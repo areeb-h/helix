@@ -1404,10 +1404,10 @@ impl Compiler {
                 b.emit(
                     Op::raise(
                         std::rc::Rc::new(format!(
-                            "`@{name}` is a column reference, only valid inside a DataFrame operation"
+                            "`@{name}` is a column reference, and this position is read as a frame's own expression"
                         )),
                         std::rc::Rc::new(
-                            "use `@column` inside a verb like `df.where(...)`, `df.select(...)`, or `df.group(...)`.".to_string(),
+                            "a column expression is a value everywhere else — `p = @age > 30` — so bind it and pass the name here; the argument of a frame verb is read as the frame's own expression (ADR 0052).".to_string(),
                         ),
                     ),
                     *line,

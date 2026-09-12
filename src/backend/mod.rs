@@ -334,7 +334,7 @@ impl StrFn {
 }
 
 /// Map a method name to the string function it asks, if it is one.
-fn str_fn(name: &str) -> Option<StrFn> {
+pub(crate) fn str_fn(name: &str) -> Option<StrFn> {
     match name {
         "starts_with" => Some(StrFn::StartsWith),
         "ends_with" => Some(StrFn::EndsWith),
@@ -367,7 +367,7 @@ pub fn probe_str_call(
 }
 
 /// Map a function name to the float predicate it asks, if it is one.
-fn float_pred_kind(name: &str) -> Option<FloatPredKind> {
+pub(crate) fn float_pred_kind(name: &str) -> Option<FloatPredKind> {
     match name {
         "is_nan" => Some(FloatPredKind::IsNan),
         "is_finite" => Some(FloatPredKind::IsFinite),
@@ -553,7 +553,12 @@ pub fn ast_to_colexpr(
         // explicitly, which is what an author who writes `@value > cutoff` already means.
         Ast::Ident { name, line, col } => {
             if let Some(v) = resolve_var(name) {
-                // A variable used in a query must be a scalar — reject e.g. an
+                // A name bound to a PREDICATE VALUE — `p = @age > 30` — is the expression it
+                // describes (ADR 0052): a frame verb accepts a condition built anywhere.
+                if crate::predicate::is_predicate(&v) {
+                    return crate::predicate::from_value(&v, columns, *line, *col);
+                }
+                // Any other variable used in a query must be a scalar — reject e.g. an
                 // Array up front, with the same message the engine would give.
                 validate_scalar(&v, *line, *col)?;
                 Ok(ColExpr::Lit(v))
@@ -669,7 +674,7 @@ pub fn ast_to_colexpr(
 }
 
 /// Reject a non-scalar value used as a literal inside a DataFrame query.
-fn validate_scalar(v: &Value, line: usize, col: usize) -> Result<(), HelixError> {
+pub(crate) fn validate_scalar(v: &Value, line: usize, col: usize) -> Result<(), HelixError> {
     match v {
         Value::Int(_) | Value::Float(_) | Value::Str(_) | Value::Bool(_) | Value::Missing => Ok(()),
         other => Err(HelixError::new(

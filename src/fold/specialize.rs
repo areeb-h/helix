@@ -166,14 +166,15 @@ impl Binding {
 }
 
 /// What `specialize` made of a call: a clone to call, or nothing worth calling — the
-/// clone reduced to one of its parameters, or to a literal (a scalar, or an array or
-/// record of literals: what a clause builder becomes for a shape), and the call site
-/// becomes that.
+/// clone reduced to one of its parameters, or to a literal, or to a record or array
+/// literal whose leaves have nothing to run (a constructor's result, a clause builder's
+/// `{s, n, ps}` with the value's field read in `ps`), and the call site becomes that, with
+/// the arguments in for the parameters.
 #[derive(Clone, Debug)]
 pub(crate) enum Made {
     Fn(String),
     Param(usize),
-    Lit(Expr),
+    Inline { params: Vec<String>, body: Expr },
 }
 
 /// A name bound in the body being rewritten: what is known of it, and — for a `let` bound
@@ -420,6 +421,17 @@ impl<'t> Specializer<'t> {
         }
     }
 
+    /// Reduce `e` — a body inlined at a call site outside any clone — by the rules a clone's
+    /// body gets: a field of a record literal is its expression, a `let` alias its name, a
+    /// closed sub-expression its value. `bound` are the names local to the site.
+    pub(crate) fn reduce(&mut self, e: &mut Expr, bound: &[String], sb: &mut Sandbox, done: &[Stmt]) {
+        let mut env = Env::new();
+        for b in bound {
+            env.shadow(b);
+        }
+        self.substitute(e, &mut env, 0, sb, done);
+    }
+
     /// What a call site outside any clone knows about `e`: `bound` are the names local to
     /// the site, `held` says whether the sandbox holds a top-level name.
     pub(crate) fn binding_at(&mut self, e: &Expr, bound: &[String], held: &dyn Fn(&str) -> bool) -> Binding {
@@ -508,11 +520,16 @@ impl<'t> Specializer<'t> {
         let outer = std::mem::replace(&mut self.changed, false);
         self.substitute(&mut body, &mut env, depth + 1, sb, done);
         let reduced = std::mem::replace(&mut self.changed, outer);
-        // A body that is one of its parameters, or a literal, is not a function worth
-        // calling: the call site becomes that.
+        // A body that is one of its parameters, a literal, or a record or array literal
+        // whose leaves have nothing to run, is not a function worth calling: the call site
+        // becomes that.
         let trivial = match &body {
             Expr::Ident { name: n, .. } => params.iter().position(|(p, _)| p == n).map(Made::Param),
-            lit if simplify::is_literal(lit) => Some(Made::Lit(lit.clone())),
+            Expr::Record(_) | Expr::Array(_) | Expr::Tuple(_) if is_safe(&body, &env, &self.globals) => Some(Made::Inline {
+                params: params.iter().map(|(p, _)| p.clone()).collect(),
+                body: body.clone(),
+            }),
+            lit if simplify::is_literal(lit) => Some(Made::Inline { params: Vec::new(), body: lit.clone() }),
             _ => None,
         };
         if let Some(made) = trivial {
@@ -655,6 +672,30 @@ impl<'t> Specializer<'t> {
             }
             Expr::Field { recv, name, .. } => {
                 self.substitute(recv, env, depth, sb, done);
+                // A field of a record literal written here — what an inlined call leaves,
+                // `{city: v}.city` — is that field's expression, when the fields dropped
+                // with the record have nothing to run.
+                if let Expr::Record(fs) = &**recv
+                    && let Some(pos) = fs.iter().position(|(k, _)| k == name)
+                    && fs.iter().enumerate().all(|(i, (_, v))| i == pos || is_safe(v, env, &self.globals))
+                {
+                    let val = fs[pos].1.clone();
+                    self.set(e, val);
+                    self.substitute(e, env, depth, sb, done);
+                    return;
+                }
+                // A field of a name a `let` bound to a record literal whose leaves have
+                // nothing to run — an inlined clause builder's `{s, n, ps}` — is that field's
+                // expression, read where the field was; the binding goes once nothing reads it.
+                if let Expr::Ident { name: rn, .. } = &**recv
+                    && let Some(Expr::Record(fs)) = env.literal_of(rn)
+                    && let Some((_, val)) = fs.iter().find(|(k, _)| k == name)
+                {
+                    let val = val.clone();
+                    self.set(e, val);
+                    self.substitute(e, env, depth, sb, done);
+                    return;
+                }
                 // A present key whose value the call site wrote as a literal or a held name.
                 let known = self.known(recv, env);
                 if let Some(fs) = known.shape() {
@@ -730,8 +771,13 @@ impl<'t> Specializer<'t> {
                             let taken = std::mem::replace(&mut args[i], Expr::Missing);
                             self.set(e, taken);
                         }
-                        Some(Made::Lit(lit)) if args.iter().all(|a| is_safe(a, env, &self.globals)) => {
-                            self.set(e, lit);
+                        Some(Made::Inline { params, body }) if args.iter().all(|a| is_safe(a, env, &self.globals)) => {
+                            let mut inl = body;
+                            let args: Vec<Expr> = std::mem::take(args);
+                            replace_idents(&mut inl, &|n| params.iter().position(|p| p == n).map(|i| args[i].clone()), &mut Vec::new());
+                            self.set(e, inl);
+                            self.substitute(e, env, depth, sb, done);
+                            return;
                         }
                         _ => {}
                     }
@@ -819,6 +865,12 @@ impl<'t> Specializer<'t> {
                         ("last", 0) if n > 0 => Some(items[n - 1].clone()),
                         ("map", 1) if is_array && n <= MAX_UNROLL => unrolled_map(self.types, &args[0], &items).map(Expr::Array),
                         ("reduce", 2) if is_array && n <= MAX_UNROLL => unrolled_reduce(self.types, &args[0], &args[1], &items),
+                        // Two known arrays concatenate to one — a clause builder's `l.ps.concat(r.ps)`.
+                        ("concat", 1) if is_array && matches!(recv_kind(&args[0], env, &self.globals), Some(Seq::Array)) => {
+                            sequence_literal(&args[0], env, &self.globals)
+                                .filter(|rhs| items.len() + rhs.len() <= MAX_UNROLL)
+                                .map(|rhs| Expr::Array(items.iter().chain(rhs.iter()).cloned().collect()))
+                        }
                         _ => None,
                     };
                     if let Some(new) = new {
@@ -926,7 +978,14 @@ impl<'t> Specializer<'t> {
                         continue;
                     }
                     let b = self.known(&bindings[i].1, env);
-                    let lit = if is_safe_sequence(&bindings[i].1, env, &self.globals) { Some(bindings[i].1.clone()) } else { None };
+                    // A sequence or record literal whose leaves have nothing to run is kept
+                    // as the literal: its length, elements and fields are read from it.
+                    let v = &bindings[i].1;
+                    let lit = if is_safe_sequence(v, env, &self.globals) || (matches!(v, Expr::Record(_)) && is_safe(v, env, &self.globals)) {
+                        Some(v.clone())
+                    } else {
+                        None
+                    };
                     env.bind_with(&bindings[i].0, b, lit);
                     i += 1;
                 }
@@ -1228,7 +1287,7 @@ fn mentions(e: &Expr, name: &str) -> bool {
 
 /// Replace free identifiers under `e` by what `with` gives for their name; a binder of the
 /// same name inside `e` shadows it.
-fn replace_idents(e: &mut Expr, with: &dyn Fn(&str) -> Option<Expr>, shadow: &mut Vec<String>) {
+pub(super) fn replace_idents(e: &mut Expr, with: &dyn Fn(&str) -> Option<Expr>, shadow: &mut Vec<String>) {
     match e {
         Expr::Ident { name, .. } => {
             if !shadow.iter().any(|s| s == name)

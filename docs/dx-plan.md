@@ -492,7 +492,23 @@ a replaced name into a call through the value — `it(p, s, c)`. Their reproduce
 (`specialize_bug2.helix`), test files and `engine_diff` all pass on every engine with the
 pass on and off. RULE for this pass: any walker that asks "is this name read" must look at
 call names too, and the field's reproducers and twelve-way oracle run before every commit
-that touches the fold — the library finds what synthetic tests do not. Measured on the field's harness, the budget commit's binary against this one, both built fresh, interleaved, min of three runs of its median of 5 trials of 2 000: `order+limit+offset` 2.698 → 0.702 µs, `OR two branches` 7.666 → 6.454 µs, `keyset cursor` 4.848 → 1.600 µs, `page offset` 1.326 → 0.682 µs, `where eq` 2.498 → 2.118 µs, `where+limit` 3.170 → 2.684 µs, `update` 3.302 → 1.933 µs; `helix check` of the harness 18.4 → 19.7 ms; the rendered statements identical.
+that touches the fold — the library finds what synthetic tests do not.
+**ADR 0052 (2026-09-12) — a column expression is a value, DONE.** The user's decision on
+the field's `any_of` gap: an operator in a quoted key (`{"age >": 30}`, a dict the
+specializer cannot see through) and the triple `[["age", ">", 30]]` were both the
+language's condition syntax rebuilt by hand. Now `@age > lo and @city == c` outside a
+frame verb is the record that describes it (`src/predicate.rs`: the parser's last pass;
+kinds col/lit/bin/not/neg/is_missing/is_nan/is_finite/str, node for node the frame's
+`ColExpr`), a frame verb takes it back through a name (`ast_to_colexpr`'s Ident arm →
+`predicate::from_value`), and the specializer sees the shape: a renderer's text is a
+constant, only the values are parameters. With it, a clone reducing to a record or array
+literal whose leaves have nothing to run is INLINED at its call site with the arguments in
+for the parameters (`Made::Inline`), a `let`-bound safe record literal answers its fields,
+and two known arrays `concat` — so a recursive `render(p, n)` over a predicate composes at
+load time. The argument list of a frame verb's NAME stays the frame's, on any receiver: a
+record's `where` receives a predicate through a binding, and the check-time message says
+so. Pinned by the `predicate` tests, `a_predicate_at_a_call_site_renders_to_its_text`,
+`a_column_expression_is_a_value_on_every_engine` and the corpus's `predicates_are_values`. Measured on the field's harness, the budget commit's binary against this one, both built fresh, interleaved, min of three runs of its median of 5 trials of 2 000: `order+limit+offset` 2.698 → 0.702 µs, `OR two branches` 7.666 → 6.454 µs, `keyset cursor` 4.848 → 1.600 µs, `page offset` 1.326 → 0.682 µs, `where eq` 2.498 → 2.118 µs, `where+limit` 3.170 → 2.684 µs, `update` 3.302 → 1.933 µs; `helix check` of the harness 18.4 → 19.7 ms; the rendered statements identical.
 
 **1.46a (2026-09-07) — const-fold a pure call with literal arguments.** DECIDED by the user
 and DONE: ADR 0050. `src/fold.rs` runs after the checker and the UFCS rewrite in every run, check

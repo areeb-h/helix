@@ -680,8 +680,9 @@ fn fold_expr(
             }
         }
     }
-    if sp.enabled() && !evaluated {
-        specialize_site(e, sb, sp, done, bound);
+    if sp.enabled() && !evaluated && specialize_site(e, sb, sp, done, bound) {
+        // The call became an inlined body: fold it as the tree it now is.
+        return fold_expr(e, sb, sp, done, bound, unconditional);
     }
     Ok(())
 }
@@ -690,7 +691,9 @@ fn fold_expr(
 /// sandbox holds becomes a direct call of the closure it holds there, and a call to one of
 /// the program's functions that passes a literal shape, a held name or a scalar literal is
 /// pointed at the clone made for exactly that.
-fn specialize_site(e: &mut Expr, sb: &mut Sandbox, sp: &mut Specializer, done: &[Stmt], bound: &[String]) {
+fn specialize_site(e: &mut Expr, sb: &mut Sandbox, sp: &mut Specializer, done: &[Stmt], bound: &[String]) -> bool {
+    // Whether the call became an inlined body — a new subtree the fold has not walked.
+    let mut inlined = false;
     if let Expr::Method { recv, name, args, named, line, col, .. } = e
         && named.is_empty()
         && let Expr::Ident { name: g, .. } = &**recv
@@ -733,8 +736,15 @@ fn specialize_site(e: &mut Expr, sb: &mut Sandbox, sp: &mut Specializer, done: &
                 let taken = std::mem::replace(&mut args[i], Expr::Missing);
                 sp.set(e, taken);
             }
-            Some(Made::Lit(lit)) if args.iter().all(specialize::is_trivially_safe) => {
-                sp.set(e, lit);
+            Some(Made::Inline { params, body }) if args.iter().all(specialize::is_trivially_safe) => {
+                let mut inl = body;
+                let args: Vec<Expr> = std::mem::take(args);
+                specialize::replace_idents(&mut inl, &|n| params.iter().position(|p| p == n).map(|i| args[i].clone()), &mut Vec::new());
+                sp.set(e, inl);
+                // The body is reduced by the clone's own rules — a field of the record
+                // literal an argument put there is its expression — before the fold walks it.
+                sp.reduce(e, bound, sb, done);
+                inlined = true;
             }
             _ => {}
         }
@@ -746,6 +756,7 @@ fn specialize_site(e: &mut Expr, sb: &mut Sandbox, sp: &mut Specializer, done: &
     for (n, v) in sp.take_held() {
         sb.hold(n, v);
     }
+    inlined
 }
 
 /// What the sandbox may evaluate here, and the label the futility memo keeps for it: a
@@ -1384,11 +1395,15 @@ mod tests {
             "mut RT = 1\nfn clause(w) = w.items().reduce({s: \"\", n: 1}, (a, c) => {s: \"{a.s}{c[0]} = ${a.n}\", n: a.n + 1, v: c[1]})\ny = clause({city: RT})",
             true,
         );
-        let clone = func(&s, "clause$1");
-        assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Method { .. })), 0, "{clone:?}");
-        assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Str(t) if t == "city = $1")), 1, "{clone:?}");
-        assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Int(2))), 1, "{clone:?}");
-        assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Field { name, .. } if name == "city")), 1, "{clone:?}");
+        // …and the clone, a record whose leaves have nothing to run, is inlined at the call
+        // site with the argument in for `w`: `y` IS `{s: "city = $1", n: 2, v: RT}`.
+        let y = value_of(&s[2]);
+        assert!(matches!(y, Expr::Record(_)), "{y:?}");
+        assert_eq!(count_nodes(y, |e| matches!(e, Expr::Method { .. } | Expr::Call { .. } | Expr::Field { .. })), 0, "{y:?}");
+        assert_eq!(count_nodes(y, |e| matches!(e, Expr::Str(t) if t == "city = $1")), 1, "{y:?}");
+        assert_eq!(count_nodes(y, |e| matches!(e, Expr::Int(2))), 1, "{y:?}");
+        assert_eq!(count_nodes(y, |e| matches!(e, Expr::Ident { name, .. } if name == "RT")), 1, "{y:?}");
+        assert!(!s.iter().any(|st| matches!(st, Stmt::Func { name, .. } if name.starts_with("clause$"))), "{s:?}");
     }
 
     /// `count`, `first` and `last` are frame verbs, whose ARGUMENTS the pass leaves as
@@ -1484,9 +1499,13 @@ mod tests {
     #[test]
     fn only_a_comprehension_verb_binds_it() {
         let s = folded_with("mut RT = 1\nfn f(cols, cur) = cols.map(cur.get(it))\ny = f([\"a\", \"b\"], {a: RT, b: RT})", true);
-        let clone = func(&s, "f$1");
-        assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Ident { name, .. } if name == "it")), 0, "{clone:?}");
-        assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Field { name, .. } if name == "a" || name == "b")), 2, "{clone:?}");
+        // The unrolled map is an array of the two field reads, inlined at the call site with
+        // the record literal in for `cur`, whose fields are then read: `y` IS `[RT, RT]`.
+        let y = value_of(&s[2]);
+        assert!(matches!(y, Expr::Array(xs) if xs.len() == 2), "{y:?}");
+        assert_eq!(count_nodes(y, |e| matches!(e, Expr::Ident { name, .. } if name == "it")), 0, "{y:?}");
+        assert_eq!(count_nodes(y, |e| matches!(e, Expr::Ident { name, .. } if name == "RT")), 2, "{y:?}");
+        assert_eq!(count_nodes(y, |e| matches!(e, Expr::Method { .. } | Expr::Field { .. } | Expr::Record(_))), 0, "{y:?}");
     }
 
     /// A name an expression binds itself — a lambda's parameter, the `it` of a method's
@@ -1499,6 +1518,26 @@ mod tests {
         assert!(matches!(value_of(&s[3]), Expr::Int(0)), "{:?}", s[3]);
         let s = folded("fn h() = 0\ny = [1, 2].map((x) => x * 2).sum() + 1");
         assert!(matches!(value_of(&s[1]), Expr::Int(7)), "{:?}", s[1]);
+    }
+
+    /// A column expression at a call site is a predicate record whose column, operator and
+    /// shape are literals (ADR 0052): a renderer walking it reduces to its text with the
+    /// values as parameters — its recursive `{s, n, ps}` results, records whose leaves have
+    /// nothing to run, are inlined at their call sites with the arguments in for the
+    /// parameters, and the arrays of parameters concatenate.
+    #[test]
+    fn a_predicate_at_a_call_site_renders_to_its_text() {
+        let s = folded_with(
+            "mut LO = 30\nmut C = \"oslo\"\n\
+             fn render(p, n) = if p.kind == \"bin\" and (p.op == \"and\" or p.op == \"or\") then let l = render(p.left, n) in let r = render(p.right, l.n) in {s: \"{l.s} {p.op} {r.s}\", n: r.n, ps: l.ps.concat(r.ps)} else if p.kind == \"bin\" then {s: \"{p.left.name} {p.op} ${n}\", n: n + 1, ps: [p.right.value]} else raise(\"unsupported\")\n\
+             fn sql(spec) = let {where} = spec in let w = render(where, 1) in {sql: \"select * from t where {w.s}\", params: w.ps}\n\
+             y = sql({where: @age > LO and @city == C})",
+            true,
+        );
+        let clone = func(&s, "sql$1");
+        assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Call { .. } | Expr::Method { .. } | Expr::If { .. })), 0, "{clone:?}");
+        assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Str(t) if t == "select * from t where age > $1 and city == $2")), 1, "{clone:?}");
+        assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Field { name, .. } if name == "value")), 2, "{clone:?}");
     }
 
     /// A program with no function of its own is untouched, cheaply.

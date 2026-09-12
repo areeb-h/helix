@@ -1,0 +1,10 @@
+exit: 0
+--- stdout ---
+bin > col age lit 30
+and str starts_with C lit >
+2 1 1 1 1
+2
+select * from t where (age > $1 and not city = $2)
+30 oslo
+select * from t where (score is null or age > $1)
+--- stderr ---

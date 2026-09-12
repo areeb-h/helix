@@ -4254,7 +4254,7 @@ print(m())\n";
 /// the column-reference error. Both must match exactly.
 #[test]
 fn unknown_receiver_dataframe_verbs_match_walker() {
-    let col_err = "`@a` is a column reference, only valid inside a DataFrame operation";
+    let col_err = "`@a` is a column reference, and this position is read as a frame's own expression";
     let src = "fn w(d) = d.where(@a > 1)\n\
 fn s(x) = x.sort(@a)\n\
 fn m(g) = g.mean(@a)\n\
@@ -16659,4 +16659,45 @@ print(app([inc, dbl], RT))\nprint(app2(INC, RT))\nprint(app3([inc, dbl], RT))\np
         assert_eq!(code, Some(0), "{label}: {err}");
         assert_eq!(out, want, "{label}");
     }
+}
+
+/// A column expression is a value (ADR 0052): outside a frame verb `@age > 30` is the
+/// record that describes it, a frame verb takes it back through a name, a library renders
+/// it, and `not`/`and`/`or`, the String tests and `is_missing` come along. Every engine,
+/// with and without each pass, prints the same; and a `@name` in the argument of a
+/// record's method named like a frame verb is refused at check time with the rule.
+#[test]
+fn a_column_expression_is_a_value_on_every_engine() {
+    let src = "D = dataframe({age: [10, 40, 70], name: [\"Ann\", \"bob\", \"Cy\"], score: [1.5, missing, 3.0]})\n\
+p = @age > 30\n\
+q = p and @name.starts_with(\"C\")\n\
+m = @score.is_missing()\n\
+np = not (@age > 30)\n\
+fn older(lo) = @age > lo\n\
+r = older(50)\n\
+print(p.kind, p.op, p.left.kind, p.left.name, p.right.kind, p.right.value)\n\
+print(q.op, q.right.kind, q.right.name, q.right.args[0], q.left.kind, q.left.value.op)\n\
+print(D.where(p).count(), D.where(q).count(), D.where(np).count(), D.where(m).count(), D.where(r).count())\n\
+fn render(p, n) = if p.kind == \"bin\" and (p.op == \"and\" or p.op == \"or\") then let l = render(p.left, n) in let r = render(p.right, l.n) in {s: \"({l.s} {p.op} {r.s})\", n: r.n, ps: l.ps.concat(r.ps)} else if p.kind == \"bin\" then {s: \"{p.left.name} {if p.op == \"==\" then \"=\" else p.op} ${n}\", n: n + 1, ps: [p.right.value]} else if p.kind == \"not\" then let i = render(p.expr, n) in {s: \"not {i.s}\", n: i.n, ps: i.ps} else raise(\"unsupported: {p.kind}\")\n\
+fn sql(spec) = let {where} = spec in let w = render(where, 1) in {sql: \"select * from t where {w.s}\", params: w.ps}\n\
+RT_LO = if now() > 0.0 then 30 else 0\n\
+RT_C = if now() > 0.0 then \"oslo\" else \"\"\n\
+res = sql({where: @age > RT_LO and not (@city == RT_C)})\n\
+print(res.sql)\nprint(res.params[0], res.params[1])\n";
+    let want = "bin > col age lit 30\nand str starts_with C lit >\n2 1 1 1 1\nselect * from t where (age > $1 and not city = $2)\n30 oslo\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("predicate_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}");
+    }
+    for (label, env) in [("nospecialize", &[("HELIX_NOSPECIALIZE", "1")][..]), ("nofold", &[("HELIX_NOFOLD", "1")][..])] {
+        let (out, err, code) = run_source(src, env, &format!("predicate_{label}"));
+        assert_eq!(code, Some(0), "{label}: {err}");
+        assert_eq!(out, want, "{label}");
+    }
+    // The argument of a frame verb's name is the frame's: on a record it is refused, with
+    // the rule — bind the predicate and pass the name.
+    let (out, err, code) = run_source("Q = {where: (c) => c}\nprint(Q.where(@age > 1))\n", &[], "predicate_stray");
+    assert_ne!(code, Some(0), "{out}");
+    assert!(err.contains("bind it and pass the name"), "{err}");
 }

@@ -936,11 +936,11 @@ impl Checker {
             Expr::Bool(_) => Ok(Type::Bool),
             Expr::Missing => Ok(Type::Missing),
             Expr::Column { name, line, col } => Err(HelixError::new(
-                format!("`@{name}` is a column reference, only valid inside a DataFrame operation"),
+                format!("`@{name}` is a column reference, and this position is read as a frame's own expression"),
                 *line,
                 *col,
             )
-            .hint("use `@column` inside a verb like `df.where(...)`, `df.select(...)`, or `df.group(...)`.")),
+            .hint("a column expression is a value everywhere else — `p = @age > 30` — so bind it and pass the name here; the argument of a frame verb is read as the frame's own expression (ADR 0052).")),
             Expr::Interp(parts) => {
                 // Type-check every embedded expression (so `"{undefined}"` errors),
                 // then the whole thing is a String. An undefined BARE NAME in a hole

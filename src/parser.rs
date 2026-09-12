@@ -926,7 +926,10 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Stmt>, HelixError> {
     // EVERY SIGNATURE BEFORE THE FIRST CALL IS PARSED — a function may be called above
     // its definition, and its defaults and parameter names must be known there too.
     p.prescan_signatures();
-    let program = p.program()?;
+    let mut program = p.program()?;
+    // A column expression outside a frame verb's argument is a value — the record that
+    // describes it (ADR 0052) — the last pass over the finished tree.
+    crate::predicate::desugar_program(&mut program)?;
     reject_do_binding_over_mut_global(&program, &p.do_bindings)?;
     Ok(program)
 }

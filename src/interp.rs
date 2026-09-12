@@ -562,11 +562,11 @@ impl Interp {
             Expr::Bool(b) => Ok(Value::Bool(*b)),
             Expr::Missing => Ok(Value::Missing),
             Expr::Column { name, line, col } => Err(HelixError::new(
-                format!("`@{name}` is a column reference, only valid inside a DataFrame operation"),
+                format!("`@{name}` is a column reference, and this position is read as a frame's own expression"),
                 *line,
                 *col,
             )
-            .hint("use `@column` inside a verb like `df.where(...)`, `df.select(...)`, or `df.group(...)`.")),
+            .hint("a column expression is a value everywhere else — `p = @age > 30` — so bind it and pass the name here; the argument of a frame verb is read as the frame's own expression (ADR 0052).")),
             Expr::Interp(parts) => {
                 // Same reservation as the VM's `Op::Interp` (literals exactly, four per
                 // hole), so the two engines allocate alike. The walker EVALUATES holes

@@ -136,6 +136,14 @@ read_csv("patients.csv")
     .sort(@age)
     .write_csv("cohort.csv")
 
+# A condition is a value (ADR 0052): outside a frame verb `@age > lo` is the record that
+# describes it — `{kind: "bin", op: ">", left: {kind: "col", name: "age"}, right: {kind: "lit", value: lo}}`
+# — so a library can render it (`age > $1`), a frame takes it back by name, and the
+# load-time specializer folds a library's rendering of it to a constant.
+adult = @age > 18 and not @name.starts_with("test")
+cohort.where(adult)                                 # the frame reads the value
+model.sql({where: adult, order: ["-age"]})          # an ORM renders it: `where age > $1 and not name like $2`
+
 # Databases return frames, so the same verbs continue over the result. Parameters are
 # VALUES (`$1`), never text spliced into the statement, and the session is read-only
 # from its first byte — a write comes back as the server's own SQLSTATE, not a guess.

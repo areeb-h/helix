@@ -38,6 +38,7 @@ mod dataframe;
 mod docs;
 mod effects;
 mod fold;
+mod predicate;
 mod visit;
 mod doctest;
 mod error;

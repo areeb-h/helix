@@ -4,6 +4,27 @@
 
 ### Added
 
+- **A column expression is a value (ADR 0052).** `@age > lo and @city == c` — how a frame
+  verb's condition was always spelled — is a value anywhere else: the record that describes
+  it, `{kind: "bin", op: "and", left: {kind: "bin", op: ">", left: {kind: "col", name: "age"},
+  right: {kind: "lit", value: lo}}, right: …}`, node for node the frame engine's own grammar
+  (`col`, `lit`, `bin`, `not`, `neg`, `is_missing`, `is_nan`, `is_finite`, `str`). A library
+  reads it like any record — an ORM renders `age > $1 and city = $2` and binds the values —
+  and a frame verb takes it back through a name: `p = @age > lo` then `df.where(p)`, with the
+  frame's own checks. The specializer (ADR 0051) sees the shape, so a library's rendering of
+  a condition is a load-time constant and only the values are work; a helper whose clone
+  reduces to a record or array literal with nothing to run in its leaves is inlined at its
+  call site with the arguments in for the parameters, so a recursive renderer's `{s, n, ps}`
+  results compose at load time. The field build's `{"age >": 30}` (a dict, opaque to the
+  specializer) and `[["age", ">", 30]]` were the same condition rebuilt by hand; both stay
+  valid. The argument list of a frame verb's NAME stays the frame's on any receiver — a
+  record's `where` receives a predicate through a binding — and a program that relied on
+  `@age > 30` outside a frame verb being a check-time error no longer sees one (none could
+  run). `helix doc column` has the encoding. Pinned by the `predicate` module's tests,
+  `a_predicate_at_a_call_site_renders_to_its_text`,
+  `a_column_expression_is_a_value_on_every_engine` (three engines, each pass off) and the
+  corpus program `predicates_are_values.helix`.
+
 - **An array literal at a call site is knowledge its elements carry into the callee (ADR
   0051, field build §1.50a).** `sql({order: ["-age"], any_of: [{city: v}, {age: w}]})`
   says how many elements `order` and `any_of` have and what each one is, so inside the

@@ -1918,15 +1918,16 @@ The current element inside a comprehension — no parameter to name.
 
 ### `column`
 
-`@name` refers to a DataFrame column inside a frame verb.
+`@name` refers to a DataFrame column inside a frame verb. Anywhere else a column expression is a VALUE — the record that describes it (ADR 0052): `@age > lo` is `{kind: "bin", op: ">", left: {kind: "col", name: "age"}, right: {kind: "lit", value: lo}}`, which a library reads like any record and a frame verb takes back through a name: `p = @age > lo` then `df.where(p)`.
 
 `df.where(@name > 1)`
 
-**Note:** A bare `name` would be an ordinary binding, so the `@` is what makes a column reference visible at the call site. A column takes the String tests too — starts_with, ends_with, contains and re_match — so a text filter is a query rather than a round trip through JSON. Keywords: dataframe, column, field, select, filter, expression, reference, table, regex, text, string.
+**Note:** A bare `name` would be an ordinary binding, so the `@` is what makes a column reference visible at the call site. A column takes the String tests too — starts_with, ends_with, contains and re_match — so a text filter is a query rather than a round trip through JSON. The kinds of a predicate record: col {name}, lit {value}, bin {op, left, right}, not {expr}, neg {expr}, is_missing {expr}, is_nan {expr}, is_finite {expr}, str {name, expr, args}; a lit whose value is a predicate is that predicate (`p and @x > 1` writes `p` as a leaf). To combine two predicate values, write the record: `{kind: "bin", op: "and", left: p, right: q}`. The argument of a frame verb's name is the frame's: a record's `where` receives a predicate through a binding, never as `@age > 1` written in place. Keywords: dataframe, column, field, select, filter, expression, reference, table, regex, text, string, predicate, condition, value, record, kind, orm, sql, where.
 
 ```
->>> print(dataframe({a: [1, 2, 3]}).where(@a > 1).count())
-2
+>>> p = @a > 1
+>>> print(p.op, p.left.name, dataframe({a: [1, 2, 3]}).where(p).count())
+> a 2
 ```
 
 ### `try`

@@ -1,0 +1,32 @@
+# A column expression is a value (ADR 0052): outside a frame verb `@age > 30` is the record
+# that describes it, node for node the frame engine's own grammar; a frame verb takes it
+# back through a name; a library renders it. `not` binds tighter than a comparison, as it
+# does everywhere in Helix, so a negated comparison is written with its parentheses.
+D = dataframe({age: [10, 40, 70], name: ["Ann", "bob", "Cy"], score: [1.5, missing, 3.0]})
+p = @age > 30
+q = p and @name.starts_with("C")
+m = @score.is_missing()
+np = not (@age > 30)
+fn older(lo) = @age > lo
+r = older(50)
+print(p.kind, p.op, p.left.kind, p.left.name, p.right.kind, p.right.value)
+print(q.op, q.right.kind, q.right.name, q.right.args[0], q.left.kind, q.left.value.op)
+print(D.where(p).count(), D.where(q).count(), D.where(np).count(), D.where(m).count(), D.where(r).count())
+# Two predicate values combine as the record they would be.
+both = {kind: "bin", op: "or", left: p, right: m}
+print(D.where(both).count())
+# A renderer over the record: the text with the values as parameters.
+fn render(p, n) =
+  if p.kind == "bin" and (p.op == "and" or p.op == "or")
+  then let l = render(p.left, n) in let r = render(p.right, l.n) in {s: "({l.s} {p.op} {r.s})", n: r.n, ps: l.ps.concat(r.ps)}
+  else if p.kind == "bin" then {s: "{p.left.name} {if p.op == "==" then "=" else p.op} ${n}", n: n + 1, ps: [p.right.value]}
+  else if p.kind == "not" then let i = render(p.expr, n) in {s: "not {i.s}", n: i.n, ps: i.ps}
+  else if p.kind == "is_missing" then {s: "{p.expr.name} is null", n: n, ps: []}
+  else raise("unsupported: {p.kind}")
+fn sql(spec) = let {where} = spec in let w = render(where, 1) in {sql: "select * from t where {w.s}", params: w.ps}
+LO = 30
+C = "oslo"
+res = sql({where: @age > LO and not (@city == C)})
+print(res.sql)
+print(res.params[0], res.params[1])
+print(sql({where: @score.is_missing() or @age > LO}).sql)
