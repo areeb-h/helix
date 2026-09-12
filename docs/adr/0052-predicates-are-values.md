@@ -73,6 +73,13 @@ its call site with the arguments in for the parameters, so a recursive renderer'
 - A program that relied on `@age > 30` outside a frame verb being a check-time error no
   longer sees one: the expression is a record. No shipped program did, since it could not
   run.
+- The inlining of a clone that becomes a record or array literal reaches the field build's
+  existing spellings — their clause builders return `{s, n, ps}` records. Their harness,
+  the previous commit's binary against this one, both built fresh, interleaved, min of
+  three runs of its median of 5 trials of 2 000: `where eq` 2.039 → 0.830 µs, `delete`
+  1.857 → 0.780 µs, `update` 1.842 → 1.693 µs, `OR two branches` 6.129 → 5.775 µs,
+  `prepared bind only` 0.252 → 0.230 µs; the rest within the noise; statements identical;
+  `helix check` of the harness 19.7 → 20.2 ms.
 - Pinned by the `predicate` module's tests (every node's record; a frame verb's argument
   left alone; a value read back as the frame's expression), the fold's
   `a_predicate_at_a_call_site_renders_to_its_text`, and

@@ -20,7 +20,12 @@
   valid. The argument list of a frame verb's NAME stays the frame's on any receiver — a
   record's `where` receives a predicate through a binding — and a program that relied on
   `@age > 30` outside a frame verb being a check-time error no longer sees one (none could
-  run). `helix doc column` has the encoding. Pinned by the `predicate` module's tests,
+  run). The inlining reaches the field build's existing spellings too — their clause builders
+  return `{s, n, ps}` records — measured on their harness, the previous commit's binary
+  against this one, both fresh, interleaved, min of three: `where eq` 2.039 → 0.830 µs,
+  `delete` 1.857 → 0.780 µs, `update` 1.842 → 1.693 µs, `OR two branches` 6.129 → 5.775 µs,
+  `prepared bind only` 0.252 → 0.230 µs, the rest within noise, statements identical, `check`
+  of the harness 19.7 → 20.2 ms. `helix doc column` has the encoding. Pinned by the `predicate` module's tests,
   `a_predicate_at_a_call_site_renders_to_its_text`,
   `a_column_expression_is_a_value_on_every_engine` (three engines, each pass off) and the
   corpus program `predicates_are_values.helix`.
