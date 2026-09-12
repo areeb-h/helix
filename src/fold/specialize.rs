@@ -163,6 +163,17 @@ impl Binding {
     fn earns_clone(&self) -> bool {
         matches!(self, Binding::Shape(_) | Binding::Global(_) | Binding::Seq(_))
     }
+
+    /// Whether `part` is what one of this knowledge's parts is — a shape's field, a
+    /// sequence's element, at any depth. A recursion that passes such a part down
+    /// (`render(p.left, n)`) shrinks what it knows, and ends.
+    fn contains(&self, part: &Binding) -> bool {
+        match self {
+            Binding::Shape(fs) => fs.iter().any(|(_, v)| v == part || v.contains(part)),
+            Binding::Seq(xs) => xs.iter().any(|x| x == part || x.contains(part)),
+            _ => false,
+        }
+    }
 }
 
 /// What `specialize` made of a call: a clone to call, or nothing worth calling — the
@@ -255,6 +266,10 @@ pub(crate) struct Specializer<'t> {
     /// Whether the clone being made has been changed by what is known — set by every
     /// rewrite; a clone nothing changed is the function under another name, and not kept.
     changed: bool,
+    /// The clones being made right now, outermost first — the functions on the
+    /// specialization stack, with what each is being made for. A call to one of them is a
+    /// recursion, and what it passes down is measured against this.
+    building: Vec<(String, Vec<Binding>)>,
     next_id: usize,
     devirt: HashMap<(String, String), Option<String>>,
     /// Clones and devirtualized functions, to be appended to the program.
@@ -324,6 +339,7 @@ impl<'t> Specializer<'t> {
             nodes: 0,
             budget: MAX_CLONE_NODES,
             changed: false,
+            building: Vec::new(),
             next_id: 1,
             devirt: HashMap::new(),
             pending: Vec::new(),
@@ -488,6 +504,30 @@ impl<'t> Specializer<'t> {
         if let Some(r) = self.memo.get(&key) {
             return r.clone();
         }
+        // A RECURSION IS SPECIALIZED ONCE PER CHAIN. A call to a function whose clone is
+        // being made right now — `_tk(st, i + 1, acc.concat([tok]))` inside `_tk`'s own
+        // body — carries knowledge that changed along the recursion: the index one literal
+        // higher, the accumulator one element longer. Every level would earn a clone of
+        // its own, a chain of them until the budget ran out (the field build's tokenizer:
+        // 390 clones of `_tk`, 624 of `_scan_str`, 0.6 s to load a 100-line file — §1.60,
+        // the checker's §1.48 in the load path). What the recursion passes down is measured
+        // against what the ancestor was made for: knowledge that SHRINKS — a part of the
+        // ancestor's shape, `render(p.left, n)` — is kept, since a finite structure ends;
+        // knowledge that grows or merely changes is generalized to `Any`, and the chain
+        // reaches a clone that recurses into itself.
+        if let Some((_, ancestor)) = self.building.iter().rev().find(|(f, _)| f == fname) {
+            // Any position that shrinks puts the whole call on a finite path: the
+            // renderer's `render(p.right, l.n)` passes a subtree AND a counter one higher,
+            // and the counter is exactly what its text needs; the subtree is what ends it.
+            let shrinks = known.iter().zip(ancestor.iter()).any(|(now, was)| now != was && was.contains(now));
+            if !shrinks {
+                let general: Vec<Binding> =
+                    known.iter().zip(ancestor.iter()).map(|(now, was)| if now == was { now.clone() } else { Binding::Any }).collect();
+                if general != known {
+                    return self.specialize(fname, &general, depth, sb, done);
+                }
+            }
+        }
         let def = &self.funcs[fname];
         // A clone costs its body's size, against the program's budget.
         let size = def.types.len();
@@ -518,7 +558,9 @@ impl<'t> Specializer<'t> {
             env.bind(p, b.clone());
         }
         let outer = std::mem::replace(&mut self.changed, false);
+        self.building.push((fname.to_string(), known.clone()));
         self.substitute(&mut body, &mut env, depth + 1, sb, done);
+        self.building.pop();
         let reduced = std::mem::replace(&mut self.changed, outer);
         // A body that is one of its parameters, a literal, or a record or array literal
         // whose leaves have nothing to run, is not a function worth calling: the call site

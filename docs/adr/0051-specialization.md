@@ -141,7 +141,18 @@ build's harness — thirteen cases in one file — starved its later call sites:
 offset` went through the generic clone at 3.7 µs while the same call alone rendered in
 1.3 µs, and `keyset` and `any_of` never reached theirs (§1.50). Which call site loses to
 a count is decided by its position in the file, which is no rule at all; a budget by
-size is what the cost actually is. `HELIX_NOSPECIALIZE=1` turns the pass off for an A/B;
+size is what the cost actually is. A RECURSION IS SPECIALIZED ONCE PER CHAIN: a call to
+a function whose clone is being made carries knowledge that changed along the recursion
+— `_tk(st, i + 1, acc.concat([tok]))` inside `_tk`, the index one literal higher, the
+accumulator one element longer — and every level would earn a clone until the budget ran
+out (the field build's tokenizer: 390 clones of `_tk`, 624 of `_scan_str`, 0.6 s to load
+a 100-line file, §1.60 — the checker's §1.48 in the load path). What the recursion passes
+down is measured against what the ancestor was made for: a call in which any position
+shrinks — a part of the ancestor's shape, `render(p.left, n)`, however the counter beside
+it grows — keeps all its knowledge, since a finite structure ends; a call in which nothing
+shrinks has its changed positions generalized to `Any`, and the chain reaches a clone that
+recurses into itself (the tokenizer is two clones: the entry, and one for its recursion).
+`HELIX_NOSPECIALIZE=1` turns the pass off for an A/B;
 `HELIX_NOFOLD=1` turns off the fold it rides on; `HELIX_FOLD_DUMP=<name>` prints what the
 pass made (`1` for all of it, `all` for the whole program as the compiler sees it).
 

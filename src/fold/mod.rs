@@ -1540,6 +1540,29 @@ mod tests {
         assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Field { name, .. } if name == "value")), 2, "{clone:?}");
     }
 
+    /// A recursion is specialized once per chain (the field build's §1.60): a tokenizer
+    /// called with a record, an index and an empty accumulator recursed with the index one
+    /// literal higher and the accumulator one element longer at every level, and every
+    /// level earned a clone — 390 of them, 0.6 s to load a 100-line file. Knowledge that
+    /// grows or changes along the recursion is generalized to `Any`, so the chain reaches
+    /// a clone that recurses into itself; knowledge that shrinks — a predicate's subtree —
+    /// is kept, so a renderer over a finite structure still folds all the way down.
+    #[test]
+    fn a_recursion_that_grows_its_knowledge_is_specialized_once_per_chain() {
+        let s = folded_with(
+            "mut RT = 5\nfn walk(st, i, acc) = if i >= st.n then acc else walk(st, i + 1, acc.concat([st.k]))\ny = walk({n: RT, k: 1}, 0, [])",
+            true,
+        );
+        let clones = s.iter().filter(|st| matches!(st, Stmt::Func { name, .. } if name.starts_with("walk$"))).count();
+        assert!(clones <= 2, "{clones} clones of walk: {s:?}");
+        // The entry clone knows `i` is 0 and `acc` is `[]`; its recursion reaches the
+        // clone made for (shape, Any, Any), which recurses into itself.
+        let entry = func(&s, "walk$1");
+        assert_eq!(count_nodes(entry, |e| matches!(e, Expr::Call { name, .. } if name == "walk$2")), 1, "{entry:?}");
+        let general = func(&s, "walk$2");
+        assert_eq!(count_nodes(general, |e| matches!(e, Expr::Call { name, .. } if name == "walk$2")), 1, "{general:?}");
+    }
+
     /// A program with no function of its own is untouched, cheaply.
     #[test]
     fn nothing_to_fold_is_nothing_done() {

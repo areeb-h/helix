@@ -529,7 +529,18 @@ the value-binding rule as the hint. `fn f` then `f = 5` (corpus `t8_fn_rebind`) 
 already refused as a reassignment, so every top-level name follows one rule now; modules
 are namespaced, so only a file's own duplicates are caught. Their
 third point stands as OPEN: an arity error should name the DEFINITION it resolved, not
-only the call. Measured on the field's harness, the budget commit's binary against this one, both built fresh, interleaved, min of three runs of its median of 5 trials of 2 000: `order+limit+offset` 2.698 → 0.702 µs, `OR two branches` 7.666 → 6.454 µs, `keyset cursor` 4.848 → 1.600 µs, `page offset` 1.326 → 0.682 µs, `where eq` 2.498 → 2.118 µs, `where+limit` 3.170 → 2.684 µs, `update` 3.302 → 1.933 µs; `helix check` of the harness 18.4 → 19.7 ms; the rendered statements identical.
+only the call.
+**§1.60 (2026-09-12) — a clone per recursion level, FIXED.** The web field build's tree
+test 29 → 155 s, in LOAD: `import ui.expr` 0.82 s, 0.014 with either pass off. Their
+tokenizer `_tk(st, i, acc)` recursed with `i + 1` (folded to a literal) and
+`acc.concat([tok])` (the concat rule grows the known sequence), so every level earned a
+clone: 390 of `_tk`, 624 of `_scan_str`, under the node budget. `Specializer.building` is
+the specialization stack; a recursive call is measured against the ancestor's key
+(`Binding::contains`): any shrinking position keeps all knowledge (a predicate subtree, a
+finite path), otherwise the changed positions become `Any` and the chain reaches a clone
+that recurses into itself. Their reproducer 543 → 7 ms on this box, 1 024 → 12 clones,
+output identical. Same bug as the checker's §1.48, in the other pass: knowledge that can
+grow along a recursion always needs a per-chain guard. Measured on the field's harness, the budget commit's binary against this one, both built fresh, interleaved, min of three runs of its median of 5 trials of 2 000: `order+limit+offset` 2.698 → 0.702 µs, `OR two branches` 7.666 → 6.454 µs, `keyset cursor` 4.848 → 1.600 µs, `page offset` 1.326 → 0.682 µs, `where eq` 2.498 → 2.118 µs, `where+limit` 3.170 → 2.684 µs, `update` 3.302 → 1.933 µs; `helix check` of the harness 18.4 → 19.7 ms; the rendered statements identical.
 
 **1.46a (2026-09-07) — const-fold a pure call with literal arguments.** DECIDED by the user
 and DONE: ADR 0050. `src/fold.rs` runs after the checker and the UFCS rewrite in every run, check

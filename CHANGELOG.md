@@ -516,6 +516,23 @@
 
 ### Fixed
 
+- **A recursive function specialized against a record could take a clone per level, and
+  seconds to load (field build, §1.60).** Their tree test went from 29 s to 155 s; `import
+  ui.expr` took 0.82 s to load and 0.014 s with either pass off. The file's tokenizer,
+  `_tk(st, i, acc)`, called as `_tk({s: s, cs: s.chars(), n: s.length()}, 0, [])`, recursed
+  with knowledge that changed at every level — the index one literal higher, the
+  accumulator one element longer — and every level earned a clone of its own: 390 of `_tk`,
+  624 of `_scan_str`, until the budget ran out. The checker's §1.48 in the load path. A
+  recursion is specialized once per chain now: a recursive call in which any position
+  shrinks against the clone being made (a predicate's subtree, `render(p.left, n)`) keeps
+  all its knowledge, since a finite structure ends; a call in which nothing shrinks has its
+  changed positions generalized to `Any`, so the chain reaches a clone that recurses into
+  itself — the tokenizer is two clones. Their reproducer, the tokenizer's first 100 lines,
+  loads in 8 ms instead of 579 ms (12 clones instead of 1 014), with identical output; the
+  ORM harness is untouched. Pinned by
+  `a_recursion_that_grows_its_knowledge_is_specialized_once_per_chain`, beside the
+  predicate renderer test that still folds all the way down.
+
 - **A duplicate top-level `fn` was accepted in silence, the first one winning (field
   build, §1.59).** `fn tag(n)` at line 65 and a new `fn tag(v)` at line 606 of a 900-line
   test file, same arity: no diagnostic anywhere — the header the second one set was never
