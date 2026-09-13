@@ -546,6 +546,40 @@ measured. NOT worth doing, measured: the ceiling with type dispatch removed ENTI
 call, compare and branch chain — is 15% of the four-hole render, so the remaining 8% needs
 the comparison gone too, which a program that binds `let ty = …` has already hidden from
 the compiler.
+**§1.52 (2026-09-13) — the render path does not need native code; it needs the template
+compiled. MEASURED.** Asked to take the page render native, the first thing to settle was
+what "native" would buy, because THE STRING BUILDING IS ALREADY NATIVE: `html_escape`,
+interpolation and `join` are Rust. What is interpreted is the walk between them — their
+`link` turns a template into a TREE OF CLOSURES and walks it per row, about 170 VM ops per
+hole at ~5 ns each. Writing the same four-hole template as the flat Helix function a
+template compiler would emit — one function, the field reads and the interpolation inline,
+no closure per instruction — and rendering the same 200 rows to BYTE-IDENTICAL output
+(13 790 B, outputs compared before anything is timed, rows seeded from `now()` so no pass
+can precompute them):
+
+| | µs/row | vs the tree |
+|---|--:|--:|
+| their closure tree | 3.45 | 1× |
+| compiled template, same emit semantics | 0.74 | **4.65×** |
+| compiled, hole type known (escape only) | 0.34 | 10.1× |
+| compiled, no escaping | 0.20 | 16.9× |
+
+Unchanged with either load-time pass off, and the same ratio on the VM and the JIT (the
+walker is 19×, being slower to start with). So the 4.65× is architectural and available
+today with no language change: templates are files, and emitting `.helix` from `.tsx` in a
+build step is what every compiled template engine does. The further 2× to 0.34 needs the
+hole's type known, which is what a typed template or a specialized props shape would give.
+NATIVE CODE IS THE WRONG NEXT STEP, and the reason is in `src/jit/`: 9 235 lines over
+unboxed `i64`/`f64` buffers with NO boxed value model. Strings there mean a second back
+end — a `Value` ABI, refcounting emitted into native code, allocation and error
+propagation through the runtime, deopt — and the differential oracle would be the only
+thing between a refcount bug and silent corruption. It is worth doing after the closure
+tree is gone, not instead of removing it, because what remains at 0.74 µs/row is the
+primitives themselves. Candidate found along the way, NOT built: a builtin call costs
+~40 ns and `Op::CallBuiltin` re-dispatches by NAME at run time through a 139-arm match
+even though the compiler already assigned the index — `type_of` as an op measured ~4 ns
+against `abs()`'s ~41, so some of that 36 ns gap is name dispatch that every builtin call
+in every program pays.
 **§1.60 (2026-09-12) — a clone per recursion level, FIXED.** The web field build's tree
 test 29 → 155 s, in LOAD: `import ui.expr` 0.82 s, 0.014 with either pass off. Their
 tokenizer `_tk(st, i, acc)` recursed with `i + 1` (folded to a literal) and
