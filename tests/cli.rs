@@ -5489,7 +5489,7 @@ fn no_new_panicking_calls_on_user_reachable_paths() {
         // before the op, the same stack-shape invariant the other 57 rely on.
         // 65 as of `Op::GetFieldOrMissing` (2026-09-04): one more `stack.pop().unwrap()`
         // under the same invariant, proven at the site.
-        ("src/vm.rs", 3),
+        ("src/vm.rs", 66),
         ("src/bytecode.rs", 1),
         ("src/bytecode/comprehensions.rs", 0),
         ("src/bytecode/ops.rs", 0),
@@ -5542,10 +5542,32 @@ fn no_new_panicking_calls_on_user_reachable_paths() {
             }
         };
         // AN INLINE TEST MODULE IS TEST CODE — the rule above already says so of test files,
-        // and `autodiff.rs` keeps its tests in the file: everything from its `#[cfg(test)]`
-        // line on is a test's own `expect`s, unreachable by any user input, and counting
-        // them made the tape's budget a count of its tests.
-        let code = src.split("#[cfg(test)]").next().unwrap_or(src.as_str());
+        // and a file may hold its tests inline (`autodiff.rs` does). ONLY THE MODULE'S OWN
+        // SPAN is skipped. The first version cut the file at the `#[cfg(test)]` attribute
+        // instead, and `vm.rs` carries `mod frame_size` at line 637 of 3349: everything
+        // below it — the entire run loop — stopped being counted, and the budget it
+        // reported fell from 65 to 3. A guard with a hole is worse than a smaller guard,
+        // because the number it reports is trusted. A bare `mod tests;` declaration opens
+        // no span; only `mod NAME {` does, and rustfmt closes it with a `}` in column 0.
+        let mut code = String::with_capacity(src.len());
+        let mut lines = src.lines().peekable();
+        while let Some(l) = lines.next() {
+            if l.trim_start().starts_with("#[cfg(test)]") {
+                if lines
+                    .peek()
+                    .is_some_and(|n| n.trim_start().starts_with("mod ") && n.trim_end().ends_with('{'))
+                {
+                    for inside in lines.by_ref() {
+                        if inside == "}" {
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
+            code.push_str(l);
+            code.push('\n');
+        }
         let n = code
             .lines()
             .filter(|l| {

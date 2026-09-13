@@ -833,6 +833,71 @@ const _: () = assert!(
     "Value grew past 2 words — box the offending variant",
 );
 
+/// Every name [`Value::type_name`] can answer, in `type_slot` order. A name missing from
+/// this list costs an allocation in [`Value::type_value`] and nothing else, so the list can
+/// never make a program wrong — only slower than it could be.
+const TYPE_NAME_LIST: [&str; 23] = [
+    "Int",
+    "Float",
+    "Rational",
+    "String",
+    "Bool",
+    "Array",
+    "Tuple",
+    "Record",
+    "Tensor",
+    "DataFrame",
+    "GroupBy",
+    "Function",
+    "Dna",
+    "Bytes",
+    "Missing",
+    "Unit",
+    "PyObject",
+    "Node",
+    "Headers",
+    "Dict",
+    "Net",
+    "Connection",
+    "Lock",
+];
+
+thread_local! {
+    /// The interned type names, built once per thread on first use.
+    static TYPE_NAMES: Vec<Rc<String>> = TYPE_NAME_LIST.iter().map(|n| Rc::new((*n).to_string())).collect();
+}
+
+/// A name's index in [`TYPE_NAME_LIST`]. A `match` rather than a scan: the compiler turns
+/// it into a length-and-bytes decision, which is the point of interning at all.
+fn type_slot(name: &str) -> Option<usize> {
+    Some(match name {
+        "Int" => 0,
+        "Float" => 1,
+        "Rational" => 2,
+        "String" => 3,
+        "Bool" => 4,
+        "Array" => 5,
+        "Tuple" => 6,
+        "Record" => 7,
+        "Tensor" => 8,
+        "DataFrame" => 9,
+        "GroupBy" => 10,
+        "Function" => 11,
+        "Dna" => 12,
+        "Bytes" => 13,
+        "Missing" => 14,
+        "Unit" => 15,
+        "PyObject" => 16,
+        "Node" => 17,
+        "Headers" => 18,
+        "Dict" => 19,
+        "Net" => 20,
+        "Connection" => 21,
+        "Lock" => 22,
+        _ => return None,
+    })
+}
+
 impl Value {
     /// Wrap a backend DataFrame handle into a `Value`. The extra `Rc` keeps the
     /// `DataFrame` variant one word wide (see the variant's doc); construct through
@@ -1008,6 +1073,26 @@ impl Value {
             Value::Net(_) => "Net",
             Value::Db(_) => "Connection",
             Value::Lock(_) => "Lock",
+        }
+    }
+
+    /// The type's name AS A HELIX VALUE, interned — one `Rc` per name for the life of the
+    /// thread.
+    ///
+    /// `type_of` is how a program asks what it is holding, so every dispatcher in every
+    /// library runs it: `let ty = type_of(v) in if ty == "Record" …`. Answering with a
+    /// freshly built `String` in a fresh `Rc` made the idiom the language recommends cost
+    /// two heap allocations per question — measured at 9.5% of a template render in the
+    /// web field build, whose two hot dispatchers each ask one per hole.
+    ///
+    /// The name still comes from `type_name()`, so the two can never disagree, and a name
+    /// the table does not list is allocated exactly as before: the table is an
+    /// optimization, never a correctness dependency.
+    pub fn type_value(&self) -> Value {
+        let name = self.type_name();
+        match type_slot(name) {
+            Some(slot) => TYPE_NAMES.with(|names| Value::Str(names[slot].clone())),
+            None => Value::Str(Rc::new(name.to_string())),
         }
     }
 
@@ -1480,4 +1565,44 @@ pub fn validate_header(name: &str, value: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `type_value` answers exactly what `type_name` does, and answers it from the interned
+    /// table — the same `Rc` every time, so a dispatcher pays no allocation to ask. A
+    /// misordered table would hand back the WRONG type name, which is why the table is
+    /// checked against itself here and the answer against `type_name` for every value this
+    /// test can build.
+    #[test]
+    fn a_type_name_is_interned_and_is_the_name_type_name_gives() {
+        for (i, name) in TYPE_NAME_LIST.iter().enumerate() {
+            assert_eq!(type_slot(name), Some(i), "`{name}` is not at its own index");
+        }
+        assert_eq!(type_slot("NotAType"), None, "an unlisted name must fall back to allocating");
+        let values = [
+            Value::Int(1),
+            Value::Float(1.5),
+            Value::Str(Rc::new("a".to_string())),
+            Value::Bool(true),
+            Value::array(vec![Value::Int(1)]),
+            Value::Tuple(Rc::new(vec![Value::Int(1)])),
+            Value::Missing,
+            Value::Unit,
+            Value::Bytes(Rc::new(vec![1u8])),
+        ];
+        for v in &values {
+            match v.type_value() {
+                Value::Str(s) => assert_eq!(s.as_str(), v.type_name(), "{:?}", v.type_name()),
+                other => panic!("type_value gave {other:?}"),
+            }
+            // Interned: asking twice hands back the same allocation, not a copy of it.
+            let (Value::Str(a), Value::Str(b)) = (v.type_value(), v.type_value()) else {
+                panic!("type_value must answer a String");
+            };
+            assert!(Rc::ptr_eq(&a, &b), "{} was allocated again", v.type_name());
+        }
+    }
 }

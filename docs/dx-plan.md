@@ -530,6 +530,22 @@ already refused as a reassignment, so every top-level name follows one rule now;
 are namespaced, so only a file's own duplicates are caught. Their
 third point stands as OPEN: an arity error should name the DEFINITION it resolved, not
 only the call.
+**§1.52 (2026-09-13) — where a template hole's microsecond goes, MEASURED, and one layer
+of it removed.** The web field build re-decomposed their render on the 09-12 build and
+showed no pass touches it: a hole is ~0.9 µs, `jit-explain` offers two kernel sites, one of
+them in their harness. Ablating their own library (a copy, each variant re-rendering to the
+SAME output sha) says where that goes, per hole: `expr.field`'s layer 160 ns, `_emit_value`'s
+layer 130 ns, `html_escape` 32 ns, and of those the two `type_of` questions are 90 ns. The
+rest — roughly two thirds — is the chain of closures the linker builds, at ~45 ns per
+interpreted call, which is interpreter call cost and not a pass's to remove. `type_of` is
+now a VM op with an interned answer (77 → 45 ns a question), worth 7% of their four-hole
+render and 5% through a component. What would move the rest is native code for
+string-building closures, or fewer layers in the library: their `_field` forwards to
+`expr.field`, and that one hop with its own type dispatch is the single largest item
+measured. NOT worth doing, measured: the ceiling with type dispatch removed ENTIRELY —
+call, compare and branch chain — is 15% of the four-hole render, so the remaining 8% needs
+the comparison gone too, which a program that binds `let ty = …` has already hidden from
+the compiler.
 **§1.60 (2026-09-12) — a clone per recursion level, FIXED.** The web field build's tree
 test 29 → 155 s, in LOAD: `import ui.expr` 0.82 s, 0.014 with either pass off. Their
 tokenizer `_tk(st, i, acc)` recursed with `i + 1` (folded to a literal) and

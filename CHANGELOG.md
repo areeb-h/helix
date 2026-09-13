@@ -516,6 +516,17 @@
 
 ### Fixed
 
+- **The panicking-call ratchet had stopped counting most of the VM.** The guard that bounds
+  `unwrap`/`expect`/`borrow` on user-reachable paths was taught, in the same commit that put
+  axis reductions on the tape, that an inline `#[cfg(test)]` module is test code — by cutting
+  each file at that attribute. `src/vm.rs` carries an inline `mod frame_size` at line 637 of
+  3 349, so everything below it, the entire run loop, stopped being counted and its reported
+  budget fell from 65 to 3. Only the module's own span is skipped now, and the budgets it
+  reports are true again (`vm.rs` back to 65; `sam.rs`, `cookiejar.rs` and `autodiff.rs` keep
+  the lower counts their end-of-file test modules really earned). A guard with a hole is
+  worse than a smaller guard, because the number it reports is trusted — the same sentence
+  the test already carried about an earlier hole in it.
+
 - **A recursive function specialized against a record could take a clone per level, and
   seconds to load (field build, §1.60).** Their tree test went from 29 s to 155 s; `import
   ui.expr` took 0.82 s to load and 0.014 s with either pass off. The file's tokenizer,
@@ -897,6 +908,21 @@
   answer a type question with a build flag.
 
 ### Performance
+
+- **Asking a value's type is one instruction, and allocates nothing.** `type_of` is how a
+  Helix program dispatches — `let ty = type_of(v) in if ty == "Record" …` is in every
+  library's hot path — and it was an ordinary builtin call: a frame, an argument vector,
+  and two heap allocations to name one of twenty-three fixed words. The VM compiles
+  `type_of(x)` to a dedicated op now (only where the name is the builtin; a program that
+  binds `type_of` itself keeps its own function, on every engine), and the name it pushes
+  is interned once per thread, so the walker stops allocating too. A type question in the
+  VM costs 45 ns instead of 77. Measured on the web field build's template renderer, whose
+  two hot dispatchers each ask one per hole (fresh builds, interleaved, min of three, their
+  own output sha unchanged): a 200-row four-hole render 0.726 → 0.675 ms, the same rows
+  through a component 1.445 → 1.374 ms. Where the remaining time goes is recorded in
+  `docs/dx-plan.md` under §1.52: about 30% of a hole is its two dispatcher layers and the
+  escape, and the rest is the closure chain the linker builds, which is interpreter call
+  cost.
 
 - **The allocator holds a freed page for one millisecond before returning it.** mimalloc's
   `purge_delay` was 0 — return at once — for peak RSS in short-lived processes. With

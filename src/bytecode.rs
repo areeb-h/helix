@@ -1703,6 +1703,14 @@ impl Compiler {
                             for a in args {
                                 self.compile_expr(b, a)?;
                             }
+                            // `type_of(x)` is a question about the value on the stack, not
+                            // work to call out for: one op, no frame, no argument vector,
+                            // no allocation. Reached only here, where the name is the
+                            // builtin — a user binding of it took an arm above.
+                            if name == "type_of" && args.len() == 1 {
+                                b.emit(Op::TypeOf, *line, *col);
+                                return Ok(());
+                            }
                             let idx = self.builtin_idx(name);
                             b.emit(Op::CallBuiltin { idx, nargs: args.len() as u32 }, *line, *col);
                         } else {

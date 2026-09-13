@@ -33,6 +33,15 @@ pub enum Op {
     LoadLocalConstBinary(u32, u32, BinOp),
     /// Superinstruction: pop `v`, push `v op consts[k]` (fuses `Const k; Binary op`).
     ConstBinary(u32, BinOp),
+    /// Pop one, push its type's name — `type_of(x)` without the call.
+    ///
+    /// Every library dispatches on a type by asking for its name (`let ty = type_of(v) in
+    /// if ty == "Record" …`), and as an ordinary builtin call that question cost a frame,
+    /// an argument vector and two allocations for a fixed word. The compiler emits this
+    /// only where `type_of` is the builtin — a program that binds the name itself keeps
+    /// its own function — and the answer is [`Value::type_value`], the same name
+    /// `type_name()` gives every diagnostic.
+    TypeOf,
     /// Unconditional jump to an instruction index.
     Jump(u32),
     /// `match` arm: pop the scrutinee and run this pattern. On a match, push the bound

@@ -1199,6 +1199,12 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let v = stack.pop().unwrap();
                 stack.push(host.eval_unary(o, v, line, col)?);
             }
+            // The compiler emits the argument's expression immediately before this op, so
+            // the stack holds it — the same argument every unary op above makes.
+            Op::TypeOf => {
+                let v = stack.pop().unwrap();
+                stack.push(v.type_value());
+            }
             Op::Binary(o) => {
                 let b = stack.pop().unwrap();
                 let a = stack.pop().unwrap();

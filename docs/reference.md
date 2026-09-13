@@ -582,7 +582,7 @@ Bool
 
 The value's type name as a String — the same names every diagnostic uses.
 
-**Note:** Ask this instead of provoking an error to find out: a caught `try` was measured at 36x a plain lookup, so a type TEST should never cost an exception.
+**Note:** Ask this instead of provoking an error to find out: a caught `try` was measured at 36x a plain lookup, so a type TEST should never cost an exception. It is also the cheapest question in the language: the compiler turns it into a single instruction and the name it answers is interned, so a dispatcher — `let ty = type_of(v) in if ty == "Record" then … else …` — allocates nothing to ask. A program that defines its own `type_of` keeps it, as with any builtin name. Keywords: type, kind, dispatch, is a, instance, class, tag.
 
 ```
 >>> type_of("hi")

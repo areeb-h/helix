@@ -456,7 +456,7 @@ pub(super) fn a_assert_close(args: Vec<Value>, line: usize, col: usize) -> Resul
 /// error charges an exception for a question.
 pub(super) fn a_type_of(name: &str, args: Vec<Value>, line: usize, col: usize) -> Result<Value, HelixError> {
     arity(name, &args, 1, line, col)?;
-    Ok(Value::Str(std::rc::Rc::new(args[0].type_name().to_string())))
+    Ok(args[0].type_value())
 }
 
 /// `has_feature(name)` — is this build's `name` capability compiled in?
