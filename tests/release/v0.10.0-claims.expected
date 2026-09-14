@@ -1,0 +1,36 @@
+inf
+NaN
+-inf
+1e21
+1e-5
+2.0
+1.6666666666666667
+1.25
+missing
+{a: 10, b: 20}
+{id: "id", name: "name"}
+{x: 1, y: 3, z: 4}
+id 5
+255
+255
+2.0
+missing
+[{a: 1}, {a: 2}]
+[2, 1]
+[4, 6]
+6
+0
+11
+7
+2
+2
+0
+missing
+18
+Record
+1 2 1
+bin > col age lit 30
+2
+[6, 5]
+6.0
+true

@@ -1,0 +1,38 @@
+# The v0.10.0 release notes' ERROR claims: the cells whose answer is a refusal. One per line:
+#
+#   <substring the diagnostic must contain>	<program>
+#
+# Tab-separated, `#` comments ignored. Each program must exit NON-ZERO and its stderr must
+# contain the substring. Both halves matter: an exit code without the message is a program
+# that failed for some other reason. Each program is ONE line, because that is how the runner
+# writes them — Helix has no statement separator, so a claim needing two top-level
+# definitions (the duplicate `fn` refusal) is pinned by the corpus program `dup_fn_refused`
+# instead of here.
+
+# --- "A negative `take`/`drop` count is an error, on every type ... One sentence everywhere
+# --- now" — the String's sentence, which Array used to answer with `[]`.
+needs a non-negative count	print([1, 2, 3].take(-1))
+needs a non-negative count	print([1, 2, 3].drop(-1))
+
+# --- ADR 0048: "`//` and `%` keep raising on zero", and "A NaN reaching an ordering
+# --- comparison still raises with the `is_nan` hint".
+zero	print(1 // 0)
+zero	print(7 % 0)
+is_nan	print(0 / 0 < 1)
+
+# --- "The checker knows the range, so `f()` is refused ... in the runtime's words:
+# --- `` `f` takes 1 to 2 arguments, got 0 ``".
+takes 1 to 2 arguments, got 0	print(((x, n = 10) => x + n)())
+
+# --- "`s.normalize()` is NFC ... an unknown form is refused by name".
+nope	print("a".normalize("nope"))
+
+# --- ADR 0052: "The argument list of a frame verb's NAME stays the frame's on any receiver —
+# --- a record's `where` receives a predicate through a binding".
+a frame's own expression	print({where: (c) => c}.where(@age > 1))
+
+# --- "PostgreSQL writes: `postgres_execute(url, sql, params?)` ... behind `db-write`" — and
+# --- behind `--features postgres`: the verb exists and type-checks everywhere, only the body
+# --- is gated (ADR 0032), so a default binary saying so IS the claim.
+no PostgreSQL support	print(postgres_execute("postgres://u:p@h/d", "select 1"))
+no PostgreSQL support	print(postgres_open("postgres://u:p@h/d", "write"))

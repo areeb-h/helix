@@ -4,12 +4,27 @@ A running note so the thread is not lost between sessions. **Newest first.** Eve
 is measured or gated unless it says otherwise — a claim without a number in this file is a
 claim nobody checked.
 
-Last updated: 2026-09-02.
+Last updated: 2026-09-14.
 
 ---
 
 ## Released
 
+- **v0.10.0** — tag `v0.10.0`, published 2026-09-14. A program pays less for what it already
+  knows: pure calls with literal arguments are evaluated when the program loads (ADR 0050), and
+  a call site's record shapes, held names and array literals reach the callee as a clone reduced
+  to the work the runtime values need (ADR 0051) — on the field build's ORM harness,
+  `order+limit+offset` 2.698 → 0.702 µs from element knowledge alone and `where eq` 2.039 →
+  0.830 µs from inlining record results alone, each an interleaved A/B of fresh builds with the
+  statements byte-identical. A condition is a value
+  (ADR 0052), so a library renders `@age > lo` and a frame takes it back by name. Two semantics
+  changes by the user's decision: `/` is IEEE (ADR 0048) and spreads are the sample estimate by
+  default (ADR 0049). Reductions along an axis carry gradients, so a row-wise softmax
+  differentiates. Found by the field builds and fixed at the root in the same window: a clone
+  typed through a freed address (§1.51), later call sites starved of their clones (§1.50), a
+  binding called by name losing its binding (§1.53), a clone per recursion level (§1.60, a
+  tokenizer 579 ms → 7 ms to load), and a duplicate top-level `fn` accepted in silence (§1.59).
+  Release notes run as a program before the tag: 36 value claims and 10 refusals.
 - **v0.9.0** — tag `v0.9.0`, published 2026-09-01. PostgreSQL spoken directly with
   TLS the server cannot turn off (ADR 0044); a method call resolved by its RECEIVER
   (ADR 0045), which is what makes a fluent library writable at all; polars retired to

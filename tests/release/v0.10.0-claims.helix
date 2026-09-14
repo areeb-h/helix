@@ -1,0 +1,109 @@
+# The v0.10.0 release notes, as a program.
+#
+# Every line below is a claim the changelog makes, quoted or taken from its examples. The
+# expectations in `v0.10.0-claims.expected` are authored BY HAND from the notes — capturing
+# them from a binary would prove only that the binary agrees with itself, which every other
+# gate already covers. This is the one check that can notice the notes promising something
+# the binary does not do.
+#
+# Nothing here needs a server or a feature build: the PostgreSQL cells are in
+# `v0.10.0-errors.tsv`, which pins what a default binary says instead.
+
+# --- ADR 0048: "`x / 0` is `inf`, `0 / 0` is NaN, never an error".
+print(1 / 0)
+print(0 / 0)
+print(-1 / 0)
+
+# --- "prints |x| >= 1e16 and 0 < |x| < 1e-4 as `2.702159776422298e16` / `1e-5` ... `2.0`
+# --- still reads as a Float".
+print(1e21)
+print(0.00001)
+print(2.0)
+
+# --- ADR 0049: "Everything that computes a spread now divides by n − 1 ... `std(0)`,
+# --- `var(0)` ... are the population's. A spread over one value is `missing`".
+print([1, 2, 3, 4].var())
+print([1, 2, 3, 4].var(0))
+print([7].std())
+
+# --- "`rec.map_values(f)` ... the same keys, each value replaced ... a second binder is the
+# --- key, `{id: "int", name: "text"}.map_values((v, k) => k)`".
+print({a: 1, b: 2}.map_values(it * 10))
+print({id: "int", name: "text"}.map_values((v, k) => k))
+
+# --- "More than one `...spread` in a record literal, later ones winning ... written order".
+base = {x: 1, y: 2}
+more = {y: 3, z: 4}
+print({...base, ...more})
+
+# --- "A destructure may rename a field: `let {select: sel, limit} = spec in …`".
+fn clause(spec) = let {select: sel, limit} = spec in "{sel} {limit}"
+print(clause({select: "id", limit: 5}))
+
+# --- "`to_int("ff", 16)` reads a string's digits in a base ... free and as `"ff".to_int(16)`
+# --- ... `cov` takes the ddof `var` takes; a missing anywhere makes either missing.
+# --- `records()` is the rows as records".
+print(to_int("ff", 16))
+print("ff".to_int(16))
+print([1, 2, 3].cov([2, 4, 6]))
+print([1, missing, 3].cov([1, 2, 3]))
+print(dataframe({a: [1, 2]}).records())
+
+# --- "`group(@k).agg({n: count(), m: mean(@v), hi: max(@v * 2)})`".
+agg = dataframe({k: ["a", "a", "b"], v: [1, 2, 3]}).group(@k).agg({n: count(), m: mean(@v), hi: max(@v * 2)})
+print(agg.column("n"))
+print(agg.column("hi"))
+
+# --- "`xs.reduce(0, add)` ... take a bare bound function".
+fn add(p, q) = p + q
+print([1, 2, 3].reduce(0, add))
+
+# --- "A default may be a literal container of literals — `= {}`, `= []`".
+fn size(xs = []) = xs.count()
+print(size())
+
+# --- "`(x, n = 10) => x + n` declares a trailing default ... `h = g; h(2)` with
+# --- `fn g(a, b = 5)`".
+bump = (x, n = 10) => x + n
+print(bump(1))
+fn g5(a, b = 5) = a + b
+h = g5
+print(h(2))
+
+# --- "`w = {f: (x) => x + 1}` / `w.f(1)` # 2 / `(w.f)(1)` # 2 — still valid".
+w = {f: (x) => x + 1}
+print(w.f(1))
+print((w.f)(1))
+
+# --- "`Dict.get(k, default?)` ... a key that is PRESENT with a `missing` value answers
+# --- `missing`, not the default".
+d = [["a", 1], ["m", missing]].to_dict()
+print(d.get("zz", 0))
+print(d.get("m", 0))
+
+# --- "`{city: "oslo", "age >=": 18}` is a record ... written order kept, the field
+# --- reachable as `rec.get("age >=")`".
+qk = {city: "oslo", "age >=": 18}
+print(qk.get("age >="))
+print(type_of(qk))
+
+# --- "`s.normalize()` is NFC; `"nfd"` ... on request ... `length` ... count Unicode scalar
+# --- values". The literal below is the precomposed é.
+print("é".length(), "é".normalize("nfd").length(), "é".normalize("nfd").normalize().length())
+
+# --- ADR 0052: "`@age > lo` ... is the record that describes it ... a frame verb takes it
+# --- back through a name: `p = @age > lo` then `df.where(p)`".
+people = dataframe({age: [10, 40, 70], name: ["Ann", "bob", "Cy"]})
+lo = 30
+p = @age > lo
+print(p.kind, p.op, p.left.kind, p.left.name, p.right.kind, p.right.value)
+print(people.where(p).count())
+
+# --- "`sum(k)`, `mean(k)`, `max(k)` and `min(k)` carry gradients ... `exp(x) /
+# --- exp(x).sum(1).reshape([n, 1])` is a differentiable row-wise softmax".
+x = variable(tensor([[1.0, 2.0, 3.0], [0.5, 0.5, 4.0]]))
+print(value_of(x.sum(1)))
+print(gradient(x.sum(1).sum(), x).sum())
+ex = exp(x)
+sm = ex / ex.sum(1).reshape([2, 1])
+print((value_of(sm).sum(1) - 1.0).abs().sum() < 1e-12)

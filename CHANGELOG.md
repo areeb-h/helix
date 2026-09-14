@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.10.0 — 2026-09-14
 
 ### Added
 
@@ -722,10 +722,11 @@
   and `chars` count: Unicode scalar values — not bytes, not grapheme clusters. The
   `unicode-normalization` crate (pure Rust) is the one new dependency.
 - **`std(ddof?)` and `var(ddof?)`.** `[1, 2, 3, 4].std(1)` is the sample standard deviation
-  (divide by n−1), `std()` the population one it always was; the same for `var`. The walker
-  already parsed the argument — only the documented signature `std()` stood in the way, and the
-  checker refused `std(1)` as "takes no arguments" (field build, 1.36). `helix doc Array.std`
-  and the reference say which one you get.
+  (divide by n−1) and `std(0)` the population one; the same for `var`. The walker already
+  parsed the argument — only the documented signature `std()` stood in the way, and the checker
+  refused `std(1)` as "takes no arguments" (field build, 1.36). Which one `std()` gives with no
+  argument changed in this same release: it is the sample estimate (ADR 0049, under Changed).
+  `helix doc Array.std` and the reference say which one you get.
 - **A negative `take`/`drop` count is an error, on every type.** Array clamped it to 0 —
   `[1, 2, 3].take(-1)` was `[]` and `drop(-1)` the whole array, silently — while String raised
   "`take` needs a non-negative count" (field build, 1.33); Bytes clamped too. One sentence
