@@ -60,12 +60,19 @@ esac
 
 sed -i "s/^version = \"$CUR\"/version = \"$NEXT\"/" Cargo.toml
 
+# CARGO.LOCK RECORDS THE CRATE'S OWN VERSION TOO. `release.sh` refreshes it through its
+# `cargo check`; this script used to bump Cargo.toml alone, so the v0.10.0 re-arm committed a
+# lock still naming 0.10.0 — the next build rewrote it, leaving every later tree dirty and a
+# `--locked` build refused. `cargo metadata` rewrites the root package's entry without
+# resolving a dependency or compiling anything.
+cargo metadata --format-version 1 --offline > /dev/null
+
 # `release.sh` REQUIRES a `## Unreleased` heading and nothing ever wrote one back after it
 # consumed it, so every cycle began by hand-adding it. Re-open it here.
 grep -q '^## Unreleased' CHANGELOG.md || sed -i "0,/^## v/s//## Unreleased\n\n## v/" CHANGELOG.md
 
 echo "== tree re-armed: $CUR -> $NEXT"
-echo "   Cargo.toml bumped and CHANGELOG reopened — commit and push both."
+echo "   Cargo.toml and Cargo.lock bumped, CHANGELOG reopened — commit and push all three."
 # SINGLE quotes around the backticked part: in double quotes `helix --version` is a
 # COMMAND SUBSTITUTION, so this line ran whatever `helix` was on PATH and printed its
 # version instead of the literal text — "From here helix 0.2.1 reports 0.7.1-dev", naming
