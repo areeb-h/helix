@@ -16797,3 +16797,33 @@ fn a_duplicate_top_level_fn_is_refused_naming_the_first() {
     assert_ne!(code, Some(0));
     assert!(err.contains("`f` is immutable and cannot be reassigned"), "{err}");
 }
+
+/// The field build's §1.63 reproducer shape — a renderer reached through zero, three, four
+/// and five wrapper frames, with a shape another site shares and one no other site has —
+/// renders the same text on every engine, with the pass on and off. Values only: the pass
+/// may fold every row or none, and the engines must not be able to tell.
+#[test]
+fn a_deep_chain_renders_the_same_on_every_engine() {
+    let src = "V = if now() > 0.0 then 5 else 0\n\
+fn r(p, n) = let k = if type_of(p) == \"Record\" then p.get(\"kind\") ?? \"\" else \"\" in if k == \"bin\" and type_of(p.left) == \"Record\" and ((p.left).get(\"kind\") ?? \"\") == \"col\" and type_of(p.right) == \"Record\" and ((p.right).get(\"kind\") ?? \"\") == \"lit\" then {s: \"{(p.left).name} {p.op} ${n}\", ps: [(p.right).value], n: n + 1} else if k == \"bin\" then let l = r(p.left, n) in let x = r(p.right, l.n) in {s: \"{l.s} {p.op} {x.s}\", ps: l.ps.concat(x.ps), n: x.n} else raise(\"not a node\")\n\
+fn a3(w, n) = r(w, n)\nfn a2(spec) = a3(spec.where, 1)\nfn a1(m, spec) = a2(spec)\n\
+fn c4(w, n) = r(w, n)\nfn c3(w, n) = c4(w, n)\nfn c2(spec) = c3(spec.where, 1)\nfn c1(m, spec) = c2(spec)\n\
+fn b4(w, n) = r(w, n)\nfn b3(w, n) = b4(w, n)\nfn b2(spec) = b3(spec.where, 1)\nfn b1(m, spec) = b2(spec)\nfn b0(spec) = b1(\"m\", spec)\n\
+fn shared() = r(@age > V and @id < V and @age < 90, 1)\n\
+print(shared().s, shared().n, shared().ps)\n\
+print(a1(\"m\", {where: @age > V and @id < V and @age < 90}).s)\n\
+print(c1(\"m\", {where: @age >= V and @id <= V and @age <= 90}).s)\n\
+print(c1(\"m\", {where: @age > V and @id < V and @age < 90}).ps)\n\
+print(b0({where: @age > V and @id < V and @age < 90}).s)\n";
+    let want = "age > $1 and id < $2 and age < $3 4 [5, 5, 90]\nage > $1 and id < $2 and age < $3\nage >= $1 and id <= $2 and age <= $3\n[5, 5, 90]\nage > $1 and id < $2 and age < $3\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("deepchain_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}");
+    }
+    for (label, env) in [("nospecialize", &[("HELIX_NOSPECIALIZE", "1")][..]), ("nofold", &[("HELIX_NOFOLD", "1")][..])] {
+        let (out, err, code) = run_source(src, env, &format!("deepchain_{label}"));
+        assert_eq!(code, Some(0), "{label}: {err}");
+        assert_eq!(out, want, "{label}");
+    }
+}

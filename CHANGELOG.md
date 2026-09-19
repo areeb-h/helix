@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+### Fixed
+
+- **Specialization stopped four calls from the call site, recursion included, and what it
+  made there depended on which call the walk met first (field build, §1.63).** A depth cap of
+  four charged a recursion a level per tree level, so a library's helper chain — `M.sql ->
+  sql -> _sql_lean -> _where -> _psql` — put a predicate's leaves out of reach: a two-comparison
+  render cost 4.94 µs where a standalone renderer of the same tree folded to 1.04. And the
+  clone memo carried no depth, so a clone first made deep — its inner calls left generic —
+  was what a later shallow site reused: adding a never-called function changed a live call
+  from 1.9 µs to 1.0. A recursion spends no depth now (the once-per-chain rule, not a count,
+  is what ends it), the cap is a sanity ceiling of sixteen distinct frames with the node
+  budget as the bound, the memo is consulted before the ceiling, and each entry carries the
+  depth it was made at so a shallower site remakes a clone made with less room. Their
+  reproducer's five rows fold alike now. Four documents that disagreed with the code are
+  corrected: ADR 0050's statement of where the fold runs (after the checker and BEFORE the
+  receiver-directed rewrite), ADR 0051's and the plan's caps, and a test comment. Pinned by
+  `a_recursion_spends_no_depth_so_a_deep_chain_still_folds`,
+  `a_clone_made_deep_is_remade_for_a_shallower_site` and
+  `a_deep_chain_renders_the_same_on_every_engine`.
+
+- **`helix fmt` wrote `{...a,...b}`.** "Nothing hugs a `...` on either side" is right for the
+  spread's operand and was also applied to the gap before it, so a spread that was not first
+  in its brace lost the comma's space — `{...a, ...b}` and `{x: 1, ...r}` were "unformatted".
+  It went unseen because the only formatted spread in the tree came first, until v0.10.0's
+  release-claims program wrote two: that file is added by the release commit, after the gate
+  has run, so the release gate never formatted it and the first gate afterwards failed on it.
+  A comma before a spread keeps its space now, and `docs/RELEASING.md` says to run `helix fmt
+  --check` on the claims program before the release commit. Pinned in the formatter's own
+  table (`a_match_body_and_a_try_are_not_a_record_and_a_call`).
+
 ## v0.10.0 — 2026-09-14
 
 ### Added

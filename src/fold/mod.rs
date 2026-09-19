@@ -1341,7 +1341,7 @@ mod tests {
     }
 
     /// Specialization follows a known argument into the callees a clone calls, and stops
-    /// at its caps: eight clones per function, and no more.
+    /// at its cap: the program's budget of clone nodes.
     #[test]
     fn specialization_is_transitive_and_budgeted() {
         // `g`'s clone is `missing` for the shape, so `f`'s clone — `g$…(s)` — is `missing`
@@ -1561,6 +1561,47 @@ mod tests {
         assert_eq!(count_nodes(entry, |e| matches!(e, Expr::Call { name, .. } if name == "walk$2")), 1, "{entry:?}");
         let general = func(&s, "walk$2");
         assert_eq!(count_nodes(general, |e| matches!(e, Expr::Call { name, .. } if name == "walk$2")), 1, "{general:?}");
+    }
+
+    /// A recursion spends no depth and a chain of distinct frames is not cut off at four
+    /// (§1.63): five wrappers that pass their argument on, then a renderer walking a
+    /// three-leaf predicate — the leaves are reached and the text is a constant, where the old
+    /// cap left the walk to run time.
+    #[test]
+    fn a_recursion_spends_no_depth_so_a_deep_chain_still_folds() {
+        let s = folded_with(
+            "mut V = 5\n\
+             fn r(p, n) = if p.kind == \"bin\" and (p.op == \"and\" or p.op == \"or\") then let l = r(p.left, n) in let x = r(p.right, l.n) in {s: \"{l.s} {p.op} {x.s}\", ps: l.ps.concat(x.ps), n: x.n} else {s: \"{p.left.name} {p.op} ${n}\", ps: [p.right.value], n: n + 1}\n\
+             fn b4(w, n) = r(w, n)\nfn b3(w, n) = b4(w, n)\nfn b2(spec) = b3(spec.where, 1)\nfn b1(m, spec) = b2(spec)\nfn b0(spec) = b1(\"m\", spec)\n\
+             y = b0({where: @a > V and @b < V and @a < 90})",
+            true,
+        );
+        let y = s.iter().find(|st| matches!(st, Stmt::Assign { name, .. } if name == "y")).map(value_of).expect("y");
+        assert_eq!(count_nodes(y, |e| matches!(e, Expr::Str(t) if t == "a > $1 and b < $2 and a < $3")), 1, "{y:?}");
+        assert_eq!(count_nodes(y, |e| matches!(e, Expr::Call { .. } | Expr::Method { .. })), 0, "{y:?}");
+    }
+
+    /// A clone made deep — with less room for the calls inside it — is remade when a
+    /// shallower site asks (§1.63): a chain of eighteen distinct frames is beyond the ceiling,
+    /// so the first call through it leaves the renderer generic; a later call entering the
+    /// same chain ten frames down reaches the renderer and folds, instead of reusing what the
+    /// deep walk made. The result of a site does not depend on which site the walk met first.
+    #[test]
+    fn a_clone_made_deep_is_remade_for_a_shallower_site() {
+        let mut src = String::from("mut V = 5\nfn r(p, n) = if p.kind == \"bin\" and (p.op == \"and\" or p.op == \"or\") then let l = r(p.left, n) in let x = r(p.right, l.n) in {s: \"{l.s} {p.op} {x.s}\", ps: l.ps.concat(x.ps), n: x.n} else {s: \"{p.left.name} {p.op} ${n}\", ps: [p.right.value], n: n + 1}\n");
+        for i in 0..18 {
+            let next = if i == 17 { "r(w, n)".to_string() } else { format!("c{}(w, n)", i + 1) };
+            src.push_str(&format!("fn c{i}(w, n) = {next}\n"));
+        }
+        src.push_str("y = c0({where: @a > V and @b < V}.where, 1)\nz = c10({where: @a > V and @b < V}.where, 1)\n");
+        let s = folded_with(&src, true);
+        let of = |n: &str| s.iter().find(|st| matches!(st, Stmt::Assign { name, .. } if name == n)).map(value_of).expect(n);
+        let z = of("z");
+        assert_eq!(count_nodes(z, |e| matches!(e, Expr::Str(t) if t == "a > $1 and b < $2")), 1, "{z:?}");
+        assert_eq!(count_nodes(z, |e| matches!(e, Expr::Call { .. })), 0, "{z:?}");
+        // The deep site is beyond the ceiling and stays a call, as it would alone.
+        let y = of("y");
+        assert_eq!(count_nodes(y, |e| matches!(e, Expr::Call { .. })), 1, "{y:?}");
     }
 
     /// A program with no function of its own is untouched, cheaply.

@@ -4,7 +4,8 @@
   the measurement below; the field build's ORM is the case.
 - **Decision:** a call to one of the program's own functions whose arguments carry
   something the callee can use before the values are known — a record literal's KEYS, a
-  top-level name the load-time sandbox holds, a scalar literal — is pointed at a clone of
+  top-level name the load-time sandbox holds, an array literal's elements (a scalar literal
+  alone earns no clone: passing one costs ten nanoseconds) — is pointed at a clone of
   the callee made once for exactly that, in which every question that knowledge answers is
   answered in place, and the fold (ADR 0050) then runs over the clone as over any
   function. A method through a record the sandbox holds — `M.sql(spec)`, the object API a
@@ -152,6 +153,16 @@ shrinks — a part of the ancestor's shape, `render(p.left, n)`, however the cou
 it grows — keeps all its knowledge, since a finite structure ends; a call in which nothing
 shrinks has its changed positions generalized to `Any`, and the chain reaches a clone that
 recurses into itself (the tokenizer is two clones: the entry, and one for its recursion).
+A RECURSION SPENDS NO DEPTH, and the depth that remains is a ceiling on chains of DISTINCT
+frames, sixteen, a sanity ceiling rather than the bound — the budget and the rule above
+are the bounds. The first cut charged a level per tree level and stopped at four, so a
+library's helper chain put a predicate's leaves out of reach and a walk over a literal
+tree was cut off where it had already been proved to end (§1.63). THE MEMO IS CONSULTED
+BEFORE THE CEILING — a clone that exists costs nothing to point at — and each entry
+carries the depth it was made at: a request from a shallower site than the one that made
+a clone remakes it, since the deeper one had less room for the calls inside it. Without
+that, which clone a live call got depended on which call the walk met first, and a
+function nobody called changed how fast another ran.
 `HELIX_NOSPECIALIZE=1` turns the pass off for an A/B;
 `HELIX_NOFOLD=1` turns off the fold it rides on; `HELIX_FOLD_DUMP=<name>` prints what the
 pass made (`1` for all of it, `all` for the whole program as the compiler sees it).

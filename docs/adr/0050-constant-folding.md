@@ -71,7 +71,7 @@ any statement runs. Under `if`, `match`, `try`, the right of `and`/`or`/`??`, in
 a method's argument, inside a function body: the call stays and raises at run time as before.
 The sandbox's own refusals are never errors.
 
-**Where it runs.** After the checker and the receiver-directed rewrite, in every pipeline
+**Where it runs.** After the checker and BEFORE the receiver-directed rewrite (`ufcs`), in every pipeline
 that runs, checks or bundles a program. The checker types what the programmer wrote: a fold
 never adds precision a call lacked — `launder(true)`, typed `Any` by its annotation, stays
 `Any` folded or not — and a type error outranks a raise, since the fold only runs on a

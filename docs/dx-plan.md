@@ -431,8 +431,9 @@ spread is refused wherever it stands. Reference: a `spread` syntax entry (the fo
 
 **ORM render (2026-09-07) — a function compiled for what its call site knows.** DECIDED by
 the user on the measurement and DONE: ADR 0051. `src/fold/specialize.rs`: a call passing a
-record literal's keys, a held global or a scalar literal runs a clone of the callee (memoized
-per function and knowledge; 64 per program, 8 per function, 4 deep) in which the shape's and
+record literal's keys, a held global or an array literal runs a clone of the callee (memoized
+per function and knowledge; bounded by a budget of clone nodes, 64 × 4 096 for the program;
+a recursion spends no depth and chains of distinct frames stop at sixteen) in which the shape's and
 the constant's questions are answered in place and the fold does the rest; `M.sql(spec)` on a
 record the sandbox holds is devirtualized to a top-level `M$sql` with its captures hoisted
 first. `src/fold/simplify.rs` folds constant control flow. The fold's candidates grew literal
@@ -580,6 +581,19 @@ primitives themselves. Candidate found along the way, NOT built: a builtin call 
 even though the compiler already assigned the index — `type_of` as an op measured ~4 ns
 against `abs()`'s ~41, so some of that 36 ns gap is name dispatch that every builtin call
 in every program pays.
+**§1.63 (2026-09-17) — depth spent on recursion, and a memo blind to depth, FIXED.** The web
+field build's ORM rendered `{where: @age > x and @id < y}` in 4.94 µs while a standalone
+renderer folded the same tree: `MAX_DEPTH = 4` charged a recursion a level per tree level,
+so `M.sql -> sql -> _sql_lean -> _where -> _psql` put the leaves out of reach; and the memo
+keyed by (function, knowledge) only, looked up AFTER the depth check, so a clone first made
+deep was reused by a shallow site and a never-called function changed a live call (1.9 →
+1.0 µs). Now (`specialize.rs`): a recursion continues at its ancestor's depth (the
+once-per-chain rule ends it); the memo is consulted first and each entry carries the depth
+it was made at — a shallower request remakes; the ceiling is 16 distinct frames, the node
+budget the bound. Their reproducer: all five rows ~0.2 µs. The four docs they found
+disagreeing (ADR 0050's fold order, ADR 0051's and this file's caps, a test comment) are
+corrected. Their §1.62 (a record built at run time is opaque) and §1.61 (a statement cache
+in the driver) follow.
 **§1.60 (2026-09-12) — a clone per recursion level, FIXED.** The web field build's tree
 test 29 → 155 s, in LOAD: `import ui.expr` 0.82 s, 0.014 with either pass off. Their
 tokenizer `_tk(st, i, acc)` recursed with `i + 1` (folded to a literal) and

@@ -259,7 +259,16 @@ fn render_line(src: &str, line: &[&Token]) -> String {
 /// binary one.
 fn needs_space(prev: &Tok, next: &Tok, line: &[&Token], i: usize) -> bool {
     use Tok::*;
-    // Nothing hugs a `.`, `..` or `...` on either side — `a.b`, `0..n`, `xs...`.
+    // A SPREAD AFTER A COMMA TAKES THE COMMA'S SPACE: `{...a, ...b}`, `{x: 1, ...r}`. The rule
+    // below is about a `...` hugging its OPERAND and a `.` hugging both sides; applied to the
+    // gap BEFORE a spread it rendered the second part of a record update as `{...a,...b}`,
+    // which nobody writes. It went unseen because the only formatted spread in the tree came
+    // first in its brace — until the v0.10.0 claims program wrote two, was added after its
+    // gate had run, and failed the next one for being formatted the way a person formats.
+    if matches!(prev, Comma) && matches!(next, DotDotDot) {
+        return true;
+    }
+    // Nothing hugs a `.`, `..` or `...` on either side — `a.b`, `0..n`, `...xs`.
     if matches!(prev, Dot | DotDot | DotDotDot) || matches!(next, Dot | DotDot | DotDotDot) {
         return false;
     }
@@ -628,6 +637,10 @@ mod tests {
             ("{ a: 1 }", "{a: 1}"),
             ("f({k: 1})", "f({k: 1})"),
             ("{...r, c: 3}", "{...r, c: 3}"),
+            // A spread that is not first keeps the comma's space (it was `{...a,...b}`).
+            ("{...a, ...b}", "{...a, ...b}"),
+            ("{...a,...b}", "{...a, ...b}"),
+            ("{x: 1, ...r, y: 2}", "{x: 1, ...r, y: 2}"),
             // `try` keeps its space; a real call still binds tight.
             ("try (1 / 0)", "try (1 / 0)"),
             ("try(1 / 0)", "try (1 / 0)"),

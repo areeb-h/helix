@@ -78,6 +78,12 @@ the parser ships one release ahead of the first marker.
    by hand; `…-errors.tsv` holds the cells whose answer is a refusal. Then:
    `BIN=./target/gate/helix bash scripts/release-smoke.sh X.Y.Z`.
 
+   The claims program is a tracked `.helix` file like any other, so `checkall` formats it —
+   but only once it is TRACKED, and the release commit adds it after the gate has run. Run
+   `helix fmt --check tests/release/vX.Y.Z-claims.helix` before that commit: v0.10.0's went in
+   with two lines the formatter wanted otherwise, and the first gate after the release was the
+   one to say so.
+
    This step exists because it is the only one that can fail. Every other gate
    compares the tree against itself — the corpus against its own `.expected`,
    `dfdiff` between two backends, `vmparity` between three engines, `compat`

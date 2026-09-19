@@ -67,8 +67,16 @@ use crate::value::{FuncVal, Value};
 
 use super::{simplify, Sandbox};
 
-/// How far a specialization may follow calls into callees.
-const MAX_DEPTH: usize = 4;
+/// How long a chain of DISTINCT frames a specialization may follow — a sanity ceiling,
+/// not the bound. The bounds are the node budget below and the once-per-chain rule for a
+/// recursion in `specialize`; a chain of distinct functions is finite by itself, a function
+/// appearing twice in it being a recursion. The first cut set this to four and charged a
+/// recursion a level per tree level, so a library's helper chain — `M.sql -> sql ->
+/// _sql_lean -> _where -> _psql` — put a predicate's leaves out of reach, and a walk over a
+/// literal tree was cut off where it had already been proved to end (the web field build's
+/// §1.63: `_where` taken out of the chain took a two-comparison render from 4.94 µs to
+/// 1.04). A library should not have to buy levels back by writing fewer, larger functions.
+const MAX_DEPTH: usize = 16;
 /// A body larger than this (in nodes) is not cloned.
 const MAX_NODES: usize = 4_096;
 /// The nodes all of a program's clones may hold together: a clone costs its body's size,
@@ -258,7 +266,12 @@ struct FnDef {
 pub(crate) struct Specializer<'t> {
     types: &'t mut TypeMap,
     funcs: HashMap<String, FnDef>,
-    memo: HashMap<(String, Vec<Binding>), Option<Made>>,
+    /// What each (function, knowledge) became, and the depth it was made AT: a clone made
+    /// deep had less room for the calls inside it than one made shallow, so a request from a
+    /// shallower site remakes it rather than reusing a poorer one. Without the depth here,
+    /// which clone a live call got depended on which call the walk met first — a function
+    /// nobody called changed how fast another ran (§1.63).
+    memo: HashMap<(String, Vec<Binding>), (Option<Made>, usize)>,
     total: usize,
     /// The nodes the clones made so far hold, against `budget`.
     nodes: usize,
@@ -269,7 +282,7 @@ pub(crate) struct Specializer<'t> {
     /// The clones being made right now, outermost first — the functions on the
     /// specialization stack, with what each is being made for. A call to one of them is a
     /// recursion, and what it passes down is measured against this.
-    building: Vec<(String, Vec<Binding>)>,
+    building: Vec<(String, Vec<Binding>, usize)>,
     next_id: usize,
     devirt: HashMap<(String, String), Option<String>>,
     /// Clones and devirtualized functions, to be appended to the program.
@@ -483,7 +496,7 @@ impl<'t> Specializer<'t> {
         // A scalar literal alone earns no clone — passing it costs ten nanoseconds, and a
         // library's own internal calls carry them everywhere. A shape, a held name or an
         // array literal does.
-        if !self.enabled || depth > MAX_DEPTH || !args.iter().any(Binding::earns_clone) {
+        if !self.enabled || !args.iter().any(Binding::earns_clone) {
             return None;
         }
         let known_fn = self.funcs.get(fname)?;
@@ -501,8 +514,23 @@ impl<'t> Specializer<'t> {
             });
         }
         let key = (fname.to_string(), known.clone());
-        if let Some(r) = self.memo.get(&key) {
+        // A RECURSION SPENDS NO DEPTH. A call to a function whose clone is being made continues
+        // at that clone's own level: the rule below either keeps it on a finite path or
+        // generalizes it to a clone that recurses into itself, and that — not a count of
+        // levels — is what ends it. Charging a level per tree level cut a walk over a
+        // literal predicate off at its fourth leaf (§1.63).
+        let recursion = self.building.iter().rev().find(|(f, _, _)| f == fname).map(|(_, k, d)| (k.clone(), *d));
+        let depth = recursion.as_ref().map_or(depth, |(_, d)| *d);
+        // THE MEMO BEFORE THE CEILING: a clone that exists costs nothing to point at, whatever
+        // the depth of the site asking. One made with LESS room than this site has — deeper —
+        // is remade below, so what a site gets never depends on which site the walk met first.
+        if let Some((r, made_at)) = self.memo.get(&key)
+            && *made_at <= depth
+        {
             return r.clone();
+        }
+        if depth > MAX_DEPTH {
+            return None;
         }
         // A RECURSION IS SPECIALIZED ONCE PER CHAIN. A call to a function whose clone is
         // being made right now — `_tk(st, i + 1, acc.concat([tok]))` inside `_tk`'s own
@@ -515,7 +543,7 @@ impl<'t> Specializer<'t> {
         // ancestor's shape, `render(p.left, n)` — is kept, since a finite structure ends;
         // knowledge that grows or merely changes is generalized to `Any`, and the chain
         // reaches a clone that recurses into itself.
-        if let Some((_, ancestor)) = self.building.iter().rev().find(|(f, _)| f == fname) {
+        if let Some((ancestor, _)) = recursion {
             // Any position that shrinks puts the whole call on a finite path: the
             // renderer's `render(p.right, l.n)` passes a subtree AND a counter one higher,
             // and the counter is exactly what its text needs; the subtree is what ends it.
@@ -532,7 +560,7 @@ impl<'t> Specializer<'t> {
         // A clone costs its body's size, against the program's budget.
         let size = def.types.len();
         if self.total >= MAX_CLONES || size > MAX_NODES || self.nodes + size > self.budget {
-            self.memo.insert(key, None);
+            self.memo.insert(key, (None, depth));
             return None;
         }
         let name = format!("{fname}${}", self.next_id);
@@ -541,7 +569,7 @@ impl<'t> Specializer<'t> {
         self.nodes += size;
         // Memoized BEFORE the body is rewritten, so a recursive call inside it reaches the
         // clone itself.
-        self.memo.insert(key.clone(), Some(Made::Fn(name.clone())));
+        self.memo.insert(key.clone(), (Some(Made::Fn(name.clone())), depth));
         let (params, defaults, ret, mut body, snapshot, line, col) = (
             def.params.clone(),
             def.defaults.clone(),
@@ -558,7 +586,7 @@ impl<'t> Specializer<'t> {
             env.bind(p, b.clone());
         }
         let outer = std::mem::replace(&mut self.changed, false);
-        self.building.push((fname.to_string(), known.clone()));
+        self.building.push((fname.to_string(), known.clone(), depth));
         self.substitute(&mut body, &mut env, depth + 1, sb, done);
         self.building.pop();
         let reduced = std::mem::replace(&mut self.changed, outer);
@@ -576,7 +604,7 @@ impl<'t> Specializer<'t> {
         };
         if let Some(made) = trivial {
             forget_types(self.types, &body);
-            self.memo.insert(key, Some(made.clone()));
+            self.memo.insert(key, (Some(made.clone()), depth));
             self.total -= 1;
             self.nodes -= size;
             return Some(made);
@@ -586,7 +614,7 @@ impl<'t> Specializer<'t> {
             // runtime values decide. The clone would be the function under another name:
             // not kept, and the budget it took is returned.
             forget_types(self.types, &body);
-            self.memo.insert(key, None);
+            self.memo.insert(key, (None, depth));
             self.total -= 1;
             self.nodes -= size;
             return None;
