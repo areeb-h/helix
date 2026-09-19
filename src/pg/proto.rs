@@ -132,10 +132,44 @@ pub fn write_msg(w: &mut impl Write, tag: Option<u8>, body: &[u8]) -> Result<(),
     w.flush().map_err(|e| format!("sending to the server: {e}"))
 }
 
+/// Append one frontend message to `out`, framed — for a caller that sends several in ONE
+/// write. A query is Parse, Bind, Describe, Execute and Sync: as five flushed writes that
+/// is five syscalls, five segments with `TCP_NODELAY` on, and five records under TLS.
+pub fn frame_msg(out: &mut Vec<u8>, tag: u8, body: &[u8]) -> Result<(), String> {
+    let len = i32::try_from(body.len() + 4).map_err(|_| "message too large to send".to_string())?;
+    out.push(tag);
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(body);
+    Ok(())
+}
+
+/// Send what `frame_msg` gathered, in one write.
+pub fn send_framed(w: &mut impl Write, framed: &[u8]) -> Result<(), String> {
+    w.write_all(framed).map_err(|e| format!("sending to the server: {e}"))?;
+    w.flush().map_err(|e| format!("sending to the server: {e}"))
+}
+
 /// Append a NUL-terminated string, the protocol's only string form.
 pub fn put_cstr(out: &mut Vec<u8>, s: &str) {
     out.extend_from_slice(s.as_bytes());
     out.push(0);
+}
+
+/// The SQLSTATE of an `ErrorResponse` — what makes an error identifiable to a PROGRAM rather
+/// than to a reader. The statement cache re-prepares on `26000` and `0A000`, falls back to
+/// the unnamed statement on `42P05`, and treats every other code as the caller's.
+pub fn error_code(m: &Msg) -> String {
+    let mut cur = m.cur();
+    while let Ok(f) = cur.u8() {
+        if f == 0 {
+            break;
+        }
+        let Ok(v) = cur.cstr() else { break };
+        if f == b'C' {
+            return v;
+        }
+    }
+    String::new()
 }
 
 /// The fields of an `ErrorResponse` / `NoticeResponse`, rendered as one line.

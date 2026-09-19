@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Performance
+
+- **A PostgreSQL connection prepares each statement once (field build, §1.61).** Every query
+  was Parsed from scratch as the unnamed statement, so the server parsed, analysed and
+  rewrote the same text on every call — measured by the field build against pgx and GORM on
+  one PostgreSQL 17 as the whole gap to GORM on a small query, 23–57 µs of a ~150 µs round
+  trip, and one a library cannot close: SQL-level `EXECUTE p($1)` refuses a bound parameter.
+  A connection from `postgres_open` now Parses each distinct text once under a name and only
+  Binds and Executes it after that: at most 256, the least recently used closed in the round
+  trip that parses its replacement. Invisible to a caller — a statement the server no longer
+  has (`26000`) or whose result type changed under it (`0A000`) is prepared again once, a name
+  a user's `PREPARE` already took (`42P05`) falls back to the unnamed statement, a text that
+  does not parse is never remembered — and proven so against PostgreSQL 17, case by case. One
+  exchange is also ONE write now, where Parse, Bind, Describe, Execute and Sync were five
+  flushed writes: five syscalls, five segments, five records under TLS. And a result is READ
+  THROUGH A BUFFER: every backend message was two unbuffered `read` calls — its 5-byte header,
+  then its body — so a 1 000-row result was ~2 000 syscalls, which, not text parsing, was
+  most of what that read cost against pgx. The one-shot verbs keep the unnamed statement and
+  gain the buffer and the single write. Numbers are in ADR 0044's addendum and the commit. Pinned by
+  `a_connection_prepares_a_statement_once`, `a_statement_the_server_forgot_is_prepared_again`
+  and `the_least_recently_used_statement_is_closed_when_the_cache_is_full`, against a fake
+  server that now knows statement names, `Close` and how to forget.
+
 ### Fixed
 
 - **A call through a record built at run time was never specialized, and `P = People.on(db)`

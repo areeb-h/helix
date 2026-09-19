@@ -581,6 +581,26 @@ primitives themselves. Candidate found along the way, NOT built: a builtin call 
 even though the compiler already assigned the index — `type_of` as an op measured ~4 ns
 against `abs()`'s ~41, so some of that 36 ns gap is name dispatch that every builtin call
 in every program pays.
+**§1.61 (2026-09-19) — a statement is prepared once per connection, DONE.** The web field
+build measured Helix's raw PostgreSQL connection equal to pgx with its statement cache OFF,
+and that cache worth 23–57 µs of a ~150 µs round trip — the whole gap to GORM. `src/pg/mod.rs`:
+`Prepared` (SQL text → server-side name, LRU of 256, `Close` for the displaced one pipelined
+with the new `Parse`), `run_prepared` (a hit skips Parse; `26000`/`0A000` → forget and
+prepare again ONCE; `42P05` → the unnamed statement), `exchange` (one function for both
+flows; `Fail` carries the SQLSTATE and whether ParseComplete arrived, so a statement refused
+at Bind is still remembered). The one-shot verbs keep the unnamed statement. Also: one
+exchange is ONE write (`frame_msg`/`send_framed`) where it was five flushed ones. The fake
+server learned names, `Close`, skip-to-Sync and forgetting — and `TCP_NODELAY`, without which
+Nagle held each of its small replies behind the client's delayed ACK: 40 ms a round trip, an
+11-second test. LIVE PROOF: an ephemeral `podman run --rm postgres:17-alpine` on a spare
+loopback port (`target/bench/f88/live.sh`); every stale-name case answers what the unnamed
+statement did. THE 1 000-ROW READ WAS SYSCALLS, NOT TEXT PARSING: `read_msg` did two
+unbuffered reads per message, ~2 000 per thousand rows, and the commit script REFUSED the
+cache alone because that row read 6% slower with it — tiny reads make a result's time follow
+the server's pacing, and a prepared statement answers sooner. `Stream` now owns a 16 KiB read
+buffer (`src/pg/tls.rs`: the enum became `Raw` underneath, two construction sites changed, no
+signature did). Their second ask — binary results for fixed-width columns — is therefore NOT
+needed for that row; build it only if a measurement AFTER this says the text parse remains.
 **§1.62 (2026-09-19) — a call through a record built at run time, DEVIRTUALIZED.** The web
 field build's `P = People.on(db)`: `db` is I/O, the sandbox never holds `P`, every verb on it
 paid 4.95 µs against the unbound model's 0.9. TWO DESIGNS WERE THROWN AWAY FIRST, and why is

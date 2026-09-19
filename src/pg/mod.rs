@@ -46,7 +46,7 @@ use crate::error::HelixError;
 use crate::value::Value;
 
 #[cfg(feature = "postgres")]
-use proto::{error_text, put_cstr, read_msg, write_msg, Msg};
+use proto::{error_code, error_text, frame_msg, put_cstr, read_msg, send_framed, write_msg, Msg};
 #[cfg(feature = "postgres")]
 use conninfo::{parse_url, SslMode, Target};
 #[cfg(feature = "postgres")]
@@ -83,6 +83,9 @@ pub struct Conn {
     /// refuses BEFORE sending anything, with the spelling that opens a writable one.
     #[cfg(feature = "postgres")]
     writable: bool,
+    /// The statements this connection has prepared on the server, by their text.
+    #[cfg(feature = "postgres")]
+    prepared: std::cell::RefCell<Prepared>,
 }
 
 #[cfg(feature = "postgres")]
@@ -99,7 +102,9 @@ impl Conn {
             .try_borrow_mut()
             .map_err(|_| "this connection is already in use".to_string())?;
         let s = guard.as_mut().ok_or("this connection is closed")?;
-        run_statement(s, sql, params)
+        let mut prepared =
+            self.prepared.try_borrow_mut().map_err(|_| "this connection is already in use".to_string())?;
+        run_prepared(s, &mut prepared, sql, params)
     }
 }
 
@@ -125,6 +130,7 @@ pub fn postgres_open(args: &[Value], line: usize, col: usize) -> Result<Value, H
         stream: std::cell::RefCell::new(Some(stream)),
         label,
         writable,
+        prepared: std::cell::RefCell::new(Prepared::default()),
     })))
 }
 
@@ -321,7 +327,7 @@ fn connect(t: &Target, read_only: bool) -> Result<Stream, String> {
     // byte and it is not a preference: a server that answers "no" ends the connection
     // here rather than continuing in the clear.
     let mut s = match t.sslmode {
-        SslMode::Disable => Stream::Plain(s),
+        SslMode::Disable => Stream::plain(s),
         SslMode::VerifyFull => tls::negotiate(s, &t.host, t.sslrootcert.as_deref())?,
     };
 
@@ -429,25 +435,157 @@ struct Outcome {
     tag: String,
 }
 
+/// How many statements a connection keeps prepared. Past it the least recently used one is
+/// closed on the server as the new one is parsed, in the same round trip.
 #[cfg(feature = "postgres")]
-/// Run one parameterised statement: its rows, and its completion tag.
-fn run_statement(
-    s: &mut Stream,
-    sql: &str,
-    params: &[Option<String>],
-) -> Result<Outcome, String> {
-    let mut out = Vec::new();
+const MAX_PREPARED: usize = 256;
 
-    // Parse: unnamed statement, no declared parameter types (the server infers).
-    put_cstr(&mut out, "");
-    put_cstr(&mut out, sql);
-    out.extend_from_slice(&0i16.to_be_bytes());
-    write_msg(s, Some(b'P'), &out)?;
+/// THE STATEMENTS A CONNECTION HAS PREPARED, BY THEIR TEXT (field build, §1.61).
+///
+/// Every query used to be Parsed from scratch as the unnamed statement: the server parsed,
+/// analysed and rewrote the same text on every call. Measured against pgx on one PostgreSQL
+/// 17, that was the whole gap to GORM on a small query — 23–57 µs of a ~150 µs round trip —
+/// and a library cannot close it itself: SQL-level `EXECUTE p($1)` refuses a bound parameter,
+/// so the only client-side cache is one that splices values into text, which is the one
+/// thing a query layer must never do.
+///
+/// A text is Parsed ONCE under a name and thereafter only Bound and Executed. Nothing a
+/// caller can see changes: parameter types were already inferred from the text alone (Parse
+/// never saw the values), and the three ways a name can go stale are handled where they
+/// surface — the statement gone (`26000`: `DEALLOCATE`, `DISCARD ALL`, a pooler's other
+/// backend) or its result type changed under it (`0A000`: `ALTER TABLE`) is prepared again,
+/// once; a name a user's own `PREPARE` already took (`42P05`) falls back to the unnamed
+/// statement, which always works. The one-shot verbs keep the unnamed statement: a connection
+/// that lives for one query has nothing to reuse.
+#[cfg(feature = "postgres")]
+#[derive(Default)]
+struct Prepared {
+    /// SQL text → the server-side name, and the tick of its last use.
+    by_sql: std::collections::HashMap<String, (String, u64)>,
+    tick: u64,
+    next: u64,
+}
+
+#[cfg(feature = "postgres")]
+impl Prepared {
+    /// The name `sql` is prepared under, marked as just used.
+    fn touch(&mut self, sql: &str) -> Option<String> {
+        self.tick += 1;
+        let tick = self.tick;
+        self.by_sql.get_mut(sql).map(|(name, used)| {
+            *used = tick;
+            name.clone()
+        })
+    }
+
+    /// A fresh name — and, when the cache is full, the least recently used statement's,
+    /// which leaves the cache here and the server in the round trip that follows.
+    fn reserve(&mut self) -> (String, Option<String>) {
+        self.next += 1;
+        let name = format!("_helix_{}", self.next);
+        if self.by_sql.len() < MAX_PREPARED {
+            return (name, None);
+        }
+        let oldest = self.by_sql.iter().min_by_key(|(_, (_, used))| *used).map(|(sql, _)| sql.clone());
+        let evicted = oldest.and_then(|sql| self.by_sql.remove(&sql)).map(|(old, _)| old);
+        (name, evicted)
+    }
+
+    fn insert(&mut self, sql: &str, name: String) {
+        self.tick += 1;
+        self.by_sql.insert(sql.to_string(), (name, self.tick));
+    }
+}
+
+/// Why an exchange failed: the text for a reader, the SQLSTATE for the cache, and whether
+/// the statement was parsed before it did — a statement whose Bind was refused (a parameter
+/// of the wrong shape) exists on the server all the same.
+#[cfg(feature = "postgres")]
+struct Fail {
+    text: String,
+    code: String,
+    parsed: bool,
+}
+
+#[cfg(feature = "postgres")]
+impl From<String> for Fail {
+    fn from(text: String) -> Self {
+        Fail { text, code: String::new(), parsed: false }
+    }
+}
+
+/// Run one statement on a connection that keeps what it prepares.
+#[cfg(feature = "postgres")]
+fn run_prepared(s: &mut Stream, prepared: &mut Prepared, sql: &str, params: &[Option<String>]) -> Result<Outcome, String> {
+    // A HIT: Bind and Execute against the name — no Parse.
+    if let Some(name) = prepared.touch(sql) {
+        match exchange(s, &name, None, params) {
+            // The server no longer has it, or its result type changed under it: forget the
+            // name and prepare the text again below — once.
+            Err(f) if f.code == "26000" || f.code == "0A000" => {
+                prepared.by_sql.remove(sql);
+            }
+            other => return other.map_err(|f| f.text),
+        }
+    }
+    // A MISS: Parse under a fresh name, closing the statement it displaces.
+    let (name, evicted) = prepared.reserve();
+    match exchange(s, &name, Some((sql, evicted.as_deref())), params) {
+        Ok(out) => {
+            prepared.insert(sql, name);
+            Ok(out)
+        }
+        // The name is a user's own prepared statement: the unnamed one always works.
+        Err(f) if f.code == "42P05" => exchange(s, "", Some((sql, None)), params).map_err(|f| f.text),
+        Err(f) => {
+            if f.parsed {
+                prepared.insert(sql, name);
+            }
+            Err(f.text)
+        }
+    }
+}
+
+#[cfg(feature = "postgres")]
+/// Run one parameterised statement as the UNNAMED statement: its rows, and its completion
+/// tag. What a connection opened for one query uses.
+fn run_statement(s: &mut Stream, sql: &str, params: &[Option<String>]) -> Result<Outcome, String> {
+    exchange(s, "", Some((sql, None)), params).map_err(|f| f.text)
+}
+
+/// One round trip: optionally Close a displaced statement and Parse `sql` under `name` (the
+/// empty name is the unnamed statement), then Bind, Describe, Execute and Sync.
+#[cfg(feature = "postgres")]
+fn exchange(
+    s: &mut Stream,
+    name: &str,
+    parse: Option<(&str, Option<&str>)>,
+    params: &[Option<String>],
+) -> Result<Outcome, Fail> {
+    let mut out = Vec::new();
+    // The whole exchange, framed, to go out in ONE write.
+    let mut wire: Vec<u8> = Vec::new();
+
+    if let Some((sql, evicted)) = parse {
+        // Closing a name the server does not have is not an error, so this needs no answer
+        // of its own; `CloseComplete` is skipped with the other messages nobody waits for.
+        if let Some(old) = evicted {
+            out.push(b'S');
+            put_cstr(&mut out, old);
+            frame_msg(&mut wire, b'C', &out)?;
+            out.clear();
+        }
+        // Parse: no declared parameter types (the server infers them from the text).
+        put_cstr(&mut out, name);
+        put_cstr(&mut out, sql);
+        out.extend_from_slice(&0i16.to_be_bytes());
+        frame_msg(&mut wire, b'P', &out)?;
+    }
 
     // Bind: text in, text out.
     out.clear();
     put_cstr(&mut out, ""); // portal
-    put_cstr(&mut out, ""); // statement
+    put_cstr(&mut out, name); // statement
     out.extend_from_slice(&0i16.to_be_bytes()); // parameter formats: all text
     let n = i16::try_from(params.len()).map_err(|_| "too many parameters".to_string())?;
     out.extend_from_slice(&n.to_be_bytes());
@@ -462,23 +600,25 @@ fn run_statement(
         }
     }
     out.extend_from_slice(&0i16.to_be_bytes()); // result formats: all text
-    write_msg(s, Some(b'B'), &out)?;
+    frame_msg(&mut wire, b'B', &out)?;
 
     // Describe the portal, so the column names and type OIDs arrive even for zero rows.
     out.clear();
     out.push(b'P');
     put_cstr(&mut out, "");
-    write_msg(s, Some(b'D'), &out)?;
+    frame_msg(&mut wire, b'D', &out)?;
 
     out.clear();
     put_cstr(&mut out, "");
     out.extend_from_slice(&0i32.to_be_bytes()); // unlimited rows
-    write_msg(s, Some(b'E'), &out)?;
+    frame_msg(&mut wire, b'E', &out)?;
 
-    write_msg(s, Some(b'S'), &[])?;
+    frame_msg(&mut wire, b'S', &[])?;
+    send_framed(s, &wire)?;
 
     let mut cols: Vec<ColBuf> = Vec::new();
     let mut described = false;
+    let mut parsed = false;
     let mut tag = String::new();
     loop {
         let m = read_msg(s)?;
@@ -487,8 +627,10 @@ fn run_statement(
                 // Drain to the synchronisation point so the connection is left in a
                 // known state even though this query is finished.
                 let _ = wait_for(s, b"Z");
-                return Err(error_text(&m));
+                return Err(Fail { text: error_text(&m), code: error_code(&m), parsed });
             }
+            // ParseComplete: the statement exists on the server from here on.
+            b'1' => parsed = true,
             // RowDescription
             b'T' => {
                 let mut c = m.cur();
@@ -512,10 +654,10 @@ fn run_statement(
                 let mut c = m.cur();
                 let n = usize::try_from(c.i16()?).map_err(|_| "negative column count".to_string())?;
                 if n != cols.len() {
-                    return Err(format!(
+                    return Err(Fail::from(format!(
                         "the server sent a row of {n} values for {} columns",
                         cols.len()
-                    ));
+                    )));
                 }
                 for col in cols.iter_mut().take(n) {
                     let v = c.field()?;
@@ -533,7 +675,7 @@ fn run_statement(
         }
     }
     if !described {
-        return Err("the server never described the result".to_string());
+        return Err(Fail::from("the server never described the result".to_string()));
     }
     Ok(Outcome { cols, tag })
 }
@@ -789,12 +931,29 @@ mod wire_tests {
         write_msg(s, Some(tag), body).unwrap();
     }
 
-    /// Serve one connection; the thread returns the SQL the client sent.
-    fn serve(script: Script) -> (u16, std::thread::JoinHandle<String>) {
+    /// What the fake server saw: the last statement's text, every `Parse`'s statement name in
+    /// order (`""` is the unnamed statement), and every name it was asked to `Close`.
+    struct Seen {
+        sql: String,
+        parses: Vec<String>,
+        closes: Vec<String>,
+    }
+
+    /// Serve one connection; the thread returns what the client sent.
+    fn serve(script: Script) -> (u16, std::thread::JoinHandle<Seen>) {
+        serve_forgetting(script, None)
+    }
+
+    /// The same, with a server that FORGETS its prepared statements before the `forget_at`-th
+    /// Bind — what `DEALLOCATE ALL`, `DISCARD ALL` or a pooler's other backend does to a name.
+    fn serve_forgetting(script: Script, forget_at: Option<usize>) -> (u16, std::thread::JoinHandle<Seen>) {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = l.local_addr().unwrap().port();
         let h = std::thread::spawn(move || {
             let (mut s, _) = l.accept().unwrap();
+            // Small replies, written one by one: without this Nagle holds each behind the
+            // client's delayed ACK, ~40 ms a round trip.
+            let _ = s.set_nodelay(true);
             let (_, startup) = read_one(&mut s, false);
             let text = String::from_utf8_lossy(&startup).into_owned();
             assert_eq!(
@@ -805,16 +964,59 @@ mod wire_tests {
             send(&mut s, b'R', &0i32.to_be_bytes()); // AuthenticationOk
             send(&mut s, b'Z', b"I"); // ReadyForQuery, idle
             let mut sql = String::new();
+            let (mut parses, mut closes): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
+            let mut known: Vec<String> = Vec::new();
+            let mut binds = 0usize;
+            // After an error the server discards messages until `Sync`, as the protocol says.
+            let mut skipping = false;
             loop {
                 let (tag, body) = read_one(&mut s, true);
+                if skipping && tag != b'S' && tag != b'X' {
+                    continue;
+                }
                 match tag {
-                    // Parse: unnamed statement (one NUL), then the statement text.
+                    // Parse: the statement's name (empty for the unnamed one), then its text.
                     b'P' => {
-                        let text = body[1..].split(|b| *b == 0).next().unwrap();
-                        sql = String::from_utf8_lossy(text).into_owned();
+                        let mut parts = body.split(|b| *b == 0);
+                        let name = String::from_utf8_lossy(parts.next().unwrap()).into_owned();
+                        sql = String::from_utf8_lossy(parts.next().unwrap()).into_owned();
+                        if !name.is_empty() {
+                            known.push(name.clone());
+                        }
+                        parses.push(name);
                         send(&mut s, b'1', &[]);
                     }
-                    b'B' => send(&mut s, b'2', &[]),
+                    // Close: `S` and a statement's name. Never an error, known or not.
+                    b'C' => {
+                        let name = String::from_utf8_lossy(body[1..].split(|b| *b == 0).next().unwrap()).into_owned();
+                        known.retain(|k| *k != name);
+                        closes.push(name);
+                        send(&mut s, b'3', &[]);
+                    }
+                    // Bind: the portal, then the statement it binds — which must still exist.
+                    b'B' => {
+                        binds += 1;
+                        if forget_at == Some(binds) {
+                            known.clear();
+                        }
+                        let mut parts = body.split(|b| *b == 0);
+                        let _portal = parts.next();
+                        let stmt = String::from_utf8_lossy(parts.next().unwrap()).into_owned();
+                        if !stmt.is_empty() && !known.contains(&stmt) {
+                            let mut out = Vec::new();
+                            out.push(b'S');
+                            put_cstr(&mut out, "ERROR");
+                            out.push(b'C');
+                            put_cstr(&mut out, "26000");
+                            out.push(b'M');
+                            put_cstr(&mut out, &format!("prepared statement \"{stmt}\" does not exist"));
+                            out.push(0);
+                            send(&mut s, b'E', &out);
+                            skipping = true;
+                        } else {
+                            send(&mut s, b'2', &[]);
+                        }
+                    }
                     b'D' => {
                         if script.columns.is_empty() {
                             send(&mut s, b'n', &[]); // NoData
@@ -847,12 +1049,15 @@ mod wire_tests {
                         put_cstr(&mut out, script.tag);
                         send(&mut s, b'C', &out);
                     }
-                    b'S' => send(&mut s, b'Z', b"I"),
+                    b'S' => {
+                        skipping = false;
+                        send(&mut s, b'Z', b"I")
+                    }
                     b'X' => break,
                     other => panic!("unexpected message {:?}", other as char),
                 }
             }
-            sql
+            Seen { sql, parses, closes }
         });
         (port, h)
     }
@@ -876,7 +1081,7 @@ mod wire_tests {
         let df = query(&url(port), "select 7 as n", &[], 1, 1).unwrap();
         assert_eq!(df.row_count(1, 1).unwrap(), 1);
         assert!(matches!(df.column_values("n", 1, 1).unwrap().as_slice(), [Value::Int(7)]));
-        assert_eq!(h.join().unwrap(), "select 7 as n");
+        assert_eq!(h.join().unwrap().sql, "select 7 as n");
     }
 
     #[test]
@@ -896,7 +1101,7 @@ mod wire_tests {
         assert!(matches!(get("affected"), Value::Int(3)), "{:?}", get("affected"));
         let Value::DataFrame(rows) = get("rows") else { panic!("rows is not a frame") };
         assert_eq!(rows.row_count(1, 1).unwrap(), 0, "no RETURNING, no rows");
-        assert_eq!(h.join().unwrap(), "insert into t values (1), (2), (3)");
+        assert_eq!(h.join().unwrap().sql, "insert into t values (1), (2), (3)");
     }
 
     #[test]
@@ -960,6 +1165,69 @@ mod wire_tests {
         let affected = fields.iter().find(|(s, _)| s.as_str() == "affected").map(|(_, v)| v.clone());
         assert!(matches!(affected, Some(Value::Int(2))), "{affected:?}");
         drop(c);
-        assert_eq!(h.join().unwrap(), "update t set x = 1");
+        assert_eq!(h.join().unwrap().sql, "update t set x = 1");
+    }
+
+    /// A connection prepares a statement ONCE (§1.61): the same text again is a Bind and an
+    /// Execute against the name it was parsed under, whatever the parameters; a different text
+    /// is a statement of its own. The one-shot verbs keep the unnamed statement — a connection
+    /// that lives for one query has nothing to reuse.
+    #[test]
+    fn a_connection_prepares_a_statement_once() {
+        let (port, h) = serve(Script { expect_read_only: true, columns: vec!["n"], rows: vec![vec!["7"]], tag: "SELECT 1" });
+        let c = postgres_open(&[sv(&url(port))], 1, 1).unwrap();
+        let Value::Db(c) = c else { panic!("not a connection") };
+        let arr = |n: i64| Value::Array(std::rc::Rc::new(crate::value::ArrayData::Values(vec![Value::Int(n)])));
+        for n in [1, 2, 3] {
+            conn_method(&c, "query", &[sv("select $1::int as n"), arr(n)], 1, 1).unwrap();
+        }
+        conn_method(&c, "query", &[sv("select 7 as n")], 1, 1).unwrap();
+        conn_method(&c, "query", &[sv("select $1::int as n"), arr(4)], 1, 1).unwrap();
+        drop(c);
+        let seen = h.join().unwrap();
+        assert_eq!(seen.parses.len(), 2, "{:?}", seen.parses);
+        assert!(seen.parses.iter().all(|n| !n.is_empty()) && seen.parses[0] != seen.parses[1], "{:?}", seen.parses);
+        assert!(seen.closes.is_empty(), "{:?}", seen.closes);
+
+        let (port, h) = serve(Script { expect_read_only: true, columns: vec!["n"], rows: vec![vec!["7"]], tag: "SELECT 1" });
+        query(&url(port), "select 7 as n", &[], 1, 1).unwrap();
+        assert_eq!(h.join().unwrap().parses, vec![String::new()]);
+    }
+
+    /// A statement the server no longer has — `DEALLOCATE ALL`, `DISCARD ALL`, a pooler's other
+    /// backend — is prepared again, ONCE, and the call answers as if nothing had happened.
+    #[test]
+    fn a_statement_the_server_forgot_is_prepared_again() {
+        let script = Script { expect_read_only: true, columns: vec!["n"], rows: vec![vec!["7"]], tag: "SELECT 1" };
+        let (port, h) = serve_forgetting(script, Some(2));
+        let c = postgres_open(&[sv(&url(port))], 1, 1).unwrap();
+        let Value::Db(c) = c else { panic!("not a connection") };
+        for _ in 0..3 {
+            let v = conn_method(&c, "query", &[sv("select 7 as n")], 1, 1).unwrap();
+            let Value::DataFrame(df) = v else { panic!("not a frame") };
+            assert!(matches!(df.column_values("n", 1, 1).unwrap().as_slice(), [Value::Int(7)]));
+        }
+        drop(c);
+        // Parsed; forgotten by the server before the second Bind; parsed again under a new name;
+        // and the third call is a hit on that one.
+        let seen = h.join().unwrap();
+        assert_eq!(seen.parses.len(), 2, "{:?}", seen.parses);
+        assert_ne!(seen.parses[0], seen.parses[1]);
+    }
+
+    /// The cache is bounded: past `MAX_PREPARED` statements the least recently used one is
+    /// closed on the server as the new one is parsed, in the same round trip.
+    #[test]
+    fn the_least_recently_used_statement_is_closed_when_the_cache_is_full() {
+        let (port, h) = serve(Script { expect_read_only: true, columns: vec!["n"], rows: vec![vec!["7"]], tag: "SELECT 1" });
+        let c = postgres_open(&[sv(&url(port))], 1, 1).unwrap();
+        let Value::Db(c) = c else { panic!("not a connection") };
+        for i in 0..=MAX_PREPARED {
+            conn_method(&c, "query", &[sv(&format!("select {i} as n"))], 1, 1).unwrap();
+        }
+        drop(c);
+        let seen = h.join().unwrap();
+        assert_eq!(seen.parses.len(), MAX_PREPARED + 1);
+        assert_eq!(seen.closes, vec![seen.parses[0].clone()]);
     }
 }

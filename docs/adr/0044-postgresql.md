@@ -210,3 +210,47 @@ D3 stands unchanged for the read verbs — a query session is read-only from its
 and a session that can write is a *different* session, opened by `postgres_execute` or
 `postgres_open(url, "write")`, spending `db-write` as well as `net`.
 
+## Addendum 2026-09-19 — a statement is prepared once per connection
+
+Every query used to be Parsed from scratch as the unnamed statement, so the server parsed,
+analysed and rewrote the same text on every call. The web field build measured what that
+costs against pgx and GORM on one PostgreSQL 17: Helix's raw connection matched pgx with its
+statement cache OFF, and that cache was worth 23–57 µs of a ~150 µs round trip — the whole
+gap to GORM on a small query (§1.61). A library cannot close it itself: SQL-level `EXECUTE
+p($1)` refuses a bound parameter, so the only client-side cache is one that splices values
+into text, which is the one thing a query layer must never do.
+
+A connection opened with `postgres_open` now Parses each distinct text ONCE under a name and
+thereafter only Binds and Executes it (`Prepared` in `src/pg/mod.rs`): at most 256 statements,
+the least recently used one closed on the server in the same round trip that parses its
+replacement. Nothing a caller can see changes. Parameter types were already inferred from the
+text alone — Parse never saw the values — and the three ways a name goes stale are handled
+where they surface: the statement gone (`26000`: `DEALLOCATE`, `DISCARD ALL`, a pooler's
+other backend) or its result type changed under it (`0A000`: `ALTER TABLE` beneath a prepared
+`select *`) is prepared again, once; a name a user's own `PREPARE` already took (`42P05`)
+falls back to the unnamed statement, which always works. A text that does not parse is never
+remembered; one that parsed and was then refused at Bind (a parameter of the wrong shape) is,
+because the statement exists. There is no knob: behind a transaction-mode pooler the cache
+stays correct and merely re-prepares. The one-shot verbs (`postgres_query(url, …)`,
+`postgres_execute(url, …)`) keep the unnamed statement — a connection that lives for one
+query has nothing to reuse.
+
+With it, one exchange became ONE write. Parse, Bind, Describe, Execute and Sync were five
+flushed writes — five syscalls, five segments with `TCP_NODELAY` on, five records under TLS —
+and are framed into one buffer and sent together, which the extended protocol is built for.
+
+And the connection READS THROUGH A BUFFER. `read_msg` takes a message as its 5-byte header
+and then its body, and on a bare socket that was two `read` calls for every `DataRow`: a
+1 000-row result was ~2 000 syscalls, and that — not text parsing, which the field build
+reasonably inferred — was most of what the read cost against pgx (3.7x). It also made a
+result's time depend on the server's pacing, each tiny read either finding its bytes or
+blocking for them: preparing statements, which makes the server answer SOONER, read 6%
+slower on that row, and the commit script refused it until the cause was found. `Stream`
+(`src/pg/tls.rs`) owns a 16 KiB buffer over the plain or TLS socket; a read that size or
+larger goes straight through, and nothing is ever read around it. Binary results for
+fixed-width columns, the report's other ask, are not needed to close that row and stay
+unbuilt until a measurement says the text parse is what remains.
+
+Proven without a server by the fake one in `src/pg` — which learned statement names, `Close`,
+the skip-to-Sync an error starts, and how to forget its statements — and against PostgreSQL
+17 in a container: every stale-name case answers exactly what the unnamed statement answered.
