@@ -159,10 +159,14 @@ are the bounds. The first cut charged a level per tree level and stopped at four
 library's helper chain put a predicate's leaves out of reach and a walk over a literal
 tree was cut off where it had already been proved to end (§1.63). THE MEMO IS CONSULTED
 BEFORE THE CEILING — a clone that exists costs nothing to point at — and each entry
-carries the depth it was made at: a request from a shallower site than the one that made
-a clone remakes it, since the deeper one had less room for the calls inside it. Without
-that, which clone a live call got depended on which call the walk met first, and a
-function nobody called changed how fast another ran.
+carries the depth it was made at and whether the ceiling CUT IT SHORT, whether any call
+beneath it was refused for depth: a request from a shallower site remakes a clone that
+was, since it had less room than that site would give it. Without that, which clone a
+live call got depended on which call the walk met first, and a function nobody called
+changed how fast another ran. A clone that was NOT cut short is what every site would
+get and is never made twice — the first cut of this rule remade on depth alone, and the
+field build's harness kept 54 more clones, identical bodies under new names, for 8% more
+`check` and nothing at run time.
 `HELIX_NOSPECIALIZE=1` turns the pass off for an A/B;
 `HELIX_NOFOLD=1` turns off the fold it rides on; `HELIX_FOLD_DUMP=<name>` prints what the
 pass made (`1` for all of it, `all` for the whole program as the compiler sees it).

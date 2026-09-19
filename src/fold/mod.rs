@@ -1604,6 +1604,17 @@ mod tests {
         assert_eq!(count_nodes(y, |e| matches!(e, Expr::Call { .. })), 1, "{y:?}");
     }
 
+    /// A clone the ceiling did NOT cut short is what every site would get, and is made once
+    /// (§1.63's rule, refined): `f`'s clone is first made a frame down, inside `g`'s, then
+    /// asked for again from the top level with the same knowledge — one `f$…`, not two
+    /// identical bodies under two names. The first cut of the rule remade on depth alone.
+    #[test]
+    fn a_clone_the_ceiling_did_not_cut_short_is_made_once() {
+        let s = folded_with("mut RT = 1\nfn f(s) = s.a + RT\nfn g(s) = f(s)\ny = g({a: 1})\nz = f({a: 1})", true);
+        let clones = s.iter().filter(|st| matches!(st, Stmt::Func { name, .. } if name.starts_with("f$"))).count();
+        assert_eq!(clones, 1, "{s:?}");
+    }
+
     /// A program with no function of its own is untouched, cheaply.
     #[test]
     fn nothing_to_fold_is_nothing_done() {

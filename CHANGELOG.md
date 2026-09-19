@@ -14,7 +14,8 @@
   from 1.9 µs to 1.0. A recursion spends no depth now (the once-per-chain rule, not a count,
   is what ends it), the cap is a sanity ceiling of sixteen distinct frames with the node
   budget as the bound, the memo is consulted before the ceiling, and each entry carries the
-  depth it was made at so a shallower site remakes a clone made with less room. Their
+  depth it was made at and whether the ceiling cut it short, so a shallower site remakes a
+  clone that had less room — and only that one: a clone not cut short is made once. Their
   reproducer's five rows fold alike now. Four documents that disagreed with the code are
   corrected: ADR 0050's statement of where the fold runs (after the checker and BEFORE the
   receiver-directed rewrite), ADR 0051's and the plan's caps, and a test comment. Pinned by

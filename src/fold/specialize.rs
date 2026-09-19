@@ -263,15 +263,28 @@ struct FnDef {
     col: usize,
 }
 
+/// What one (function, knowledge) became: the clone or what it reduced to, the depth it was
+/// made at, and whether the ceiling cut it short beneath — see `Specializer::memo`.
+struct MemoEntry {
+    made: Option<Made>,
+    depth: usize,
+    cut: bool,
+}
+
 pub(crate) struct Specializer<'t> {
     types: &'t mut TypeMap,
     funcs: HashMap<String, FnDef>,
-    /// What each (function, knowledge) became, and the depth it was made AT: a clone made
-    /// deep had less room for the calls inside it than one made shallow, so a request from a
-    /// shallower site remakes it rather than reusing a poorer one. Without the depth here,
-    /// which clone a live call got depended on which call the walk met first — a function
-    /// nobody called changed how fast another ran (§1.63).
-    memo: HashMap<(String, Vec<Binding>), (Option<Made>, usize)>,
+    /// What each (function, knowledge) became, the depth it was made AT, and whether the
+    /// ceiling CUT IT SHORT — whether any call beneath it was refused for depth. A clone cut
+    /// short had less room than a shallower site would give it, so a request from one
+    /// remakes it; without that, which clone a live call got depended on which call the walk
+    /// met first, and a function nobody called changed how fast another ran (§1.63). A clone
+    /// NOT cut short is what every site would get, and is never made twice: the first cut
+    /// of this rule remade on depth alone, and the field build's harness kept 54 more clones
+    /// — identical bodies under new names — for 8% more `check` and nothing at run time.
+    memo: HashMap<(String, Vec<Binding>), MemoEntry>,
+    /// Whether the clone being made has met the ceiling anywhere beneath it.
+    truncated: bool,
     total: usize,
     /// The nodes the clones made so far hold, against `budget`.
     nodes: usize,
@@ -352,6 +365,7 @@ impl<'t> Specializer<'t> {
             nodes: 0,
             budget: MAX_CLONE_NODES,
             changed: false,
+            truncated: false,
             building: Vec::new(),
             next_id: 1,
             devirt: HashMap::new(),
@@ -524,12 +538,15 @@ impl<'t> Specializer<'t> {
         // THE MEMO BEFORE THE CEILING: a clone that exists costs nothing to point at, whatever
         // the depth of the site asking. One made with LESS room than this site has — deeper —
         // is remade below, so what a site gets never depends on which site the walk met first.
-        if let Some((r, made_at)) = self.memo.get(&key)
-            && *made_at <= depth
+        if let Some((r, made_at, cut)) = self.memo.get(&key).map(|m| (m.made.clone(), m.depth, m.cut))
+            && (!cut || made_at <= depth)
         {
-            return r.clone();
+            // What this points at was cut short, so whatever is being made here was too.
+            self.truncated |= cut;
+            return r;
         }
         if depth > MAX_DEPTH {
+            self.truncated = true;
             return None;
         }
         // A RECURSION IS SPECIALIZED ONCE PER CHAIN. A call to a function whose clone is
@@ -560,7 +577,7 @@ impl<'t> Specializer<'t> {
         // A clone costs its body's size, against the program's budget.
         let size = def.types.len();
         if self.total >= MAX_CLONES || size > MAX_NODES || self.nodes + size > self.budget {
-            self.memo.insert(key, (None, depth));
+            self.memo.insert(key, MemoEntry { made: None, depth, cut: false });
             return None;
         }
         let name = format!("{fname}${}", self.next_id);
@@ -569,7 +586,7 @@ impl<'t> Specializer<'t> {
         self.nodes += size;
         // Memoized BEFORE the body is rewritten, so a recursive call inside it reaches the
         // clone itself.
-        self.memo.insert(key.clone(), (Some(Made::Fn(name.clone())), depth));
+        self.memo.insert(key.clone(), MemoEntry { made: Some(Made::Fn(name.clone())), depth, cut: false });
         let (params, defaults, ret, mut body, snapshot, line, col) = (
             def.params.clone(),
             def.defaults.clone(),
@@ -586,10 +603,14 @@ impl<'t> Specializer<'t> {
             env.bind(p, b.clone());
         }
         let outer = std::mem::replace(&mut self.changed, false);
+        let outer_cut = std::mem::replace(&mut self.truncated, false);
         self.building.push((fname.to_string(), known.clone(), depth));
         self.substitute(&mut body, &mut env, depth + 1, sb, done);
         self.building.pop();
         let reduced = std::mem::replace(&mut self.changed, outer);
+        // Cut short anywhere beneath: this clone was, and so is whatever is being made above.
+        let cut = std::mem::replace(&mut self.truncated, outer_cut);
+        self.truncated |= cut;
         // A body that is one of its parameters, a literal, or a record or array literal
         // whose leaves have nothing to run, is not a function worth calling: the call site
         // becomes that.
@@ -604,7 +625,7 @@ impl<'t> Specializer<'t> {
         };
         if let Some(made) = trivial {
             forget_types(self.types, &body);
-            self.memo.insert(key, (Some(made.clone()), depth));
+            self.memo.insert(key, MemoEntry { made: Some(made.clone()), depth, cut });
             self.total -= 1;
             self.nodes -= size;
             return Some(made);
@@ -614,11 +635,12 @@ impl<'t> Specializer<'t> {
             // runtime values decide. The clone would be the function under another name:
             // not kept, and the budget it took is returned.
             forget_types(self.types, &body);
-            self.memo.insert(key, (None, depth));
+            self.memo.insert(key, MemoEntry { made: None, depth, cut });
             self.total -= 1;
             self.nodes -= size;
             return None;
         }
+        self.memo.insert(key, MemoEntry { made: Some(Made::Fn(name.clone())), depth, cut });
         self.pending.push(Stmt::Func { name: name.clone(), params, defaults, ret, exported: false, body, line, col });
         Some(Made::Fn(name))
     }

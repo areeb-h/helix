@@ -6890,8 +6890,13 @@ fn walker_fold_append_is_linear() {
         assert_eq!(out.trim(), n.to_string());
         start.elapsed().as_secs_f64()
     };
-    let t1 = time_of(65_536);
-    let t4 = time_of(262_144);
+    // MIN OF THREE, each size. One launch each went red in a gate that ran beside another
+    // session's browser — a burst landed on one of the two launches and the ratio read 8x
+    // on a linear loop. The minimum is what the program costs; the rest is the neighbour.
+    // A quadratic regression is untouched by this: it is quadratic in every launch.
+    let best = |n: usize| (0..3).map(|_| time_of(n)).fold(f64::INFINITY, f64::min);
+    let t1 = best(65_536);
+    let t4 = best(262_144);
     let ratio = t4 / t1.max(1e-9);
     assert!(
         ratio < 8.0,
