@@ -4,6 +4,25 @@
 
 ### Fixed
 
+- **A call through a record built at run time was never specialized, and `P = People.on(db)`
+  is exactly that (field build, §1.62).** The API an ORM recommends — bind the connection
+  once, call verbs on the result — paid four to five times what the unbound model paid:
+  `People.on(runtime).sql(spec)` 4.95 µs against `People.sql(spec)`'s 0.9. The load-time
+  sandbox can never hold `P`, since `db` is I/O, so `P.sql(spec)` stayed a dynamic method call
+  and nothing about `spec`'s shape was used. The initializer is now evaluated ABSTRACTLY
+  (`src/fold/bound.rs`) — over values the sandbox holds, records built symbolically, the
+  program's own functions followed, everything else unknown — to find which closure a field
+  is CERTAIN to hold: `sql` arrives through the spread of the held model and nothing later
+  overrides it, so it is the model's own closure whatever `db` is. The CALL is devirtualized to
+  the same function `People.sql(spec)` becomes; the record `P` is never rewritten, because
+  `People.sql == P.sql` is `true` in Helix and an optimization may not change that. Their
+  reproducer's fourth row meets its first. Also: a capture hoisted for a devirtualized closure
+  is held by the sandbox at once, so the FIRST call site to reach a closure is inlined to its
+  constant as the later ones always were. Pinned by
+  `a_call_through_a_record_built_at_run_time_is_devirtualized_and_the_record_untouched` and
+  `a_bound_model_renders_the_same_on_every_engine` (`M.sql == B.sql` on every engine, each
+  pass off).
+
 - **Specialization stopped four calls from the call site, recursion included, and what it
   made there depended on which call the walk met first (field build, §1.63).** A depth cap of
   four charged a recursion a level per tree level, so a library's helper chain — `M.sql ->

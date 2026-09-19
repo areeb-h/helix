@@ -298,6 +298,15 @@ pub(crate) struct Specializer<'t> {
     building: Vec<(String, Vec<Binding>, usize)>,
     next_id: usize,
     devirt: HashMap<(String, String), Option<String>>,
+    /// The same, by the closure ITSELF. A spread copies a closure value, so for `P = M.on(db)`
+    /// the field `P.sql` holds the very closure `M.sql` holds, and both calls become ONE
+    /// function — no second copy, none of its clones made twice. The `Rc` is kept so the
+    /// address stays that closure's for as long as it is a key.
+    devirt_by_closure: HashMap<usize, (Rc<FuncVal>, Option<String>)>,
+    /// Closure-valued fields of top-level records BUILT AT RUN TIME, by record name, as the
+    /// abstract evaluation of their initializers found them (`bound.rs`, §1.62). Filled on
+    /// first use, and only once the binding's statement has been walked.
+    bound: HashMap<String, Vec<(String, Rc<FuncVal>)>>,
     /// Clones and devirtualized functions, to be appended to the program.
     pending: Vec<Stmt>,
     /// How many of `pending` the sandbox has been handed already.
@@ -369,6 +378,8 @@ impl<'t> Specializer<'t> {
             building: Vec::new(),
             next_id: 1,
             devirt: HashMap::new(),
+            devirt_by_closure: HashMap::new(),
+            bound: HashMap::new(),
             pending: Vec::new(),
             handed: 0,
             hoisted: Vec::new(),
@@ -645,11 +656,35 @@ impl<'t> Specializer<'t> {
         Some(Made::Fn(name))
     }
 
+    /// The closure that field `field` of the top-level record `global` is CERTAIN to hold,
+    /// when `global` is bound — immutably, earlier in the program — to a record built at run
+    /// time from what the sandbox holds: `P = People.on(db)` (§1.62; the evaluation and its
+    /// argument are in `bound.rs`). The record itself is never touched.
+    pub(crate) fn bound_closure(&mut self, global: &str, field: &str, sb: &mut Sandbox, done: &[Stmt]) -> Option<Rc<FuncVal>> {
+        if !self.enabled {
+            return None;
+        }
+        if !self.bound.contains_key(global) {
+            // Not yet bound where the walk stands — a function written above the binding —
+            // is not an answer to remember.
+            let init = done.iter().rev().find_map(|s| match s {
+                Stmt::Assign { name, mutable: false, value, .. } if name == global => Some(value),
+                _ => None,
+            })?;
+            let funcs = &self.funcs;
+            let func = |n: &str| funcs.get(n).map(|d| (d.params.iter().map(|(p, _)| p.clone()).collect::<Vec<String>>(), d.body.clone()));
+            let mut held = |n: &str| sb.value_on_demand(n, done);
+            let found = super::bound::Reads::new(&mut held, &func).closures_of(init);
+            self.bound.insert(global.to_string(), found);
+        }
+        self.bound.get(global)?.iter().find(|(k, _)| k == field).map(|(_, fv)| fv.clone())
+    }
+
     /// The closure `fv`, held as field `field` of the top-level record `global`, as a
     /// top-level function of its own — its captured values hoisted to top-level bindings —
     /// so a call through the field becomes a direct call. The closure's body is the
     /// sandbox's copy, which carries the checker's types of the body it was copied from.
-    pub(crate) fn devirtualize(&mut self, global: &str, field: &str, fv: &FuncVal) -> Option<String> {
+    pub(crate) fn devirtualize(&mut self, sb: &mut Sandbox, global: &str, field: &str, fv: &Rc<FuncVal>) -> Option<String> {
         if !self.enabled {
             return None;
         }
@@ -657,12 +692,21 @@ impl<'t> Specializer<'t> {
         if let Some(r) = self.devirt.get(&key) {
             return r.clone();
         }
-        let made = self.devirtualize_now(global, field, fv);
+        // The closure may already be a function under another record's name.
+        let id = Rc::as_ptr(fv) as usize;
+        let made = match self.devirt_by_closure.get(&id) {
+            Some((_, made)) => made.clone(),
+            None => {
+                let made = self.devirtualize_now(sb, global, field, fv);
+                self.devirt_by_closure.insert(id, (fv.clone(), made.clone()));
+                made
+            }
+        };
         self.devirt.insert(key, made.clone());
         made
     }
 
-    fn devirtualize_now(&mut self, global: &str, field: &str, fv: &FuncVal) -> Option<String> {
+    fn devirtualize_now(&mut self, sb: &mut Sandbox, global: &str, field: &str, fv: &FuncVal) -> Option<String> {
         if self.total >= MAX_CLONES {
             return None;
         }
@@ -712,7 +756,14 @@ impl<'t> Specializer<'t> {
         );
         self.pending.push(Stmt::Func { name: name.clone(), params, defaults, ret: None, exported: false, body, line: 0, col: 0 });
         self.hoisted.extend(hoisted);
-        self.held.extend(held);
+        // HELD AT ONCE, not when the call site is done. The clone made for this very call is
+        // folded as it is made, and an interpolation over a capture — `"select * from {t}"` —
+        // folds only if the sandbox already holds it: handed over afterwards, the FIRST site
+        // to reach a closure kept a call to a clone whose body the later walk then folded to
+        // a constant, while every later site was inlined to the constant itself.
+        for (n, v) in held {
+            sb.hold(n, v);
+        }
         Some(name)
     }
 

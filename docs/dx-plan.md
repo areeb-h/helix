@@ -581,6 +581,23 @@ primitives themselves. Candidate found along the way, NOT built: a builtin call 
 even though the compiler already assigned the index — `type_of` as an op measured ~4 ns
 against `abs()`'s ~41, so some of that 36 ns gap is name dispatch that every builtin call
 in every program pays.
+**§1.62 (2026-09-19) — a call through a record built at run time, DEVIRTUALIZED.** The web
+field build's `P = People.on(db)`: `db` is I/O, the sandbox never holds `P`, every verb on it
+paid 4.95 µs against the unbound model's 0.9. TWO DESIGNS WERE THROWN AWAY FIRST, and why is
+the lesson. (1) Write `P` out as a record literal — a spread of the held model as its fields,
+closures as new top-level functions. Inert for the real case (`on`'s closure captures the
+model, which holds closures and has no literal form) and UNSOUND had it fired: `M.sql ==
+P.sql` is `true` (a spread copies the closure; functions compare by identity), and it would
+have answered `false`. (2) On the way, registering clones as functions so knowledge could
+compose reopened §1.60 — the fold, walking a clone's body, took the calls left there for
+fresh sites: the tokenizer 7 ms → 386. CALLS INSIDE A CLONE ARE FINAL. What landed
+(`src/fold/bound.rs`): an ABSTRACT evaluation of the initializer — held values, symbolic
+records, the program's own functions and known closures followed, all else unknown — that
+answers only which closure a field is certain to hold; `specialize_site` then devirtualizes
+the CALL (`closure_behind`), keyed by the closure itself so `P.sql` and `M.sql` are one
+function. Values are never rewritten. Hoisted captures are held at once. Not covered, by
+design: a verb the binding REPLACES with a lambda over the target (`rows`, `fetch`) — those
+are a database round trip, and their closure does not exist until run time.
 **§1.63 (2026-09-17) — depth spent on recursion, and a memo blind to depth, FIXED.** The web
 field build's ORM rendered `{where: @age > x and @id < y}` in 4.94 µs while a standalone
 renderer folded the same tree: `MAX_DEPTH = 4` charged a recursion a level per tree level,

@@ -41,6 +41,7 @@
 //! lambda's own — is never the global of that name, so a body reading its parameter `M`
 //! folds nothing of a top-level `M`.
 
+mod bound;
 mod simplify;
 mod specialize;
 
@@ -249,6 +250,11 @@ impl Sandbox {
     /// Hold a value under a top-level name, as the engines will from a hoisted binding.
     fn hold(&mut self, name: String, value: Value) {
         self.interp.hold_global(name, value);
+    }
+
+    /// The value held under the top-level `name`, binding it on demand first.
+    fn value_on_demand(&mut self, name: &str, done: &[Stmt]) -> Option<Value> {
+        if self.holds_value(name, done) { self.interp.global_value(name).cloned() } else { None }
     }
 
     /// The closure held as field `field` of the record the top-level `name` holds.
@@ -687,6 +693,16 @@ fn fold_expr(
     Ok(())
 }
 
+/// The closure a method `field` through the top-level record `g` calls: the one the sandbox
+/// holds there, or — for a record built at run time, which it can never hold — the one the
+/// abstract evaluation of `g`'s initializer finds certain (§1.62, `bound.rs`).
+fn closure_behind(g: &str, field: &str, sb: &mut Sandbox, sp: &mut Specializer, done: &[Stmt]) -> Option<Rc<FuncVal>> {
+    if sb.holds_record(g, done) {
+        return sb.closure_field(g, field);
+    }
+    sp.bound_closure(g, field, sb, done)
+}
+
 /// The specialization rules at one call site (ADR 0051): a method through a record the
 /// sandbox holds becomes a direct call of the closure it holds there, and a call to one of
 /// the program's functions that passes a literal shape, a held name or a scalar literal is
@@ -699,9 +715,8 @@ fn specialize_site(e: &mut Expr, sb: &mut Sandbox, sp: &mut Specializer, done: &
         && let Expr::Ident { name: g, .. } = &**recv
         && !bound.iter().any(|b| b == g)
         && !crate::registry::type_owns_method("Record", name)
-        && sb.holds_record(g, done)
-        && let Some(fv) = sb.closure_field(g, name)
-        && let Some(fname) = sp.devirtualize(g, name, &fv)
+        && let Some(fv) = closure_behind(g, name, sb, sp, done)
+        && let Some(fname) = sp.devirtualize(sb, g, name, &fv)
     {
         let (line, col) = (*line, *col);
         // A function-valued field receives the ORIGIN of a lambda the parser synthesized
@@ -1613,6 +1628,42 @@ mod tests {
         let s = folded_with("mut RT = 1\nfn f(s) = s.a + RT\nfn g(s) = f(s)\ny = g({a: 1})\nz = f({a: 1})", true);
         let clones = s.iter().filter(|st| matches!(st, Stmt::Func { name, .. } if name.starts_with("f$"))).count();
         assert_eq!(clones, 1, "{s:?}");
+    }
+
+    /// A call through a record BUILT AT RUN TIME from a held one is devirtualized, and the
+    /// record is not rewritten (§1.62). `M` is held, `RT` is not, so the sandbox can never hold
+    /// `B = M.on(RT)` — but `B.sql` is CERTAIN to be the closure `M.sql` is (a spread copies it,
+    /// nothing later overrides it), so `B.sql(spec)` folds to its text exactly as `M.sql(spec)`
+    /// does. `B`'s own statement stays what the program wrote: `M.sql == B.sql` is `true` in
+    /// Helix, and an optimization may not change what `==` answers. A field a later part
+    /// OVERRIDES is not the held closure, and the call through it stays dynamic.
+    #[test]
+    fn a_call_through_a_record_built_at_run_time_is_devirtualized_and_the_record_untouched() {
+        let s = folded_with(
+            "mut RT = \"db://x\"\n\
+             fn mk(t) = let w = {table: t, sql: (s) => \"select * from {t} where {s.where.left.name} {s.where.op} $1\", n: 0} in {...w, on: (c) => on(w, c)}\n\
+             fn on(m, c) = {...m, target: c, rows: (s) => \"{m.table} {c}\"}\n\
+             fn other(m, c) = {...m, sql: (s) => \"other {c}\"}\n\
+             M = mk(\"people\")\n\
+             B = M.on(RT)\n\
+             O = other(M, RT)\n\
+             y = B.sql({where: @age > RT})\n\
+             v = O.sql({where: @age > RT})\n\
+             u = M.sql({where: @id < RT})",
+            true,
+        );
+        let of = |n: &str| s.iter().find(|st| matches!(st, Stmt::Assign { name, .. } if name == n)).map(value_of).expect(n);
+        // The record is what the program wrote — a call, never a literal written out for it.
+        assert!(matches!(of("B"), Expr::Method { .. } | Expr::Call { .. }), "{:?}", of("B"));
+        let y = of("y");
+        assert_eq!(count_nodes(y, |e| matches!(e, Expr::Str(t) if t == "select * from people where age > $1")), 1, "{y:?}");
+        assert_eq!(count_nodes(y, |e| matches!(e, Expr::Call { .. } | Expr::Method { .. })), 0, "{y:?}");
+        // The overridden field is someone else's closure: the call through it is left alone.
+        assert!(matches!(of("v"), Expr::Method { .. }), "{:?}", of("v"));
+        // One closure, one function: `B.sql` and `M.sql` did not each get their own.
+        let copies = s.iter().filter(|st| matches!(st, Stmt::Func { name, .. } if name == "B$sql" || name == "M$sql")).count();
+        assert!(copies <= 1, "{copies} devirtualized copies of one closure");
+        assert_eq!(count_nodes(of("u"), |e| matches!(e, Expr::Str(t) if t == "select * from people where id < $1")), 1);
     }
 
     /// A program with no function of its own is untouched, cheaply.

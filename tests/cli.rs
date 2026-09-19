@@ -16803,6 +16803,43 @@ fn a_duplicate_top_level_fn_is_refused_naming_the_first() {
     assert!(err.contains("`f` is immutable and cannot be reassigned"), "{err}");
 }
 
+/// A model bound to a run-time target (§1.62) renders and runs the same on every engine, with
+/// each pass off — and the bound record's closure is STILL the model's: `M.sql == B.sql` is
+/// `true` everywhere, which is why the pass devirtualizes the call and never rewrites the
+/// record. A rebinding starts from the model, an overridden verb is the override's, and the
+/// unbound model is untouched.
+#[test]
+fn a_bound_model_renders_the_same_on_every_engine() {
+    let src = "RT = if now() > 0.0 then \"db://one\" else \"\"\n\
+RT2 = if now() > 0.0 then \"db://two\" else \"\"\n\
+fn mk(t) = let w = {table: t, sql: (s) => \"select * from {t} where {s.where.left.name} {s.where.op} $1\", n: 0} in {...w, on: (c) => on(w, c)}\n\
+fn on(m, c) = {...m, target: c, rows: (s) => go(m, s, c), on: (c2) => on(m, c2)}\n\
+fn go(m, s, c) = \"{m.sql(s)} on {c}\"\n\
+fn other(m, c) = {...m, sql: (s) => \"other {c}\"}\n\
+M = mk(\"people\")\n\
+B = M.on(RT)\n\
+C = B.on(RT2)\n\
+O = other(M, RT)\n\
+print(B.sql({where: @age > 30}))\n\
+print(B.rows({where: @age > 30}))\n\
+print(C.rows({where: @id < 7}))\n\
+print(O.sql({where: @age > 30}))\n\
+print(B.target, C.target, M.table, B.n, C.keys().count())\n\
+print(M.sql == B.sql, B.sql == C.sql, M.sql == O.sql, [M.sql].contains(B.sql))\n\
+print(M.sql({where: @city == \"oslo\"}))\n";
+    let want = "select * from people where age > $1\nselect * from people where age > $1 on db://one\nselect * from people where id < $1 on db://two\nother db://one\ndb://one db://two people 0 6\ntrue true false true\nselect * from people where city == $1\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("boundmodel_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}");
+    }
+    for (label, env) in [("nospecialize", &[("HELIX_NOSPECIALIZE", "1")][..]), ("nofold", &[("HELIX_NOFOLD", "1")][..])] {
+        let (out, err, code) = run_source(src, env, &format!("boundmodel_{label}"));
+        assert_eq!(code, Some(0), "{label}: {err}");
+        assert_eq!(out, want, "{label}");
+    }
+}
+
 /// The field build's §1.63 reproducer shape — a renderer reached through zero, three, four
 /// and five wrapper frames, with a shape another site shares and one no other site has —
 /// renders the same text on every engine, with the pass on and off. Values only: the pass

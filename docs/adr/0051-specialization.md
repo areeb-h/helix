@@ -153,6 +153,23 @@ shrinks — a part of the ancestor's shape, `render(p.left, n)`, however the cou
 it grows — keeps all its knowledge, since a finite structure ends; a call in which nothing
 shrinks has its changed positions generalized to `Any`, and the chain reaches a clone that
 recurses into itself (the tokenizer is two clones: the entry, and one for its recursion).
+A CALL THROUGH A RECORD BUILT AT RUN TIME IS DEVIRTUALIZED; THE RECORD IS NEVER REWRITTEN.
+`P = People.on(db)` — bind the connection once, call verbs on the result — is the shape of
+every configure-once API, and the sandbox can never hold `P`: `db` is I/O. Every verb on it
+paid four to five times what the unbound model paid (§1.62). `src/fold/bound.rs` evaluates
+such an initializer ABSTRACTLY — over values the sandbox holds, building records
+symbolically, following the program's own functions and closures it knows, everything else
+unknown — to answer one question: which closure is field `f` CERTAIN to hold? For `{...m,
+target: t, rows: (s) => …}` with `m` a held model, `sql` is exactly the closure `m` holds
+there, whatever `t` turns out to be; `target` and `rows` are unknown, and so is any field a
+later part overrides. The call `P.sql(spec)` is then a direct call of that closure, as
+`M.sql(spec)` already is — and the SAME function, devirtualization being keyed by the
+closure itself as well as by name, so nothing is cloned twice. What it must not do is touch
+`P`: a spread copies the closure itself and Helix compares functions by identity, so `M.sql
+== P.sql` is `true`. The first cut wrote `P` out as a literal whose closure fields were new
+top-level functions — an optimization changing what `==` answers — and is pinned against.
+A hoisted capture is handed to the sandbox AT ONCE, so the clone made for the very call that
+devirtualized a closure can fold an interpolation over it, as every later site's could.
 A RECURSION SPENDS NO DEPTH, and the depth that remains is a ceiling on chains of DISTINCT
 frames, sixteen, a sanity ceiling rather than the bound — the budget and the rule above
 are the bounds. The first cut charged a level per tree level and stopped at four, so a
