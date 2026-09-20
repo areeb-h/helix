@@ -436,7 +436,7 @@ Open one PostgreSQL connection and reuse it for every query made through it.
 
 Run a read-only SQL query against a PostgreSQL server and return the rows as a DataFrame.
 
-**Note:** Runs inside a READ-ONLY transaction, so the server itself refuses INSERT, UPDATE, DELETE and DDL — the guarantee is enforced at the far end, because there is no such thing as a read-only socket. Parameters bind as VALUES to $1, $2, ...; there is no way to splice text into the statement, which is what makes injection unrepresentable rather than merely discouraged. Authenticates with SCRAM-SHA-256 and verifies the SERVER's signature too, so the exchange proves both directions. Speaks protocol 3.0, which every server from 7.4 to 19 accepts. Columns typed int2/int4/int8 become Int, float4/float8/numeric become Float, bool becomes Bool, and every other type — uuid, jsonb, timestamps, extension types — arrives as the text the server printed rather than being refused. NULL becomes missing. Keywords: postgres, postgresql, sql, database, query, rows, table.
+**Note:** Runs inside a READ-ONLY transaction, so the server itself refuses INSERT, UPDATE, DELETE and DDL — the guarantee is enforced at the far end, because there is no such thing as a read-only socket. Parameters bind as VALUES to $1, $2, ...; there is no way to splice text into the statement, which is what makes injection unrepresentable rather than merely discouraged. A parameter is an Int, Float, Bool, String, Bytes (`bytea`), missing (NULL), or an ARRAY of those: `where id = any($1)` with `[[1, 2, 3]]` is one statement and one parameter for a list of any length, where `in ($1, $2, …)` is a different statement per length and stops at 65 535 values. Authenticates with SCRAM-SHA-256 and verifies the SERVER's signature too, so the exchange proves both directions. Speaks protocol 3.0, which every server from 7.4 to 19 accepts. Columns typed int2/int4/int8 become Int, float4/float8/numeric become Float, bool becomes Bool, and every other type — uuid, jsonb, timestamps, extension types — arrives as the text the server printed rather than being refused. NULL becomes missing. Keywords: postgres, postgresql, sql, database, query, rows, table.
 
 ```
 >>> postgres_query("postgres://me:pw@localhost/app", "select name from users where age > $1", [30])
@@ -4314,7 +4314,7 @@ Run one statement that may write on a connection opened with "write"; returns {a
 
 Run one read-only statement on this connection; returns a DataFrame.
 
-**Note:** PARAMETERS ARE VALUES, never text spliced into the statement: `$1`, `$2` … are bound by the server, so a string containing a quote is data. The session is read-only from its first byte (set in the startup packet), so a write comes back as the server's own SQLSTATE 25006 rather than a client-side guess. The connection closes when the last handle to it goes — there is nothing to call. Keywords: sql, postgres, database, select, parameter.
+**Note:** PARAMETERS ARE VALUES, never text spliced into the statement: `$1`, `$2` … are bound by the server, so a string containing a quote is data. An Array is a parameter too — `where id = any($1)` with `[[1, 2, 3]]` — as is Bytes. The session is read-only from its first byte (set in the startup packet), so a write comes back as the server's own SQLSTATE 25006 rather than a client-side guess. The connection closes when the last handle to it goes — there is nothing to call. Keywords: sql, postgres, database, select, parameter.
 
 ```
 >>> conn.query("select name from people where age > $1", [40])

@@ -354,3 +354,30 @@ distinct statements — prints the same 228 lines on both binaries, in the clear
 
 Measured and declined: a 64 KiB read buffer (1.00x everywhere — the server flushes at 8 KiB,
 so there is never more than the 16 KiB buffer's worth waiting).
+
+## Addendum 2026-09-20 — an Array is a parameter
+
+D1 made parameters VALUES, and the values were scalars: Int, Float, Bool, String, `missing`.
+A list had to be spelled `in ($1, $2, $3)`, which has two costs the statement cache made
+visible. Its TEXT changes with the count, so every length of list is a different prepared
+statement — parsed again, another of the 256 entries — and the server takes at most 65 535
+parameters, so a relation load over 70 000 parents did not get slow, it failed. PostgreSQL's
+own answer is `where id = any($1)` with one array parameter, and the field build's ORM was
+already using it — by writing the array literal's grammar itself, in Helix, with a fast path
+through `to_json` held to a careful slow one. That grammar is the driver's to get right once.
+
+An Array binds as the array literal (`put_array` in `src/pg/statement.rs`): numbers and
+booleans bare, `missing` as the bare word `NULL`, and a String ALWAYS quoted, with `\` and
+`"` escaped. Always, because a bare element is where every trap lives — `NULL` would be a
+null, `a,b` two elements, `{` a nesting, leading spaces would vanish — and a quoted element
+is its text and nothing else. It is data for the server's array parser, never SQL, which is
+why a String is safe here where splicing one into the statement would not be. A nested
+Array is a further dimension, to PostgreSQL's limit of six; the server holds the rectangle
+to account. `Bytes` binds as `bytea`, in hex.
+
+Parameters stay TEXT with unspecified types: the server infers `int4[]` from `= any($1)`
+against an `int4` column exactly as it infers `int4` from `= $1`. Verified against the
+server's own parser, element for element (`target/bench/f92/arrays.helix`): commas, quotes,
+backslashes, braces, the text `NULL`, the empty string, non-ASCII, a newline, a `missing`;
+`NaN` and infinity in a `float8[]`; two dimensions; an empty array; 70 000 keys in one
+parameter; and the same statement with two list lengths is ONE prepared statement.

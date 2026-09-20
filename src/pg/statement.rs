@@ -14,7 +14,7 @@ use std::rc::Rc;
 use super::proto::{begin_msg, end_msg, error_code, error_text, put_cstr, send_framed, Cur};
 use super::stream::Stream;
 use super::types::{binary_width, ColBuf};
-use crate::value::Value;
+use crate::value::{ArrayData, Value};
 
 /// A connection past its handshake, and what it remembers between statements.
 pub struct Session {
@@ -267,6 +267,8 @@ fn put_param(out: &mut Vec<u8>, v: &Value) -> Result<(), String> {
         Value::Float(f) => out.extend_from_slice(crate::value::fmt_float(*f).as_bytes()),
         Value::Bool(b) => out.push(if *b { b't' } else { b'f' }),
         Value::Str(s) => out.extend_from_slice(s.as_bytes()),
+        Value::Bytes(b) => put_bytea(out, b),
+        Value::Array(a) => put_array(out, a, 1)?,
         other => return Err(format!("{} has no SQL form", crate::value::with_article(other.type_name()))),
     }
     let len = i32::try_from(out.len() - at - 4).map_err(|_| "parameter too large".to_string())?;
@@ -274,6 +276,77 @@ fn put_param(out: &mut Vec<u8>, v: &Value) -> Result<(), String> {
         slot.copy_from_slice(&len.to_be_bytes());
     }
     Ok(())
+}
+
+/// `bytea`, in the hex form every server since 9.0 reads: `\x` and two digits a byte.
+fn put_bytea(out: &mut Vec<u8>, bytes: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    out.extend_from_slice(b"\\x");
+    for b in bytes {
+        out.push(HEX[usize::from(b >> 4)]);
+        out.push(HEX[usize::from(b & 15)]);
+    }
+}
+
+/// How deep an array parameter may nest: PostgreSQL's own limit on dimensions (`MAXDIM`).
+pub const MAX_ARRAY_DEPTH: usize = 6;
+
+/// AN ARRAY, AS THE ARRAY LITERAL `= any($1)` BINDS.
+///
+/// `where id in ($1, $2, …)` spends a parameter per value, so its text changes with the COUNT —
+/// a different prepared statement for every length of list — and it stops working at 65 535.
+/// `where id = any($1)` is one statement and one parameter for any number of values, and this
+/// is that parameter. The field build's ORM wrote this grammar itself, in Helix, with a fast
+/// path through `to_json` held to a careful slow one; it is the driver's to get right once.
+///
+/// The grammar is small and has one trap. Elements are separated by commas inside braces; a
+/// number or a boolean is written bare; `missing` is the bare word `NULL`; and a String is
+/// ALWAYS quoted, with `\` and `"` escaped — always, because a bare element is where the
+/// traps live: `NULL` would be a null, `a,b` two elements, `{` a nesting, and leading spaces
+/// would vanish. A quoted element is its text and nothing else. It is data for the server's
+/// array parser, never SQL, which is why a String is safe here where splicing one into the
+/// statement would not be. A nested Array is a further dimension; the server holds the
+/// rectangle to account.
+fn put_array(out: &mut Vec<u8>, a: &ArrayData, depth: usize) -> Result<(), String> {
+    if depth > MAX_ARRAY_DEPTH {
+        return Err(format!("an Array nested more than {MAX_ARRAY_DEPTH} deep has no SQL form"));
+    }
+    out.push(b'{');
+    for (i, v) in a.iter_values().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        match &v {
+            Value::Missing => out.extend_from_slice(b"NULL"),
+            Value::Int(n) => {
+                let _ = write!(out, "{n}");
+            }
+            Value::Float(f) => out.extend_from_slice(crate::value::fmt_float(*f).as_bytes()),
+            Value::Bool(b) => out.push(if *b { b't' } else { b'f' }),
+            Value::Str(s) => put_quoted(out, s.as_bytes()),
+            Value::Bytes(b) => {
+                let mut hex = Vec::with_capacity(2 + 2 * b.len());
+                put_bytea(&mut hex, b);
+                put_quoted(out, &hex);
+            }
+            Value::Array(inner) => put_array(out, inner, depth + 1)?,
+            other => return Err(format!("{} has no SQL form", crate::value::with_article(other.type_name()))),
+        }
+    }
+    out.push(b'}');
+    Ok(())
+}
+
+/// One array element, quoted: `\` and `"` escaped, everything else as it is.
+fn put_quoted(out: &mut Vec<u8>, text: &[u8]) {
+    out.push(b'"');
+    for &b in text {
+        if b == b'"' || b == b'\\' {
+            out.push(b'\\');
+        }
+        out.push(b);
+    }
+    out.push(b'"');
 }
 
 /// Frame one exchange into `wire`: optionally Close a displaced statement and Parse `sql` under
@@ -552,5 +625,50 @@ mod tests {
         frame(&mut wire, Name::Unnamed, None, &[], Some(&text_only), true).unwrap();
         let bind_len = 1 + i32::from_be_bytes([wire[1], wire[2], wire[3], wire[4]]) as usize;
         assert_eq!(&wire[bind_len - 2..bind_len], &[0, 0]);
+    }
+
+    fn param(v: Value) -> String {
+        let mut out = Vec::new();
+        put_param(&mut out, &v).unwrap();
+        let len = i32::from_be_bytes([out[0], out[1], out[2], out[3]]) as usize;
+        assert_eq!(len, out.len() - 4, "the length prefix covers the text exactly");
+        String::from_utf8(out[4..].to_vec()).unwrap()
+    }
+
+    fn arr(vs: Vec<Value>) -> Value {
+        Value::Array(Rc::new(ArrayData::Values(vs)))
+    }
+
+    fn st(s: &str) -> Value {
+        Value::Str(Rc::new(s.to_string()))
+    }
+
+    /// An Array is the array literal `= any($1)` binds: numbers bare, `missing` the bare word
+    /// NULL, and a String ALWAYS quoted — so the text `NULL`, a comma, a brace, a quote, a
+    /// backslash and leading spaces are each one element's text and nothing else.
+    #[test]
+    fn an_array_is_the_array_literal_any_binds() {
+        assert_eq!(param(Value::Array(Rc::new(ArrayData::Ints(vec![1, -2, 3])))), "{1,-2,3}");
+        assert_eq!(param(Value::Array(Rc::new(ArrayData::Floats(vec![1.5, f64::NAN, f64::INFINITY])))), "{1.5,NaN,inf}");
+        assert_eq!(param(arr(vec![])), "{}");
+        assert_eq!(param(arr(vec![Value::Bool(true), Value::Missing, Value::Bool(false)])), "{t,NULL,f}");
+        assert_eq!(
+            param(arr(vec![st("a,b"), st("q\"t"), st("back\\slash"), st("NULL"), st("{x}"), st("  lead"), st(""), Value::Missing])),
+            r#"{"a,b","q\"t","back\\slash","NULL","{x}","  lead","",NULL}"#
+        );
+        // A nested Array is a further dimension, to PostgreSQL's own limit of six.
+        assert_eq!(param(arr(vec![arr(vec![Value::Int(1), Value::Int(2)]), arr(vec![Value::Int(3), Value::Int(4)])])), "{{1,2},{3,4}}");
+        let mut deep = arr(vec![Value::Int(1)]);
+        for _ in 0..MAX_ARRAY_DEPTH - 1 {
+            deep = arr(vec![deep]);
+        }
+        assert_eq!(param(deep.clone()), "{{{{{{1}}}}}}");
+        let mut out = Vec::new();
+        let e = put_param(&mut out, &arr(vec![deep])).unwrap_err();
+        assert!(e.contains("nested more than 6 deep"), "{e}");
+        // And `bytea` is hex — bare as a parameter, quoted (its backslash escaped) as an element.
+        let bytes = Value::Bytes(Rc::new(vec![0, 10, 255]));
+        assert_eq!(param(bytes.clone()), "\\x000aff");
+        assert_eq!(param(arr(vec![bytes])), r#"{"\\x000aff"}"#);
     }
 }

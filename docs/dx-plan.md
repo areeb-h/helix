@@ -603,6 +603,14 @@ statement reading its predecessor's unread replies as its own rows. Live harness
 a caller can see — 228 lines identical on both binaries, plaintext and TLS). Measured and
 declined: 64 KiB read buffer (1.00x).
 
+**An Array is a parameter (2026-09-20), DONE.** `c.query("… where id = any($1)", [[1, 2, 3]])`:
+`put_array` in `src/pg/statement.rs` writes the array literal (Strings ALWAYS quoted — the
+bare form is where `NULL`, commas, braces and leading spaces go wrong), nested to PostgreSQL's
+six dimensions; `Bytes` binds as hex `bytea`; `sql_form` in `mod.rs` refuses anything else with
+the line it was written on (`parameter 2 holds a Record …`). One statement text for any list
+length, so one cache entry, and no 65 535 ceiling. FOR THE FIELD BUILD: `array_literal` and
+`array_literal_exact` in `db/pg.helix` can go — pass the Array.
+
 **A transaction is a value (2026-09-20), DONE — ADR 0047 D5, the field's §1.19 #4.**
 `tx = c.begin(isolation?)` answers a `Value::Db` sharing the session (`Conn { shared:
 Rc<Shared>, tx: Option<u64> }` in `src/pg/mod.rs`); `commit()`/`rollback()` end it; `Drop` on

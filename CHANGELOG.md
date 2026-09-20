@@ -4,6 +4,21 @@
 
 ### Added
 
+- **An Array is a PostgreSQL parameter, and so is Bytes.** `c.query("select * from people
+  where id = any($1)", [[3, 1, 2]])` binds the list as ONE parameter — one prepared statement
+  for a list of any length, where `in ($1, $2, …)` is a different statement text for every
+  count (so a different entry in the statement cache, parsed again each time the length
+  changes) and fails outright past 65 535 values. The Array is written as the server's array
+  literal: numbers and booleans bare, `missing` as the bare word `NULL`, and a String ALWAYS
+  quoted with `\` and `"` escaped — always, because a bare element is where the traps are
+  (`NULL` would be a null, `a,b` two elements, `{` a nesting, leading spaces would vanish).
+  It is data for the server's array parser, never SQL. Nested Arrays are further dimensions,
+  to PostgreSQL's own six. Verified against the server's parser element for element — commas,
+  quotes, backslashes, braces, the text `NULL`, empty strings, non-ASCII, a newline, a
+  `missing` — and with 70 000 keys in one parameter. `Bytes` binds as `bytea` (hex). The field
+  build's ORM carries this grammar in Helix today, with a fast path through `to_json` held to
+  a careful slow one; it can now pass the Array.
+
 - **A PostgreSQL transaction, as a value (ADR 0047 D5 — the open item since writes landed).**
   `tx = c.begin()` answers a connection value that speaks for the transaction: `tx.query`,
   `tx.execute`, then `tx.commit()` or `tx.rollback()`. ONE THAT IS DROPPED WITHOUT COMMITTING

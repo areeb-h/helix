@@ -480,20 +480,33 @@ fn statement_params(
         }
     };
     for (i, p) in params.iter().enumerate() {
-        if !matches!(p, Value::Missing | Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Str(_)) {
-            return Err(HelixError::new(
-                format!(
-                    "parameter {} is {}, which has no SQL form",
-                    i + 1,
-                    crate::value::with_article(p.type_name())
-                ),
-                line,
-                col,
-            )
-            .hint("parameters may be Int, Float, Bool, String, or missing (SQL NULL)."));
+        if let Err(what) = sql_form(p, 0) {
+            return Err(HelixError::new(format!("parameter {} {what}", i + 1), line, col).hint(
+                "a parameter may be Int, Float, Bool, String, Bytes, missing (SQL NULL), or an Array of those — `where id = any($1)` takes `[[1, 2, 3]]`.",
+            ));
         }
     }
     Ok(params)
+}
+
+/// Whether SQL has a form for `v` — and if not, what to say about it after `parameter N`.
+/// An Array is the array literal `= any($1)` binds, so its elements are held to the same rule,
+/// to the depth PostgreSQL's arrays go.
+#[cfg(feature = "postgres")]
+fn sql_form(v: &Value, depth: usize) -> Result<(), String> {
+    match v {
+        Value::Missing | Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Str(_) | Value::Bytes(_) => Ok(()),
+        Value::Array(_) if depth >= statement::MAX_ARRAY_DEPTH => {
+            Err(format!("nests Arrays more than {} deep, and PostgreSQL's arrays stop there", statement::MAX_ARRAY_DEPTH))
+        }
+        Value::Array(a) => a.iter_values().try_for_each(|e| {
+            sql_form(&e, depth + 1).map_err(|what| match what.strip_prefix("is ") {
+                Some(rest) => format!("holds {rest}"),
+                None => what,
+            })
+        }),
+        other => Err(format!("is {}, which has no SQL form", crate::value::with_article(other.type_name()))),
+    }
 }
 
 /// The rows a statement returned, as a frame — with no columns when it returned none.
