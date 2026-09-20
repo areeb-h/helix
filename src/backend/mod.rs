@@ -22,6 +22,7 @@
 
 #[cfg(feature = "native-df")]
 pub mod native;
+pub mod strbuild;
 pub mod timefmt;
 #[cfg(feature = "dataframes")]
 pub mod polars;
@@ -54,6 +55,23 @@ pub enum ColData {
     Float(Vec<Option<f64>>),
     /// A boolean column (no nulls — e.g. a VCF Flag: present → true).
     Bool(Vec<bool>),
+    /// A nullable integer column as VALUES WITH THEIR VALIDITY ALONGSIDE — what the native
+    /// engine stores. A reader that meets its cells one at a time fills both as they arrive
+    /// and hands them over as they are, where `IntOpt` costs the engine another pass to pull
+    /// the two apart. An invalid slot holds `0`.
+    ///
+    /// (These three shapes have ONE reader filling them so far, PostgreSQL's, so a build
+    /// without that feature constructs none — which is what the narrowed `allow`s say. Every
+    /// engine reads them in every build.)
+    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
+    IntValid(Vec<i64>, Vec<bool>),
+    /// The same for floats; an invalid slot holds `0.0`.
+    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
+    FloatValid(Vec<f64>, Vec<bool>),
+    /// Text interned as it arrived (see [`strbuild`]): one allocation per DISTINCT value, where
+    /// `StrOpt` is one per cell that the engine then hashes and mostly throws away.
+    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
+    StrBuilt(strbuild::StrBuilder),
 }
 
 /// Build an eager DataFrame from backend-agnostic [`ColData`] columns, routing any

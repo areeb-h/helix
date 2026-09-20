@@ -140,6 +140,13 @@ session omits the read-only startup default and spends `db-write` (`HELIX_ALLOW_
 as well as `net`, so granting the network alone still keeps a program read-only. Verified
 here against a fake wire server; live verification is the field build's.
 
+**The driver's own speed (2026-09-19/20, ADR 0044 addenda).** A connection prepares each
+statement once, sends an exchange as one write, reads through a buffer that messages are
+LENT from, parses cells from those bytes straight into the engine's vectors, remembers what
+each statement returns (no second Describe; `int2/4/8`, `bool`, `float8` in binary from the
+second run), and closes itself if an exchange does not reach `ReadyForQuery`. Live harness
+against PostgreSQL 17 in a container: `target/bench/f89/`.
+
 **Still open:** `SCRAM-SHA-256-PLUS` channel binding, and a transaction spanning
 statements (each `execute` is its own).
 

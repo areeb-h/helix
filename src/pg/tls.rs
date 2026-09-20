@@ -34,120 +34,27 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
+use std::time::Duration;
 
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
+
+use super::stream::Stream;
 
 /// The SSLRequest packet's body: protocol 1234.5679, the reserved version number that
 /// means "before anything else, may we start TLS?". Frozen since 7.2.
 const SSL_REQUEST: i32 = 80877103;
 
-/// The socket, before or after TLS wraps it.
-enum Raw {
-    Plain(TcpStream),
-    Tls(Box<StreamOwned<ClientConnection, TcpStream>>),
-}
-
-/// How much of the server's answer is taken from the socket at once.
-const READ_BUFFER: usize = 16 * 1024;
-
-/// The connection, before or after TLS wraps it, READ THROUGH A BUFFER.
-///
-/// `proto`'s framing already takes `impl Read`/`impl Write`, so this is the only place
-/// that has to know which one it is — every message-level function reads and writes the
-/// same way whether or not there is a TLS record layer underneath.
-///
-/// THE BUFFER IS WHY A RESULT IS NOT TWO SYSCALLS A ROW. `read_msg` takes a message as its
-/// 5-byte header and then its body, and on a bare socket that was two `read` calls for
-/// every `DataRow`: a 1 000-row result, ~2 000 syscalls, most of what that read cost — the
-/// field build measured it at 3.7x pgx and took it for text parsing (§1.61). It also made
-/// the read's time depend on the server's pacing, a tiny read either finding its bytes or
-/// blocking for them: preparing statements, which makes the server answer SOONER, read 6%
-/// slower on that row until this. A read the size of the buffer or more goes straight to
-/// the socket; nothing is ever read around the buffer, so nothing can be skipped or seen
-/// twice.
-pub struct Stream {
-    raw: Raw,
-    buf: Vec<u8>,
-    pos: usize,
-    end: usize,
-}
-
-impl Read for Raw {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        match self {
-            Raw::Plain(s) => s.read(buf),
-            Raw::Tls(s) => s.read(buf),
-        }
-    }
-}
-
-impl Read for Stream {
-    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
-        if self.pos == self.end {
-            if out.len() >= self.buf.len() {
-                return self.raw.read(out);
-            }
-            // Empty until the read below says otherwise — a timeout leaves it empty.
-            self.pos = 0;
-            self.end = 0;
-            self.end = self.raw.read(&mut self.buf)?;
-        }
-        let n = out.len().min(self.end - self.pos);
-        out[..n].copy_from_slice(&self.buf[self.pos..self.pos + n]);
-        self.pos += n;
-        Ok(n)
-    }
-}
-
-impl Write for Stream {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        match &mut self.raw {
-            Raw::Plain(s) => s.write(buf),
-            Raw::Tls(s) => s.write(buf),
-        }
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        match &mut self.raw {
-            Raw::Plain(s) => s.flush(),
-            Raw::Tls(s) => s.flush(),
-        }
-    }
-}
-
-impl Stream {
-    fn over(raw: Raw) -> Self {
-        Stream { raw, buf: vec![0u8; READ_BUFFER], pos: 0, end: 0 }
-    }
-
-    /// A connection in the clear — `sslmode=disable`, and nothing else reaches this.
-    pub fn plain(s: TcpStream) -> Self {
-        Stream::over(Raw::Plain(s))
-    }
-
-    /// Whether this connection is encrypted — for the diagnostic label, so a program that
-    /// prints a connection says which kind it has.
-    pub fn is_tls(&self) -> bool {
-        matches!(self.raw, Raw::Tls(_))
-    }
-
-    /// Say goodbye at the TLS layer as well as the protocol one.
-    ///
-    /// Failure is ignored: this runs from `Drop`, which must not raise, and a session
-    /// that cannot be closed politely is still closed when the descriptor goes.
-    pub fn close_notify(&mut self) {
-        if let Raw::Tls(s) = &mut self.raw {
-            s.conn.send_close_notify();
-            let _ = s.flush();
-        }
-    }
-}
-
 /// Ask the server for TLS and wrap the socket, or fail.
 ///
 /// The one-byte reply is the whole negotiation: `S` proceed, `N` refuse. `N` is an ERROR
 /// here and never a fallback — that is the downgrade this client does not have.
-pub fn negotiate(mut tcp: TcpStream, host: &str, root: Option<&str>) -> Result<Stream, String> {
+pub fn negotiate(
+    mut tcp: TcpStream,
+    host: &str,
+    root: Option<&str>,
+    wait: Option<Duration>,
+) -> Result<Stream, String> {
     let mut pkt = [0u8; 8];
     pkt[..4].copy_from_slice(&8i32.to_be_bytes());
     pkt[4..].copy_from_slice(&SSL_REQUEST.to_be_bytes());
@@ -199,7 +106,7 @@ pub fn negotiate(mut tcp: TcpStream, host: &str, root: Option<&str>) -> Result<S
     // certificate that does not verify is reported as a connection failure with the
     // reason, instead of surfacing halfway through authentication.
     s.flush().map_err(|e| format!("TLS handshake with `{host}`: {e}"))?;
-    Ok(Stream::over(Raw::Tls(Box::new(s))))
+    Ok(Stream::tls(s, wait))
 }
 
 /// The trust anchors: the Mozilla set, or exactly the certificates in `root`.
@@ -295,7 +202,7 @@ mod tests {
     fn a_server_refusing_tls_is_an_error_and_never_a_fallback() {
         let addr = one_byte_server(b'N');
         let tcp = TcpStream::connect(&addr).expect("connect");
-        let e = refused(negotiate(tcp, "localhost", None));
+        let e = refused(negotiate(tcp, "localhost", None, None));
         assert!(e.contains("refused TLS"), "{e}");
         // The message has to name the fix, or it is just a refusal.
         assert!(e.contains("sslmode=disable"), "{e}");
@@ -306,7 +213,7 @@ mod tests {
     fn an_unrecognised_tls_reply_is_an_error() {
         let addr = one_byte_server(b'E');
         let tcp = TcpStream::connect(&addr).expect("connect");
-        let e = refused(negotiate(tcp, "localhost", None));
+        let e = refused(negotiate(tcp, "localhost", None, None));
         assert!(e.contains("neither `S` nor `N`"), "{e}");
     }
 

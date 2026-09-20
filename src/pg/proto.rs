@@ -13,7 +13,7 @@
 //! size a buffer. A malformed reply is a Helix error naming what was wrong, never an
 //! abort.
 
-use std::io::{Read, Write};
+use std::io::Write;
 
 /// The largest message this client will allocate for, in bytes.
 ///
@@ -22,18 +22,6 @@ use std::io::{Read, Write};
 /// byte of body arrives. 64 MB is far above any real `RowDescription` or `DataRow` and
 /// far below a denial of service.
 const MAX_MSG: usize = 64 * 1024 * 1024;
-
-/// One backend message: its type byte and its body, length prefix already stripped.
-pub struct Msg {
-    pub tag: u8,
-    pub body: Vec<u8>,
-}
-
-impl Msg {
-    pub fn cur(&self) -> Cur<'_> {
-        Cur { b: &self.body, at: 0 }
-    }
-}
 
 /// A bounds-checked cursor over a message body.
 ///
@@ -45,6 +33,11 @@ pub struct Cur<'a> {
 }
 
 impl<'a> Cur<'a> {
+    /// A cursor over one message's body.
+    pub fn new(body: &'a [u8]) -> Cur<'a> {
+        Cur { b: body, at: 0 }
+    }
+
     fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
         let end = self.at.checked_add(n).ok_or("message field length overflowed")?;
         let s = self.b.get(self.at..end).ok_or_else(|| {
@@ -72,9 +65,15 @@ impl<'a> Cur<'a> {
     /// replacement: a column name or an error message that is not what the server sent
     /// would be a quiet lie in a diagnostic.
     pub fn cstr(&mut self) -> Result<String, String> {
+        self.cstr_ref().map(str::to_string)
+    }
+
+    /// The same string, lent from the message — for a reader that only looks at it.
+    pub fn cstr_ref(&mut self) -> Result<&'a str, String> {
         let rest = self.b.get(self.at..).ok_or("truncated message")?;
         let n = rest.iter().position(|&c| c == 0).ok_or("unterminated string in message")?;
-        let s = std::str::from_utf8(&rest[..n]).map_err(|_| "message string is not UTF-8".to_string())?.to_string();
+        let s = std::str::from_utf8(rest.get(..n).unwrap_or(&[]))
+            .map_err(|_| "message string is not UTF-8".to_string())?;
         self.at += n + 1;
         Ok(s)
     }
@@ -96,12 +95,17 @@ impl<'a> Cur<'a> {
     }
 }
 
-/// Read one backend message: 1 tag byte, then a 4-byte length that INCLUDES itself.
-pub fn read_msg(r: &mut impl Read) -> Result<Msg, String> {
-    let mut head = [0u8; 5];
-    r.read_exact(&mut head).map_err(|e| format!("reading from the server: {e}"))?;
-    let tag = head[0];
-    let len = i32::from_be_bytes([head[1], head[2], head[3], head[4]]);
+/// A backend message's header: 1 type byte, then a 4-byte length that INCLUDES itself.
+pub const HEADER: usize = 5;
+
+/// Read a header: the message's type, and how many bytes of body follow. This is the check
+/// that stands between a length the server chose and a buffer sized by it, so it runs before
+/// anything is reserved — the stream calls it on the five bytes and nothing else.
+pub fn header(head: &[u8]) -> Result<(u8, usize), String> {
+    let &[tag, a, b, c, d] = head else {
+        return Err("truncated message header".to_string());
+    };
+    let len = i32::from_be_bytes([a, b, c, d]);
     // The length counts itself, so anything under 4 is malformed rather than merely empty.
     let body_len = len
         .checked_sub(4)
@@ -113,9 +117,7 @@ pub fn read_msg(r: &mut impl Read) -> Result<Msg, String> {
             tag as char
         ));
     }
-    let mut body = vec![0u8; body_len];
-    r.read_exact(&mut body).map_err(|e| format!("reading message '{}': {e}", tag as char))?;
-    Ok(Msg { tag, body })
+    Ok((tag, body_len))
 }
 
 /// Write one frontend message. `tag` is `None` only for the startup and SSL-request
@@ -132,18 +134,31 @@ pub fn write_msg(w: &mut impl Write, tag: Option<u8>, body: &[u8]) -> Result<(),
     w.flush().map_err(|e| format!("sending to the server: {e}"))
 }
 
-/// Append one frontend message to `out`, framed — for a caller that sends several in ONE
-/// write. A query is Parse, Bind, Describe, Execute and Sync: as five flushed writes that
-/// is five syscalls, five segments with `TCP_NODELAY` on, and five records under TLS.
-pub fn frame_msg(out: &mut Vec<u8>, tag: u8, body: &[u8]) -> Result<(), String> {
-    let len = i32::try_from(body.len() + 4).map_err(|_| "message too large to send".to_string())?;
+/// Begin one frontend message in `out`, for a caller that sends several in ONE write: its
+/// type byte, and room for a length that [`end_msg`] fills in once the body is written — so a
+/// body is built where it will be sent from, never in a buffer of its own and copied. A query
+/// is Parse, Bind, Describe, Execute and Sync: as five flushed writes that is five syscalls,
+/// five segments with `TCP_NODELAY` on, and five records under TLS.
+pub fn begin_msg(out: &mut Vec<u8>, tag: u8) -> usize {
     out.push(tag);
-    out.extend_from_slice(&len.to_be_bytes());
-    out.extend_from_slice(body);
+    let at = out.len();
+    out.extend_from_slice(&[0u8; 4]);
+    at
+}
+
+/// Close the message [`begin_msg`] opened at `at`: its length, which counts itself.
+pub fn end_msg(out: &mut [u8], at: usize) -> Result<(), String> {
+    let len = out
+        .len()
+        .checked_sub(at)
+        .and_then(|n| i32::try_from(n).ok())
+        .ok_or_else(|| "message too large to send".to_string())?;
+    let slot = out.get_mut(at..at + 4).ok_or_else(|| "message framing slipped".to_string())?;
+    slot.copy_from_slice(&len.to_be_bytes());
     Ok(())
 }
 
-/// Send what `frame_msg` gathered, in one write.
+/// Send what `begin_msg`/`end_msg` framed, in one write.
 pub fn send_framed(w: &mut impl Write, framed: &[u8]) -> Result<(), String> {
     w.write_all(framed).map_err(|e| format!("sending to the server: {e}"))?;
     w.flush().map_err(|e| format!("sending to the server: {e}"))
@@ -158,8 +173,8 @@ pub fn put_cstr(out: &mut Vec<u8>, s: &str) {
 /// The SQLSTATE of an `ErrorResponse` — what makes an error identifiable to a PROGRAM rather
 /// than to a reader. The statement cache re-prepares on `26000` and `0A000`, falls back to
 /// the unnamed statement on `42P05`, and treats every other code as the caller's.
-pub fn error_code(m: &Msg) -> String {
-    let mut cur = m.cur();
+pub fn error_code(body: &[u8]) -> String {
+    let mut cur = Cur::new(body);
     while let Ok(f) = cur.u8() {
         if f == 0 {
             break;
@@ -178,8 +193,8 @@ pub fn error_code(m: &Msg) -> String {
 /// needs, and `C` (SQLSTATE) is what makes an error identifiable rather than merely
 /// readable. `D` and `H` are included when present because "detail" and "hint" are
 /// exactly the parts that turn a rejection into a fix.
-pub fn error_text(m: &Msg) -> String {
-    let mut cur = m.cur();
+pub fn error_text(body: &[u8]) -> String {
+    let mut cur = Cur::new(body);
     let (mut msg, mut code, mut detail, mut hint) = (String::new(), String::new(), String::new(), String::new());
     while let Ok(f) = cur.u8() {
         // A zero field type is the terminator; anything unreadable after it means the

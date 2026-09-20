@@ -156,7 +156,9 @@ construct a `Connection` — ADR 0032's gate-the-body rule — which also makes
 
 `int2/int4/int8` → Int, `float4/float8/numeric` → Float, `bool` → Bool, everything else →
 the text the server printed. So `uuid`, `jsonb`, timestamps, ranges, extension types and
-domains all read on day one.
+domains all read on day one. (Text is the format every column CAN be read in, and the one a
+statement's first run uses; since 2026-09-20 five fixed-width types cross in binary on later
+runs — the same values, see that addendum.)
 
 This is ADR 0033 Stage 2's rule for foreign parquet dtypes, applied for the same reason:
 refusing a column because the reader has no opinion about it is worse than handing back what
@@ -186,9 +188,11 @@ visible in `describe`, which is where a reader can see the trade.
 
 - **A driver crate.** Rejected on dependency cost: an async runtime for a synchronous
   language, to speak a protocol that has not changed since 2003.
-- **Binary result format.** Rejected: a decoder per OID and a new failure mode per decoder,
-  for a saving invisible next to the network round trip — and it would have made the
-  unknown-type case a refusal instead of text.
+- **Binary result format — for everything.** Rejected: a decoder per OID and a new failure
+  mode per decoder, and it would have made the unknown-type case a refusal instead of text.
+  REVISITED 2026-09-20 for exactly five types, once a measurement said what it buys: the
+  saving is not invisible on a result of any size, because for `float8` it is the SERVER's
+  printing that binary removes. Text stays the universal format; see that addendum.
 - **Supporting MD5 auth.** Rejected: a client that downgrades on request is worse than one
   that says no. `sslmode=prefer` is the same sentence about a different layer, and is
   refused for the same reason.
@@ -254,3 +258,99 @@ unbuilt until a measurement says the text parse is what remains.
 Proven without a server by the fake one in `src/pg` — which learned statement names, `Close`,
 the skip-to-Sync an error starts, and how to forget its statements — and against PostgreSQL
 17 in a container: every stale-name case answers exactly what the unnamed statement answered.
+
+## Addendum 2026-09-20 — a result is decoded where it arrives, and a statement's columns are remembered
+
+Asked to make the driver faster still, the first thing done was to find out where a round
+trip's time goes, from outside the process: its own user and system time against the wall.
+
+| µs per round trip | wall | user | sys |
+|---|--:|--:|--:|
+| `select 1` | 157 | 7 | 32 |
+| find by pk | 192 | 13 | 31 |
+| 1 000 rows x 7 mixed columns | 770 | 377 | 160 |
+| 1 000 rows x 4 `float8` | 660 | 212 | 110 |
+| 10 000 rows x 7 mixed columns | 6 000 | 3 873 | 1 267 |
+
+Two different answers. **A small query has almost nothing left in the client**: 7–13 µs of
+its own code in a 150–190 µs round trip, the rest the socket and the server — so nothing
+below claims a small-query win, and none was found. **A result of any size was half
+client**, 54 ns a cell, and every nanosecond of it allocation:
+
+- each message was a fresh `Vec` — allocated, zeroed, filled from the read buffer, parsed,
+  freed — a thousand times for a thousand rows;
+- each CELL became a `String` (validated, copied, pushed), and a number was parsed from that
+  string in a second pass at the end and the string freed: 7 000 allocations for a 1 000 x 7
+  result before a frame existed;
+- then the engine interned every text column, hashing each of those strings and — the text
+  almost always being in the dictionary already — throwing it away.
+
+**Decoded where it arrives.** `Stream::next_msg` (`src/pg/stream.rs`) lends a message's body
+from the buffer it was read into; only one larger than the buffer is gathered, into a second
+buffer that is kept. A number is parsed from those bytes straight into the vectors the engine
+keeps (`ColData::IntValid`/`FloatValid`: values with their validity alongside, the native
+column's own shape). Text is interned AS IT ARRIVES, through the engine's one hash-consing
+builder, which moved to the seam for it (`backend::strbuild`, `ColData::StrBuilt`): one
+allocation per DISTINCT value where there was one per cell. A query is framed in place in a
+buffer the connection keeps (`begin_msg`/`end_msg`), parameters written into it directly.
+
+**What a statement returns is remembered with its name.** The first run asks the server to
+describe the result, as every run used to. Later runs neither ask nor wait for that, and —
+knowing each column's type BEFORE Bind is sent, which is the only time a format can be asked
+for — take five types in binary: `int2`, `int4`, `int8`, `bool`, `float8`. The measurement
+that decided it is the `float8` row above against the integer one: the same cells cost 250 µs
+more, and that is the server printing each float as the shortest decimal that reads back —
+work no client can speed up and binary simply does not do.
+
+It is only ever the same value in another encoding, which is the rule that picked the five.
+`float8` text has been exact since PostgreSQL 12, and binary floats are gated on the
+server's reported version, because a statement's first run (text) and its later ones
+(binary) must never disagree. `float4` and `numeric` STAY text: their text is what Helix's
+Float means by them — `1.1`, not the `1.100000023841858` a widened 32-bit float is, and a
+decimal parsed once, correctly rounded. Everything else stays text because text is what makes
+an unknown type readable at all (D5). NaN is one value in either format. Every decoder is
+fixed-width, so the only new failure is "the server sent the wrong number of bytes", which
+is an error naming the column.
+
+The remembered columns cannot go stale unnoticed. A named statement's result type is FIXED
+on the server: when it replans it compares names, types, typmods and collations, and answers
+`0A000` rather than return a different shape — the code that already sends the statement
+cache back to Parse. Verified live under a prepared `select *`: add a column, RENAME it,
+change its type, drop it, widen an `int2` to `int8` — each answers the new shape on the very
+next call, in both formats.
+
+**A connection that can no longer be trusted closes itself.** Found while moving the decoder:
+an exchange that did not end at `ReadyForQuery` — the read timed out, the socket dropped, a
+cell was not UTF-8 and the read stopped there — left the server's replies unread, and the
+connection open. The NEXT statement on it would have read them as its own: not an error, the
+wrong rows. Now an error the server reports is read to its end and the connection carries
+on; a cell that is not its column's type is remembered while the rest of the result is still
+read, then reported; and anything else — a failure with the protocol state unknown — is the
+connection's last act. Every later call says `this connection is closed — an earlier statement
+on it failed with: …` without touching the socket. A timeout also says what it is
+(`the server did not answer within 30 s`) where it said `Resource temporarily unavailable
+(os error 11)`. And a `COPY … FROM STDIN` — which makes the server WAIT for rows a Helix
+connection has no way to be handed — is refused with `CopyFail` the moment the server asks:
+an ordinary error in 0.00 s where it was the whole read timeout and then a dead connection.
+
+Measured live against PostgreSQL 17 in a container (one codegen unit both sides, three
+interleaved rounds, min per row; `866aca4` → this), µs per round trip:
+
+| | before | after | |
+|---|--:|--:|--:|
+| `select 1` | 150.7 | 148.4 | 0.98 |
+| find by pk | 188.8 | 187.0 | 0.99 |
+| range + order, limit 20 | 207.6 | 194.2 | 0.94 |
+| in (3), limit 50 | 255.9 | 240.9 | 0.94 |
+| 1 000 rows x 7 mixed | 700.6 | 545.8 | 0.78 |
+| 1 000 rows x 4 `float8` | 609.7 | 384.2 | 0.63 |
+| 1 000 rows x 4 int | 408.6 | 375.5 | 0.92 |
+| 10 000 rows x 7 mixed | 5 612.8 | 3 765.6 | 0.67 |
+
+The same through verified TLS (a throwaway CA, `sslrootcert=`): 0.74, 0.65 and 0.63 on the
+three large rows, and the caller-visible script — every type with its NULLs and extremes run
+three times, every way a name or a remembered column goes stale, errors mid-result, 300
+distinct statements — prints the same 228 lines on both binaries, in the clear and under TLS.
+
+Measured and declined: a 64 KiB read buffer (1.00x everywhere — the server flushes at 8 KiB,
+so there is never more than the 16 KiB buffer's worth waiting).

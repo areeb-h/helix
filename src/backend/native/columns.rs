@@ -10,7 +10,6 @@
 //! an order of magnitude. A worst-case all-unique column degrades to codes
 //! 0..n — four extra bytes per row, nothing else lost.
 
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::backend::ColData;
@@ -29,96 +28,15 @@ pub enum Col {
     Null { len: usize },
 }
 
-/// A dictionary key that hashes and compares as its text, so the builder can
-/// probe with a bare `&str` (std has no `Borrow<str>` for `Rc<String>`).
-#[derive(PartialEq, Eq, Hash)]
-struct DictKey(Rc<String>);
-
-impl std::borrow::Borrow<str> for DictKey {
-    fn borrow(&self) -> &str {
-        self.0.as_str()
-    }
-}
-
-/// Hash-consing builder for a dictionary-encoded string column.
-pub struct StrBuilder {
-    dict: Vec<Rc<String>>,
-    index: HashMap<DictKey, u32>,
-    codes: Vec<u32>,
-    valid: Vec<bool>,
-}
+/// The hash-consing builder for a dictionary-encoded string column. It lives at the seam
+/// (`backend::strbuild`) so a reader can fill one cell by cell; the engine is where it becomes a
+/// column.
+pub use crate::backend::strbuild::StrBuilder;
 
 impl StrBuilder {
-    pub fn with_capacity(rows: usize) -> StrBuilder {
-        StrBuilder {
-            dict: Vec::new(),
-            index: HashMap::new(),
-            codes: Vec::with_capacity(rows),
-            valid: Vec::with_capacity(rows),
-        }
-    }
-
-    pub fn push_missing(&mut self) {
-        self.codes.push(0);
-        self.valid.push(false);
-    }
-
-    pub fn push_str(&mut self, s: &str) {
-        if let Some(&c) = self.index.get(s) {
-            self.codes.push(c);
-            self.valid.push(true);
-            return;
-        }
-        let rc = Rc::new(s.to_string());
-        let c = self.dict.len() as u32;
-        self.dict.push(rc.clone());
-        self.index.insert(DictKey(rc), c);
-        self.codes.push(c);
-        self.valid.push(true);
-    }
-
-    pub fn push_rc(&mut self, s: &Rc<String>) {
-        if let Some(&c) = self.index.get(s.as_str()) {
-            self.codes.push(c);
-            self.valid.push(true);
-            return;
-        }
-        let c = self.dict.len() as u32;
-        self.dict.push(s.clone());
-        self.index.insert(DictKey(s.clone()), c);
-        self.codes.push(c);
-        self.valid.push(true);
-    }
-
-    /// The code for `s`, interning it if new — the remap half of a
-    /// chunk-dictionary splice (per DISTINCT value, not per cell).
-    pub fn intern(&mut self, s: &str) -> u32 {
-        if let Some(&c) = self.index.get(s) {
-            return c;
-        }
-        let rc = Rc::new(s.to_string());
-        let c = self.dict.len() as u32;
-        self.dict.push(rc.clone());
-        self.index.insert(DictKey(rc), c);
-        c
-    }
-
-    /// Append a cell by an already-interned code.
-    pub fn push_code(&mut self, code: u32) {
-        self.codes.push(code);
-        self.valid.push(true);
-    }
-
-    /// Adopt pre-built codes/validity wholesale (a worker thread's segment
-    /// whose dictionary was interned in the same order — `intern` on a fresh
-    /// builder assigns 0,1,2,… exactly like the worker did).
-    pub fn set_codes(&mut self, codes: Vec<u32>, valid: Vec<bool>) {
-        self.codes = codes;
-        self.valid = valid;
-    }
-
     pub fn finish(self) -> Col {
-        Col::Str { dict: Rc::new(self.dict), codes: self.codes, valid: self.valid }
+        let (dict, codes, valid) = self.into_parts();
+        Col::Str { dict: Rc::new(dict), codes, valid }
     }
 }
 
@@ -502,6 +420,17 @@ impl Col {
                 let valid = vec![true; v.len()];
                 Col::Bool { vals: v, valid }
             }
+            // Already the engine's own shape. A reader keeps the two vectors in step by
+            // construction; the resize makes a slip a missing cell rather than a panic.
+            ColData::IntValid(vals, mut valid) => {
+                valid.resize(vals.len(), false);
+                Col::I64 { vals, valid }
+            }
+            ColData::FloatValid(vals, mut valid) => {
+                valid.resize(vals.len(), false);
+                Col::F64 { vals, valid }
+            }
+            ColData::StrBuilt(b) => b.finish(),
         }
     }
 

@@ -4,6 +4,28 @@
 
 ### Performance
 
+- **A PostgreSQL result is decoded where it arrives, and a statement's columns are remembered.**
+  Measured from outside the process first: a small query has 7–13 µs of client code in a
+  150–190 µs round trip, so nothing was left there; a result of any size was HALF client —
+  54 ns a cell, all of it allocation. Each message was a fresh `Vec`, each cell a `String`
+  that a number was parsed out of in a second pass, and each text column was then interned by
+  the engine, which hashed those strings and mostly threw them away. Now a message's body is
+  lent from the read buffer (`Stream::next_msg`), numbers are parsed from those bytes into the
+  vectors the engine keeps (`ColData::IntValid`/`FloatValid`), and text is interned as it
+  arrives through the engine's own builder, moved to the seam for it (`backend::strbuild`,
+  `ColData::StrBuilt`) — one allocation per distinct value, not per cell. And what a statement
+  returns is kept with its name: from its second run the server is not asked to describe the
+  result again, and `int2`/`int4`/`int8`/`bool`/`float8` cross in BINARY — the same values
+  (`float8` text is exact from PostgreSQL 12, which is what binary floats are gated on;
+  `float4` and `numeric` stay text, because `1.1` must not become `1.100000023841858`), minus
+  the server printing every float as its shortest round-trip decimal, which was 250 µs of a
+  1 000 x 4 float read and nothing a client could ever speed up. Live against PostgreSQL 17:
+  1 000 rows x 7 mixed columns 701 → 546 µs, 1 000 x 4 `float8` 610 → 384, 10 000 x 7 5.61 →
+  3.77 ms; small round trips unchanged. The remembered columns cannot go stale
+  unnoticed — the server answers `0A000` rather than return a different shape, verified under
+  a prepared `select *` for add, rename, retype, drop and widen. ADR 0044's addendum has the
+  table and what was measured and declined (a 64 KiB buffer: 1.00x).
+
 - **A PostgreSQL connection prepares each statement once (field build, §1.61).** Every query
   was Parsed from scratch as the unnamed statement, so the server parsed, analysed and
   rewrote the same text on every call — measured by the field build against pgx and GORM on
@@ -26,6 +48,23 @@
   server that now knows statement names, `Close` and how to forget.
 
 ### Fixed
+
+- **A PostgreSQL connection whose exchange did not finish is never used again.** A read that
+  timed out, a socket that dropped, a text cell that was not UTF-8 — each ended the read
+  where it stood and left the server's remaining replies on the wire, with the connection
+  still open: the NEXT statement on it would have read them as its own rows, silently. An
+  error the server reports is now read to `ReadyForQuery` and the connection carries on; a
+  cell that is not its column's type is reported after the rest of the result has been read;
+  and a failure that leaves the protocol state unknown closes the connection, so every later
+  call says `this connection is closed — an earlier statement on it failed with: …` instead
+  of touching the socket. A timeout says `the server did not answer within 30 s` where it
+  said `Resource temporarily unavailable (os error 11)`. And `execute("copy t from stdin")`,
+  which makes the server wait for rows this connection cannot be handed, is refused the
+  moment the server asks — an ordinary error at once, where it was the whole 30 s and then a
+  dead connection. Pinned by `a_connection_whose_exchange_did_not_finish_is_never_used_again`,
+  `a_bad_cell_is_an_error_and_the_connection_carries_on` and
+  `a_copy_from_stdin_is_refused_at_once_and_the_connection_carries_on`; all three verified
+  against a live PostgreSQL 17 as well.
 
 - **A call through a record built at run time was never specialized, and `P = People.on(db)`
   is exactly that (field build, §1.62).** The API an ORM recommends — bind the connection

@@ -81,6 +81,23 @@ pub fn build_frame(
                 ColData::IntOpt(v) => Column::new(n, v),
                 ColData::Float(v) => Column::new(n, v),
                 ColData::Bool(v) => Column::new(n, v),
+                ColData::IntValid(vals, valid) => Column::new(
+                    n,
+                    vals.into_iter().zip(valid).map(|(v, ok)| ok.then_some(v)).collect::<Vec<Option<i64>>>(),
+                ),
+                ColData::FloatValid(vals, valid) => Column::new(
+                    n,
+                    vals.into_iter().zip(valid).map(|(v, ok)| ok.then_some(v)).collect::<Vec<Option<f64>>>(),
+                ),
+                ColData::StrBuilt(b) => {
+                    let (dict, codes, valid) = b.into_parts();
+                    let cells: Vec<Option<&str>> = codes
+                        .iter()
+                        .zip(&valid)
+                        .map(|(c, ok)| if *ok { dict.get(*c as usize).map(|s| s.as_str()) } else { None })
+                        .collect();
+                    Column::new(n, cells)
+                }
             }
         })
         .collect();

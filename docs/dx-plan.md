@@ -581,6 +581,30 @@ primitives themselves. Candidate found along the way, NOT built: a builtin call 
 even though the compiler already assigned the index — `type_of` as an op measured ~4 ns
 against `abs()`'s ~41, so some of that 36 ns gap is name dispatch that every builtin call
 in every program pays.
+**The driver, again (2026-09-20) — a result decoded where it arrives; DONE.** Asked to go
+further, measured first from OUTSIDE the process (user and system time against the wall): a
+small query is 7–13 µs of client in 150–190 µs, so nothing was claimed there; a result of any
+size was half client, 54 ns a cell, all allocation. `src/pg` is now `mod.rs` (the verbs and the
+connection value), `connect.rs`, `statement.rs` (the `Session`: prepared statements, what
+each RETURNS, the framing buffer; `exchange`), `stream.rs` (`Stream::next_msg` lends a
+message's body from the read buffer), `types.rs` (typed cells parsed from the bytes; text or
+binary), `wire_tests.rs`. THE SEAM GREW: `backend::strbuild::StrBuilder` is the engine's one
+hash-consing text builder moved where a reader can fill it (`ColData::StrBuilt`), and
+`ColData::IntValid`/`FloatValid` are the native column's own shape — any cell-at-a-time
+reader (VCF, SAM, GFF, SQLite) can adopt them for the same saving. BINARY for
+int2/int4/int8/bool/float8 from a statement's SECOND run (its columns are remembered with its
+name, so Describe is skipped and formats are known before Bind): the rule is "the same value
+in another encoding" — float8 gated on PostgreSQL 12+ (exact text), float4/numeric stay text.
+What decided it: 1 000 x 4 float8 cost 250 µs more than 1 000 x 4 int, which is the SERVER
+printing shortest-round-trip decimals. A CONNECTION WHOSE EXCHANGE DID NOT REACH
+`ReadyForQuery` CLOSES ITSELF (`Fail.broken`, `State::Closed`): the alternative was the next
+statement reading its predecessor's unread replies as its own rows. Live harness:
+`target/bench/f89/` (`withpg.sh` + `ab.sh`/`cpu.sh`/`tls.sh`; `stale.helix` prints everything
+a caller can see — 228 lines identical on both binaries, plaintext and TLS). Measured and
+declined: 64 KiB read buffer (1.00x). NEXT in the same arc: the interner itself hashes a
+distinct value two to three times (`get` then `insert`, again on growth) — a `HashTable` of
+codes hashes it once, 76 → 52 ns a distinct cell, still SipHash.
+
 **§1.61 (2026-09-19) — a statement is prepared once per connection, DONE.** The web field
 build measured Helix's raw PostgreSQL connection equal to pgx with its statement cache OFF,
 and that cache worth 23–57 µs of a ~150 µs round trip — the whole gap to GORM. `src/pg/mod.rs`:
@@ -599,8 +623,9 @@ unbuffered reads per message, ~2 000 per thousand rows, and the commit script RE
 cache alone because that row read 6% slower with it — tiny reads make a result's time follow
 the server's pacing, and a prepared statement answers sooner. `Stream` now owns a 16 KiB read
 buffer (`src/pg/tls.rs`: the enum became `Raw` underneath, two construction sites changed, no
-signature did). Their second ask — binary results for fixed-width columns — is therefore NOT
-needed for that row; build it only if a measurement AFTER this says the text parse remains.
+signature did). Their second ask — binary results for fixed-width columns — was not needed
+for that row; it was built on 2026-09-20 (entry above) once a measurement said what it buys:
+the server's float printing, not the client's parse.
 **§1.62 (2026-09-19) — a call through a record built at run time, DEVIRTUALIZED.** The web
 field build's `P = People.on(db)`: `db` is I/O, the sandbox never holds `P`, every verb on it
 paid 4.95 µs against the unbound model's 0.9. TWO DESIGNS WERE THROWN AWAY FIRST, and why is
