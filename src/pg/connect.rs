@@ -4,7 +4,7 @@
 use std::net::TcpStream;
 use std::time::Duration;
 
-use super::conninfo::{SslMode, Target};
+use super::conninfo::{Patience, SslMode, Target};
 use super::proto::{error_text, put_cstr, write_msg, Cur};
 use super::statement::Session;
 use super::stream::Stream;
@@ -13,8 +13,19 @@ use super::{scram, tls};
 /// Protocol 3.0, as `libpq` still requests by default.
 const PROTOCOL_3_0: i32 = 196_608;
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long the HANDSHAKE waits for each reply — and how long the server may be silent
+/// afterwards, when the URL says nothing about it. A server that accepts a connection and then
+/// says nothing is broken, not busy, so the handshake's bound is not the URL's to move.
+const SILENCE: Duration = Duration::from_secs(30);
+
+/// How long past a statement's own limit the client keeps listening before it concludes the
+/// server is not going to answer at all.
+const GRACE: Duration = Duration::from_secs(10);
+
+/// What the error says when the default silence runs out: the wait is the URL's to change.
+const WAY_OUT: &str = " — a statement that needs longer says so in its connection's URL: \
+                       `?timeout=300` lets one run five minutes (the server then ends an over-long \
+                       statement itself, and the connection carries on), `timeout=0` as long as it takes";
 
 /// Connect, authenticate, and leave the session ready for a query.
 pub fn connect(t: &Target, read_only: bool) -> Result<Session, String> {
@@ -23,21 +34,22 @@ pub fn connect(t: &Target, read_only: bool) -> Result<Session, String> {
         .map_err(|e| format!("cannot resolve `{addr}`: {e}"))?
         .collect();
     let first = addrs.first().ok_or_else(|| format!("`{addr}` resolved to no address"))?;
-    let s = TcpStream::connect_timeout(first, CONNECT_TIMEOUT)
+    let s = TcpStream::connect_timeout(first, t.connect_timeout)
         .map_err(|e| format!("cannot connect to `{addr}`: {e}"))?;
     // A bounded wait, so a server that accepts and then stalls cannot hang the program.
-    s.set_read_timeout(Some(READ_TIMEOUT)).map_err(|e| format!("setting a read timeout: {e}"))?;
-    s.set_write_timeout(Some(READ_TIMEOUT)).map_err(|e| format!("setting a write timeout: {e}"))?;
+    s.set_read_timeout(Some(SILENCE)).map_err(|e| format!("setting a read timeout: {e}"))?;
+    s.set_write_timeout(Some(SILENCE)).map_err(|e| format!("setting a write timeout: {e}"))?;
     // Small messages, and latency is what matters on a query round trip.
     let _ = s.set_nodelay(true);
+    keep_alive(&s);
 
     // TLS FIRST, before the startup packet — which is the message carrying the user name,
     // and which is immediately followed by the password exchange. The negotiation is one
     // byte and it is not a preference: a server that answers "no" ends the connection
     // here rather than continuing in the clear.
     let mut s = match t.sslmode {
-        SslMode::Disable => Stream::plain(s, Some(READ_TIMEOUT)),
-        SslMode::VerifyFull => tls::negotiate(s, &t.host, t.sslrootcert.as_deref(), Some(READ_TIMEOUT))?,
+        SslMode::Disable => Stream::plain(s, Some(SILENCE)),
+        SslMode::VerifyFull => tls::negotiate(s, &t.host, t.sslrootcert.as_deref(), Some(SILENCE))?,
     };
 
     let mut body = Vec::new();
@@ -62,13 +74,79 @@ pub fn connect(t: &Target, read_only: bool) -> Result<Session, String> {
         put_cstr(&mut body, "default_transaction_read_only");
         put_cstr(&mut body, "on");
     }
+    // A LIMIT ON HOW LONG A STATEMENT RUNS IS THE SERVER'S TO ENFORCE. This client's only
+    // bound used to be its own read timeout — thirty seconds of silence, not the caller's to
+    // move — and a statement that outlived it was abandoned: the connection closed, because
+    // its reply was still coming, and the server left working on an answer nobody would read.
+    // `timeout=N` asks the SERVER instead (`statement_timeout`, from the first byte and for no
+    // round trip, like read-only above): running too long is then an ORDINARY ERROR — the
+    // server stops the statement itself, says so (`57014`), and the connection carries on.
+    // The client's own wait sits a little past the limit, so the server's verdict arrives
+    // first and the wait is only ever what it should be: a bound on a server that has stopped
+    // answering altogether.
+    if let Patience::Limit(limit) = t.patience {
+        put_cstr(&mut body, "statement_timeout");
+        put_cstr(&mut body, &limit.as_millis().to_string());
+    }
     body.push(0);
     write_msg(&mut s, None, &body)?;
 
     authenticate(&mut s, t)?;
     let exact_float_text = until_ready(&mut s)?;
-    Ok(Session::new(s, exact_float_text))
+    let mut session = Session::new(s, exact_float_text);
+    match t.patience {
+        // Nothing asked: nothing changes, except that the error now names the way out.
+        Patience::Silence => session.stream.set_wait(Some(SILENCE), WAY_OUT)?,
+        Patience::Limit(limit) => {
+            session.stream.set_wait(Some(limit + GRACE), "")?;
+            session.limit = Some(limit);
+        }
+        // As long as it takes — which `keep_alive` keeps from meaning "forever" when there is
+        // nobody left to answer.
+        Patience::Unbounded => session.stream.set_wait(None, "")?,
+    }
+    Ok(session)
 }
+
+/// Ask the kernel to notice a peer that has gone — a host that lost power, a NAT that forgot
+/// the flow — by probing a connection that has been quiet for a minute. With `timeout=0` a
+/// statement may wait as long as it takes, and this is what keeps "as long as it takes" from
+/// meaning "forever" when there is nobody left to answer; on a long-lived connection it turns
+/// the next statement's long wait into a prompt error. Best effort: a platform or a socket
+/// that refuses it is no worse off than before.
+#[cfg(unix)]
+fn keep_alive(s: &TcpStream) {
+    use std::os::fd::AsRawFd;
+    let fd = s.as_raw_fd();
+    let set = |level: libc::c_int, name: libc::c_int, value: libc::c_int| {
+        // SAFETY: `fd` is this live socket's descriptor for the whole call, and the option
+        // value is a `c_int` passed by pointer with its own size — the documented contract
+        // of `setsockopt` for every option set here.
+        unsafe {
+            libc::setsockopt(
+                fd,
+                level,
+                name,
+                &value as *const libc::c_int as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+    };
+    set(libc::SOL_SOCKET, libc::SO_KEEPALIVE, 1);
+    // Quiet for a minute, then a probe every ten seconds, and six unanswered is a dead peer.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    set(libc::IPPROTO_TCP, libc::TCP_KEEPIDLE, 60);
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    set(libc::IPPROTO_TCP, libc::TCP_KEEPALIVE, 60);
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios"))]
+    {
+        set(libc::IPPROTO_TCP, libc::TCP_KEEPINTVL, 10);
+        set(libc::IPPROTO_TCP, libc::TCP_KEEPCNT, 6);
+    }
+}
+
+#[cfg(not(unix))]
+fn keep_alive(_: &TcpStream) {}
 
 /// Read to the first `ReadyForQuery`, keeping the one thing the server says about itself that
 /// this client acts on: whether its `float8` text is exact. `NoticeResponse`,
@@ -170,6 +248,30 @@ fn authenticate(s: &mut Stream, t: &Target) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::prints_floats_exactly;
+
+    /// The kernel is asked to probe a quiet connection — read back from the socket itself.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn a_connection_asks_the_kernel_to_notice_a_dead_peer() {
+        use std::os::fd::AsRawFd;
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let s = std::net::TcpStream::connect(l.local_addr().expect("addr")).expect("connect");
+        super::keep_alive(&s);
+        let get = |level: libc::c_int, name: libc::c_int| {
+            let mut value: libc::c_int = -1;
+            let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+            // SAFETY: a live descriptor, and a `c_int` with its size — `getsockopt`'s contract.
+            let rc = unsafe {
+                libc::getsockopt(s.as_raw_fd(), level, name, &mut value as *mut libc::c_int as *mut libc::c_void, &mut len)
+            };
+            assert_eq!(rc, 0);
+            value
+        };
+        assert_eq!(get(libc::SOL_SOCKET, libc::SO_KEEPALIVE), 1);
+        assert_eq!(get(libc::IPPROTO_TCP, libc::TCP_KEEPIDLE), 60);
+        assert_eq!(get(libc::IPPROTO_TCP, libc::TCP_KEEPINTVL), 10);
+        assert_eq!(get(libc::IPPROTO_TCP, libc::TCP_KEEPCNT), 6);
+    }
 
     #[test]
     fn a_float_is_binary_only_from_a_server_whose_text_is_exact() {

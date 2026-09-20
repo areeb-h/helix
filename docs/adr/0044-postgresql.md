@@ -381,3 +381,46 @@ server's own parser, element for element (`target/bench/f92/arrays.helix`): comm
 backslashes, braces, the text `NULL`, the empty string, non-ASCII, a newline, a `missing`;
 `NaN` and infinity in a `float8[]`; two dimensions; an empty array; 70 000 keys in one
 parameter; and the same statement with two list lengths is ONE prepared statement.
+
+## Addendum 2026-09-20 — how long a statement may take
+
+TOTALITY put a bound on every wait (the module note: a server that accepts a connection and
+then says nothing must not hang a program that cannot be interrupted from inside), and the
+bound was one number for everything: a 30 s read timeout. For the handshake that is right. For
+a statement it conflated two things. It is a bound on SILENCE, so a result that streams for
+ten minutes was always fine, while a statement that COMPUTES for 31 s before its first row —
+an aggregate over a large table, which is what a scientific language is for — could not be
+run at all. And when it fired, the statement was abandoned rather than ended: the connection
+is closed (its reply is still coming; addendum above), and the server carries on producing
+an answer nobody will read.
+
+The URL now says (`conninfo::Patience`):
+
+- **nothing** — what it always was: the server may be silent for thirty seconds. The error
+  that ends that wait now names the two spellings below.
+- **`timeout=N`** — the SERVER ends a statement that runs past N seconds. It is sent as
+  `statement_timeout` in the startup packet, the way read-only is: in force from the first
+  byte, for no round trip. Running too long is then an ORDINARY error — the server stops the
+  work itself, answers `57014`, and the connection carries on; the message adds where the
+  limit lives, recognised by the SQLSTATE and the clock rather than by the server's wording,
+  which follows `lc_messages`. The client's own wait moves to N + 10 s, so the server's
+  verdict always arrives first and the wait is what it should be: a bound on a server that
+  has stopped answering altogether.
+- **`timeout=0`** — as long as it takes.
+
+`connect_timeout=N` (10) bounds the TCP connection; the handshake's own 30 s is not the URL's
+to move, because a server that goes quiet mid-handshake is broken, not busy.
+
+Every connection also asks the kernel to notice a peer that has gone (`keep_alive` in
+`src/pg/connect.rs`: a probe after a minute's quiet, then every ten seconds, six unanswered is
+dead — `libc`, already a dependency, Unix only). With `timeout=0` that is what keeps "as long
+as it takes" from meaning "forever" when the host at the other end lost power; on a
+long-lived connection it turns the next statement's long wait into a prompt error.
+
+Rejected: making a limit the DEFAULT. `statement_timeout` bounds a statement's whole life,
+streaming included, so a default would end large reads that work today. The default's meaning
+is unchanged; only its error message grew.
+
+Rejected: the client giving up and sending `CancelRequest`. That is what a client must do
+when only IT knows the limit; the server knowing it is strictly better — no second connection,
+no race between the cancel and the reply, and the connection survives.

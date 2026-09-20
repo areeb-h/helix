@@ -4,6 +4,21 @@
 
 ### Added
 
+- **How long a PostgreSQL statement may take is the URL's to say: `?timeout=`.** The only bound
+  was this client's own read timeout — thirty seconds of silence, not the caller's to move —
+  so a statement that computes for 31 s before its first row could not be run at all, and one
+  that outlived the wait was abandoned: the connection closed (its reply was still coming)
+  and the server left working on an answer nobody would read. `timeout=N` asks the SERVER to
+  end a statement that runs past N seconds (`statement_timeout`, in the startup packet, no
+  round trip): an ORDINARY error — the server stops the statement itself, `57014`, the message
+  says where the limit lives — and the connection carries on. `timeout=0` is as long as it
+  takes. Saying nothing changes nothing, except that the error which ends that wait now names
+  the way out. `connect_timeout=N` bounds the TCP connection (10). Every connection also asks
+  the kernel to probe a peer that has been quiet for a minute (TCP keepalive; Unix), so "as
+  long as it takes" never means "forever" when the host at the other end has gone. Verified
+  live: `timeout=2` ends a 5 s statement at 2 s and the next query answers; `timeout=0` sits
+  through 33 s.
+
 - **An Array is a PostgreSQL parameter, and so is Bytes.** `c.query("select * from people
   where id = any($1)", [[3, 1, 2]])` binds the list as ONE parameter — one prepared statement
   for a list of any length, where `in ($1, $2, …)` is a different statement text for every

@@ -29,6 +29,9 @@ pub struct Session {
     /// in a transaction, `E` in a transaction that has failed and will answer nothing but its
     /// end.
     pub status: u8,
+    /// How long the server was asked to let one statement run on this session (`timeout=N`);
+    /// `None` when it was not asked.
+    pub limit: Option<std::time::Duration>,
 }
 
 /// A framing buffer is kept between exchanges up to this size and let go past it, so one
@@ -37,7 +40,7 @@ const KEEP_WIRE: usize = 1024 * 1024;
 
 impl Session {
     pub fn new(stream: Stream, exact_float_text: bool) -> Session {
-        Session { stream, prepared: Prepared::default(), wire: Vec::new(), exact_float_text, status: b'I' }
+        Session { stream, prepared: Prepared::default(), wire: Vec::new(), exact_float_text, status: b'I', limit: None }
     }
 }
 
@@ -162,6 +165,11 @@ pub struct Fail {
 }
 
 impl Fail {
+    /// The server CANCELLED the statement (`57014`) — its own timeout, or someone's request.
+    pub fn cancelled(&self) -> bool {
+        self.code == "57014"
+    }
+
     /// Refused before a byte was sent: the connection is exactly where it was.
     fn unsent(text: String) -> Fail {
         Fail { text, code: String::new(), parsed: false, broken: false }

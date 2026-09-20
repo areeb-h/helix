@@ -60,6 +60,8 @@ pub struct Stream {
     gathered: Vec<u8>,
     /// How long a read waits before it gives up — named in the error when it does.
     wait: Option<Duration>,
+    /// What a caller can do about a wait that ran out, when there is something.
+    way_out: &'static str,
 }
 
 impl Write for Stream {
@@ -79,7 +81,7 @@ impl Write for Stream {
 
 impl Stream {
     fn over(raw: Raw, wait: Option<Duration>) -> Self {
-        Stream { raw, buf: vec![0u8; READ_BUFFER], pos: 0, end: 0, gathered: Vec::new(), wait }
+        Stream { raw, buf: vec![0u8; READ_BUFFER], pos: 0, end: 0, gathered: Vec::new(), wait, way_out: "" }
     }
 
     /// A connection in the clear — `sslmode=disable`, and nothing else reaches this. `wait` is
@@ -91,6 +93,19 @@ impl Stream {
     /// A connection under TLS, the handshake already driven.
     pub fn tls(s: StreamOwned<ClientConnection, TcpStream>, wait: Option<Duration>) -> Self {
         Stream::over(Raw::Tls(Box::new(s)), wait)
+    }
+
+    /// Change how long a read waits — `None` for as long as it takes — and what the error says
+    /// can be done when it runs out. The handshake has one bound and a statement another.
+    pub fn set_wait(&mut self, wait: Option<Duration>, way_out: &'static str) -> Result<(), String> {
+        let socket = match &self.raw {
+            Raw::Plain(s) => s,
+            Raw::Tls(s) => &s.sock,
+        };
+        socket.set_read_timeout(wait).map_err(|e| format!("setting a read timeout: {e}"))?;
+        self.wait = wait;
+        self.way_out = way_out;
+        Ok(())
     }
 
     /// Whether this connection is encrypted — for the diagnostic label, so a program that
@@ -121,7 +136,7 @@ impl Stream {
                     return Ok(());
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(read_error(&e, self.wait)),
+                Err(e) => return Err(read_error(&e, self.wait, self.way_out)),
             }
         }
     }
@@ -176,7 +191,7 @@ impl Stream {
                 Ok(0) => return Err(format!("reading message '{}': the connection closed", tag as char)),
                 Ok(n) => at += n,
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(read_error(&e, self.wait)),
+                Err(e) => return Err(read_error(&e, self.wait, self.way_out)),
             }
         }
         Ok((tag, &self.gathered))
@@ -186,11 +201,11 @@ impl Stream {
 /// A failed read, said the way a reader can act on. A timeout arrives as `WouldBlock` on Unix
 /// and `TimedOut` on Windows, and "Resource temporarily unavailable (os error 11)" is not a
 /// sentence anyone should have to decode.
-fn read_error(e: &std::io::Error, wait: Option<Duration>) -> String {
+fn read_error(e: &std::io::Error, wait: Option<Duration>, way_out: &str) -> String {
     use std::io::ErrorKind::{TimedOut, WouldBlock};
     match (e.kind(), wait) {
         (WouldBlock | TimedOut, Some(w)) => {
-            format!("the server did not answer within {} s", w.as_secs())
+            format!("the server did not answer within {} s{way_out}", w.as_secs())
         }
         _ => format!("reading from the server: {e}"),
     }
@@ -274,7 +289,7 @@ mod tests {
         let addr = l.local_addr().expect("addr");
         let hold = std::thread::spawn(move || {
             let c = l.accept().map(|(c, _)| c);
-            std::thread::sleep(Duration::from_millis(1500));
+            std::thread::sleep(Duration::from_millis(2600));
             drop(c);
         });
         let tcp = TcpStream::connect(addr).expect("connect");
@@ -283,6 +298,10 @@ mod tests {
         let mut s = Stream::plain(tcp, Some(wait));
         let e = s.next_msg().expect_err("nothing arrives");
         assert_eq!(e, "the server did not answer within 1 s");
+        // And when there is something a caller can do about it, the error says what.
+        s.set_wait(Some(wait), " — and here is the way out").expect("set");
+        let e = s.next_msg().expect_err("still nothing");
+        assert_eq!(e, "the server did not answer within 1 s — and here is the way out");
         let _ = hold.join();
     }
 }

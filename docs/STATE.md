@@ -152,7 +152,14 @@ value that speaks for a transaction; `tx.commit()` / `tx.rollback()` end it, and
 without committing rolls back — so an error between `begin` and `commit` undoes everything.
 While it is open it is the only way into the session; a failed one cannot commit.
 
-**Still open:** `SCRAM-SHA-256-PLUS` channel binding.
+**Parameters and patience (2026-09-20).** An Array is a parameter (`= any($1)` with
+`[[1, 2, 3]]`; Strings always quoted in the literal), and so is Bytes (`bytea`). The URL says
+how long a statement may take: nothing (30 s of silence, as ever), `timeout=N` (the SERVER
+ends it, `57014`, the connection carries on) or `timeout=0`; `connect_timeout=N`; TCP
+keepalive on every connection.
+
+**Still open:** `SCRAM-SHA-256-PLUS` channel binding; several statements in one round trip
+(a pipeline / batch), which is where a small query's time actually is.
 
 ### A method call is resolved by its receiver (ADR 0045)
 

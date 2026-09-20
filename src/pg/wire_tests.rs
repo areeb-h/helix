@@ -48,6 +48,8 @@ struct Seen {
     binary_columns: Vec<usize>,
     /// The text of every statement EXECUTED, in order.
     executed: Vec<String>,
+    /// The startup packet, NULs and all.
+    startup: String,
 }
 
 /// What a server can do beyond answering its script.
@@ -65,6 +67,8 @@ struct Twists {
     /// Fail this Execute (1-based) with a unique violation, as a statement inside a
     /// transaction might.
     fail_at: Option<usize>,
+    /// Let the FIRST Execute run this long and then cancel it, as `statement_timeout` does.
+    cancel_first_after: Option<std::time::Duration>,
 }
 
 /// Serve one connection; the thread returns what the client sent.
@@ -252,6 +256,22 @@ fn serve_with(script: Script, twists: Twists) -> (u16, std::thread::JoinHandle<S
                 }
                 // The three statements that move a session between its states: they return
                 // nothing, whatever this connection's script says a query returns.
+                // `statement_timeout`: the statement ran as long as the server was told to let
+                // it, and the server ends it — an ordinary error, read to its end.
+                b'E' if twists.cancel_first_after.is_some() && executes == 0 => {
+                    executes += 1;
+                    std::thread::sleep(twists.cancel_first_after.unwrap());
+                    let mut out = Vec::new();
+                    out.push(b'S');
+                    put_cstr(&mut out, "ERROR");
+                    out.push(b'C');
+                    put_cstr(&mut out, "57014");
+                    out.push(b'M');
+                    put_cstr(&mut out, "canceling statement due to statement timeout");
+                    out.push(0);
+                    send(&mut s, b'E', &out);
+                    skipping = true;
+                }
                 b'E' if bound.starts_with("begin") || bound == "commit" || bound == "rollback" => {
                     executes += 1;
                     executed.push(bound.clone());
@@ -284,7 +304,7 @@ fn serve_with(script: Script, twists: Twists) -> (u16, std::thread::JoinHandle<S
                         }
                         send(&mut s, b'D', &out);
                         if twists.hang_up_at == Some(executes) {
-                            return Seen { sql, parses, closes, describes, binary_columns, executed };
+                            return Seen { sql, parses, closes, describes, binary_columns, executed, startup: text };
                         }
                     }
                     let mut out = Vec::new();
@@ -299,7 +319,7 @@ fn serve_with(script: Script, twists: Twists) -> (u16, std::thread::JoinHandle<S
                 other => panic!("unexpected message {:?}", other as char),
             }
         }
-        Seen { sql, parses, closes, describes, binary_columns, executed }
+        Seen { sql, parses, closes, describes, binary_columns, executed, startup: text }
     });
     (port, h)
 }
@@ -696,4 +716,49 @@ fn a_failed_transaction_rolls_back_and_commit_says_so() {
     drop(tx);
     drop(c);
     assert_eq!(h.join().unwrap().executed, ["begin", "insert into t values (1)", "rollback", "insert into t values (3)"]);
+}
+
+/// HOW LONG A STATEMENT MAY RUN IS THE SERVER'S TO ENFORCE, when the URL names a limit: it goes
+/// out in the startup packet, in milliseconds, with no round trip of its own. A URL that says
+/// nothing, or `timeout=0`, asks the server for nothing.
+#[test]
+fn a_timeout_in_the_url_is_asked_of_the_server_in_the_startup_packet() {
+    for (extra, want) in [("", None), ("&timeout=0", None), ("&timeout=300", Some("statement_timeout\u{0}300000\u{0}"))] {
+        let (port, h) = serve(Script { expect_read_only: true, columns: vec!["n"], rows: vec![vec!["7"]], tag: "SELECT 1" });
+        query(&format!("{}{extra}", url(port)), "select 7 as n", &[], 1, 1).unwrap();
+        let startup = h.join().unwrap().startup;
+        match want {
+            Some(w) => assert!(startup.contains(w), "`{extra}`: {startup:?}"),
+            None => assert!(!startup.contains("statement_timeout"), "`{extra}`: {startup:?}"),
+        }
+    }
+}
+
+/// A STATEMENT THE SERVER ENDED FOR RUNNING TOO LONG is an ordinary error — it says where the
+/// limit lives, and the connection carries on, which is the whole difference from the client
+/// giving up: that closes the connection and leaves the server working.
+#[test]
+fn a_statement_that_outruns_its_timeout_is_an_error_and_the_connection_carries_on() {
+    let script = Script { expect_read_only: true, columns: vec!["n"], rows: vec![vec!["9"]], tag: "SELECT 1" };
+    let twists = Twists { cancel_first_after: Some(std::time::Duration::from_millis(1050)), ..Twists::default() };
+    let (port, h) = serve_with(script, twists);
+    let Value::Db(c) = postgres_open(&[sv(&format!("{}&timeout=1", url(port)))], 1, 1).unwrap() else { panic!("not a connection") };
+    let e = conn_method(&c, "query", &[sv("select pg_sleep(60)")], 1, 1).unwrap_err();
+    assert!(e.message.contains("57014"), "{}", e.message);
+    assert!(e.message.contains("this connection's URL says `timeout=1`"), "{}", e.message);
+    let v = conn_method(&c, "query", &[sv("select 9 as n")], 1, 1).unwrap();
+    let Value::DataFrame(df) = v else { panic!("not a frame") };
+    assert!(matches!(df.column_values("n", 1, 1).unwrap().as_slice(), [Value::Int(9)]));
+    drop(c);
+    h.join().unwrap();
+
+    // A cancel that came EARLY was somebody's request, not the limit: the server's words stand alone.
+    let script = Script { expect_read_only: true, columns: vec!["n"], rows: vec![vec!["9"]], tag: "SELECT 1" };
+    let twists = Twists { cancel_first_after: Some(std::time::Duration::from_millis(10)), ..Twists::default() };
+    let (port, h) = serve_with(script, twists);
+    let Value::Db(c) = postgres_open(&[sv(&format!("{}&timeout=60", url(port)))], 1, 1).unwrap() else { panic!("not a connection") };
+    let e = conn_method(&c, "query", &[sv("select pg_sleep(60)")], 1, 1).unwrap_err();
+    assert!(e.message.contains("57014") && !e.message.contains("timeout="), "{}", e.message);
+    drop(c);
+    h.join().unwrap();
 }

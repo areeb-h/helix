@@ -7,6 +7,8 @@
 //! that feature would be one nothing ever checked. Nothing here needs a socket, so nothing
 //! here is gated: this compiles, and is tested, in every build.
 
+use std::time::Duration;
+
 use crate::error::HelixError;
 
 /// How this connection is to be protected.
@@ -23,6 +25,20 @@ pub enum SslMode {
     Disable,
 }
 
+/// How long a statement may take — the URL's `timeout=`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Patience {
+    /// The URL said nothing. A statement may run as long as it likes, but the server may not
+    /// be SILENT for more than thirty seconds — what this client has always done, because a
+    /// program that waits forever on a server that has stopped answering cannot be
+    /// interrupted from inside.
+    Silence,
+    /// `timeout=N`: the SERVER ends a statement that runs past this (see `connect`).
+    Limit(Duration),
+    /// `timeout=0`: as long as it takes.
+    Unbounded,
+}
+
 /// Where to connect and as whom, parsed from a URL.
 #[derive(Debug)]
 pub struct Target {
@@ -36,7 +52,18 @@ pub struct Target {
     pub sslmode: SslMode,
     /// A PEM file that REPLACES the default anchors, for a private or provider CA.
     pub sslrootcert: Option<String>,
+    /// How long a statement may take (`timeout=`, in seconds).
+    pub patience: Patience,
+    /// How long to wait for the TCP connection (`connect_timeout=`, in seconds; 10).
+    pub connect_timeout: Duration,
 }
+
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The server takes `statement_timeout` as a 32-bit count of milliseconds, so this many
+/// seconds — a little under 25 days — is as far as a limit goes. Longer than that is
+/// `timeout=0`.
+const MAX_TIMEOUT_SECS: u64 = 2_147_483;
 
 /// Parse `postgres://user:pass@host:port/database`.
 ///
@@ -74,8 +101,37 @@ pub fn parse_url(raw: &str, line: usize, col: usize) -> Result<Target, HelixErro
     // mistake with the same consequence.
     let mut sslmode = SslMode::VerifyFull;
     let mut sslrootcert: Option<String> = None;
+    let mut patience = Patience::Silence;
+    let mut connect_timeout = DEFAULT_CONNECT_TIMEOUT;
+    // A number of whole seconds, or an error that says what one looks like.
+    let seconds = |key: &str, v: &str| -> Result<u64, HelixError> {
+        match v.parse::<u64>() {
+            Ok(n) if n <= MAX_TIMEOUT_SECS => Ok(n),
+            Ok(_) => Err(bad(format!(
+                "`{key}={v}` is longer than the server can count — the most is {MAX_TIMEOUT_SECS} seconds"
+            ))
+            .hint("`timeout=0` is no limit at all.")),
+            Err(_) => Err(bad(format!("`{key}={v}` is not a number of seconds"))
+                .hint("e.g. `timeout=300` lets a statement run five minutes; `timeout=0` is no limit.")),
+        }
+    };
     for (k, v) in u.query_pairs() {
         match k.as_ref() {
+            "timeout" => {
+                patience = match seconds("timeout", v.as_ref())? {
+                    0 => Patience::Unbounded,
+                    n => Patience::Limit(Duration::from_secs(n)),
+                }
+            }
+            "connect_timeout" => {
+                connect_timeout = match seconds("connect_timeout", v.as_ref())? {
+                    0 => {
+                        return Err(bad("`connect_timeout=0` would never give up on a host that is not there".to_string())
+                            .hint("it is a number of seconds, at least 1; the default is 10."))
+                    }
+                    n => Duration::from_secs(n),
+                }
+            }
             "sslmode" => {
                 sslmode = match v.as_ref() {
                     "verify-full" => SslMode::VerifyFull,
@@ -125,7 +181,7 @@ pub fn parse_url(raw: &str, line: usize, col: usize) -> Result<Target, HelixErro
                 return Err(bad(format!(
                     "`{other}` is not a connection parameter Helix understands"
                 ))
-                .hint("the URL takes `sslmode` and `sslrootcert`."))
+                .hint("the URL takes `sslmode`, `sslrootcert`, `timeout` and `connect_timeout`."))
             }
         }
     }
@@ -145,6 +201,8 @@ pub fn parse_url(raw: &str, line: usize, col: usize) -> Result<Target, HelixErro
         database,
         sslmode,
         sslrootcert,
+        patience,
+        connect_timeout,
     })
 }
 
@@ -233,6 +291,24 @@ mod tests {
         // Two requests that contradict each other are refused rather than ranked.
         let m = err("postgres://u:p@h/db?sslmode=disable&sslrootcert=/x.pem");
         assert!(m.contains("two different things"), "{m}");
+    }
+
+    /// HOW LONG A STATEMENT MAY TAKE IS THE URL'S TO SAY. Saying nothing changes nothing; a
+    /// number of seconds is a limit the server enforces; `0` is as long as it takes. A value
+    /// that is not a number is an error, like every other parameter this client cannot honour
+    /// exactly.
+    #[test]
+    fn the_url_says_how_long_a_statement_may_take() {
+        let t = ok("postgres://u:p@h/db");
+        assert_eq!((t.patience, t.connect_timeout), (Patience::Silence, Duration::from_secs(10)));
+        assert_eq!(ok("postgres://u:p@h/db?timeout=300").patience, Patience::Limit(Duration::from_secs(300)));
+        assert_eq!(ok("postgres://u:p@h/db?timeout=0").patience, Patience::Unbounded);
+        assert_eq!(ok("postgres://u:p@h/db?connect_timeout=3&sslmode=disable").connect_timeout, Duration::from_secs(3));
+        assert!(err("postgres://u:p@h/db?timeout=5m").contains("`timeout=5m` is not a number of seconds"));
+        assert!(err("postgres://u:p@h/db?timeout=-1").contains("is not a number of seconds"));
+        assert!(err("postgres://u:p@h/db?timeout=99999999").contains("longer than the server can count"));
+        assert!(err("postgres://u:p@h/db?connect_timeout=0").contains("would never give up"));
+        assert!(err("postgres://u:p@h/db?nope=1").contains("`timeout`"), "the hint names every parameter");
     }
 
     /// A password must never reach an error message. Errors are the most widely copied

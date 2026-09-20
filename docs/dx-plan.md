@@ -603,6 +603,37 @@ statement reading its predecessor's unread replies as its own rows. Live harness
 a caller can see — 228 lines identical on both binaries, plaintext and TLS). Measured and
 declined: 64 KiB read buffer (1.00x).
 
+**How long a statement may take (2026-09-20), DONE.** The one 30 s read timeout was a bound
+on SILENCE: a statement that computes for 31 s could not be run, and one that outlived the
+wait was abandoned (connection closed, server still working). `conninfo::Patience`: the URL
+says nothing (unchanged, and the error now names the way out), `timeout=N` (sent as
+`statement_timeout` in the startup packet — the SERVER ends the statement, `57014`, the
+connection carries on; client wait N + 10 s; the message says where the limit lives, known by
+SQLSTATE + clock, not by `lc_messages`-dependent wording) or `timeout=0` (as long as it
+takes). `connect_timeout=N`. TCP keepalive on every connection (`libc`, Unix: 60 s / 10 s / 6).
+A limit is NOT the default: `statement_timeout` bounds streaming too, and would end large
+reads that work today. Live: `target/bench/f93/timeouts.helix`.
+
+**NEXT FOR THE DRIVER, designed and NOT built: several statements in one round trip.** The
+2026-09-20 profile says a small query is 7-13 us of client in a 150-190 us round trip, so the
+only lever left for small queries is fewer round trips: a page's five independent reads, or an
+ORM loading three relations for the same parents (1 + 3 round trips today). SHAPE: no new
+verb — `c.query([q1, q2, q3])` answers an Array of frames and `c.execute([...])` an Array of
+`{affected, rows}`, each `q` a String or the `{sql, params}` record the field's renderer
+already produces; gating stays by verb name. SEMANTICS: every statement framed
+(Parse?/Bind/Describe?/Execute) and ONE Sync at the end, so outside a transaction the batch
+is one implicit transaction — all or nothing — and an error names its statement (`statement 2
+of 3: ...`). CACHE: plan every item first (hits, misses, a text repeated inside the batch is
+parsed once, evictions must skip ids the batch uses); a stale name (`26000`/`0A000`) forgets
+it and re-runs the WHOLE batch once, which the rollback makes safe. THE TRAP, and why it is
+not a quick add: with blocking I/O the whole request is written before anything is read, so a
+request larger than the socket buffers, against results larger than them, DEADLOCKS (server
+blocked sending, client blocked writing) until the write timeout breaks the connection.
+Either bound the framed request to what the kernel takes without the peer reading (read
+`SO_SNDBUF`; small batches are the real use, and bulk writes already have
+`unnest($1::int[], $2::text[])` now that an Array is a parameter), or do it properly with a
+non-blocking socket and a poll loop that reads while it writes — under rustls too.
+
 **An Array is a parameter (2026-09-20), DONE.** `c.query("… where id = any($1)", [[1, 2, 3]])`:
 `put_array` in `src/pg/statement.rs` writes the array literal (Strings ALWAYS quoted — the
 bare form is where `NULL`, commas, braces and leading spaces go wrong), nested to PostgreSQL's

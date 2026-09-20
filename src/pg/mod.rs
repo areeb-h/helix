@@ -60,7 +60,7 @@ use conninfo::parse_url;
 #[cfg(feature = "postgres")]
 use proto::write_msg;
 #[cfg(feature = "postgres")]
-use statement::{run_prepared, run_statement, Outcome, Session};
+use statement::{run_prepared, run_statement, Fail, Outcome, Session};
 #[cfg(feature = "postgres")]
 use types::ColBuf;
 
@@ -186,14 +186,31 @@ impl Shared {
                 return Err(format!("this connection is closed — an earlier statement on it failed with: {why}"))
             }
         };
+        let (limit, started) = (session.limit, std::time::Instant::now());
         run_prepared(session, sql, params).map_err(|f| {
             if f.broken {
                 // Dropping the session closes the socket. No goodbye: the protocol state is
                 // unknown, so there is nothing safe to say.
                 *guard = State::Closed(f.text.clone());
             }
-            f.text
+            said(f, limit, started)
         })
+    }
+}
+
+/// What a failed statement says. One the server CANCELLED after it had run as long as this
+/// session asked the server to let a statement run was stopped by that limit — known from the
+/// clock and the SQLSTATE, so it holds whatever language the server words its errors in — and
+/// the message says where the limit lives.
+#[cfg(feature = "postgres")]
+fn said(f: Fail, limit: Option<std::time::Duration>, started: std::time::Instant) -> String {
+    match limit {
+        Some(l) if f.cancelled() && started.elapsed() >= l.mul_f32(0.9) => format!(
+            "{} — this connection's URL says `timeout={}`; a larger number lets a statement run longer, `timeout=0` as long as it takes",
+            f.text,
+            l.as_secs()
+        ),
+        _ => f.text,
     }
 }
 
@@ -557,7 +574,8 @@ pub fn postgres_execute(args: &[Value], line: usize, col: usize) -> Result<Value
     };
     // A WRITABLE SESSION: the startup packet without `default_transaction_read_only`.
     let mut session = connect(&target, false).map_err(&err)?;
-    let out = run_statement(&mut session, sql.as_str(), &params).map_err(|f| err(f.text))?;
+    let (limit, started) = (session.limit, std::time::Instant::now());
+    let out = run_statement(&mut session, sql.as_str(), &params).map_err(|f| err(said(f, limit, started)))?;
     let _ = write_msg(&mut session.stream, Some(b'X'), &[]);
     outcome_value(out, line, col)
 }
@@ -598,7 +616,8 @@ fn query(
     // stronger than one a client remembers to ask for.
     let mut session = connect(&target, true).map_err(&err)?;
 
-    let cols = run_statement(&mut session, sql, params).map_err(|f| err(f.text))?.cols;
+    let (limit, started) = (session.limit, std::time::Instant::now());
+    let cols = run_statement(&mut session, sql, params).map_err(|f| err(said(f, limit, started)))?.cols;
 
     // Best-effort goodbye: the answer is already in hand, so failing to say it must not
     // turn a successful query into an error.
