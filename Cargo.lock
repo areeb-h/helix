@@ -1672,6 +1672,7 @@ dependencies = [
  "ed25519-dalek",
  "faer",
  "flate2",
+ "hashbrown 0.17.1",
  "hmac",
  "libc",
  "libm",

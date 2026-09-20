@@ -601,9 +601,20 @@ printing shortest-round-trip decimals. A CONNECTION WHOSE EXCHANGE DID NOT REACH
 statement reading its predecessor's unread replies as its own rows. Live harness:
 `target/bench/f89/` (`withpg.sh` + `ab.sh`/`cpu.sh`/`tls.sh`; `stale.helix` prints everything
 a caller can see — 228 lines identical on both binaries, plaintext and TLS). Measured and
-declined: 64 KiB read buffer (1.00x). NEXT in the same arc: the interner itself hashes a
-distinct value two to three times (`get` then `insert`, again on growth) — a `HashTable` of
-codes hashes it once, 76 → 52 ns a distinct cell, still SipHash.
+declined: 64 KiB read buffer (1.00x).
+
+**The interner hashes a cell once (2026-09-20), DONE.** Followed from the driver's profile:
+with a result decoded in place, what a text-heavy read had left was `StrBuilder` — std's
+`HashMap<DictKey, u32>` hashes a distinct value two to three times (`get`, then `insert`,
+again on growth). `backend::strbuild` now keeps a `hashbrown::HashTable<u32>` of codes, the
+hash computed once and cached beside each entry; 76 → 52 ns a distinct cell (94 → 49 at
+100 000 values), SipHash kept on purpose (`foldhash` measured 3 ns better and disclaims
+resistance to an attacker who can time it). It is the engine's ONE text builder, so
+`dataframe()`, `read_csv`, `read_parquet` and `to_dataframe` gained with the driver.
+`hashbrown` 0.17 was already in every build (indexmap -> toml_edit): the lock gained an edge,
+no crate. CANDIDATE LEFT: the CSV reader's per-chunk segments intern with their own
+`HashMap<String, u32>` + `Vec<String>` (two copies of each distinct text, get-then-insert,
+then a third hash at the splice) — the same table would serve them.
 
 **§1.61 (2026-09-19) — a statement is prepared once per connection, DONE.** The web field
 build measured Helix's raw PostgreSQL connection equal to pgx with its statement cache OFF,

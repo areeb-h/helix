@@ -4,6 +4,23 @@
 
 ### Performance
 
+- **Building a text column hashes each cell once.** The native engine stores text
+  dictionary-encoded, and every string column — `dataframe()`, `read_csv`, `read_parquet`,
+  `to_dataframe`, a database result — is built by one hash-consing builder. Its index was a
+  `HashMap<DictKey, u32>`, and std's map cannot look a key up by `&str` and insert an owned
+  one on a miss without hashing twice (`get`, then `insert`), and a third time whenever the
+  map grows, since it keeps 7 bits of a hash and recomputes the rest. For a column of distinct
+  values — names, ids, free text — that was most of the work: 76 ns a cell. The index is now
+  a `hashbrown::HashTable` of CODES that is handed each hash: computed once, equality a look
+  at the dictionary, each entry's hash kept beside it so growth re-reads no string. 52 ns a
+  distinct cell at 1 000 values, 49 where it was 94 at 100 000; a repeated value costs what it
+  did. STILL SipHash under a per-builder random key — cells are data from files, sockets and
+  strangers, and `foldhash`, 3 ns faster, says of itself that it does not resist an attacker
+  who can observe timings. `hashbrown` is no new crate: it is what std's map is made of and
+  was already compiled into every build. Found by following the PostgreSQL driver's profile
+  into the engine: once a result was decoded in place, interning was what a text-heavy read
+  had left. Numbers are in the commit.
+
 - **A PostgreSQL result is decoded where it arrives, and a statement's columns are remembered.**
   Measured from outside the process first: a small query has 7–13 µs of client code in a
   150–190 µs round trip, so nothing was left there; a result of any size was HALF client —

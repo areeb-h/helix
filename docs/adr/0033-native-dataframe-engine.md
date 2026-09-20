@@ -239,3 +239,25 @@ for removing a dependency from a feature nobody gets unless they ask for it.
    appliance only) becomes terminal instead.
 4. Zero-copy Helix-to-Python frames become a headline feature — pyo3-polars' Arrow
    path keeps polars in the builds that matter (it survives behind `python`).
+
+## Addendum 2026-09-20 — the text builder moved to the seam, and hashes a cell once
+
+Text is dictionary-encoded (Stage 3), and every string column is built by one hash-consing
+builder. Two things changed about it, both found from outside the engine — in the PostgreSQL
+driver's profile (ADR 0044's addendum of the same date).
+
+**It lives at the seam** (`backend::strbuild`; the engine re-exports it and keeps `finish`).
+A reader may not name an engine type, so a cell-at-a-time reader used to collect
+`Vec<Option<String>>` for the engine to intern afterwards: a `String` allocated per CELL,
+hashed, and — the text nearly always being in the dictionary already — thrown away. A reader
+now interns as it reads and hands over `ColData::StrBuilt`; `ColData::IntValid`/`FloatValid`
+are the numeric columns' own shape (values, validity alongside), handed over without the pass
+`IntOpt` costs. The oracle builds the same columns from them.
+
+**It hashes a cell once.** The index was std's `HashMap<DictKey, u32>`, which cannot look a
+key up by `&str` and insert an owned one on a miss without hashing twice, and hashes every
+key again when it grows. It is now a `hashbrown::HashTable` of codes that is handed the hash;
+each entry's hash is kept beside the dictionary so growth re-reads no string. 76 → 52 ns a
+distinct cell at 1 000 values, 94 → 49 at 100 000; a repeated value costs what it did. The
+hash is still SipHash under a random key — a column's cells are data from strangers — and
+`hashbrown` was already in every build, so this added an edge to the lock and no crate.
