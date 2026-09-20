@@ -147,8 +147,12 @@ each statement returns (no second Describe; `int2/4/8`, `bool`, `float8` in bina
 second run), and closes itself if an exchange does not reach `ReadyForQuery`. Live harness
 against PostgreSQL 17 in a container: `target/bench/f89/`.
 
-**Still open:** `SCRAM-SHA-256-PLUS` channel binding, and a transaction spanning
-statements (each `execute` is its own).
+**Transactions (ADR 0047 addendum, 2026-09-20).** `tx = c.begin(isolation?)` is a connection
+value that speaks for a transaction; `tx.commit()` / `tx.rollback()` end it, and one DROPPED
+without committing rolls back — so an error between `begin` and `commit` undoes everything.
+While it is open it is the only way into the session; a failed one cannot commit.
+
+**Still open:** `SCRAM-SHA-256-PLUS` channel binding.
 
 ### A method call is resolved by its receiver (ADR 0045)
 

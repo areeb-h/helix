@@ -157,6 +157,12 @@ db = postgres_open("postgres://user:pw@host/db", "write")
 db.execute("insert into people (name, age) values ($1, $2) returning id", ["Ada", 36]).rows
 postgres_execute("postgres://user:pw@host/db", "delete from people where age < $1", [18]).affected
 
+# A transaction is a VALUE: dropped without `commit()` — an error unwinding past it — it rolls back.
+tx = db.begin()
+tx.execute("update accounts set balance = balance - $1 where id = $2", [10, 1])
+tx.execute("update accounts set balance = balance + $1 where id = $2", [10, 2])
+tx.commit()
+
 # First-class genomics.
 seq = dna("ATGCGTAC")
 seq.gc_content()

@@ -54,7 +54,8 @@ reads are the `net` grant, as ADR 0044 decided. A value that does not parse is r
 startup, like every other grant.
 
 **D5 — One statement is one transaction.** It commits when it completes; a failed one
-changed nothing. A transaction spanning statements is not offered; it is the open item.
+changed nothing. ~~A transaction spanning statements is not offered; it is the open item.~~
+**Closed 2026-09-20: a transaction is a value** — see the addendum.
 
 **D6 — Verified without a server, and with one.** A fake server in `src/pg` speaks enough of
 the protocol to prove what the client sends — the read-only startup parameter present for a
@@ -81,4 +82,71 @@ tests ran nowhere. Live verification against a real PostgreSQL is the field buil
 - **Return the count only.** Rejected: it loses `RETURNING`, and an inserted id would need a
   second query that can observe another writer's row.
 - **A transaction API now.** Deferred (D5). It needs a design for a connection that holds
-  state across calls and what happens when the value is dropped mid-transaction.
+  state across calls and what happens when the value is dropped mid-transaction. (Both
+  answered on 2026-09-20, and the second answer IS the design: it rolls back.)
+
+## Addendum 2026-09-20 — a transaction is a value, and its lifetime is the value's
+
+```helix
+fn transfer(c, n) = do {
+  tx = c.begin()
+  _ = tx.execute("update acct set bal = bal - $1 where id = 1", [n])
+  _ = tx.execute("update acct set bal = bal + $1 where id = 2", [n])
+  tx.commit()
+}
+```
+
+`c.begin(isolation?)` answers a CONNECTION VALUE that speaks for the transaction. It takes
+`query` and `execute` like the connection it came from — `type_of(tx)` is `"Connection"`, so a
+model layer written against a connection takes it unchanged (`People.on(tx)`) — and ends with
+`tx.commit()` or `tx.rollback()`.
+
+**One that is dropped without committing rolls back.** That is the whole design, and it is
+ADR 0044 D7's rule applied once more: Helix values are reference-counted, so "dropped" is a
+moment, not an eventuality. An error raised between `begin` and `commit` unwinds past `tx`,
+and the `ROLLBACK` has been sent by the time a `try` around it answers — on the walker, the
+VM and the JIT alike, verified live on all three. So the function above commits when both
+updates succeeded and undoes both when either raised, with nothing for its author to
+remember: there is no `close` to forget, and now no `rollback` either.
+
+The field build asked for `conn.transaction(tx => do { … })`, the shape every other language
+uses because every other language has to: a callback is how you get a guaranteed cleanup
+without deterministic destruction. Helix has deterministic destruction, so the callback buys
+nothing — and it costs what ended `postgres_with` (ADR 0044 D7): a builtin cannot call a
+closure the same way on the walker and the VM. A library that wants the callback spelling
+writes it in three lines over this one: `fn transaction(c, f) = do { tx = c.begin(); r =
+f(tx); _ = tx.commit(); r }`.
+
+**While a transaction is open, its value is the only way in.** The session is one, so a
+statement sent through the connection's own value would land INSIDE the transaction,
+silently. It is refused instead, before anything is sent, naming the transaction's value. A
+value whose transaction has ended refuses everything the same way. There is no nesting —
+`begin` on a transaction's value is refused by name; savepoints are not offered.
+
+**A failed transaction cannot commit.** An error inside a transaction ends it on the server:
+every later statement is answered `25P02` until it rolls back. And the server answers
+`COMMIT` on such a transaction with the tag `ROLLBACK` and NO error — which any caller would
+take for success. The session's standing arrives with every `ReadyForQuery` (`I` idle, `T` in
+a transaction, `E` failed) and is kept; `commit()` on a failed transaction sends `ROLLBACK`
+by name and raises `the transaction was rolled back, not committed`.
+
+**The isolation level is one of three sentences**, never text a caller supplied:
+`begin()`, `begin("read committed")`, `begin("repeatable read")`, `begin("serializable")`.
+On a READ-ONLY connection `begin("repeatable read")` is how several queries see one snapshot,
+which is what a report made of five queries needs and had no way to ask for.
+
+**`begin()` refuses a session already in a transaction begun in SQL** (`execute("begin")` still
+works, as it always did, and is the caller's to end): a value that rolled such a transaction
+back when dropped would be undoing work it was never given.
+
+**One honest cost.** Inside a transaction, ANY error ends it — including the two the
+statement cache normally absorbs (`26000`, `0A000`: a prepared statement made stale by a
+concurrent `ALTER TABLE` or `DISCARD ALL`). Outside a transaction those are re-prepared
+invisibly; inside one the re-prepare could only be answered `25P02`, so the original error is
+reported instead, saying what happened and what to do: roll back and run it again. Every
+driver that prepares statements has this property; the ones that hide it do so with a
+savepoint per statement, a round trip each.
+
+No new capability: `begin` spends nothing a connection did not already hold. What a
+transaction can DO is decided where the session was opened — `execute` through a transaction's
+value is `db-write` exactly as it is through the connection.

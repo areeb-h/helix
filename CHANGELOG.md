@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Added
+
+- **A PostgreSQL transaction, as a value (ADR 0047 D5 — the open item since writes landed).**
+  `tx = c.begin()` answers a connection value that speaks for the transaction: `tx.query`,
+  `tx.execute`, then `tx.commit()` or `tx.rollback()`. ONE THAT IS DROPPED WITHOUT COMMITTING
+  ROLLS BACK — values are reference-counted, so an error raised between `begin` and `commit`
+  unwinds past `tx` and the rollback has been sent by the time a `try` around it answers. A
+  function that begins, writes twice and commits therefore commits both or neither, with
+  nothing to remember; the callback shape other languages need for that (`transaction(fn)`)
+  is three lines of library over it, and `type_of(tx)` is `"Connection"`, so a model layer
+  takes it unchanged. While a transaction is open its value is the only way into the session
+  (a statement through the connection itself would land inside it silently, so it is
+  refused); a transaction that failed cannot commit — the server answers `COMMIT` with
+  `ROLLBACK` and no error, so `commit()` rolls back by name and raises; `begin("repeatable
+  read")` on a read-only connection is how several queries see one snapshot; isolation is one
+  of three fixed sentences, never caller text. Verified live on PostgreSQL 17 under the
+  walker, the VM and the JIT.
+
 ### Performance
 
 - **Building a text column hashes each cell once.** The native engine stores text

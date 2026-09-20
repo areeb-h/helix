@@ -731,7 +731,7 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         doc: "Open one PostgreSQL connection and reuse it for every query made through it.",
         example: "postgres_open(\"postgres://me:pw@localhost/app\")",
         example_out: "",
-        notes: "The connection is opened ONCE and reused for every query inside, and each distinct statement is PREPARED once on it — the server parses a text the first time it is sent and only binds and executes it after that (up to 256 of them; invisible to a caller, and a statement the server forgets is simply prepared again). What a statement returns is remembered with it, so from its second run the result is not described again and its `int2`/`int4`/`int8`/`bool`/`float8` columns cross in binary — the same values, without the server printing them. A connection whose exchange was cut short (a timeout, a dropped socket) closes itself, and every later call on it says so: it never reads a previous statement's leftover replies as its own. Reuse is the whole point: a connection costs a TCP handshake plus a SCRAM exchange — measured at 4.7 ms against PostgreSQL 19, the same for `select 1` as for a full table — so five queries through `postgres_query` spend ~24 ms before doing any work. There is no close to forget: Helix values are reference-counted, so the socket shuts when the last handle to it goes. The connection answers `query(sql, params?)`, with the same parameter discipline and the same server-enforced read-only session as `postgres_query`. Opened with mode `\"write\"` — which spends the `db-write` capability (ADR 0047) — it also answers `execute(sql, params?)`, `{affected, rows}` exactly as `postgres_execute` does, on the reused socket. Keywords: postgres, connection, pool, reuse, handshake, scope, transaction, write.",
+        notes: "The connection is opened ONCE and reused for every query inside, and each distinct statement is PREPARED once on it — the server parses a text the first time it is sent and only binds and executes it after that (up to 256 of them; invisible to a caller, and a statement the server forgets is simply prepared again). What a statement returns is remembered with it, so from its second run the result is not described again and its `int2`/`int4`/`int8`/`bool`/`float8` columns cross in binary — the same values, without the server printing them. A connection whose exchange was cut short (a timeout, a dropped socket) closes itself, and every later call on it says so: it never reads a previous statement's leftover replies as its own. Reuse is the whole point: a connection costs a TCP handshake plus a SCRAM exchange — measured at 4.7 ms against PostgreSQL 19, the same for `select 1` as for a full table — so five queries through `postgres_query` spend ~24 ms before doing any work. There is no close to forget: Helix values are reference-counted, so the socket shuts when the last handle to it goes. The connection answers `query(sql, params?)`, with the same parameter discipline and the same server-enforced read-only session as `postgres_query`. Opened with mode `\"write\"` — which spends the `db-write` capability (ADR 0047) — it also answers `execute(sql, params?)`, `{affected, rows}` exactly as `postgres_execute` does, on the reused socket. `begin()` opens a transaction as a value of its own (see `Connection.begin`). Keywords: postgres, connection, pool, reuse, handshake, scope, transaction, write.",
     },
     DocEntry {
         name: "postgres_query",
@@ -3745,8 +3745,60 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
                     clause returned. On a connection opened without \"write\" it is refused BEFORE a byte \
                     is sent — the session is read-only from its first byte — and the help names the \
                     spelling that opens a writable one: `postgres_open(url, \"write\")`, which needs the \
-                    `db-write` capability. One statement is one transaction. Keywords: sql, postgres, \
+                    `db-write` capability. One statement is one transaction — unless it is sent through a \
+                    transaction's value (`tx = conn.begin()`), where several are. Keywords: sql, postgres, \
                     insert, update, delete, write, returning, affected.",
+        },
+    ),
+    (
+        "Connection",
+        DocEntry {
+            name: "begin",
+            sig: "begin(isolation?)",
+            doc: "Open a transaction; returns a connection value that speaks for it until `commit()` or `rollback()`.",
+            example: "tx = conn.begin()",
+            example_out: "",
+            notes: "A TRANSACTION IS A VALUE, and its lifetime is the value's (ADR 0047). `tx` answers `query` and \
+                    `execute` like the connection it came from — code written against a connection takes it \
+                    unchanged — and ends with `tx.commit()` or `tx.rollback()`. ONE THAT IS DROPPED WITHOUT \
+                    COMMITTING ROLLS BACK: values are reference-counted, so an error raised between `begin` and \
+                    `commit` unwinds past `tx` and the rollback has been sent by the time a `try` around it \
+                    answers. So `fn transfer(c) = do { tx = c.begin(); _ = tx.execute(…); _ = tx.execute(…); \
+                    tx.commit() }` commits when every statement succeeded and undoes all of them when one \
+                    raised, with nothing to remember. While a transaction is open its value is the only way \
+                    in: a statement through the connection's own value would land inside it silently, so it \
+                    is refused. `isolation` is `\"read committed\"` (the server's default), `\"repeatable \
+                    read\"` or `\"serializable\"` — on a read-only connection `begin(\"repeatable read\")` \
+                    is how several queries see ONE snapshot. No nesting. An error inside a transaction ends \
+                    it on the server: every later statement is refused until it rolls back, and `commit()` \
+                    on it rolls back and says so rather than report a commit that did not happen. Keywords: \
+                    transaction, atomic, begin, commit, rollback, snapshot, isolation, serializable.",
+        },
+    ),
+    (
+        "Connection",
+        DocEntry {
+            name: "commit",
+            sig: "commit()",
+            doc: "Commit the transaction this value speaks for; the value has then ended.",
+            example: "tx.commit()",
+            example_out: "",
+            notes: "Only the value `begin()` answered takes this. If a statement in the transaction had \
+                    failed there is nothing to commit: the server would answer `COMMIT` with `ROLLBACK` and no \
+                    error, so this rolls back by name and RAISES, rather than let a caller take it for \
+                    success. Keywords: transaction, commit, save.",
+        },
+    ),
+    (
+        "Connection",
+        DocEntry {
+            name: "rollback",
+            sig: "rollback()",
+            doc: "Undo the transaction this value speaks for; the value has then ended.",
+            example: "tx.rollback()",
+            example_out: "",
+            notes: "What dropping the value without `commit()` does by itself — spelled out for the caller \
+                    who decides, rather than fails, to stop. Keywords: transaction, rollback, undo, abort.",
         },
     ),
     (

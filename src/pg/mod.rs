@@ -83,16 +83,28 @@ use types::ColBuf;
 /// already relies on, and it removes the failure every connection pool eventually grows a
 /// leak detector for: a handle nobody remembered to give back.
 pub struct Conn {
+    /// The session, which a transaction's value shares with the connection it was begun on.
     #[cfg(feature = "postgres")]
+    shared: std::rc::Rc<Shared>,
+    /// `Some` on the value `begin()` answered: which transaction it speaks for.
+    #[cfg(feature = "postgres")]
+    tx: Option<u64>,
+}
+
+/// What a connection value and the transactions begun on it have in common: one session.
+#[cfg(feature = "postgres")]
+struct Shared {
     state: std::cell::RefCell<State>,
     /// `user@host:port/database`, for diagnostics. Never the password.
-    #[cfg(feature = "postgres")]
     label: String,
     /// Opened with `"write"`: the startup packet omitted the read-only default, and the
     /// `db-write` grant was checked at `postgres_open`. `execute` on a read-only connection
     /// refuses BEFORE sending anything, with the spelling that opens a writable one.
-    #[cfg(feature = "postgres")]
     writable: bool,
+    /// The transaction open through a value of its own, if one is — and how many have been
+    /// begun, which is what tells one transaction's value from the next.
+    open_tx: std::cell::Cell<Option<u64>>,
+    begun: std::cell::Cell<u64>,
 }
 
 /// A connection is open, or it is closed and says why.
@@ -110,9 +122,56 @@ enum State {
     Closed(String),
 }
 
+/// A TRANSACTION IS A VALUE, AND ITS LIFETIME IS THE VALUE'S (ADR 0047 D5).
+///
+/// `tx = c.begin()` answers a connection value that speaks for the transaction: it takes
+/// `query` and `execute` like any other — a library written against a connection takes it
+/// unchanged — and ends with `tx.commit()` or `tx.rollback()`. ONE THAT IS DROPPED WITHOUT
+/// COMMITTING ROLLS BACK. Helix values are reference-counted, so "dropped" is a moment, not an
+/// eventuality: an error raised between `begin` and `commit` unwinds past `tx`, and the
+/// rollback has been sent by the time a `try` around it answers. That is commit-on-success and
+/// rollback-on-raise without a callback — which matters here, because a builtin cannot call
+/// a closure the same way on the walker and the VM (the reason `postgres_with` was withdrawn,
+/// ADR 0044 D7) — and it is the rule the connection itself already lives by: there is no
+/// `close` to forget, and no `rollback` either.
+///
+/// WHILE IT IS OPEN, IT IS THE ONLY WAY IN. The session is one, so a statement sent through
+/// the connection's own value would land INSIDE the transaction, silently; it is refused
+/// instead, naming the transaction's value. A transaction's value that has ended refuses
+/// everything. There is no nesting: `begin` on a transaction's value is refused by name.
 #[cfg(feature = "postgres")]
 impl Conn {
-    /// Run one statement on this connection.
+    /// Run one statement through this value — if it is the one that may speak.
+    fn run(&self, sql: &str, params: &[Value]) -> Result<Outcome, String> {
+        self.may_speak()?;
+        self.shared.run(sql, params)
+    }
+
+    /// While a transaction is open, only its own value uses the session.
+    fn may_speak(&self) -> Result<(), String> {
+        match (self.tx, self.shared.open_tx.get()) {
+            (None, None) => Ok(()),
+            (Some(mine), Some(open)) if mine == open => Ok(()),
+            (None, Some(_)) => Err("a transaction is open on this connection, so statements go through the transaction's own value until it commits or rolls back".to_string()),
+            (Some(_), _) => Err("this transaction has ended — it was committed or rolled back".to_string()),
+        }
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl Shared {
+    /// Where the server says the session stands: `I` idle, `T` in a transaction, `E` in one
+    /// that has failed.
+    fn status(&self) -> Result<u8, String> {
+        match &*self.state.try_borrow().map_err(|_| "this connection is already in use".to_string())? {
+            State::Open(session) => Ok(session.status),
+            State::Closed(why) => {
+                Err(format!("this connection is closed — an earlier statement on it failed with: {why}"))
+            }
+        }
+    }
+
+    /// Run one statement on this session.
     ///
     /// `try_borrow_mut` rather than `borrow_mut`: nothing here calls back into Helix while
     /// the borrow is held, so a conflict should be impossible — but "should be impossible"
@@ -157,9 +216,14 @@ pub fn postgres_open(args: &[Value], line: usize, col: usize) -> Result<Value, H
     // afternoon it was added for.
     let label = if session.stream.is_tls() { label } else { format!("{label} (plaintext)") };
     Ok(Value::Db(std::rc::Rc::new(Conn {
-        state: std::cell::RefCell::new(State::Open(Box::new(session))),
-        label,
-        writable,
+        shared: std::rc::Rc::new(Shared {
+            state: std::cell::RefCell::new(State::Open(Box::new(session))),
+            label,
+            writable,
+            open_tx: std::cell::Cell::new(None),
+            begun: std::cell::Cell::new(0),
+        }),
+        tx: None,
     })))
 }
 
@@ -173,6 +237,22 @@ pub fn postgres_open(args: &[Value], line: usize, col: usize) -> Result<Value, H
 
 #[cfg(feature = "postgres")]
 impl Drop for Conn {
+    /// A transaction's value that goes without having committed takes what it did with it.
+    ///
+    /// Failure is ignored, as below: if the rollback cannot be sent the session is closed,
+    /// and a session that closes mid-transaction is rolled back by the server.
+    fn drop(&mut self) {
+        if let Some(mine) = self.tx
+            && self.shared.open_tx.get() == Some(mine)
+        {
+            let _ = self.shared.run("rollback", &[]);
+            self.shared.open_tx.set(None);
+        }
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl Drop for Shared {
     /// Say goodbye and drop the socket, when the last handle to it goes.
     ///
     /// Failure is ignored on purpose: the caller already has its answers, and a connection
@@ -209,26 +289,86 @@ pub fn conn_method(
             // A read-only connection refuses BEFORE a byte is sent, with the spelling that
             // opens a writable one. The server would refuse too (SQLSTATE 25006) — a round
             // trip later, and without saying what to do about it.
-            if name == "execute" && !c.writable {
+            if name == "execute" && !c.shared.writable {
                 return Err(err(format!(
                     "postgres {}: this connection is read-only, so it cannot execute a statement",
-                    c.label
+                    c.shared.label
                 ))
                 .hint("open one that can write: `postgres_open(url, \"write\")` — it needs the `db-write` capability."));
             }
             let params = statement_params(name, args.get(1), line, col)?;
-            let conn_err = |m: String| err(format!("postgres {}: {m}", c.label));
+            let conn_err = |m: String| err(format!("postgres {}: {m}", c.shared.label));
             let out = c.run(sql.as_str(), &params).map_err(&conn_err)?;
             if name == "execute" {
                 return outcome_value(out, line, col);
             }
             frame_of(out.cols, line, col).map(|df| Value::DataFrame(std::rc::Rc::new(df)))
         }
+        "begin" => {
+            let conn_err = |m: String| err(format!("postgres {}: {m}", c.shared.label));
+            if c.tx.is_some() {
+                return Err(conn_err("a transaction is already open, and Helix does not nest them".to_string())
+                    .hint("end this one with `commit()` or `rollback()`, then `begin()` again on the connection."));
+            }
+            // THE ISOLATION LEVEL IS ONE OF THREE SENTENCES, never text a caller supplied.
+            let sql = match args.first() {
+                None | Some(Value::Missing) => "begin",
+                Some(Value::Str(level)) => match level.as_str() {
+                    "read committed" => "begin isolation level read committed",
+                    "repeatable read" => "begin isolation level repeatable read",
+                    "serializable" => "begin isolation level serializable",
+                    other => {
+                        return Err(err(format!("`{other}` is not an isolation level")).hint(
+                            "`begin()` takes nothing (the server's default, read committed), or one of `\"read committed\"`, `\"repeatable read\"`, `\"serializable\"`.",
+                        ))
+                    }
+                },
+                Some(other) => {
+                    return Err(err(format!(
+                        "`begin` takes an optional isolation level as a String, got {}",
+                        crate::value::with_article(other.type_name())
+                    )))
+                }
+            };
+            c.may_speak().map_err(&conn_err)?;
+            // A `begin` sent as SQL is the caller's to end: a value that rolled it back when
+            // dropped would be undoing work it was never given.
+            if c.shared.status().map_err(&conn_err)? != b'I' {
+                return Err(conn_err("a transaction begun in SQL is open on this connection".to_string())
+                    .hint("end it the way it was begun — `execute(\"commit\")` or `execute(\"rollback\")` — or begin transactions with `begin()`."));
+            }
+            c.shared.run(sql, &[]).map_err(&conn_err)?;
+            let id = c.shared.begun.get() + 1;
+            c.shared.begun.set(id);
+            c.shared.open_tx.set(Some(id));
+            Ok(Value::Db(std::rc::Rc::new(Conn { shared: c.shared.clone(), tx: Some(id) })))
+        }
+        "commit" | "rollback" => {
+            let conn_err = |m: String| err(format!("postgres {}: {m}", c.shared.label));
+            if c.tx.is_none() {
+                return Err(err(format!("`{name}` ends a transaction, and this is the connection itself"))
+                    .hint(format!("`tx = c.begin()` opens one; `tx.{name}()` ends it.")));
+            }
+            c.may_speak().map_err(&conn_err)?;
+            // A TRANSACTION THAT HAS FAILED CANNOT COMMIT — the server answers `COMMIT` with
+            // `ROLLBACK` and no error, which a caller would take for success. It is rolled
+            // back by name instead, and `commit` says so.
+            let failed = c.shared.status().map_err(&conn_err)? == b'E';
+            let ran = c.shared.run(if name == "commit" && !failed { "commit" } else { "rollback" }, &[]);
+            // Whatever the server said, this value has spoken its last.
+            c.shared.open_tx.set(None);
+            ran.map_err(&conn_err)?;
+            if name == "commit" && failed {
+                return Err(conn_err("the transaction was rolled back, not committed: a statement in it had failed".to_string())
+                    .hint("an error inside a transaction ends it — the statements before it are undone too."));
+            }
+            Ok(Value::Missing)
+        }
         other => Err(err(format!(
             "{} has no method `{other}`",
             crate::value::with_article("Connection")
         ))
-            .hint("a Connection answers `query(sql, params?)` — and `execute(sql, params?)` when opened with `\"write\"`.")),
+            .hint("a Connection answers `query(sql, params?)`, `execute(sql, params?)` when opened with `\"write\"`, and `begin()` — whose value also answers `commit()` and `rollback()`.")),
     }
 }
 

@@ -46,6 +46,8 @@ struct Seen {
     closes: Vec<String>,
     describes: usize,
     binary_columns: Vec<usize>,
+    /// The text of every statement EXECUTED, in order.
+    executed: Vec<String>,
 }
 
 /// What a server can do beyond answering its script.
@@ -60,6 +62,9 @@ struct Twists {
     hang_up_at: Option<usize>,
     /// Answer the FIRST Execute with CopyInResponse, as `COPY … FROM STDIN` does, and wait.
     copy_in_first: bool,
+    /// Fail this Execute (1-based) with a unique violation, as a statement inside a
+    /// transaction might.
+    fail_at: Option<usize>,
 }
 
 /// Serve one connection; the thread returns what the client sent.
@@ -110,6 +115,12 @@ fn serve_with(script: Script, twists: Twists) -> (u16, std::thread::JoinHandle<S
         send(&mut s, b'R', &0i32.to_be_bytes()); // AuthenticationOk
         send(&mut s, b'Z', b"I"); // ReadyForQuery, idle
         let mut sql = String::new();
+        // Each statement's text by its name, the one the last Bind bound, every one executed —
+        // and where the session stands: `I` idle, `T` in a transaction, `E` in a failed one.
+        let mut texts: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut bound = String::new();
+        let mut executed: Vec<String> = Vec::new();
+        let mut status = b'I';
         let (mut parses, mut closes): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
         let mut known: Vec<String> = Vec::new();
         let mut binds = 0usize;
@@ -136,6 +147,7 @@ fn serve_with(script: Script, twists: Twists) -> (u16, std::thread::JoinHandle<S
                     if !name.is_empty() {
                         known.push(name.clone());
                     }
+                    texts.insert(name.clone(), sql.clone());
                     parses.push(name);
                     send(&mut s, b'1', &[]);
                 }
@@ -167,6 +179,7 @@ fn serve_with(script: Script, twists: Twists) -> (u16, std::thread::JoinHandle<S
                         send(&mut s, b'E', &out);
                         skipping = true;
                     } else {
+                        bound = texts.get(&stmt).cloned().unwrap_or_default();
                         formats = result_formats(&body);
                         binary_columns.push(formats.iter().filter(|f| **f == 1).count());
                         send(&mut s, b'2', &[]);
@@ -174,7 +187,7 @@ fn serve_with(script: Script, twists: Twists) -> (u16, std::thread::JoinHandle<S
                 }
                 b'D' => {
                     describes += 1;
-                    if script.columns.is_empty() {
+                    if script.columns.is_empty() || bound.starts_with("begin") || bound == "commit" || bound == "rollback" {
                         send(&mut s, b'n', &[]); // NoData
                     } else {
                         let mut out = Vec::new();
@@ -212,8 +225,44 @@ fn serve_with(script: Script, twists: Twists) -> (u16, std::thread::JoinHandle<S
                     skipping = true;
                 }
                 b'S' if copying => {}
+                // A failed transaction answers nothing but its end; and a statement can be
+                // told to fail, which inside a transaction is what fails it.
+                b'E' if (status == b'E' && bound != "commit" && bound != "rollback")
+                    || twists.fail_at == Some(executes + 1) =>
+                {
+                    executes += 1;
+                    let (code, text) = if status == b'E' {
+                        ("25P02", "current transaction is aborted, commands ignored until end of transaction block")
+                    } else {
+                        ("23505", "duplicate key value violates unique constraint")
+                    };
+                    if status == b'T' {
+                        status = b'E';
+                    }
+                    let mut out = Vec::new();
+                    out.push(b'S');
+                    put_cstr(&mut out, "ERROR");
+                    out.push(b'C');
+                    put_cstr(&mut out, code);
+                    out.push(b'M');
+                    put_cstr(&mut out, text);
+                    out.push(0);
+                    send(&mut s, b'E', &out);
+                    skipping = true;
+                }
+                // The three statements that move a session between its states: they return
+                // nothing, whatever this connection's script says a query returns.
+                b'E' if bound.starts_with("begin") || bound == "commit" || bound == "rollback" => {
+                    executes += 1;
+                    executed.push(bound.clone());
+                    status = if bound.starts_with("begin") { b'T' } else { b'I' };
+                    let mut out = Vec::new();
+                    put_cstr(&mut out, &bound.to_uppercase());
+                    send(&mut s, b'C', &out);
+                }
                 b'E' => {
                     executes += 1;
+                    executed.push(bound.clone());
                     let rows = match &twists.later_rows {
                         Some(later) if executes > 1 => later,
                         _ => &script.rows,
@@ -235,7 +284,7 @@ fn serve_with(script: Script, twists: Twists) -> (u16, std::thread::JoinHandle<S
                         }
                         send(&mut s, b'D', &out);
                         if twists.hang_up_at == Some(executes) {
-                            return Seen { sql, parses, closes, describes, binary_columns };
+                            return Seen { sql, parses, closes, describes, binary_columns, executed };
                         }
                     }
                     let mut out = Vec::new();
@@ -244,13 +293,13 @@ fn serve_with(script: Script, twists: Twists) -> (u16, std::thread::JoinHandle<S
                 }
                 b'S' => {
                     skipping = false;
-                    send(&mut s, b'Z', b"I")
+                    send(&mut s, b'Z', &[status])
                 }
                 b'X' => break,
                 other => panic!("unexpected message {:?}", other as char),
             }
         }
-        Seen { sql, parses, closes, describes, binary_columns }
+        Seen { sql, parses, closes, describes, binary_columns, executed }
     });
     (port, h)
 }
@@ -533,4 +582,118 @@ fn a_copy_from_stdin_is_refused_at_once_and_the_connection_carries_on() {
     assert!(matches!(df.column_values("n", 1, 1).unwrap().as_slice(), [Value::Int(9)]));
     drop(c);
     h.join().unwrap();
+}
+
+fn write_conn(port: u16) -> std::rc::Rc<super::Conn> {
+    let Value::Db(c) = postgres_open(&[sv(&url(port)), sv("write")], 1, 1).unwrap() else { panic!("not a connection") };
+    c
+}
+
+fn begin(c: &std::rc::Rc<super::Conn>, args: &[Value]) -> std::rc::Rc<super::Conn> {
+    let Value::Db(tx) = conn_method(c, "begin", args, 1, 1).unwrap() else { panic!("`begin` answers a connection value") };
+    tx
+}
+
+/// A TRANSACTION IS A VALUE (ADR 0047 D5): what goes through it is one transaction on the
+/// server, `commit()` ends it, the connection is its own again afterwards, and the value that
+/// spoke for the transaction has spoken its last.
+#[test]
+fn a_transaction_commits_through_its_own_value() {
+    let (port, h) = serve(Script { expect_read_only: false, columns: vec![], rows: vec![], tag: "UPDATE 1" });
+    let c = write_conn(port);
+    let tx = begin(&c, &[]);
+    for id in [1, 2] {
+        let arr = Value::Array(std::rc::Rc::new(crate::value::ArrayData::Values(vec![Value::Int(id)])));
+        conn_method(&tx, "execute", &[sv("update accounts set n = n + 1 where id = $1"), arr], 1, 1).unwrap();
+    }
+    assert!(matches!(conn_method(&tx, "commit", &[], 1, 1).unwrap(), Value::Missing));
+    // Ended: nothing more goes through it, and saying so costs no round trip.
+    for verb in ["query", "execute", "commit", "rollback"] {
+        let e = conn_method(&tx, verb, &[sv("select 1")], 1, 1).unwrap_err();
+        assert!(e.message.contains("this transaction has ended"), "{verb}: {}", e.message);
+    }
+    conn_method(&c, "execute", &[sv("update accounts set n = 0")], 1, 1).unwrap();
+    drop(tx);
+    drop(c);
+    assert_eq!(
+        h.join().unwrap().executed,
+        ["begin", "update accounts set n = n + 1 where id = $1", "update accounts set n = n + 1 where id = $1", "commit", "update accounts set n = 0"]
+    );
+}
+
+/// ONE THAT IS DROPPED WITHOUT COMMITTING ROLLS BACK — which is what makes an error between
+/// `begin` and `commit` undo everything, with nothing for a caller to remember.
+#[test]
+fn a_transaction_dropped_without_committing_rolls_back() {
+    let (port, h) = serve(Script { expect_read_only: false, columns: vec![], rows: vec![], tag: "INSERT 0 1" });
+    let c = write_conn(port);
+    {
+        let tx = begin(&c, &[sv("serializable")]);
+        conn_method(&tx, "execute", &[sv("insert into t values (1)")], 1, 1).unwrap();
+    }
+    // The connection is its own again the moment the value is gone.
+    conn_method(&c, "execute", &[sv("insert into t values (2)")], 1, 1).unwrap();
+    // And an explicit rollback sends exactly one.
+    let tx = begin(&c, &[]);
+    assert!(matches!(conn_method(&tx, "rollback", &[], 1, 1).unwrap(), Value::Missing));
+    drop(tx);
+    drop(c);
+    assert_eq!(
+        h.join().unwrap().executed,
+        ["begin isolation level serializable", "insert into t values (1)", "rollback", "insert into t values (2)", "begin", "rollback"]
+    );
+}
+
+/// WHILE IT IS OPEN, ITS VALUE IS THE ONLY WAY IN. The session is one, so a statement through
+/// the connection's own value would land inside the transaction, silently — it is refused, and
+/// nothing is sent. Nor do transactions nest, nor does the connection itself commit.
+#[test]
+fn an_open_transaction_is_the_only_way_into_its_session() {
+    let (port, h) = serve(Script { expect_read_only: true, columns: vec!["n"], rows: vec![vec!["1"]], tag: "SELECT 1" });
+    let Value::Db(c) = postgres_open(&[sv(&url(port))], 1, 1).unwrap() else { panic!("not a connection") };
+    let e = conn_method(&c, "commit", &[], 1, 1).unwrap_err();
+    assert!(e.message.contains("`commit` ends a transaction, and this is the connection itself"), "{}", e.message);
+    let e = conn_method(&c, "begin", &[sv("chaos")], 1, 1).unwrap_err();
+    assert!(e.message.contains("`chaos` is not an isolation level"), "{}", e.message);
+
+    // A read-only connection begins one too: several queries, one snapshot.
+    let tx = begin(&c, &[sv("repeatable read")]);
+    let e = conn_method(&c, "query", &[sv("select 1 as n")], 1, 1).unwrap_err();
+    assert!(e.message.contains("a transaction is open on this connection"), "{}", e.message);
+    let e = conn_method(&c, "begin", &[], 1, 1).unwrap_err();
+    assert!(e.message.contains("a transaction is open on this connection"), "{}", e.message);
+    let e = conn_method(&tx, "begin", &[], 1, 1).unwrap_err();
+    assert!(e.message.contains("does not nest"), "{}", e.message);
+    conn_method(&tx, "query", &[sv("select 1 as n")], 1, 1).unwrap();
+    conn_method(&tx, "commit", &[], 1, 1).unwrap();
+    conn_method(&c, "query", &[sv("select 1 as n")], 1, 1).unwrap();
+    drop(tx);
+    drop(c);
+    assert_eq!(
+        h.join().unwrap().executed,
+        ["begin isolation level repeatable read", "select 1 as n", "commit", "select 1 as n"]
+    );
+}
+
+/// A TRANSACTION THAT HAS FAILED CANNOT COMMIT. The server would answer `COMMIT` with
+/// `ROLLBACK` and no error, which a caller would take for success: it is rolled back by name,
+/// and `commit()` raises.
+#[test]
+fn a_failed_transaction_rolls_back_and_commit_says_so() {
+    let script = Script { expect_read_only: false, columns: vec![], rows: vec![], tag: "INSERT 0 1" };
+    let (port, h) = serve_with(script, Twists { fail_at: Some(3), ..Twists::default() });
+    let c = write_conn(port);
+    let tx = begin(&c, &[]);
+    conn_method(&tx, "execute", &[sv("insert into t values (1)")], 1, 1).unwrap();
+    let e = conn_method(&tx, "execute", &[sv("insert into t values (1) -- again")], 1, 1).unwrap_err();
+    assert!(e.message.contains("23505"), "{}", e.message);
+    // The server now refuses everything but the end, and says why itself.
+    let e = conn_method(&tx, "execute", &[sv("insert into t values (2)")], 1, 1).unwrap_err();
+    assert!(e.message.contains("25P02"), "{}", e.message);
+    let e = conn_method(&tx, "commit", &[], 1, 1).unwrap_err();
+    assert!(e.message.contains("rolled back, not committed"), "{}", e.message);
+    conn_method(&c, "execute", &[sv("insert into t values (3)")], 1, 1).unwrap();
+    drop(tx);
+    drop(c);
+    assert_eq!(h.join().unwrap().executed, ["begin", "insert into t values (1)", "rollback", "insert into t values (3)"]);
 }

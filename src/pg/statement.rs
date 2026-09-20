@@ -25,6 +25,10 @@ pub struct Session {
     /// Whether this server prints `float8` with round-trip digits (PostgreSQL 12 and later),
     /// which is what makes a binary `float8` the same value as its text (`types`).
     exact_float_text: bool,
+    /// Where the server says the session stands, from its last `ReadyForQuery`: `I` idle, `T`
+    /// in a transaction, `E` in a transaction that has failed and will answer nothing but its
+    /// end.
+    pub status: u8,
 }
 
 /// A framing buffer is kept between exchanges up to this size and let go past it, so one
@@ -33,7 +37,7 @@ const KEEP_WIRE: usize = 1024 * 1024;
 
 impl Session {
     pub fn new(stream: Stream, exact_float_text: bool) -> Session {
-        Session { stream, prepared: Prepared::default(), wire: Vec::new(), exact_float_text }
+        Session { stream, prepared: Prepared::default(), wire: Vec::new(), exact_float_text, status: b'I' }
     }
 }
 
@@ -197,6 +201,16 @@ pub fn run_prepared(se: &mut Session, sql: &str, params: &[Value]) -> Result<Out
             // name and prepare the text again below — once.
             Err(f) if !f.broken && (f.code == "26000" || f.code == "0A000") => {
                 se.prepared.by_sql.remove(sql);
+                // UNLESS THAT ERROR JUST ENDED A TRANSACTION. Inside one, any error is the
+                // end of it: preparing again would only be answered `25P02`, which says
+                // nothing about why. The cause is reported instead, with what to do.
+                if se.status == b'E' {
+                    let text = format!(
+                        "{} — the statement was prepared before a change that made it stale, and an error inside a transaction ends the transaction: roll back and run it again",
+                        f.text
+                    );
+                    return Err(Fail { text, ..f });
+                }
             }
             Ok((out, learned)) => {
                 if let Some(d) = learned {
@@ -337,11 +351,13 @@ fn frame(
 }
 
 /// Read to `ReadyForQuery` after an error, so the connection is left where the next statement
-/// expects it. Whatever else arrives on the way is not this caller's.
-fn drain_to_ready(s: &mut Stream) -> Result<(), String> {
+/// expects it, and answer where the server says the session now stands. Whatever else arrives
+/// on the way is not this caller's.
+fn drain_to_ready(s: &mut Stream) -> Result<u8, String> {
     loop {
-        if s.next_msg()?.0 == b'Z' {
-            return Ok(());
+        let (tag, body) = s.next_msg()?;
+        if tag == b'Z' {
+            return Ok(body.first().copied().unwrap_or(b'I'));
         }
     }
 }
@@ -379,8 +395,11 @@ fn exchange(
                 let (text, code) = (error_text(body), error_code(body));
                 // Drain to the synchronisation point so the connection is left in a known
                 // state even though this query is finished. If that fails it is not.
-                let broken = drain_to_ready(&mut se.stream).is_err();
-                return Err(Fail { text, code, parsed, broken });
+                let drained = drain_to_ready(&mut se.stream);
+                if let Ok(status) = drained {
+                    se.status = status;
+                }
+                return Err(Fail { text, code, parsed, broken: drained.is_err() });
             }
             // ParseComplete: the statement exists on the server from here on.
             b'1' => parsed = true,
@@ -446,8 +465,11 @@ fn exchange(
                 end_msg(&mut se.wire, at)?;
                 send_framed(&mut se.stream, &se.wire)?;
             }
-            // ReadyForQuery — the synchronisation point.
-            b'Z' => break,
+            // ReadyForQuery — the synchronisation point, and where the session stands.
+            b'Z' => {
+                se.status = body.first().copied().unwrap_or(b'I');
+                break;
+            }
             _ => continue,
         }
     }

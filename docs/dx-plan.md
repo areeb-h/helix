@@ -603,6 +603,19 @@ statement reading its predecessor's unread replies as its own rows. Live harness
 a caller can see — 228 lines identical on both binaries, plaintext and TLS). Measured and
 declined: 64 KiB read buffer (1.00x).
 
+**A transaction is a value (2026-09-20), DONE — ADR 0047 D5, the field's §1.19 #4.**
+`tx = c.begin(isolation?)` answers a `Value::Db` sharing the session (`Conn { shared:
+Rc<Shared>, tx: Option<u64> }` in `src/pg/mod.rs`); `commit()`/`rollback()` end it; `Drop` on
+a transaction's value that never committed sends `ROLLBACK`. That IS commit-on-success,
+rollback-on-raise — no callback, which a builtin could not call uniformly anyway (why
+`postgres_with` was withdrawn). `Shared.open_tx` makes the transaction's value the only way
+into the session while it is open; `Session.status` (the byte every `ReadyForQuery` carries)
+is how `commit()` on a FAILED transaction rolls back and raises instead of reporting the
+server's silent `COMMIT` -> `ROLLBACK`, and how `begin()` refuses a session already in a
+SQL-begun transaction. A stale prepared statement INSIDE a transaction reports its own error
+with what to do, rather than the `25P02` a re-prepare would get. Live: `target/bench/f91/tx.helix`
+prints the same under walker, VM and JIT.
+
 **The interner hashes a cell once (2026-09-20), DONE.** Followed from the driver's profile:
 with a result decoded in place, what a text-heavy read had left was `StrBuilder` — std's
 `HashMap<DictKey, u32>` hashes a distinct value two to three times (`get`, then `insert`,
