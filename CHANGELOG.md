@@ -4,6 +4,28 @@
 
 ### Added
 
+- **Several PostgreSQL statements share one round trip: `c.query([q1, q2, q3])`.** The
+  2026-09-20 profile said where a small query's time is: 7–13 µs of this client's code inside
+  a 150–190 µs round trip. Nothing done to one statement makes a page of five queries faster;
+  sending the five together does. `query` and `execute` take an ARRAY of statements — each a
+  SQL String or the record `{sql, params}` a query builder renders to — and answer an Array of
+  frames (or of `{affected, rows}`), in order. Measured live on PostgreSQL 17: five lookups by
+  primary key 998 → 281 µs (3.6x), a page of three different queries 682 → 347 (2.0x), a
+  "flight" of one exactly what the statement costs alone. Each statement is framed as it would
+  be alone — prepared once, described once, fixed-width columns in binary — and ONE Sync ends
+  them, which makes a flight one transaction without anyone saying `begin`: every statement
+  takes effect or none does, and an error names the statement it belongs to (`statement 2 of
+  3: …`). IT CANNOT DEADLOCK: written first and read afterwards, a request larger than the
+  socket buffers against an answer larger than them stops both ends for ever (the server
+  blocked sending, the client blocked writing); a flight goes out on a socket that does not
+  block, what comes back set aside as it arrives — under TLS by driving the record layer
+  directly. Verified with 7 MB out against 14 MB back, in the clear and under TLS. Two things
+  the live server taught that the fake one had wrong: after `DEALLOCATE ALL` EVERY name of a
+  flight is stale, so a stale name makes the flight forget (and close) all it binds and go
+  again once; and a `COPY` followed by other statements makes a real server END THE CONNECTION,
+  so a flight containing one is refused before anything is sent. The gate also gained its
+  first TLS data-path tests: a certificate made at test time, rustls's own server as the peer.
+
 - **How long a PostgreSQL statement may take is the URL's to say: `?timeout=`.** The only bound
   was this client's own read timeout — thirty seconds of silence, not the caller's to move —
   so a statement that computes for 31 s before its first row could not be run at all, and one

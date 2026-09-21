@@ -50,6 +50,8 @@ struct Seen {
     executed: Vec<String>,
     /// The startup packet, NULs and all.
     startup: String,
+    /// How many times the client said Sync: once per round trip.
+    syncs: usize,
 }
 
 /// What a server can do beyond answering its script.
@@ -62,8 +64,8 @@ struct Twists {
     later_rows: Option<Vec<Vec<&'static str>>>,
     /// On this Execute (1-based), send one row and HANG UP — no completion, no ReadyForQuery.
     hang_up_at: Option<usize>,
-    /// Answer the FIRST Execute with CopyInResponse, as `COPY … FROM STDIN` does, and wait.
-    copy_in_first: bool,
+    /// Answer this Execute (1-based) with CopyInResponse, as `COPY … FROM STDIN` does, and wait.
+    copy_in_at: Option<usize>,
     /// Fail this Execute (1-based) with a unique violation, as a statement inside a
     /// transaction might.
     fail_at: Option<usize>,
@@ -137,10 +139,29 @@ fn serve_with(script: Script, twists: Twists) -> (u16, std::thread::JoinHandle<S
         // Waiting for COPY data: a Sync that arrives now was sent before the client could know,
         // and is ignored — as the protocol says.
         let mut copying = false;
+        let mut syncs = 0usize;
         loop {
             let (tag, body) = read_one(&mut s, true);
+            if tag == b'S' {
+                syncs += 1;
+            }
             if skipping && tag != b'S' && tag != b'X' {
                 continue;
+            }
+            // Waiting for COPY data, anything that is not COPY data (or a Flush or a Sync, which
+            // are ignored) is the END OF THE CONNECTION, as it is with the real server: it has
+            // read the message's type and will not read the rest, so it has lost its place.
+            if copying && !matches!(tag, b'd' | b'c' | b'f' | b'H' | b'S') {
+                let mut out = Vec::new();
+                out.push(b'S');
+                put_cstr(&mut out, "FATAL");
+                out.push(b'C');
+                put_cstr(&mut out, "08P01");
+                out.push(b'M');
+                put_cstr(&mut out, "terminating connection because protocol synchronization was lost");
+                out.push(0);
+                send(&mut s, b'E', &out);
+                return Seen { sql, parses, closes, describes, binary_columns, executed, startup: text, syncs };
             }
             match tag {
                 // Parse: the statement's name (empty for the unnamed one), then its text.
@@ -208,7 +229,7 @@ fn serve_with(script: Script, twists: Twists) -> (u16, std::thread::JoinHandle<S
                         send(&mut s, b'T', &out);
                     }
                 }
-                b'E' if twists.copy_in_first && executes == 0 => {
+                b'E' if twists.copy_in_at == Some(executes + 1) => {
                     executes += 1;
                     copying = true;
                     send(&mut s, b'G', &[0, 0, 0]); // text format, no columns
@@ -304,7 +325,7 @@ fn serve_with(script: Script, twists: Twists) -> (u16, std::thread::JoinHandle<S
                         }
                         send(&mut s, b'D', &out);
                         if twists.hang_up_at == Some(executes) {
-                            return Seen { sql, parses, closes, describes, binary_columns, executed, startup: text };
+                            return Seen { sql, parses, closes, describes, binary_columns, executed, startup: text, syncs };
                         }
                     }
                     let mut out = Vec::new();
@@ -319,7 +340,7 @@ fn serve_with(script: Script, twists: Twists) -> (u16, std::thread::JoinHandle<S
                 other => panic!("unexpected message {:?}", other as char),
             }
         }
-        Seen { sql, parses, closes, describes, binary_columns, executed, startup: text }
+        Seen { sql, parses, closes, describes, binary_columns, executed, startup: text, syncs }
     });
     (port, h)
 }
@@ -589,7 +610,7 @@ fn a_connection_whose_exchange_did_not_finish_is_never_used_again() {
 #[test]
 fn a_copy_from_stdin_is_refused_at_once_and_the_connection_carries_on() {
     let script = Script { expect_read_only: false, columns: vec!["n"], rows: vec![vec!["9"]], tag: "SELECT 1" };
-    let (port, h) = serve_with(script, Twists { copy_in_first: true, ..Twists::default() });
+    let (port, h) = serve_with(script, Twists { copy_in_at: Some(1), ..Twists::default() });
     let c = postgres_open(&[sv(&url(port)), sv("write")], 1, 1).unwrap();
     let Value::Db(c) = c else { panic!("not a connection") };
     let started = std::time::Instant::now();
@@ -761,4 +782,204 @@ fn a_statement_that_outruns_its_timeout_is_an_error_and_the_connection_carries_o
     assert!(e.message.contains("57014") && !e.message.contains("timeout="), "{}", e.message);
     drop(c);
     h.join().unwrap();
+}
+
+fn array(vs: Vec<Value>) -> Value {
+    Value::Array(std::rc::Rc::new(crate::value::ArrayData::Values(vs)))
+}
+
+fn statement(sql: &str, params: Vec<Value>) -> Value {
+    Value::Record(std::rc::Rc::new(vec![
+        (crate::symbol::Symbol::intern("sql"), sv(sql)),
+        (crate::symbol::Symbol::intern("params"), array(params)),
+    ]))
+}
+
+fn ints_of(v: &Value, column: &str) -> Vec<i64> {
+    let Value::DataFrame(df) = v else { panic!("not a frame: {v:?}") };
+    df.column_values(column, 1, 1)
+        .unwrap()
+        .iter()
+        .map(|c| if let Value::Int(n) = c { *n } else { panic!("not an Int: {c:?}") })
+        .collect()
+}
+
+/// SEVERAL STATEMENTS, ONE ROUND TRIP. `query` handed an Array of statements sends them
+/// together and says Sync ONCE; what comes back is an Array of frames, in order. Each
+/// statement goes as it would alone — a text met twice is parsed once, and the second time the
+/// whole flight runs nothing is parsed or described and the integers cross in binary.
+#[test]
+fn several_statements_share_one_round_trip() {
+    let script = Script { expect_read_only: true, columns: vec!["n"], rows: vec![vec!["1"]], tag: "SELECT 1" };
+    let twists = Twists { later_rows: Some(vec![vec!["2"], vec!["3"]]), ..Twists::default() };
+    let (port, h) = serve_with(script, twists);
+    let Value::Db(c) = postgres_open(&[sv(&url(port))], 1, 1).unwrap() else { panic!("not a connection") };
+    let flight = array(vec![
+        sv("select n from a"),
+        statement("select n from b where id = $1", vec![Value::Int(7)]),
+        statement("select n from b where id = $1", vec![Value::Int(8)]),
+    ]);
+    for round in 0..2 {
+        let Value::Array(answers) = conn_method(&c, "query", std::slice::from_ref(&flight), 1, 1).unwrap() else {
+            panic!("a flight answers an Array")
+        };
+        let answers: Vec<Value> = answers.iter_values().collect();
+        assert_eq!(answers.len(), 3);
+        // The fake server's first Execute answers one row and every later one two.
+        let first = if round == 0 { vec![1] } else { vec![2, 3] };
+        assert_eq!(ints_of(&answers[0], "n"), first, "round {round}");
+        assert_eq!(ints_of(&answers[1], "n"), vec![2, 3]);
+        assert_eq!(ints_of(&answers[2], "n"), vec![2, 3]);
+    }
+    assert!(matches!(conn_method(&c, "query", &[array(vec![])], 1, 1).unwrap(), Value::Array(a) if a.is_empty()));
+    drop(c);
+    let seen = h.join().unwrap();
+    assert_eq!(seen.syncs, 2, "two flights, two round trips — and the empty one none");
+    assert_eq!(seen.parses.len(), 2, "two texts, each parsed once: {:?}", seen.parses);
+    assert_eq!(seen.describes, 3, "each statement of the first flight, none of the second");
+    assert_eq!(seen.binary_columns, vec![0, 0, 0, 1, 1, 1], "text the first time, binary after");
+    assert_eq!(seen.executed.len(), 6);
+}
+
+/// A FLIGHT IS ALL OR NOTHING, and its error says whose it was. The server skips everything
+/// after a failed statement to the flight's one Sync, and rolls back everything before it; the
+/// client reads to that Sync, so the connection carries on — remembering exactly what the
+/// server now has: the statement parsed before the failure, and not the one after it.
+#[test]
+fn a_flight_fails_as_one_and_names_the_statement() {
+    let script = Script { expect_read_only: false, columns: vec![], rows: vec![], tag: "INSERT 0 1" };
+    let (port, h) = serve_with(script, Twists { fail_at: Some(2), ..Twists::default() });
+    let c = write_conn(port);
+    let flight = array(vec![sv("insert into t values (1)"), sv("insert into t values (1) -- again"), sv("insert into t values (3)")]);
+    let e = conn_method(&c, "execute", std::slice::from_ref(&flight), 1, 1).unwrap_err();
+    assert!(e.message.contains("statement 2 of 3: "), "{}", e.message);
+    assert!(e.message.contains("23505"), "{}", e.message);
+    // Again, and nothing fails this time: three answers, each `{affected, rows}`.
+    let Value::Array(answers) = conn_method(&c, "execute", &[flight], 1, 1).unwrap() else { panic!("an Array") };
+    assert_eq!(answers.len(), 3);
+    for a in answers.iter_values() {
+        let Value::Record(fields) = a else { panic!("not a record: {a:?}") };
+        assert!(fields.iter().any(|(k, v)| k.as_str() == "affected" && matches!(v, Value::Int(1))));
+    }
+    drop(c);
+    let seen = h.join().unwrap();
+    assert_eq!(seen.syncs, 2);
+    // First flight: statements 1 and 2 parsed, 3 skipped by the server. Second: only 3 is new.
+    assert_eq!(seen.parses.len(), 3, "{:?}", seen.parses);
+    assert_eq!(
+        seen.executed,
+        ["insert into t values (1)", "insert into t values (1)", "insert into t values (1) -- again", "insert into t values (3)"]
+    );
+}
+
+/// What a flight is made of is checked before anything is sent, and the error counts as a
+/// person does.
+#[test]
+fn a_flight_is_checked_before_it_is_sent() {
+    let (port, h) = serve(Script { expect_read_only: true, columns: vec!["n"], rows: vec![vec!["1"]], tag: "SELECT 1" });
+    let Value::Db(c) = postgres_open(&[sv(&url(port))], 1, 1).unwrap() else { panic!("not a connection") };
+    let record = |fields: Vec<(&str, Value)>| {
+        Value::Record(std::rc::Rc::new(fields.into_iter().map(|(k, v)| (crate::symbol::Symbol::intern(k), v)).collect()))
+    };
+    for (flight, second, needle) in [
+        (array(vec![sv("select 1"), Value::Int(5)]), None, "statement 2 is an Int, which is not a statement"),
+        (array(vec![record(vec![("params", array(vec![]))])]), None, "statement 1 is a record with no `sql`"),
+        (array(vec![record(vec![("sql", Value::Int(1))])]), None, "statement 1's `sql` is an Int, not a String"),
+        (
+            array(vec![sv("select 1"), statement("select $1", vec![record(vec![])])]),
+            None,
+            "statement 2: parameter 1 is a Record, which has no SQL form",
+        ),
+        (array(vec![sv("select 1")]), Some(array(vec![Value::Int(1)])), "each carries its own parameters"),
+    ] {
+        let mut args = vec![flight];
+        args.extend(second);
+        let e = conn_method(&c, "query", &args, 1, 1).unwrap_err();
+        assert!(e.message.contains(needle), "{needle}: {}", e.message);
+    }
+    // A record may carry more than a statement needs; and none of the above reached the wire.
+    let rendered = record(vec![("sql", sv("select 1 as n")), ("params", array(vec![])), ("n", Value::Int(1))]);
+    conn_method(&c, "query", &[array(vec![rendered])], 1, 1).unwrap();
+    drop(c);
+    let seen = h.join().unwrap();
+    assert_eq!((seen.syncs, seen.executed.len()), (1, 1));
+}
+
+/// A STATEMENT THE FLIGHT BINDS IS NEVER THE ONE DISPLACED TO MAKE ROOM — not even when it is
+/// the least recently used, and not even when it comes AFTER the new statement in the flight.
+#[test]
+fn a_flight_never_displaces_a_statement_it_binds() {
+    let (port, h) = serve(Script { expect_read_only: true, columns: vec!["n"], rows: vec![vec!["1"]], tag: "SELECT 1" });
+    let Value::Db(c) = postgres_open(&[sv(&url(port))], 1, 1).unwrap() else { panic!("not a connection") };
+    for i in 0..MAX_PREPARED {
+        conn_method(&c, "query", &[sv(&format!("select {i} as n"))], 1, 1).unwrap();
+    }
+    // The cache is full and `select 0` is its oldest. A flight: a NEW statement, then that one.
+    let flight = array(vec![sv("select 'new' as n"), sv("select 0 as n")]);
+    conn_method(&c, "query", &[flight], 1, 1).unwrap();
+    drop(c);
+    let seen = h.join().unwrap();
+    assert_eq!(seen.parses.len(), MAX_PREPARED + 1);
+    // Room was made by closing the oldest statement the flight does NOT use: the second.
+    assert_eq!(seen.closes, vec![seen.parses[1].clone()]);
+}
+
+/// A COPY GOES ALONE. Followed by other statements it makes a real server end the connection
+/// (it reads the next statement as COPY data and loses its place), and once the flight is on
+/// the wire nothing can be done — so it is refused BEFORE anything is sent, wherever it stands,
+/// and the connection is untouched.
+#[test]
+fn a_copy_in_a_flight_is_refused_before_anything_is_sent() {
+    let (port, h) = serve(Script { expect_read_only: false, columns: vec!["n"], rows: vec![vec!["9"]], tag: "SELECT 1" });
+    let c = write_conn(port);
+    for (flight, whose) in [
+        (vec!["select 1 as n", "  /* bulk */ COPY t FROM STDIN"], "statement 2 of 2: "),
+        (vec!["copy t from stdin", "select 1 as n"], "statement 1 of 2: "),
+    ] {
+        let e = conn_method(&c, "execute", &[array(flight.iter().map(|q| sv(q)).collect())], 1, 1).unwrap_err();
+        assert!(e.message.contains(whose), "{}", e.message);
+        assert!(e.message.contains("cannot share a round trip"), "{}", e.message);
+    }
+    let v = conn_method(&c, "query", &[sv("select 9 as n")], 1, 1).unwrap();
+    assert_eq!(ints_of(&v, "n"), vec![9]);
+    drop(c);
+    let seen = h.join().unwrap();
+    assert_eq!((seen.syncs, seen.executed.len()), (1, 1), "only the query after them reached the server");
+}
+
+/// EVERY NAME STALE AT ONCE — `DEALLOCATE ALL`, `DISCARD ALL`, a pooler's other backend — found
+/// against a live server, where a flight that forgot only the statement the server happened to
+/// refuse was refused for the next one. The flight forgets every statement it binds, closes
+/// them (one that was still there must not be left behind), and goes again ONCE, all fresh.
+#[test]
+fn a_flight_whose_names_all_went_stale_goes_again_once() {
+    let script = Script { expect_read_only: true, columns: vec!["n"], rows: vec![vec!["1"]], tag: "SELECT 1" };
+    // Binds 1–3 are the first flight; the server forgets everything before the fourth.
+    let (port, h) = serve_forgetting(script, Some(4));
+    let Value::Db(c) = postgres_open(&[sv(&url(port))], 1, 1).unwrap() else { panic!("not a connection") };
+    let flight = array(vec![sv("select 1 as n"), sv("select 2 as n"), sv("select 3 as n")]);
+    for _ in 0..3 {
+        let Value::Array(answers) = conn_method(&c, "query", std::slice::from_ref(&flight), 1, 1).unwrap() else { panic!("an Array") };
+        assert_eq!(answers.len(), 3);
+    }
+    drop(c);
+    let seen = h.join().unwrap();
+    assert_eq!(seen.syncs, 4, "three flights, and one of them sent twice");
+    assert_eq!(seen.parses.len(), 6, "each text parsed twice: {:?}", seen.parses);
+    // The three stale names were closed at the head of the second attempt, none twice.
+    assert_eq!(seen.closes, seen.parses[..3].to_vec());
+}
+
+/// A flight of ONE is that statement — the same bytes, the same cache, no second code path.
+#[test]
+fn a_flight_of_one_is_that_statement() {
+    let (port, h) = serve(Script { expect_read_only: true, columns: vec!["n"], rows: vec![vec!["5"]], tag: "SELECT 1" });
+    let Value::Db(c) = postgres_open(&[sv(&url(port))], 1, 1).unwrap() else { panic!("not a connection") };
+    conn_method(&c, "query", &[sv("select 5 as n")], 1, 1).unwrap();
+    let Value::Array(answers) = conn_method(&c, "query", &[array(vec![sv("select 5 as n")])], 1, 1).unwrap() else { panic!("an Array") };
+    let answers: Vec<Value> = answers.iter_values().collect();
+    assert_eq!(ints_of(&answers[0], "n"), vec![5]);
+    drop(c);
+    let seen = h.join().unwrap();
+    assert_eq!((seen.parses.len(), seen.describes, seen.syncs), (1, 1, 2), "a hit on the statement already prepared");
 }

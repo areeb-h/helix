@@ -158,8 +158,13 @@ how long a statement may take: nothing (30 s of silence, as ever), `timeout=N` (
 ends it, `57014`, the connection carries on) or `timeout=0`; `connect_timeout=N`; TCP
 keepalive on every connection.
 
-**Still open:** `SCRAM-SHA-256-PLUS` channel binding; several statements in one round trip
-(a pipeline / batch), which is where a small query's time actually is.
+**Several statements, one round trip (2026-09-21).** `c.query([q1, q2, q3])` / `c.execute([...])`:
+framed together, ONE Sync — so all or nothing — an Array of answers; 5 lookups 998 -> 281 us.
+Sent on a non-blocking socket while the answer is set aside, so it cannot deadlock (7 MB out /
+14 MB back verified, clear and TLS). A `COPY` goes alone. The gate has TLS data-path tests
+now: a certificate made at test time, rustls's server as the peer.
+
+**Still open:** `SCRAM-SHA-256-PLUS` channel binding; a cursor for results larger than memory.
 
 ### A method call is resolved by its receiver (ADR 0045)
 

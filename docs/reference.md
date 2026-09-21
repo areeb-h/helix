@@ -4304,7 +4304,7 @@ Commit the transaction this value speaks for; the value has then ended.
 
 Run one statement that may write on a connection opened with "write"; returns {affected, rows}.
 
-**Note:** The same verb as `postgres_execute`, on the reused socket (ADR 0047): `affected` is the count from the server's completion tag, `rows` a DataFrame of what a `RETURNING` clause returned. On a connection opened without "write" it is refused BEFORE a byte is sent — the session is read-only from its first byte — and the help names the spelling that opens a writable one: `postgres_open(url, "write")`, which needs the `db-write` capability. One statement is one transaction — unless it is sent through a transaction's value (`tx = conn.begin()`), where several are. Keywords: sql, postgres, insert, update, delete, write, returning, affected.
+**Note:** Handed an ARRAY of statements (`{sql, params}` records or Strings) it runs them in ONE round trip and ONE transaction — all take effect or none does — and answers an Array of `{affected, rows}`; see `Connection.query`. The same verb as `postgres_execute`, on the reused socket (ADR 0047): `affected` is the count from the server's completion tag, `rows` a DataFrame of what a `RETURNING` clause returned. On a connection opened without "write" it is refused BEFORE a byte is sent — the session is read-only from its first byte — and the help names the spelling that opens a writable one: `postgres_open(url, "write")`, which needs the `db-write` capability. One statement is one transaction — unless it is sent through a transaction's value (`tx = conn.begin()`), where several are. Keywords: sql, postgres, insert, update, delete, write, returning, affected.
 
 ```
 >>> postgres_open(url, "write").execute("insert into people (name) values ($1) returning id", ["Ada"]).affected
@@ -4312,9 +4312,9 @@ Run one statement that may write on a connection opened with "write"; returns {a
 
 ### `query(sql, params?)`
 
-Run one read-only statement on this connection; returns a DataFrame.
+Run one read-only statement on this connection and return a DataFrame — or an Array of statements in ONE round trip, returning an Array of DataFrames.
 
-**Note:** PARAMETERS ARE VALUES, never text spliced into the statement: `$1`, `$2` … are bound by the server, so a string containing a quote is data. An Array is a parameter too — `where id = any($1)` with `[[1, 2, 3]]` — as is Bytes. The session is read-only from its first byte (set in the startup packet), so a write comes back as the server's own SQLSTATE 25006 rather than a client-side guess. The connection closes when the last handle to it goes — there is nothing to call. Keywords: sql, postgres, database, select, parameter.
+**Note:** SEVERAL STATEMENTS, ONE ROUND TRIP: `conn.query([q1, q2, q3])`, each `q` a SQL String or a record `{sql: "…", params: […]}` (what a query builder renders to; other fields are not looked at), answers an Array of DataFrames in the same order. A small query is a few microseconds of client work inside a round trip of a hundred or more, so five independent reads cost five round trips one by one and barely more than one together (measured: 998 -> 281 us). The statements are sent with ONE Sync, which makes them one transaction: all take effect or none does, and an error names its statement (`statement 2 of 3: …`). Each is prepared and cached exactly as it is alone. A `COPY` goes on its own. PARAMETERS ARE VALUES, never text spliced into the statement: `$1`, `$2` … are bound by the server, so a string containing a quote is data. An Array is a parameter too — `where id = any($1)` with `[[1, 2, 3]]` — as is Bytes. The session is read-only from its first byte (set in the startup packet), so a write comes back as the server's own SQLSTATE 25006 rather than a client-side guess. The connection closes when the last handle to it goes — there is nothing to call. Keywords: sql, postgres, database, select, parameter.
 
 ```
 >>> conn.query("select name from people where age > $1", [40])

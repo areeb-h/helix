@@ -178,8 +178,9 @@ visible in `describe`, which is where a reader can see the trade.
   not implemented. The gap it closes is narrower here than in `libpq`, because there is no
   `require` mode to be sitting in — every TLS session is chain- and hostname-verified — but
   it is a real gap and it is the next thing this file should grow.
-- **One statement per call.** No multi-statement batch and no cursor: a query is sent,
-  executed, and fully read. A result larger than memory has no streaming form yet.
+- ~~**One statement per call.**~~ Several statements share a round trip since 2026-09-21 (the
+  addendum of that date). Still no cursor: a query is sent, executed, and fully read, and a
+  result larger than memory has no streaming form yet.
 - **Type inference is the server's.** Parameters are sent with unspecified OIDs so the
   server infers each from its use, which is what `libpq` does. A parameter in a position
   the server cannot infer (`select $1`) needs a cast, exactly as it does from psql.
@@ -424,3 +425,85 @@ is unchanged; only its error message grew.
 Rejected: the client giving up and sending `CancelRequest`. That is what a client must do
 when only IT knows the limit; the server knowing it is strictly better — no second connection,
 no race between the cancel and the reply, and the connection survives.
+
+## Addendum 2026-09-21 — several statements, one round trip
+
+The 2026-09-20 profile said where a small query's time is: 7–13 µs of this client's code
+inside a 150–190 µs round trip. Nothing done to a single statement makes a page of five
+queries faster. Sending the five together does.
+
+```helix
+page = c.query([
+  {sql: "select * from people where id = $1", params: [id]},
+  {sql: "select * from posts where author_id = $1 order by id desc limit 20", params: [id]},
+  "select count(*) as n from people"])
+person = page[0]
+posts = page[1]
+```
+
+**No new verb.** `query` and `execute` take an Array of statements and answer an Array, in
+order — frames from `query`, `{affected, rows}` from `execute`. A statement is a SQL String, or
+a record with `sql` and (when it has parameters) `params`, which is the shape a query builder
+renders to anyway; other fields are not looked at. The capability gate keys on the verb's
+name, so `execute` handed a flight spends `db-write` exactly as it does handed one statement.
+
+**One Sync, so one transaction.** Each statement is framed as it would be alone — Parse only
+if this connection has not prepared its text, Describe only if what it returns is not yet
+known, binary where that is known to be the same value — and ONE Sync ends them all. The
+server commits at Sync; a statement that fails makes it skip every later one and roll back
+every earlier one. So a flight is all or nothing without anyone saying `begin`, and what comes
+back is every answer or one error naming its statement (`statement 2 of 3: …`). Inside a
+transaction's value it is part of that transaction.
+
+**The cache is planned before anything is framed.** A text met twice in a flight is parsed
+once. Every statement the flight BINDS is claimed before any new one chooses whom to displace
+— including one that comes later in the flight than the newcomer. Choosing a victim no longer
+forgets it (`Prepared::reserve`/`forget`): it leaves the cache when the `Close` naming it has
+been read by the server, so a flight that fails halfway remembers exactly what the server has
+— the statements parsed before the failure, not the ones after it.
+
+**It cannot deadlock.** Written first and read afterwards — how every single statement goes,
+safely, because the server has nothing to say until it has read the statement — a flight whose
+request is larger than the socket buffers, against an answer larger than them, stops both
+ends for ever: the server blocked sending rows nobody is reading, the client blocked writing
+statements nobody is reading. `Stream::send_draining` sends on a socket that does not block:
+what the kernel will not take yet waits, what has arrived is set ASIDE (never parsed there),
+and when neither direction moves `poll` says when one can. Under TLS the same loop drives
+rustls's record layer directly — plaintext in, records out, records in, plaintext set aside.
+Every later read serves what was set aside first. A flight of ONE is simply that statement.
+
+**Two things the live server taught that the fake one had wrong.**
+
+- After `DEALLOCATE ALL` (or `DISCARD ALL`, or a pooler's other backend) EVERY name a flight
+  binds is stale, and one that forgot only the statement the server happened to refuse was
+  refused for the next. A stale name now makes the flight forget every cached statement it
+  binds — and `Close` them at the head of the next attempt, so that one which was still there
+  (`0A000` spares the others) is not left behind — and go again, once. The rollback makes that
+  safe: nothing of the first attempt happened. (The single-statement path now closes its
+  stale statement the same way; it used to leave a `0A000` statement on the server.)
+- `COPY … FROM STDIN` followed by other statements does NOT make the server skip to the Sync.
+  It reads the next statement as COPY data, has then read one byte of a message it will not
+  finish, and ENDS THE CONNECTION (`protocol synchronization was lost`). Once the flight is on
+  the wire nothing can be done, so a flight containing a `COPY` — any form; telling `FROM
+  STDIN` from `FROM 'file'` needs the server's parser — is refused before anything is sent.
+  The fake server was rewritten to do what the real one does.
+
+Measured live against PostgreSQL 17 (µs per group, one connection, min of 5 trials):
+
+| | one by one | together | |
+|---|--:|--:|--:|
+| 5 x find by pk | 998.3 | 281.2 | 3.55x |
+| a page: find + 20 rows + count | 682.3 | 346.8 | 1.97x |
+| 1 statement (a flight of one) | 199.7 | 199.9 | 1.00x |
+
+and 120 statements carrying 7 MB out against 14 MB back — far past any socket buffer — answer
+correctly in 0.06 s in the clear and 0.07 s under TLS. The behaviour script prints the same 16
+lines under the walker, the VM and the JIT, in the clear and under TLS.
+
+**The gate has TLS data-path tests for the first time** (`src/pg/tls_wire_tests.rs`). No
+server is needed, only a peer that speaks TLS: rustls's own server side behind the one-byte `S`
+a PostgreSQL server answers the SSLRequest with. Its certificate is made at test time — a
+self-signed Ed25519 certificate for `localhost`, the DER written by hand and signed with
+`ed25519-dalek` — so no key is checked in, and the client trusts it the only way it trusts
+anything: as an `sslrootcert` file through `tls::negotiate`, chain and name verified. Both
+deadlock tests were shown to have teeth: with the blocking send they wedge until their timeouts.

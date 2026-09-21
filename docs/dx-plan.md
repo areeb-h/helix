@@ -614,25 +614,33 @@ takes). `connect_timeout=N`. TCP keepalive on every connection (`libc`, Unix: 60
 A limit is NOT the default: `statement_timeout` bounds streaming too, and would end large
 reads that work today. Live: `target/bench/f93/timeouts.helix`.
 
-**NEXT FOR THE DRIVER, designed and NOT built: several statements in one round trip.** The
-2026-09-20 profile says a small query is 7-13 us of client in a 150-190 us round trip, so the
-only lever left for small queries is fewer round trips: a page's five independent reads, or an
-ORM loading three relations for the same parents (1 + 3 round trips today). SHAPE: no new
-verb — `c.query([q1, q2, q3])` answers an Array of frames and `c.execute([...])` an Array of
-`{affected, rows}`, each `q` a String or the `{sql, params}` record the field's renderer
-already produces; gating stays by verb name. SEMANTICS: every statement framed
-(Parse?/Bind/Describe?/Execute) and ONE Sync at the end, so outside a transaction the batch
-is one implicit transaction — all or nothing — and an error names its statement (`statement 2
-of 3: ...`). CACHE: plan every item first (hits, misses, a text repeated inside the batch is
-parsed once, evictions must skip ids the batch uses); a stale name (`26000`/`0A000`) forgets
-it and re-runs the WHOLE batch once, which the rollback makes safe. THE TRAP, and why it is
-not a quick add: with blocking I/O the whole request is written before anything is read, so a
-request larger than the socket buffers, against results larger than them, DEADLOCKS (server
-blocked sending, client blocked writing) until the write timeout breaks the connection.
-Either bound the framed request to what the kernel takes without the peer reading (read
-`SO_SNDBUF`; small batches are the real use, and bulk writes already have
-`unnest($1::int[], $2::text[])` now that an Array is a parameter), or do it properly with a
-non-blocking socket and a poll loop that reads while it writes — under rustls too.
+**Several statements, one round trip (2026-09-21), DONE.** `c.query([q1, q2, q3])` /
+`c.execute([...])` — no new verb; each `q` a String or the `{sql, params}` record the field's
+renderer already produces; an Array of answers in order. `statement::run_flight`: every
+statement framed as it would be alone (`frame_statement`), ONE Sync — so a flight is one
+implicit transaction, all or nothing, and an error names its statement. One `Answer` reader
+serves the single exchange and the flight. The cache is PLANNED first: hits claimed before any
+miss picks a victim (a hit LATER in the flight must not be displaced by a miss earlier in it),
+a repeated text parsed once, `Prepared::reserve` no longer forgets its victim (`forget` does,
+once the `Close` was read — so a flight that fails halfway remembers exactly what the server
+has). THE DEADLOCK is handled properly, not bounded away: `Stream::send_draining` sends on a
+non-blocking socket, sets aside what arrives (`Aside`; under TLS it drives rustls's record
+layer: writer -> write_tls / read_tls -> process_new_packets -> reader), `poll`s when neither
+direction moves, and `take_in` serves what was set aside before the socket. A flight of one
+IS `run_prepared`. LIVE FOUND TWO THINGS THE FAKE SERVER HAD WRONG: (1) after `DEALLOCATE ALL`
+every name of a flight is stale — forget AND Close all the flight binds, go again once (the
+single path now closes its `0A000` statement too, which it used to leak); (2) a COPY followed
+by other statements makes a REAL server end the connection ("protocol synchronization was
+lost" — it has read one byte of a message it will not finish), so a flight containing a COPY
+is refused before sending (`starts_with_copy`, past comments, nested ones included); the fake
+server now does what the real one does. 5 x find by pk 998 -> 281 us; a 3-query page 682 ->
+347; 7 MB out against 14 MB back in 0.06 s, clear and TLS. THE GATE HAS TLS TESTS NOW
+(`src/pg/tls_wire_tests.rs`): a certificate made at test time (hand-written DER, Ed25519 via
+ed25519-dalek, no key checked in), rustls's server as the peer, trusted through the real
+`sslrootcert` path. FOR THE FIELD BUILD: a relation load over k includes is 1 + 1 round trips
+instead of 1 + k — hand `target.query([...rendered statements...])` the records `sql()` makes.
+Harness: `target/bench/f94/` (`live.sh`: behaviour on three engines, the deadlock-sized
+flight plain + TLS, `bench.helix`).
 
 **An Array is a parameter (2026-09-20), DONE.** `c.query("… where id = any($1)", [[1, 2, 3]])`:
 `put_array` in `src/pg/statement.rs` writes the array literal (Strings ALWAYS quoted — the

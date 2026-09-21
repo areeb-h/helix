@@ -47,6 +47,8 @@ mod tls;
 #[cfg(feature = "postgres")]
 mod types;
 #[cfg(all(test, feature = "postgres"))]
+mod tls_wire_tests;
+#[cfg(all(test, feature = "postgres"))]
 mod wire_tests;
 
 use crate::backend::Df;
@@ -60,7 +62,7 @@ use conninfo::parse_url;
 #[cfg(feature = "postgres")]
 use proto::write_msg;
 #[cfg(feature = "postgres")]
-use statement::{run_prepared, run_statement, Fail, Outcome, Session};
+use statement::{run_flight, run_prepared, run_statement, Fail, Item, Outcome, Session};
 #[cfg(feature = "postgres")]
 use types::ColBuf;
 
@@ -147,6 +149,12 @@ impl Conn {
         self.shared.run(sql, params)
     }
 
+    /// Run several statements through this value, in one round trip.
+    fn fly(&self, items: &[Item<'_>]) -> Result<Vec<Outcome>, String> {
+        self.may_speak()?;
+        self.shared.fly(items)
+    }
+
     /// While a transaction is open, only its own value uses the session.
     fn may_speak(&self) -> Result<(), String> {
         match (self.tx, self.shared.open_tx.get()) {
@@ -194,6 +202,30 @@ impl Shared {
                 *guard = State::Closed(f.text.clone());
             }
             said(f, limit, started)
+        })
+    }
+
+    /// Run several statements on this session in one round trip (`statement::run_flight`).
+    /// An error that belongs to one of them says which, counting as a person does.
+    fn fly(&self, items: &[Item<'_>]) -> Result<Vec<Outcome>, String> {
+        let mut guard =
+            self.state.try_borrow_mut().map_err(|_| "this connection is already in use".to_string())?;
+        let session = match &mut *guard {
+            State::Open(session) => session,
+            State::Closed(why) => {
+                return Err(format!("this connection is closed — an earlier statement on it failed with: {why}"))
+            }
+        };
+        let (limit, started) = (session.limit, std::time::Instant::now());
+        run_flight(session, items).map_err(|failed| {
+            if failed.fail.broken {
+                *guard = State::Closed(failed.fail.text.clone());
+            }
+            let text = said(failed.fail, limit, started);
+            match failed.at {
+                Some(k) => format!("statement {} of {}: {text}", k + 1, items.len()),
+                None => text,
+            }
         })
     }
 }
@@ -299,22 +331,41 @@ pub fn conn_method(
     let err = |m: String| HelixError::new(m, line, col);
     match name {
         "query" | "execute" => {
-            let Some(Value::Str(sql)) = args.first() else {
-                return Err(err(format!("`{name}` takes a SQL string"))
-                    .hint(format!("e.g. `c.{name}(\"select * from users where id = $1\", [7])`.")));
-            };
             // A read-only connection refuses BEFORE a byte is sent, with the spelling that
             // opens a writable one. The server would refuse too (SQLSTATE 25006) — a round
             // trip later, and without saying what to do about it.
-            if name == "execute" && !c.shared.writable {
+            if name == "execute" && !c.shared.writable && matches!(args.first(), Some(Value::Str(_) | Value::Array(_))) {
                 return Err(err(format!(
                     "postgres {}: this connection is read-only, so it cannot execute a statement",
                     c.shared.label
                 ))
                 .hint("open one that can write: `postgres_open(url, \"write\")` — it needs the `db-write` capability."));
             }
-            let params = statement_params(name, args.get(1), line, col)?;
             let conn_err = |m: String| err(format!("postgres {}: {m}", c.shared.label));
+            // SEVERAL STATEMENTS, ONE ROUND TRIP: the same verb, handed an Array of them.
+            if let Some(Value::Array(list)) = args.first() {
+                let statements = flight_statements(name, list, args.get(1), line, col)?;
+                if statements.is_empty() {
+                    return Ok(Value::Array(std::rc::Rc::new(crate::value::ArrayData::Values(Vec::new()))));
+                }
+                let items: Vec<Item<'_>> =
+                    statements.iter().map(|(sql, params)| Item { sql: sql.as_str(), params }).collect();
+                let outs = c.fly(&items).map_err(&conn_err)?;
+                let mut answers = Vec::with_capacity(outs.len());
+                for out in outs {
+                    answers.push(if name == "execute" {
+                        outcome_value(out, line, col)?
+                    } else {
+                        Value::DataFrame(std::rc::Rc::new(frame_of(out.cols, line, col)?))
+                    });
+                }
+                return Ok(Value::Array(std::rc::Rc::new(crate::value::ArrayData::Values(answers))));
+            }
+            let Some(Value::Str(sql)) = args.first() else {
+                return Err(err(format!("`{name}` takes a SQL string, or an Array of statements to run in one round trip"))
+                    .hint(format!("e.g. `c.{name}(\"select * from users where id = $1\", [7])`, or `c.{name}([{{sql: \"…\", params: [7]}}, \"select …\"])`.")));
+            };
+            let params = statement_params(name, args.get(1), line, col)?;
             let out = c.run(sql.as_str(), &params).map_err(&conn_err)?;
             if name == "execute" {
                 return outcome_value(out, line, col);
@@ -524,6 +575,68 @@ fn sql_form(v: &Value, depth: usize) -> Result<(), String> {
         }),
         other => Err(format!("is {}, which has no SQL form", crate::value::with_article(other.type_name()))),
     }
+}
+
+/// One statement of a flight, checked and ready: its text, and its parameters.
+#[cfg(feature = "postgres")]
+type Statement = (std::rc::Rc<String>, Vec<Value>);
+
+/// The statements of a flight: each a SQL String, or a record with `sql` and — when it has
+/// parameters — `params`, which is the shape a query builder renders to anyway. Other fields
+/// of such a record are nobody's business here. Everything is checked before anything is sent,
+/// and an error says WHICH statement, counting as a person does.
+#[cfg(feature = "postgres")]
+fn flight_statements(
+    verb: &str,
+    list: &crate::value::ArrayData,
+    second: Option<&Value>,
+    line: usize,
+    col: usize,
+) -> Result<Vec<Statement>, HelixError> {
+    let err = |m: String| HelixError::new(m, line, col);
+    if !matches!(second, None | Some(Value::Missing)) {
+        return Err(err(format!("with several statements each carries its own parameters, so `{verb}` takes no second argument"))
+            .hint("a statement with parameters is a record: `{sql: \"select * from t where id = $1\", params: [7]}`."));
+    }
+    let mut out = Vec::new();
+    for (i, v) in list.iter_values().enumerate() {
+        let n = i + 1;
+        let (sql, params) = match &v {
+            Value::Str(sql) => (sql.clone(), None),
+            Value::Record(fields) => {
+                let field = |key: &str| fields.iter().find(|(k, _)| k.as_str() == key).map(|(_, v)| v.clone());
+                match field("sql") {
+                    Some(Value::Str(sql)) => (sql, field("params")),
+                    Some(other) => {
+                        return Err(err(format!(
+                            "statement {n}'s `sql` is {}, not a String",
+                            crate::value::with_article(other.type_name())
+                        )))
+                    }
+                    None => {
+                        return Err(err(format!("statement {n} is a record with no `sql`"))
+                            .hint("a statement is a SQL String, or `{sql: \"…\", params: […]}`."))
+                    }
+                }
+            }
+            other => {
+                return Err(err(format!(
+                    "statement {n} is {}, which is not a statement",
+                    crate::value::with_article(other.type_name())
+                ))
+                .hint("a statement is a SQL String, or `{sql: \"…\", params: […]}`."))
+            }
+        };
+        let params = statement_params(verb, params.as_ref(), line, col).map_err(|e| {
+            let said = HelixError::new(format!("statement {n}: {}", e.message), line, col);
+            match e.hint {
+                Some(h) => said.hint(h),
+                None => said,
+            }
+        })?;
+        out.push((sql, params));
+    }
+    Ok(out)
 }
 
 /// The rows a statement returned, as a frame — with no columns when it returned none.

@@ -6,6 +6,12 @@
 //! the server parses a text once), what each one RETURNS (its columns, so the server is not
 //! asked to describe them again and the fixed-width ones can cross in binary), and the BUFFER
 //! an exchange is framed in (so sending a query allocates nothing).
+//!
+//! AND SEVERAL STATEMENTS CAN SHARE ONE ROUND TRIP ([`run_flight`]). A small query is 7–13 µs
+//! of this client's code inside a 150–190 µs round trip, so nothing done to a single statement
+//! makes a page of five queries faster — sending the five together does. Each is framed as it
+//! would be alone, and ONE Sync ends them all, which also makes the flight one transaction:
+//! every statement takes effect or none does.
 
 use std::collections::HashMap;
 use std::io::Write as _;
@@ -123,15 +129,38 @@ impl Prepared {
     }
 
     /// A fresh statement number — and, when the cache is full, the least recently used
-    /// statement's, which leaves the cache here and the server in the round trip that follows.
-    fn reserve(&mut self) -> (u64, Option<u64>) {
-        self.next += 1;
-        if self.by_sql.len() < MAX_PREPARED {
-            return (self.next, None);
+    /// statement's, to be closed on the server in the round trip that follows. `spoken_for` are
+    /// statements the same flight binds or has already chosen to displace; with every one of
+    /// them spoken for there is nobody to displace, and the caller uses the unnamed statement.
+    ///
+    /// CHOOSING IS NOT YET FORGETTING. The victim stays in the cache until the `Close` that
+    /// names it has been on the wire ([`Prepared::forget`]) — a statement forgotten here and
+    /// never closed there would sit on the server for the life of the connection, and one
+    /// closed there but remembered here is a `26000` waiting to happen.
+    fn reserve(&mut self, spoken_for: &[u64]) -> Option<(u64, Option<u64>)> {
+        let room = self.by_sql.len() + spoken_for.len().saturating_sub(self.hits_among(spoken_for)) < MAX_PREPARED;
+        if room {
+            self.next += 1;
+            return Some((self.next, None));
         }
-        let oldest = self.by_sql.iter().min_by_key(|(_, e)| e.used).map(|(sql, _)| sql.clone());
-        let evicted = oldest.and_then(|sql| self.by_sql.remove(&sql)).map(|e| e.id);
-        (self.next, evicted)
+        let victim = self
+            .by_sql
+            .values()
+            .filter(|e| !spoken_for.contains(&e.id))
+            .min_by_key(|e| e.used)
+            .map(|e| e.id)?;
+        self.next += 1;
+        Some((self.next, Some(victim)))
+    }
+
+    /// How many of `ids` are statements this cache holds (the rest are new in the same flight).
+    fn hits_among(&self, ids: &[u64]) -> usize {
+        self.by_sql.values().filter(|e| ids.contains(&e.id)).count()
+    }
+
+    /// The server has been told to close this one.
+    fn forget(&mut self, id: u64) {
+        self.by_sql.retain(|_, e| e.id != id);
     }
 
     fn insert(&mut self, sql: &str, id: u64, desc: Option<Rc<RowDesc>>) {
@@ -162,6 +191,8 @@ pub struct Fail {
     code: String,
     parsed: bool,
     pub broken: bool,
+    /// Refused before a byte was sent: the server has seen none of it.
+    unsent: bool,
 }
 
 impl Fail {
@@ -172,7 +203,7 @@ impl Fail {
 
     /// Refused before a byte was sent: the connection is exactly where it was.
     fn unsent(text: String) -> Fail {
-        Fail { text, code: String::new(), parsed: false, broken: false }
+        Fail { text, code: String::new(), parsed: false, broken: false, unsent: true }
     }
 }
 
@@ -180,7 +211,7 @@ impl Fail {
 /// message that does not parse — leaves the connection in an unknown state.
 impl From<String> for Fail {
     fn from(text: String) -> Self {
-        Fail { text, code: String::new(), parsed: false, broken: true }
+        Fail { text, code: String::new(), parsed: false, broken: true, unsent: false }
     }
 }
 
@@ -202,6 +233,10 @@ fn put_name(out: &mut Vec<u8>, name: Name) {
 
 /// Run one statement on a connection that keeps what it prepares.
 pub fn run_prepared(se: &mut Session, sql: &str, params: &[Value]) -> Result<Outcome, Fail> {
+    // A statement found stale below, to be closed by the exchange that replaces it: a name
+    // whose result type changed (`0A000`) is useless and STILL THERE, and would otherwise sit
+    // on the server for the life of the connection. Closing one that is gone is not an error.
+    let mut stale: Option<u64> = None;
     // A HIT: Bind and Execute against the name — no Parse, and once it has run, no Describe.
     if let Some((id, desc)) = se.prepared.touch(sql) {
         match exchange(se, Name::Cached(id), None, params, desc.as_ref()) {
@@ -209,6 +244,7 @@ pub fn run_prepared(se: &mut Session, sql: &str, params: &[Value]) -> Result<Out
             // name and prepare the text again below — once.
             Err(f) if !f.broken && (f.code == "26000" || f.code == "0A000") => {
                 se.prepared.by_sql.remove(sql);
+                stale = Some(id);
                 // UNLESS THAT ERROR JUST ENDED A TRANSACTION. Inside one, any error is the
                 // end of it: preparing again would only be answered `25P02`, which says
                 // nothing about why. The cause is reported instead, with what to do.
@@ -230,8 +266,19 @@ pub fn run_prepared(se: &mut Session, sql: &str, params: &[Value]) -> Result<Out
         }
     }
     // A MISS: Parse under a fresh name, closing the statement it displaces.
-    let (id, evicted) = se.prepared.reserve();
-    match exchange(se, Name::Cached(id), Some((sql, evicted)), params, None) {
+    let Some((id, evicted)) = se.prepared.reserve(&[]) else {
+        return run_statement(se, sql, params);
+    };
+    // One `Close` rides with the Parse: the stale statement, whose leaving made the room —
+    // or, with nothing stale, whatever was displaced.
+    let ran = exchange(se, Name::Cached(id), Some((sql, stale.or(evicted))), params, None);
+    // The `Close` went first, so whatever became of the rest, it was read — unless nothing went.
+    if let (None, Some(old)) = (stale, evicted)
+        && !matches!(&ran, Err(f) if f.unsent)
+    {
+        se.prepared.forget(old);
+    }
+    match ran {
         Ok((out, learned)) => {
             se.prepared.insert(sql, id, learned);
             Ok(out)
@@ -357,9 +404,7 @@ fn put_quoted(out: &mut Vec<u8>, text: &[u8]) {
     out.push(b'"');
 }
 
-/// Frame one exchange into `wire`: optionally Close a displaced statement and Parse `sql` under
-/// `name`, then Bind, Describe (only when what the statement returns is not yet `known`),
-/// Execute and Sync.
+/// Frame one exchange into `wire`: one statement's messages, and Sync.
 fn frame(
     wire: &mut Vec<u8>,
     name: Name,
@@ -369,6 +414,22 @@ fn frame(
     exact_float_text: bool,
 ) -> Result<(), String> {
     wire.clear();
+    frame_statement(wire, name, parse, params, known, exact_float_text)?;
+    let at = begin_msg(wire, b'S');
+    end_msg(wire, at)
+}
+
+/// Append one statement's messages to `wire`: optionally Close a displaced statement and Parse
+/// `sql` under `name`, then Bind, Describe (only when what the statement returns is not yet
+/// `known`) and Execute. No Sync: a flight of several ends with one.
+fn frame_statement(
+    wire: &mut Vec<u8>,
+    name: Name,
+    parse: Option<(&str, Option<u64>)>,
+    params: &[Value],
+    known: Option<&Rc<RowDesc>>,
+    exact_float_text: bool,
+) -> Result<(), String> {
     if let Some((sql, evicted)) = parse {
         // Closing a name the server does not have is not an error, so this needs no answer
         // of its own; `CloseComplete` is skipped with the other messages nobody waits for.
@@ -425,10 +486,120 @@ fn frame(
     let at = begin_msg(wire, b'E');
     wire.push(0); // the unnamed portal
     wire.extend_from_slice(&0i32.to_be_bytes()); // unlimited rows
-    end_msg(wire, at)?;
-
-    let at = begin_msg(wire, b'S');
     end_msg(wire, at)
+}
+
+/// Refuse a `COPY … FROM STDIN` the server has just started waiting on (see `exchange`).
+fn refuse_copy(se: &mut Session) -> Result<(), String> {
+    se.wire.clear();
+    let at = begin_msg(&mut se.wire, b'f');
+    put_cstr(&mut se.wire, "a Helix connection does not stream COPY data — load rows with `insert`");
+    end_msg(&mut se.wire, at)?;
+    let at = begin_msg(&mut se.wire, b'S');
+    end_msg(&mut se.wire, at)?;
+    send_framed(&mut se.stream, &se.wire)
+}
+
+/// ONE STATEMENT'S ANSWER, as its messages arrive — the same reader whether the statement went
+/// alone or in a flight.
+struct Answer {
+    cols: Vec<ColBuf>,
+    described: bool,
+    /// What the statement returns, when the server was asked and said.
+    learned: Option<Rc<RowDesc>>,
+    /// ParseComplete arrived: the statement exists on the server from here on.
+    parsed: bool,
+    affected: i64,
+    /// The first cell that was not its column's type. The rows after it are still READ — the
+    /// connection has to reach `ReadyForQuery` — and the error is reported once it has.
+    bad_cell: Option<String>,
+}
+
+impl Answer {
+    fn new(known: Option<&Rc<RowDesc>>, exact_float_text: bool) -> Answer {
+        Answer {
+            cols: known.map(|d| d.bufs(exact_float_text)).unwrap_or_default(),
+            described: known.is_some(),
+            learned: None,
+            parsed: false,
+            affected: 0,
+            bad_cell: None,
+        }
+    }
+
+    /// Take one message. Answers whether it was the statement's LAST — CommandComplete, or
+    /// EmptyQueryResponse for a statement with nothing in it. A message that is not part of an
+    /// answer (a notice, a parameter status, BindComplete, CloseComplete) is nobody's.
+    fn take(&mut self, tag: u8, body: &[u8]) -> Result<bool, String> {
+        match tag {
+            b'1' => self.parsed = true,
+            // RowDescription
+            b'T' => {
+                let mut c = Cur::new(body);
+                let n = c.i16()?;
+                let mut desc = Vec::new();
+                for _ in 0..n {
+                    let name = c.cstr()?;
+                    let _table_oid = c.i32()?;
+                    let _attnum = c.i16()?;
+                    let oid = c.i32()?;
+                    let _typlen = c.i16()?;
+                    let _typmod = c.i32()?;
+                    let _format = c.i16()?;
+                    desc.push((name, oid));
+                }
+                // Asked for without format codes, so every column of THIS run is text.
+                self.cols = desc.iter().map(|(name, oid)| ColBuf::new(name.clone(), *oid)).collect();
+                self.learned = Some(Rc::new(RowDesc { cols: desc }));
+                self.described = true;
+            }
+            // NoData: a statement with no result columns.
+            b'n' => {
+                self.learned = Some(Rc::new(RowDesc { cols: Vec::new() }));
+                self.described = true;
+            }
+            // DataRow
+            b'D' => {
+                if self.bad_cell.is_some() {
+                    return Ok(false);
+                }
+                let mut c = Cur::new(body);
+                let n = usize::try_from(c.i16()?).map_err(|_| "negative column count".to_string())?;
+                if n != self.cols.len() {
+                    return Err(format!("the server sent a row of {n} values for {} columns", self.cols.len()));
+                }
+                for col in self.cols.iter_mut() {
+                    let v = c.field()?;
+                    if let Err(e) = col.push(v) {
+                        self.bad_cell = Some(e);
+                        break;
+                    }
+                }
+            }
+            // CommandComplete: what the statement did, and to how many rows.
+            b'C' => {
+                self.affected = rows_affected(Cur::new(body).cstr_ref()?);
+                return Ok(true);
+            }
+            // EmptyQueryResponse stands in for CommandComplete.
+            b'I' => return Ok(true),
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    /// What the statement produced — once the connection has reached `ReadyForQuery`, so
+    /// neither refusal here costs the connection.
+    fn finish(self) -> Result<(Outcome, Option<Rc<RowDesc>>), Fail> {
+        let failed = |text: String, parsed: bool| Fail { text, code: String::new(), parsed, broken: false, unsent: false };
+        if !self.described {
+            return Err(failed("the server never described the result".to_string(), self.parsed));
+        }
+        if let Some(text) = self.bad_cell {
+            return Err(failed(text, self.parsed));
+        }
+        Ok((Outcome { cols: self.cols, affected: self.affected }, self.learned))
+    }
 }
 
 /// Read to `ReadyForQuery` after an error, so the connection is left where the next statement
@@ -461,14 +632,7 @@ fn exchange(
     }
     sent?;
 
-    let mut cols: Vec<ColBuf> = known.map(|d| d.bufs(se.exact_float_text)).unwrap_or_default();
-    let mut described = known.is_some();
-    let mut learned: Option<Rc<RowDesc>> = None;
-    let mut parsed = false;
-    let mut affected = 0i64;
-    // The first cell that was not its column's type. The rows after it are still READ — the
-    // connection has to reach `ReadyForQuery` — and the error is reported once it has.
-    let mut bad_cell: Option<String> = None;
+    let mut answer = Answer::new(known, se.exact_float_text);
     loop {
         let (tag, body) = se.stream.next_msg()?;
         match tag {
@@ -480,89 +644,271 @@ fn exchange(
                 if let Ok(status) = drained {
                     se.status = status;
                 }
-                return Err(Fail { text, code, parsed, broken: drained.is_err() });
+                return Err(Fail { text, code, parsed: answer.parsed, broken: drained.is_err(), unsent: false });
             }
-            // ParseComplete: the statement exists on the server from here on.
-            b'1' => parsed = true,
-            // RowDescription
-            b'T' => {
-                let mut c = Cur::new(body);
-                let n = c.i16()?;
-                let mut desc = Vec::new();
-                for _ in 0..n {
-                    let name = c.cstr()?;
-                    let _table_oid = c.i32()?;
-                    let _attnum = c.i16()?;
-                    let oid = c.i32()?;
-                    let _typlen = c.i16()?;
-                    let _typmod = c.i32()?;
-                    let _format = c.i16()?;
-                    desc.push((name, oid));
-                }
-                // Asked for without format codes, so every column of THIS run is text.
-                cols = desc.iter().map(|(name, oid)| ColBuf::new(name.clone(), *oid)).collect();
-                learned = Some(Rc::new(RowDesc { cols: desc }));
-                described = true;
-            }
-            // NoData: a statement with no result columns.
-            b'n' => {
-                learned = Some(Rc::new(RowDesc { cols: Vec::new() }));
-                described = true;
-            }
-            // DataRow
-            b'D' => {
-                if bad_cell.is_some() {
-                    continue;
-                }
-                let mut c = Cur::new(body);
-                let n = usize::try_from(c.i16()?).map_err(|_| "negative column count".to_string())?;
-                if n != cols.len() {
-                    return Err(Fail::from(format!(
-                        "the server sent a row of {n} values for {} columns",
-                        cols.len()
-                    )));
-                }
-                for col in cols.iter_mut() {
-                    let v = c.field()?;
-                    if let Err(e) = col.push(v) {
-                        bad_cell = Some(e);
-                        break;
-                    }
-                }
-            }
-            // CommandComplete: what the statement did, and to how many rows.
-            b'C' => affected = rows_affected(Cur::new(body).cstr_ref()?),
             // CopyInResponse: the statement is a `COPY … FROM STDIN`, and the server now waits
             // for rows this connection has no way to be handed. Left alone, that wait is the
             // whole read timeout and then a closed connection; refused, it is an ordinary
             // error. Copy-in mode swallowed the Sync that went out with the statement, so the
             // refusal brings its own.
-            b'G' => {
-                se.wire.clear();
-                let at = begin_msg(&mut se.wire, b'f');
-                put_cstr(&mut se.wire, "a Helix connection does not stream COPY data — load rows with `insert`");
-                end_msg(&mut se.wire, at)?;
-                let at = begin_msg(&mut se.wire, b'S');
-                end_msg(&mut se.wire, at)?;
-                send_framed(&mut se.stream, &se.wire)?;
-            }
+            b'G' => refuse_copy(se)?,
             // ReadyForQuery — the synchronisation point, and where the session stands.
             b'Z' => {
                 se.status = body.first().copied().unwrap_or(b'I');
                 break;
             }
-            _ => continue,
+            _ => {
+                answer.take(tag, body)?;
+            }
         }
     }
-    // Both of these were read to `ReadyForQuery`: the connection is sound.
-    if !described {
-        let text = "the server never described the result".to_string();
-        return Err(Fail { text, code: String::new(), parsed, broken: false });
+    answer.finish()
+}
+
+/// One statement of a flight: its text and its parameters.
+pub struct Item<'a> {
+    pub sql: &'a str,
+    pub params: &'a [Value],
+}
+
+/// Why a flight failed, and at which statement (counted from 0) when it was one's doing.
+pub struct FlightFail {
+    pub at: Option<usize>,
+    pub fail: Fail,
+}
+
+/// How one statement of a flight goes out.
+struct Plan {
+    name: Name,
+    /// Parsed in this flight, and — cached — under this number.
+    parse: bool,
+    new_id: Option<u64>,
+    evict: Option<u64>,
+    known: Option<Rc<RowDesc>>,
+}
+
+/// SEVERAL STATEMENTS, ONE ROUND TRIP, ONE TRANSACTION.
+///
+/// Each statement is framed exactly as it would be alone — Parse only if this connection has
+/// not prepared its text, Describe only if what it returns is not yet known, binary where that
+/// is known to be the same value — and the flight ends with ONE Sync. That Sync is what makes
+/// it a transaction without anyone saying `begin`: the server commits at Sync, and a statement
+/// that fails makes it skip every later one and roll back every earlier one. So a flight is
+/// all or nothing, and what comes back is every statement's answer or one error that names
+/// the statement it belongs to.
+///
+/// THE CACHE IS PLANNED BEFORE ANYTHING IS FRAMED: a text met twice in one flight is parsed
+/// once; a statement the flight binds is never the one displaced to make room for another;
+/// and when every cached statement is spoken for, the rest go as the unnamed statement. A name
+/// that turns out stale (`26000`, `0A000`) or taken (`42P05`) is dealt with as it is for one
+/// statement, by sending again, once — which the rollback makes safe: nothing of the first
+/// attempt happened. Inside a transaction's value there is no again; see `run_prepared`.
+///
+/// IT IS SENT WHILE ITS ANSWER IS TAKEN IN (`Stream::send_draining`), because the first
+/// statement's rows are on their way while the last is still being written.
+pub fn run_flight(se: &mut Session, items: &[Item<'_>]) -> Result<Vec<Outcome>, FlightFail> {
+    // A flight of one is that statement: nothing to share, nothing that can deadlock.
+    if let [only] = items {
+        return run_prepared(se, only.sql, only.params).map(|out| vec![out]).map_err(|fail| FlightFail { at: Some(0), fail });
     }
-    if let Some(text) = bad_cell {
-        return Err(Fail { text, code: String::new(), parsed, broken: false });
+    // A COPY GOES ALONE. `COPY … FROM STDIN` makes the server read what follows as COPY data;
+    // what follows in a flight is the next statement, and a real server does not skip that to
+    // the Sync — it has read one byte of a message it will not finish, has lost its place in
+    // the stream, and ENDS THE CONNECTION (found against PostgreSQL 17; the fake server had been
+    // written to be kinder). Once the flight is on the wire nothing can be done about it, so it
+    // is refused before anything is — every form of COPY, since telling `FROM STDIN` from
+    // `FROM 'file'` needs the server's own parser, and a COPY's data is nothing this
+    // connection carries either way.
+    if let Some(k) = items.iter().position(|item| starts_with_copy(item.sql)) {
+        let text = "a `COPY` cannot share a round trip — the server reads whatever follows it as COPY data — so it goes on its own".to_string();
+        return Err(FlightFail { at: Some(k), fail: Fail::unsent(text) });
     }
-    Ok((Outcome { cols, affected }, learned))
+    let (mut named, mut close_first) = (true, Vec::new());
+    let (mut went_stale, mut was_taken) = (false, false);
+    loop {
+        let failed = match fly(se, items, named, &close_first) {
+            Ok(outs) => return Ok(outs),
+            Err(f) => f,
+        };
+        let stale = failed.fail.code == "26000" || failed.fail.code == "0A000";
+        let taken = failed.fail.code == "42P05";
+        if failed.fail.broken || !(stale || taken) || (stale && went_stale) || (taken && was_taken) {
+            return Err(failed);
+        }
+        if stale {
+            // ONE STALE NAME IS RARELY ALONE. `DEALLOCATE ALL`, `DISCARD ALL`, a pooler's other
+            // backend: every name went together, and a flight that forgot only the one the
+            // server happened to refuse would be refused for the next, and the next. So every
+            // cached statement the flight binds is forgotten — and CLOSED at the head of the
+            // next attempt, so that one which was still there (`0A000` spares the others) is
+            // not left behind. Closing a name that is gone is not an error.
+            for item in items {
+                if let Some(e) = se.prepared.by_sql.remove(item.sql) {
+                    close_first.push(e.id);
+                }
+            }
+        }
+        // The error ended a transaction somebody else began: there is no sending again.
+        if se.status == b'E' {
+            let text = if stale {
+                format!(
+                    "{} — the statement was prepared before a change that made it stale, and an error inside a transaction ends the transaction: roll back and run it again",
+                    failed.fail.text
+                )
+            } else {
+                failed.fail.text.clone()
+            };
+            return Err(FlightFail { at: failed.at, fail: Fail { text, ..failed.fail } });
+        }
+        named = named && !taken;
+        went_stale |= stale;
+        was_taken |= taken;
+    }
+}
+
+/// Whether a statement's first word is COPY — past whitespace, `--` comments and `/* */`
+/// comments, which nest in PostgreSQL.
+fn starts_with_copy(sql: &str) -> bool {
+    let mut rest = sql.trim_start();
+    loop {
+        if let Some(after) = rest.strip_prefix("--") {
+            rest = after.split_once('\n').map_or("", |(_, next)| next);
+        } else if let Some(after) = rest.strip_prefix("/*") {
+            let (mut depth, mut at) = (1usize, 0usize);
+            let bytes = after.as_bytes();
+            while depth > 0 {
+                match (bytes.get(at), bytes.get(at + 1)) {
+                    (Some(b'/'), Some(b'*')) => (depth, at) = (depth + 1, at + 2),
+                    (Some(b'*'), Some(b'/')) => (depth, at) = (depth - 1, at + 2),
+                    (Some(_), _) => at += 1,
+                    // Unterminated: the server will say so; it is not a COPY here.
+                    (None, _) => return false,
+                }
+            }
+            rest = after.get(at..).unwrap_or("");
+        } else {
+            break;
+        }
+        rest = rest.trim_start();
+    }
+    let word_ends = |c: char| !(c.is_alphanumeric() || c == '_');
+    rest.get(..4).is_some_and(|w| w.eq_ignore_ascii_case("copy")) && rest.get(4..).is_some_and(|r| r.chars().next().is_none_or(word_ends))
+}
+
+/// One attempt at a flight. `close_first` are statements an earlier attempt found stale.
+fn fly(se: &mut Session, items: &[Item<'_>], named: bool, close_first: &[u64]) -> Result<Vec<Outcome>, FlightFail> {
+    let whole = |fail: Fail| FlightFail { at: None, fail };
+
+    // PLAN. First every statement this connection already has — all of them, so that none is
+    // the one displaced to make room for a new statement EARLIER in the same flight — then the
+    // new ones, `spoken_for` growing with each name taken and each victim chosen.
+    let hits: Vec<Option<(u64, Option<Rc<RowDesc>>)>> = items.iter().map(|item| se.prepared.touch(item.sql)).collect();
+    let mut spoken_for: Vec<u64> = hits.iter().flatten().map(|(id, _)| *id).collect();
+    let mut plans: Vec<Plan> = Vec::with_capacity(items.len());
+    for (i, (item, hit)) in items.iter().zip(hits).enumerate() {
+        let twin = items.get(..i).unwrap_or(&[]).iter().position(|earlier| earlier.sql == item.sql);
+        let plan = if let Some((id, known)) = hit {
+            Plan { name: Name::Cached(id), parse: false, new_id: None, evict: None, known }
+        } else if let Some(id) = twin.and_then(|j| plans.get(j)).and_then(|p| p.new_id) {
+            // The same text, earlier in this flight: parsed there, bound here.
+            Plan { name: Name::Cached(id), parse: false, new_id: None, evict: None, known: None }
+        } else {
+            let reserved = if named { se.prepared.reserve(&spoken_for) } else { None };
+            match reserved {
+                Some((id, evict)) => {
+                    spoken_for.push(id);
+                    spoken_for.extend(evict);
+                    Plan { name: Name::Cached(id), parse: true, new_id: Some(id), evict, known: None }
+                }
+                None => Plan { name: Name::Unnamed, parse: true, new_id: None, evict: None, known: None },
+            }
+        };
+        plans.push(plan);
+    }
+
+    // FRAME. Nothing has been sent until the flight is whole.
+    se.wire.clear();
+    for old in close_first {
+        let at = begin_msg(&mut se.wire, b'C');
+        se.wire.push(b'S');
+        put_name(&mut se.wire, Name::Cached(*old));
+        end_msg(&mut se.wire, at).map_err(|text| whole(Fail::unsent(text)))?;
+    }
+    for (k, (item, plan)) in items.iter().zip(&plans).enumerate() {
+        let parse = plan.parse.then_some((item.sql, plan.evict));
+        frame_statement(&mut se.wire, plan.name, parse, item.params, plan.known.as_ref(), se.exact_float_text)
+            .map_err(|text| FlightFail { at: Some(k), fail: Fail::unsent(text) })?;
+    }
+    let at = begin_msg(&mut se.wire, b'S');
+    end_msg(&mut se.wire, at).map_err(|text| whole(Fail::unsent(text)))?;
+    let sent = se.stream.send_draining(&se.wire);
+    if se.wire.capacity() > KEEP_WIRE {
+        se.wire = Vec::new();
+    }
+    sent.map_err(|text| whole(Fail::from(text)))?;
+
+    // READ. Answers arrive in order; the one being read is the one an error belongs to.
+    let mut answers: Vec<Answer> = plans.iter().map(|p| Answer::new(p.known.as_ref(), se.exact_float_text)).collect();
+    let mut cur = 0usize;
+    let mut refused: Option<(usize, String, String)> = None;
+    loop {
+        let (tag, body) = se.stream.next_msg().map_err(|text| whole(Fail::from(text)))?;
+        match tag {
+            // The server skips everything after this to the Sync; so does the reading.
+            b'E' => {
+                if refused.is_none() {
+                    refused = Some((cur, error_text(body), error_code(body)));
+                }
+            }
+            // A `COPY … FROM STDIN` that got past `starts_with_copy`, as the LAST statement:
+            // the server would wait for ever, its copy-in mode having swallowed the flight's
+            // Sync, so it is refused with a Sync of its own, as it is for one statement.
+            // (Anywhere else the server has already ended the connection, and the read that
+            // finds out is the next one.)
+            b'G' if cur + 1 == items.len() => refuse_copy(se).map_err(|text| whole(Fail::from(text)))?,
+            b'Z' => {
+                se.status = body.first().copied().unwrap_or(b'I');
+                break;
+            }
+            _ => {
+                if refused.is_none()
+                    && let Some(answer) = answers.get_mut(cur)
+                    && answer.take(tag, body).map_err(|text| whole(Fail::from(text)))?
+                {
+                    cur += 1;
+                }
+            }
+        }
+    }
+
+    // REMEMBER what the server now has, whatever became of the flight: a statement parsed
+    // before the one that failed exists (preparing is not undone by a rollback), and a victim
+    // whose Close was reached is gone. Past the failure the server read nothing.
+    let reached = refused.as_ref().map_or(items.len(), |(k, _, _)| k + 1);
+    for ((item, plan), answer) in items.iter().zip(&plans).zip(&answers).take(reached) {
+        if let Some(old) = plan.evict {
+            se.prepared.forget(old);
+        }
+        match (plan.new_id, &answer.learned) {
+            (Some(id), learned) if answer.parsed => se.prepared.insert(item.sql, id, learned.clone()),
+            (None, Some(learned)) if !plan.parse => se.prepared.describe(item.sql, learned.clone()),
+            _ => {}
+        }
+    }
+
+    if let Some((k, text, code)) = refused {
+        let parsed = answers.get(k).is_some_and(|a| a.parsed);
+        return Err(FlightFail { at: Some(k), fail: Fail { text, code, parsed, broken: false, unsent: false } });
+    }
+    if cur != items.len() {
+        let text = format!("the server answered {cur} of {} statements", items.len());
+        return Err(whole(Fail { text, code: String::new(), parsed: false, broken: false, unsent: false }));
+    }
+    let mut outs = Vec::with_capacity(answers.len());
+    for (k, answer) in answers.into_iter().enumerate() {
+        outs.push(answer.finish().map_err(|fail| FlightFail { at: Some(k), fail })?.0);
+    }
+    Ok(outs)
 }
 
 /// Rows affected, read from the completion tag. The tag is the command word, an OID for a
@@ -678,5 +1024,30 @@ mod tests {
         let bytes = Value::Bytes(Rc::new(vec![0, 10, 255]));
         assert_eq!(param(bytes.clone()), "\\x000aff");
         assert_eq!(param(arr(vec![bytes])), r#"{"\\x000aff"}"#);
+    }
+
+    #[test]
+    fn a_copy_is_recognised_past_whitespace_and_comments() {
+        for sql in [
+            "copy t from stdin",
+            "  COPY t (a, b) FROM STDIN WITH (FORMAT csv)",
+            "-- load it\n  Copy t from stdin",
+            "/* one /* nested */ still a comment */ copy(select 1) to stdout",
+            "copy",
+        ] {
+            assert!(starts_with_copy(sql), "{sql}");
+        }
+        for sql in [
+            "select 'copy t from stdin'",
+            "copyright_holders_insert()",
+            "copy_of_t",
+            "-- copy t from stdin\nselect 1",
+            "/* copy t from stdin */ select 1",
+            "/* never closed copy",
+            "",
+            "cöpy",
+        ] {
+            assert!(!starts_with_copy(sql), "{sql}");
+        }
     }
 }
