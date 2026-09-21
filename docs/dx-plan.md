@@ -614,6 +614,18 @@ takes). `connect_timeout=N`. TCP keepalive on every connection (`libc`, Unix: 60
 A limit is NOT the default: `statement_timeout` bounds streaming too, and would end large
 reads that work today. Live: `target/bench/f93/timeouts.helix`.
 
+**§1.58 (2026-09-22) — a Bool column holds `missing`, DONE.** Carried since the 0.10.0
+release, and ADR 0044's first "honest cost" (a nullable `boolean` read as the text `"t"`/`"f"`).
+THE ENGINES NEVER NEEDED ANYTHING: `Col::Bool { vals, valid }` always had validity, `read_csv`
+and `read_parquet` build such columns, and a probe of every verb (three-valued `where`,
+`sort`, `group`, `unique`, `with`, `join`, `to_json`, both round trips) printed the same on
+native and the polars oracle. Only the construction seam could not say it: `ColData` had
+`Bool(Vec<bool>)` alone, so `dataframe()` refused `[true, missing]` and the driver downgraded.
+`ColData::BoolValid(vals, valid)`; `column_data` in `src/interp/builtins/mod.rs` builds it;
+`pg/types.rs` hands it over. Corpus: `df_nullable_bool`. FOR THE FIELD BUILD: the load-time
+refusal of `bool?` in `db/local.helix:frame_of` can go, and a `bool?` column read through the
+ORM is now true/false/missing — code that compared it to `"t"` must compare to `true`.
+
 **Several statements, one round trip (2026-09-21), DONE.** `c.query([q1, q2, q3])` /
 `c.execute([...])` — no new verb; each `q` a String or the `{sql, params}` record the field's
 renderer already produces; an Array of answers in order. `statement::run_flight`: every

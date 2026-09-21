@@ -1,0 +1,33 @@
+# A Bool column holds `missing`, like the other three column types (field build §1.58).
+#
+# The engine could always STORE one — `read_csv` builds one from an empty cell in a
+# true/false column — and every verb below already handled it, identically on the oracle. What
+# could not happen was a PROGRAM building one: `dataframe({flag: [true, missing]})` was refused
+# ("boolean column `flag` cannot contain `missing`"), because the seam readers and the
+# constructor build frames through had no nullable Bool to say it with. For the same reason a
+# nullable `boolean` from PostgreSQL arrived as the TEXT "t"/"f". A nullable boolean is one of
+# the most ordinary columns a schema has; this pins that it is an ordinary column here.
+d = dataframe({id: [1, 2, 3, 4, 5], flag: [true, missing, false, true, missing], v: [10, 20, 30, 40, 50]})
+print(d)
+print(d.schema())
+print(d.column("flag"))
+print(d.records())
+
+# THREE-VALUED, as SQL means it: a missing flag is neither kept by `flag` nor by `not flag`.
+print(d.where(@flag).column("id"))
+print(d.where(not @flag).column("id"))
+print(d.where(@flag == true).column("id"))
+print(d.with({both: @flag and @v > 15, either: @flag or @v > 45}).select(@both, @either))
+
+# Missing sorts first, is its own group, and is one of the distinct values.
+print(d.sort(@flag).column("id"))
+print(d.group(@flag).count(@id))
+print(d.unique("flag").column("flag"))
+print(d.select(@flag).to_json())
+
+# The column's type comes from the first value there IS; and records build one the same way.
+print(dataframe({flag: [missing, false, true]}).schema())
+print(to_dataframe([{ok: true}, {ok: missing}, {ok: false}]).column("ok"))
+
+# Still refused: a column that is not one type.
+print((try dataframe({flag: [true, missing, 1]})).error)

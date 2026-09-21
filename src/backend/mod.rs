@@ -55,6 +55,13 @@ pub enum ColData {
     Float(Vec<Option<f64>>),
     /// A boolean column (no nulls — e.g. a VCF Flag: present → true).
     Bool(Vec<bool>),
+    /// A boolean column THAT CAN HOLD `missing`: values with their validity alongside, an
+    /// invalid slot holding `false`. What SQL means by a nullable boolean — `is_active`,
+    /// `confirmed`, every tri-state flag — and what both engines could always store (`read_csv`
+    /// builds one from an empty cell) but no PROGRAM could build, because this seam could not
+    /// say it: `dataframe()` refused `[true, missing]`, and a nullable `boolean` from a database
+    /// arrived as text (field build §1.58; ADR 0044's first honest cost).
+    BoolValid(Vec<bool>, Vec<bool>),
     /// A nullable integer column as VALUES WITH THEIR VALIDITY ALONGSIDE — what the native
     /// engine stores. A reader that meets its cells one at a time fills both as they arrive
     /// and hands them over as they are, where `IntOpt` costs the engine another pass to pull

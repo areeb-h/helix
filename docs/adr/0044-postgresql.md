@@ -168,11 +168,12 @@ visible in `describe`, which is where a reader can see the trade.
 
 ## Honest costs
 
-- **A nullable `boolean` reads as text.** `ColData` has `Bool(Vec<bool>)` with no nullable
-  form, so a boolean column containing NULL cannot become a Bool column without inventing a
-  value for the null. It reads as `"t"`/`"f"`/`missing` instead: lossless, and visibly a
-  string. `ColData::BoolOpt` is the real fix and belongs with both backends rather than
-  being smuggled in here.
+- ~~**A nullable `boolean` reads as text.**~~ Fixed 2026-09-22: `ColData::BoolValid` is the
+  nullable form the seam lacked, and a `boolean` column holding NULL is a Bool column holding
+  `missing`. It turned out the engines never needed anything — `read_csv` had always built
+  such a column and every verb handled it, the oracle agreeing; only the two doors a PROGRAM
+  builds a frame through could not say it (`dataframe()` refused `[true, missing]`, field
+  build §1.58, for the same reason).
 - **No channel binding.** `SCRAM-SHA-256-PLUS` binds the authentication exchange to the
   TLS session, so a proxy holding a mis-issued certificate still cannot replay it. It is
   not implemented. The gap it closes is narrower here than in `libpq`, because there is no

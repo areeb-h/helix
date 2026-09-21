@@ -136,6 +136,18 @@
 
 ### Fixed
 
+- **A Bool column holds `missing`, like the other three (field build §1.58) — and a nullable
+  `boolean` from PostgreSQL is a Bool column, not text.** `dataframe({flag: [true, missing]})`
+  was refused (`boolean column `flag` cannot contain `missing``) while `[1, missing]`,
+  `[1.5, missing]` and `["x", missing]` were not, and a `boolean` column holding NULL came
+  back from `query` as the STRINGS `"t"`/`"f"` — so a model declaring `bool?` rendered good
+  SQL and could not hold its own rows. The engines never needed anything: `read_csv` had
+  always built such a column from an empty cell, and `where` (three-valued: a missing flag is
+  kept by neither `flag` nor `not flag`), `sort`, `group`, `unique`, `join`, `to_json` and
+  the CSV and parquet round trips all handled it, identically on the oracle. What was missing
+  was a way to SAY it at the seam a program builds frames through: `ColData::BoolValid`.
+  Pinned by `tests/corpus/df_nullable_bool`, which the dual-engine diff runs too.
+
 - **A PostgreSQL connection whose exchange did not finish is never used again.** A read that
   timed out, a socket that dropped, a text cell that was not UTF-8 — each ended the read
   where it stood and left the server's remaining replies on the wire, with the connection

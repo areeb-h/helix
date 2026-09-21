@@ -81,6 +81,10 @@ pub fn build_frame(
                 ColData::IntOpt(v) => Column::new(n, v),
                 ColData::Float(v) => Column::new(n, v),
                 ColData::Bool(v) => Column::new(n, v),
+                ColData::BoolValid(vals, valid) => Column::new(
+                    n,
+                    vals.into_iter().zip(valid).map(|(v, ok)| ok.then_some(v)).collect::<Vec<Option<bool>>>(),
+                ),
                 ColData::IntValid(vals, valid) => Column::new(
                     n,
                     vals.into_iter().zip(valid).map(|(v, ok)| ok.then_some(v)).collect::<Vec<Option<i64>>>(),

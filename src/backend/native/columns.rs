@@ -420,6 +420,10 @@ impl Col {
                 let valid = vec![true; v.len()];
                 Col::Bool { vals: v, valid }
             }
+            ColData::BoolValid(vals, mut valid) => {
+                valid.resize(vals.len(), false);
+                Col::Bool { vals, valid }
+            }
             // Already the engine's own shape. A reader keeps the two vectors in step by
             // construction; the resize makes a slip a missing cell rather than a panic.
             ColData::IntValid(vals, mut valid) => {

@@ -344,22 +344,22 @@ fn array_to_coldata(
                 Ok(ColData::Str(out))
             }
         }
+        // A Bool column holds `missing` like the other three (§1.58): a nullable boolean is
+        // one of the most ordinary columns a schema has, and the engine always stored one.
         Value::Bool(_) => {
-            if has_missing {
-                return Err(HelixError::new(
-                    format!("boolean column `{}` cannot contain `missing`", name),
-                    line,
-                    col,
-                ));
-            }
             let mut out = crate::error::try_with_capacity(vals.len(), "DataFrame column", line, col)?;
+            let mut valid = crate::error::try_with_capacity(if has_missing { vals.len() } else { 0 }, "DataFrame column", line, col)?;
             for x in vals.iter() {
                 match x {
                     Value::Bool(b) => out.push(*b),
+                    Value::Missing if has_missing => out.push(false),
                     o => return Err(mixed(o)),
                 }
+                if has_missing {
+                    valid.push(!matches!(x, Value::Missing));
+                }
             }
-            Ok(ColData::Bool(out))
+            Ok(if has_missing { ColData::BoolValid(out, valid) } else { ColData::Bool(out) })
         }
         other => Err(HelixError::new(
             format!("column `{}` has an unsupported element type ({})", name, other.type_name()),

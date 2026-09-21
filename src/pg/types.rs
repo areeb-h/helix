@@ -219,24 +219,14 @@ impl ColBuf {
         match self.cells {
             Cells::Int { vals, valid } => ColData::IntValid(vals, valid),
             Cells::Float { vals, valid } => ColData::FloatValid(vals, valid),
+            // A `boolean` column holding NULL is a Bool column holding `missing`. (It used to
+            // read as TEXT — `"t"` / `"f"` / missing — because the seam had no nullable Bool to
+            // say it with; §1.58.)
             Cells::Bool { vals, valid } => {
-                // `ColData` has no nullable boolean, so a column carrying NULL cannot be
-                // a Bool column without inventing a value for the null. Rather than pick
-                // one, such a column reads as text — `"t"` / `"f"` / missing, the server's own
-                // spelling — which is lossless and visibly a string. Adding a nullable Bool
-                // is the real fix and belongs with both backends, not smuggled in here.
                 if valid.iter().all(|ok| *ok) {
                     ColData::Bool(vals)
                 } else {
-                    let mut t = StrBuilder::with_capacity(vals.len());
-                    for (v, ok) in vals.iter().zip(&valid) {
-                        match (ok, v) {
-                            (false, _) => t.push_missing(),
-                            (true, true) => t.push_str("t"),
-                            (true, false) => t.push_str("f"),
-                        }
-                    }
-                    ColData::StrBuilt(t)
+                    ColData::BoolValid(vals, valid)
                 }
             }
             Cells::Text(t) => ColData::StrBuilt(t),
@@ -375,18 +365,16 @@ mod tests {
         );
     }
 
-    /// A boolean column holding a NULL still reads as the server's own text, as before.
+    /// A boolean column holding a NULL is a Bool column holding `missing` — in either format —
+    /// and not the text it used to be downgraded to.
     #[test]
-    fn a_boolean_column_with_a_null_reads_as_text() {
+    fn a_boolean_column_with_a_null_is_a_bool_column_with_a_missing_cell() {
         for binary in [None, Some(1)] {
             let (t, f): (&[u8], &[u8]) = if binary.is_some() { (&[1], &[0]) } else { (b"t", b"f") };
-            let ColData::StrBuilt(b) = one(BOOL, binary, &[Some(t), None, Some(f)]).unwrap() else {
-                panic!("a nullable boolean is text")
+            let ColData::BoolValid(vals, valid) = one(BOOL, binary, &[Some(t), None, Some(f)]).unwrap() else {
+                panic!("a nullable boolean is a Bool column")
             };
-            let (dict, codes, valid) = b.into_parts();
-            let cells: Vec<Option<&str>> =
-                codes.iter().zip(&valid).map(|(c, ok)| ok.then(|| dict[*c as usize].as_str())).collect();
-            assert_eq!(cells, [Some("t"), None, Some("f")]);
+            assert_eq!((vals, valid), (vec![true, false, false], vec![true, false, true]));
         }
     }
 }
