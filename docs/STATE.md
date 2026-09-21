@@ -164,7 +164,12 @@ Sent on a non-blocking socket while the answer is set aside, so it cannot deadlo
 14 MB back verified, clear and TLS). A `COPY` goes alone. The gate has TLS data-path tests
 now: a certificate made at test time, rustls's server as the peer.
 
-**Still open:** `SCRAM-SHA-256-PLUS` channel binding; a cursor for results larger than memory.
+**The login is bound to the TLS session (2026-09-22).** `SCRAM-SHA-256-PLUS`
+(`tls-server-end-point`), on by default and not something the network can switch off;
+`channel_binding=require|disable` in the URL. A Bool column holds `missing`, so a nullable
+`boolean` is a Bool column. `connect` tries every address a name resolves to.
+
+**Still open:** a cursor for results larger than memory.
 
 ### A method call is resolved by its receiver (ADR 0045)
 

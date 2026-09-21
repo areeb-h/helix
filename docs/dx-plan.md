@@ -614,6 +614,25 @@ takes). `connect_timeout=N`. TCP keepalive on every connection (`libc`, Unix: 60
 A limit is NOT the default: `statement_timeout` bounds streaming too, and would end large
 reads that work today. Live: `target/bench/f93/timeouts.helix`.
 
+**Channel binding (2026-09-22), DONE — ADR 0044's last security honest cost.**
+`SCRAM-SHA-256-PLUS` / `tls-server-end-point`: `scram::Binding::{None, Unoffered, EndPoint}` =
+the GS2 headers `n,,` / `y,,` / `p=tls-server-end-point,,`; `end_point_hash` walks the
+certificate's DER to its signatureAlgorithm (MD5/SHA-1 -> SHA-256, RSASSA-PSS from its params,
+NONE for Ed25519 — then the login goes unbound rather than guess); `connect::binding_for`
+chooses from the URL (`channel_binding=prefer|require|disable`), the offer and the certificate;
+`Stream::peer_certificate`. `y,,` is the point of the default: able to bind and not offered,
+the client SAYS so, and a server that did offer refuses — so the offer cannot be removed on
+the way. A bound login refused for anything but the password (28P01) names
+`channel_binding=disable`, for the re-encrypting proxy. LIVE: CA-signed RSA leaf logs in under
+`require` (= the server verified our hash); Ed25519 leaf logs in unbound, `require` refuses.
+NOTE for live harnesses: `openssl req -x509` makes a CA certificate, which this client rightly
+refuses as an end entity (`CaUsedAsEndEntity`) — sign a leaf with a throwaway CA. IN THE GATE:
+`tls_wire_tests` gained a fake PostgreSQL behind real TLS doing the SERVER side of SCRAM,
+written independently of `scram.rs`, with an `ecdsa-with-SHA256` certificate made at test time
+(RFC 6979's published P-256 key, signed via `rustls::crypto::ring::sign::any_ecdsa_type`).
+`scram.rs` had NO tests; it now has RFC 7677's exchange to the byte. Also: `connect` tries
+every resolved address (it tried the first only; `localhost` is `::1` then `127.0.0.1`).
+
 **§1.58 (2026-09-22) — a Bool column holds `missing`, DONE.** Carried since the 0.10.0
 release, and ADR 0044's first "honest cost" (a nullable `boolean` read as the text `"t"`/`"f"`).
 THE ENGINES NEVER NEEDED ANYTHING: `Col::Bool { vals, valid }` always had validity, `read_csv`

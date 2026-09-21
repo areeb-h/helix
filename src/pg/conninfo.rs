@@ -25,6 +25,25 @@ pub enum SslMode {
     Disable,
 }
 
+/// Whether authentication is bound to the TLS session — the URL's `channel_binding=`.
+///
+/// The default binds whenever it can, and cannot be talked out of it: a client that CAN bind
+/// says so in the exchange even when the server did not offer to (`scram::Binding::Unoffered`),
+/// and a server that did offer refuses that — so removing the offer on the way is not a way
+/// round it. The other two values exist for the two things the default cannot know.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChannelBinding {
+    /// Bind when the server offers to and the certificate allows it. The default.
+    Prefer,
+    /// Refuse to authenticate unbound — to a server too old to offer it, or whose certificate
+    /// is signed with no hash to bind to. For a caller who would rather not connect.
+    Require,
+    /// Never bind. For a connection that a proxy re-encrypts on purpose: the certificate this
+    /// client sees is then the proxy's, the server compares the binding with its own, and a
+    /// bound exchange can only fail — which is channel binding working.
+    Disable,
+}
+
 /// How long a statement may take — the URL's `timeout=`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Patience {
@@ -54,6 +73,8 @@ pub struct Target {
     pub sslrootcert: Option<String>,
     /// How long a statement may take (`timeout=`, in seconds).
     pub patience: Patience,
+    /// Whether authentication is bound to the TLS session (`channel_binding=`).
+    pub channel_binding: ChannelBinding,
     /// How long to wait for the TCP connection (`connect_timeout=`, in seconds; 10).
     pub connect_timeout: Duration,
 }
@@ -102,6 +123,7 @@ pub fn parse_url(raw: &str, line: usize, col: usize) -> Result<Target, HelixErro
     let mut sslmode = SslMode::VerifyFull;
     let mut sslrootcert: Option<String> = None;
     let mut patience = Patience::Silence;
+    let mut channel_binding = ChannelBinding::Prefer;
     let mut connect_timeout = DEFAULT_CONNECT_TIMEOUT;
     // A number of whole seconds, or an error that says what one looks like.
     let seconds = |key: &str, v: &str| -> Result<u64, HelixError> {
@@ -117,6 +139,18 @@ pub fn parse_url(raw: &str, line: usize, col: usize) -> Result<Target, HelixErro
     };
     for (k, v) in u.query_pairs() {
         match k.as_ref() {
+            "channel_binding" => {
+                channel_binding = match v.as_ref() {
+                    "prefer" => ChannelBinding::Prefer,
+                    "require" => ChannelBinding::Require,
+                    "disable" => ChannelBinding::Disable,
+                    other => {
+                        return Err(bad(format!("`channel_binding={other}` is not a value")).hint(
+                            "`prefer` (the default: bind whenever the server offers to), `require`, or `disable`.",
+                        ))
+                    }
+                }
+            }
             "timeout" => {
                 patience = match seconds("timeout", v.as_ref())? {
                     0 => Patience::Unbounded,
@@ -181,7 +215,7 @@ pub fn parse_url(raw: &str, line: usize, col: usize) -> Result<Target, HelixErro
                 return Err(bad(format!(
                     "`{other}` is not a connection parameter Helix understands"
                 ))
-                .hint("the URL takes `sslmode`, `sslrootcert`, `timeout` and `connect_timeout`."))
+                .hint("the URL takes `sslmode`, `sslrootcert`, `channel_binding`, `timeout` and `connect_timeout`."))
             }
         }
     }
@@ -189,6 +223,14 @@ pub fn parse_url(raw: &str, line: usize, col: usize) -> Result<Target, HelixErro
         return Err(bad(
             "`sslrootcert` names the certificate to trust, and `sslmode=disable` asks for \
              no certificate at all — the URL is asking for two different things"
+                .to_string(),
+        )
+        .hint("drop one of them."));
+    }
+    if sslmode == SslMode::Disable && channel_binding == ChannelBinding::Require {
+        return Err(bad(
+            "`channel_binding=require` binds authentication to a TLS certificate, and \
+             `sslmode=disable` asks for no TLS at all — the URL is asking for two different things"
                 .to_string(),
         )
         .hint("drop one of them."));
@@ -202,6 +244,7 @@ pub fn parse_url(raw: &str, line: usize, col: usize) -> Result<Target, HelixErro
         sslmode,
         sslrootcert,
         patience,
+        channel_binding,
         connect_timeout,
     })
 }
@@ -290,6 +333,19 @@ mod tests {
 
         // Two requests that contradict each other are refused rather than ranked.
         let m = err("postgres://u:p@h/db?sslmode=disable&sslrootcert=/x.pem");
+        assert!(m.contains("two different things"), "{m}");
+    }
+
+    /// Channel binding is on unless the URL says otherwise, and the URL can only say three
+    /// things about it.
+    #[test]
+    fn channel_binding_is_preferred_unless_the_url_says_otherwise() {
+        assert_eq!(ok("postgres://u:p@h/db").channel_binding, ChannelBinding::Prefer);
+        assert_eq!(ok("postgres://u:p@h/db?channel_binding=prefer").channel_binding, ChannelBinding::Prefer);
+        assert_eq!(ok("postgres://u:p@h/db?channel_binding=require").channel_binding, ChannelBinding::Require);
+        assert_eq!(ok("postgres://u:p@h/db?channel_binding=disable").channel_binding, ChannelBinding::Disable);
+        assert!(err("postgres://u:p@h/db?channel_binding=yes").contains("`channel_binding=yes` is not a value"));
+        let m = err("postgres://u:p@h/db?sslmode=disable&channel_binding=require");
         assert!(m.contains("two different things"), "{m}");
     }
 

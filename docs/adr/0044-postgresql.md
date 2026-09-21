@@ -174,11 +174,8 @@ visible in `describe`, which is where a reader can see the trade.
   such a column and every verb handled it, the oracle agreeing; only the two doors a PROGRAM
   builds a frame through could not say it (`dataframe()` refused `[true, missing]`, field
   build §1.58, for the same reason).
-- **No channel binding.** `SCRAM-SHA-256-PLUS` binds the authentication exchange to the
-  TLS session, so a proxy holding a mis-issued certificate still cannot replay it. It is
-  not implemented. The gap it closes is narrower here than in `libpq`, because there is no
-  `require` mode to be sitting in — every TLS session is chain- and hostname-verified — but
-  it is a real gap and it is the next thing this file should grow.
+- ~~**No channel binding.**~~ Implemented 2026-09-22 (`SCRAM-SHA-256-PLUS`,
+  `tls-server-end-point`); see the addendum of that date.
 - ~~**One statement per call.**~~ Several statements share a round trip since 2026-09-21 (the
   addendum of that date). Still no cursor: a query is sent, executed, and fully read, and a
   result larger than memory has no streaming form yet.
@@ -508,3 +505,48 @@ self-signed Ed25519 certificate for `localhost`, the DER written by hand and sig
 `ed25519-dalek` — so no key is checked in, and the client trusts it the only way it trusts
 anything: as an `sslrootcert` file through `tls::negotiate`, chain and name verified. Both
 deadlock tests were shown to have teeth: with the blocking send they wedge until their timeouts.
+
+## Addendum 2026-09-22 — the login is bound to the TLS session
+
+TLS proves the other end holds a certificate some trusted authority issued for this name.
+SCRAM proves it knows the password. Neither proves they are the SAME other end: a relay holding
+a mis-issued certificate for the name terminates the TLS session, passes the SCRAM messages to
+the real server untouched, and both checks pass. D6 made the first proof as strong as it gets
+(chain and name, always); this closes what is left between the two.
+
+With `SCRAM-SHA-256-PLUS` the client signs a hash of the certificate IT WAS SHOWN into the
+SCRAM transcript (RFC 5929 `tls-server-end-point`), the server compares it with the
+certificate IT PRESENTED, and a relay — which showed the client some other certificate — makes
+the proof fail. It costs no round trip and one hash.
+
+- **The hash is the one the certificate's own signature names**, MD5 and SHA-1 replaced by
+  SHA-256, RSASSA-PSS read from its parameters (`scram::end_point_hash`, a bounds-checked DER
+  walk: a certificate is bytes a server chose). A signature that names NO hash — Ed25519 — has
+  no binding defined, and such a login goes unbound rather than guess at what the server will
+  compute. Verified live: an Ed25519-signed server certificate logs in.
+- **The default binds whenever it can and cannot be talked out of it.** Offered `-PLUS` and
+  able to bind, it binds. Able to bind and NOT offered, it says so in the exchange (`y,,`), and
+  a server that did offer — before something between the two removed the offer — refuses. That
+  is RFC 5802's downgrade protection, and it is what makes "the server did not offer it" safe
+  to believe. This is D6's principle once more: nothing on the network decides.
+- **`channel_binding=require`** refuses to authenticate unbound, saying which of the three
+  reasons applies (no TLS, no offer, a certificate with no hash) — before a byte derived from
+  the password is sent. **`channel_binding=disable`** is for a connection a proxy re-encrypts
+  ON PURPOSE: the certificate this client sees is then the proxy's, and a bound login can only
+  fail — which is channel binding working. A bound login the server refuses for anything but
+  the password says so, and names that spelling. `require` with `sslmode=disable` is refused
+  as the URL asking for two different things.
+
+Verified live against PostgreSQL 17 (a CA-signed RSA leaf: `require` logs in, so the server
+verified the hash this client signed; the wrong password is a password error and nothing
+more; an Ed25519 leaf logs in unbound and `require` refuses, saying why) — and, for the first
+time for anything in the handshake, IN THE GATE: `tls_wire_tests` runs a fake PostgreSQL behind
+real TLS that performs the server side of SCRAM independently of `scram.rs`, presenting an
+`ecdsa-with-SHA256` certificate made at test time (RFC 6979's published P-256 test key, signed
+through rustls's own signing API). It lets a bound login in, fails one whose certificate is not
+the one the server holds, and records what an unbound client said. `scram.rs` itself had no
+tests at all; it now reproduces RFC 7677's published exchange to the byte.
+
+Also: `connect` tries EVERY address a name resolves to, in order, where it tried only the
+first. `localhost` is two addresses on most machines, `::1` first, and a server listening on
+one of them is an ordinary configuration.

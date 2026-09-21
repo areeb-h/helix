@@ -156,6 +156,15 @@ impl Stream {
         Ok(())
     }
 
+    /// The certificate the server presented, as DER — what a channel-bound authentication
+    /// signs a hash of (`scram::end_point_hash`). `None` in the clear.
+    pub fn peer_certificate(&self) -> Option<&[u8]> {
+        match &self.raw {
+            Raw::Plain(_) => None,
+            Raw::Tls(s) => s.conn.peer_certificates().and_then(|chain| chain.first()).map(|c| c.as_ref()),
+        }
+    }
+
     /// Whether this connection is encrypted — for the diagnostic label, so a program that
     /// prints a connection says which kind it has.
     pub fn is_tls(&self) -> bool {

@@ -4,7 +4,7 @@
 use std::net::TcpStream;
 use std::time::Duration;
 
-use super::conninfo::{Patience, SslMode, Target};
+use super::conninfo::{ChannelBinding, Patience, SslMode, Target};
 use super::proto::{error_text, put_cstr, write_msg, Cur};
 use super::statement::Session;
 use super::stream::Stream;
@@ -33,9 +33,24 @@ pub fn connect(t: &Target, read_only: bool) -> Result<Session, String> {
     let addrs: Vec<_> = std::net::ToSocketAddrs::to_socket_addrs(&addr)
         .map_err(|e| format!("cannot resolve `{addr}`: {e}"))?
         .collect();
-    let first = addrs.first().ok_or_else(|| format!("`{addr}` resolved to no address"))?;
-    let s = TcpStream::connect_timeout(first, t.connect_timeout)
-        .map_err(|e| format!("cannot connect to `{addr}`: {e}"))?;
+    // EVERY address the name resolves to, in order, until one answers. `localhost` is two
+    // addresses on most machines — `::1` first — and a server listening on only one of them is
+    // an ordinary configuration, not an unreachable host.
+    let mut refused = None;
+    let mut connected = None;
+    for a in &addrs {
+        match TcpStream::connect_timeout(a, t.connect_timeout) {
+            Ok(s) => {
+                connected = Some(s);
+                break;
+            }
+            Err(e) => refused = Some(e),
+        }
+    }
+    let s = connected.ok_or_else(|| match refused {
+        Some(e) => format!("cannot connect to `{addr}`: {e}"),
+        None => format!("`{addr}` resolved to no address"),
+    })?;
     // A bounded wait, so a server that accepts and then stalls cannot hang the program.
     s.set_read_timeout(Some(SILENCE)).map_err(|e| format!("setting a read timeout: {e}"))?;
     s.set_write_timeout(Some(SILENCE)).map_err(|e| format!("setting a write timeout: {e}"))?;
@@ -148,6 +163,28 @@ fn keep_alive(s: &TcpStream) {
 #[cfg(not(unix))]
 fn keep_alive(_: &TcpStream) {}
 
+/// How this exchange is bound to the TLS session: by what the URL asked for, what the server
+/// offered, and whether the certificate it presented can be bound to at all.
+fn binding_for(asked: ChannelBinding, offered: &[String], certificate: Option<&[u8]>) -> Result<scram::Binding, String> {
+    let plus = offered.iter().any(|n| n == "SCRAM-SHA-256-PLUS");
+    let hash = certificate.and_then(scram::end_point_hash);
+    let binding = match (asked, hash) {
+        (ChannelBinding::Disable, _) | (_, None) => scram::Binding::None,
+        (_, Some(hash)) if plus => scram::Binding::EndPoint(hash),
+        // This client could have bound and was not offered the chance. Saying so is what lets
+        // a server that DID offer — before something in between removed the offer — refuse.
+        (_, Some(_)) => scram::Binding::Unoffered,
+    };
+    if asked == ChannelBinding::Require && !matches!(binding, scram::Binding::EndPoint(_)) {
+        return Err(match (certificate, plus) {
+            (None, _) => "`channel_binding=require`, and this connection has no TLS certificate to bind to".to_string(),
+            (Some(_), false) => "`channel_binding=require`, and the server does not offer SCRAM-SHA-256-PLUS".to_string(),
+            (Some(_), true) => "`channel_binding=require`, and the server's certificate is signed with an algorithm that names no hash to bind to (RFC 5929 defines none for it)".to_string(),
+        });
+    }
+    Ok(binding)
+}
+
 /// Read to the first `ReadyForQuery`, keeping the one thing the server says about itself that
 /// this client acts on: whether its `float8` text is exact. `NoticeResponse`,
 /// `ParameterStatus` and `BackendKeyData` can arrive at ANY time by the protocol's own rules,
@@ -182,9 +219,21 @@ fn prints_floats_exactly(server_version: &str) -> bool {
 
 fn authenticate(s: &mut Stream, t: &Target) -> Result<(), String> {
     let mut sasl: Option<scram::Scram> = None;
+    // Whether the exchange under way is bound to the TLS session.
+    let mut bound = false;
     loop {
         let (tag, body) = s.next_msg()?;
         match tag {
+            // A BOUND exchange that the server refuses for anything but the password is, most
+            // often, channel binding doing what it is for: something between the two presented
+            // this client a certificate that is not the server's. When that something is a
+            // proxy re-encrypting the connection on purpose, the way to say so is in the URL.
+            b'E' if bound && super::proto::error_code(body) != "28P01" => {
+                return Err(format!(
+                    "{} — this authentication was bound to the TLS certificate Helix was shown; if a proxy re-encrypts this connection on purpose, that certificate is the proxy's and not the server's: `channel_binding=disable` in the URL",
+                    error_text(body)
+                ))
+            }
             b'E' => return Err(error_text(body)),
             b'R' => {
                 let mut c = Cur::new(body);
@@ -207,10 +256,13 @@ fn authenticate(s: &mut Stream, t: &Target) -> Result<(), String> {
                                 names.join(", ")
                             ));
                         }
-                        let mut sc = scram::Scram::new(&t.password);
+                        let binding = binding_for(t.channel_binding, &names, s.peer_certificate())?;
+                        bound = matches!(binding, scram::Binding::EndPoint(_));
+                        let mechanism = binding.mechanism();
+                        let mut sc = scram::Scram::new(&t.password, binding);
                         let first = sc.client_first();
                         let mut out = Vec::new();
-                        put_cstr(&mut out, "SCRAM-SHA-256");
+                        put_cstr(&mut out, mechanism);
                         out.extend_from_slice(&(first.len() as i32).to_be_bytes());
                         out.extend_from_slice(first.as_bytes());
                         write_msg(s, Some(b'p'), &out)?;
@@ -248,6 +300,45 @@ fn authenticate(s: &mut Stream, t: &Target) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::prints_floats_exactly;
+
+    /// WHICH BINDING, for every combination of what the URL asked, what the server offered
+    /// and what its certificate allows. The default binds whenever it can; when it could have
+    /// and was not offered the chance it SAYS so (`Unoffered`), which is what makes an offer
+    /// removed on the way detectable; `require` refuses anything less than bound, saying why.
+    #[test]
+    fn the_binding_follows_the_url_the_offer_and_the_certificate() {
+        use super::super::conninfo::ChannelBinding::{Disable, Prefer, Require};
+        use super::super::scram::Binding;
+        // A certificate in outline, signed sha256WithRSA — and one signed Ed25519, which names no hash.
+        let cert = |alg: &[u8]| {
+            let mut body = vec![0x30, 0x03, 0x02, 0x01, 0x01, 0x30, alg.len() as u8];
+            body.extend_from_slice(alg);
+            body.extend_from_slice(&[0x03, 0x01, 0x00]);
+            let mut out = vec![0x30, body.len() as u8];
+            out.extend_from_slice(&body);
+            out
+        };
+        let rsa = cert(&[0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b, 0x05, 0x00]);
+        let ed = cert(&[0x06, 0x03, 0x2b, 0x65, 0x70]);
+        let both = vec!["SCRAM-SHA-256-PLUS".to_string(), "SCRAM-SHA-256".to_string()];
+        let plain = vec!["SCRAM-SHA-256".to_string()];
+        let of = |asked, offered: &[String], c: Option<&[u8]>| super::binding_for(asked, offered, c);
+
+        assert!(matches!(of(Prefer, &both, Some(&rsa)), Ok(Binding::EndPoint(h)) if h.len() == 32));
+        assert_eq!(of(Prefer, &plain, Some(&rsa)), Ok(Binding::Unoffered));
+        assert_eq!(of(Prefer, &both, Some(&ed)), Ok(Binding::None));
+        assert_eq!(of(Prefer, &plain, None), Ok(Binding::None));
+        assert_eq!(of(Disable, &both, Some(&rsa)), Ok(Binding::None));
+        assert!(matches!(of(Require, &both, Some(&rsa)), Ok(Binding::EndPoint(_))));
+        for (offered, c, why) in [
+            (&plain, Some(rsa.as_slice()), "does not offer SCRAM-SHA-256-PLUS"),
+            (&both, Some(ed.as_slice()), "names no hash to bind to"),
+            (&both, None, "no TLS certificate to bind to"),
+        ] {
+            let e = of(Require, offered, c).unwrap_err();
+            assert!(e.contains(why), "{e}");
+        }
+    }
 
     /// The kernel is asked to probe a quiet connection — read back from the socket itself.
     #[cfg(any(target_os = "linux", target_os = "android"))]

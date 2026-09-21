@@ -4,6 +4,23 @@
 
 ### Added
 
+- **A PostgreSQL login is bound to the TLS session it runs over (`SCRAM-SHA-256-PLUS`).** TLS
+  proves the other end holds a certificate issued for this name, SCRAM proves it knows the
+  password, and neither proves they are the SAME other end: a relay holding a mis-issued
+  certificate terminates TLS, passes the SCRAM messages through untouched, and both checks
+  pass. The client now signs a hash of the certificate it was shown into the SCRAM transcript
+  (RFC 5929 `tls-server-end-point`), the server compares it with the one it presented, and a
+  relay makes the proof fail. No round trip, one hash, on by default — and not something the
+  network can switch off: a client that could have bound and was not offered the chance SAYS
+  so in the exchange, and a server that did offer refuses. `channel_binding=require` refuses
+  to log in unbound (saying why); `channel_binding=disable` is for a connection a proxy
+  re-encrypts on purpose, where a bound login can only fail — and the error that ends such a
+  login names that spelling. A certificate whose signature names no hash (Ed25519) has no
+  binding defined and logs in unbound. Verified live against PostgreSQL 17, and in the gate:
+  a fake PostgreSQL behind real TLS performs the server side of SCRAM independently of the
+  client. `scram.rs`, which had no tests, now reproduces RFC 7677's published exchange.
+  (ADR 0044's last security "honest cost".)
+
 - **Several PostgreSQL statements share one round trip: `c.query([q1, q2, q3])`.** The
   2026-09-20 profile said where a small query's time is: 7–13 µs of this client's code inside
   a 150–190 µs round trip. Nothing done to one statement makes a page of five queries faster;
@@ -135,6 +152,10 @@
   server that now knows statement names, `Close` and how to forget.
 
 ### Fixed
+
+- **`postgres_open` tries every address a name resolves to.** It tried only the first, and
+  `localhost` is two on most machines — `::1` first — so a server listening on IPv4 alone was
+  "connection refused" by name and fine by number.
 
 - **A Bool column holds `missing`, like the other three (field build §1.58) — and a nullable
   `boolean` from PostgreSQL is a Bool column, not text.** `dataframe({flag: [true, missing]})`
