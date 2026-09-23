@@ -327,7 +327,6 @@ impl<'t> Specializer<'t> {
             .iter()
             .flat_map(|s| match s {
                 Stmt::Assign { name, .. } => vec![name.as_str()],
-                Stmt::Destructure { names, .. } => names.iter().map(String::as_str).collect(),
                 _ => Vec::new(),
             })
             .collect();
@@ -338,7 +337,6 @@ impl<'t> Specializer<'t> {
             .iter()
             .flat_map(|s| match s {
                 Stmt::Assign { name, mutable: false, .. } => vec![name.clone()],
-                Stmt::Destructure { names, mutable: false, .. } => names.clone(),
                 _ => Vec::new(),
             })
             .collect();
@@ -872,6 +870,28 @@ impl<'t> Specializer<'t> {
                         }
                     };
                     self.set(e, new);
+                }
+            }
+            // A destructured position of a sequence known from the call site is that element
+            // — or, for the rest, the literal of what is left — exactly as `xs[i]` is above.
+            // A sequence of the wrong length is left alone: it is the run-time error.
+            Expr::Part { recv, index, names, rest, .. } => {
+                self.substitute(recv, env, depth, sb, done);
+                let (index, names, rest) = (*index, *names, *rest);
+                if let Some(items) = sequence_literal(recv, env, &self.globals)
+                    && (if rest { items.len() >= names } else { items.len() == names })
+                {
+                    let new = if rest && index == names {
+                        Expr::Array(items.get(index..).map(<[Expr]>::to_vec).unwrap_or_default())
+                    } else {
+                        match items.get(index) {
+                            // An element known from the call site is `recv[i]` already.
+                            Some(Expr::Index { .. }) | None => return,
+                            Some(elem) => elem.clone(),
+                        }
+                    };
+                    self.set(e, new);
+                    self.substitute(e, env, depth, sb, done);
                 }
             }
             Expr::Unary { expr, .. } => self.substitute(expr, env, depth, sb, done),
@@ -1450,9 +1470,11 @@ pub(super) fn replace_idents(e: &mut Expr, with: &dyn Fn(&str) -> Option<Expr>, 
         Expr::Array(xs) | Expr::Tuple(xs) => xs.iter_mut().for_each(|x| replace_idents(x, with, shadow)),
         Expr::Record(fields) => fields.iter_mut().for_each(|(_, v)| replace_idents(v, with, shadow)),
         Expr::RecordUpdate { parts, .. } => parts.iter_mut().for_each(|p| replace_idents(p.expr_mut(), with, shadow)),
-        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } | Expr::Unary { expr: recv, .. } | Expr::Try { expr: recv, .. } => {
-            replace_idents(recv, with, shadow)
-        }
+        Expr::Field { recv, .. }
+        | Expr::FieldOrMissing { recv, .. }
+        | Expr::Part { recv, .. }
+        | Expr::Unary { expr: recv, .. }
+        | Expr::Try { expr: recv, .. } => replace_idents(recv, with, shadow),
         Expr::Binary { left, right, .. } => {
             replace_idents(left, with, shadow);
             replace_idents(right, with, shadow);

@@ -33,16 +33,8 @@ pub fn memoizable_fns(program: &[Stmt]) -> HashSet<String> {
     // Names of mutable top-level bindings.
     let mut mutable: HashSet<&str> = HashSet::new();
     for s in program {
-        match s {
-            Stmt::Assign { name, mutable: true, .. } => {
-                mutable.insert(name.as_str());
-            }
-            Stmt::Destructure { names, mutable: true, .. } => {
-                for n in names {
-                    mutable.insert(n.as_str());
-                }
-            }
-            _ => {}
+        if let Stmt::Assign { name, mutable: true, .. } = s {
+            mutable.insert(name.as_str());
         }
     }
 
@@ -151,7 +143,7 @@ fn any_call(e: &Expr, pred: &dyn Fn(&str) -> bool) -> bool {
         Expr::Array(xs) | Expr::Tuple(xs) => xs.iter().any(|x| any_call(x, pred)),
         Expr::Record(fs) => fs.iter().any(|(_, v)| any_call(v, pred)),
         Expr::RecordUpdate { parts, .. } => parts.iter().any(|p| any_call(p.expr(), pred)),
-        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } => any_call(recv, pred),
+        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } | Expr::Part { recv, .. } => any_call(recv, pred),
         Expr::Unary { expr, .. } => any_call(expr, pred),
         Expr::Binary { left, right, .. } => any_call(left, pred) || any_call(right, pred),
         Expr::Method { recv, args, .. } => {
@@ -245,7 +237,7 @@ fn children(e: &Expr) -> Vec<&Expr> {
         Expr::Array(xs) | Expr::Tuple(xs) => xs.iter().collect(),
         Expr::Record(fs) => fs.iter().map(|(_, v)| v).collect(),
         Expr::RecordUpdate { parts, .. } => parts.iter().map(|p| p.expr()).collect(),
-        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } => vec![recv],
+        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } | Expr::Part { recv, .. } => vec![recv],
         Expr::Unary { expr, .. } => vec![expr],
         Expr::Binary { left, right, .. } => vec![left, right],
         Expr::Call { args, .. } => args.iter().collect(),
@@ -392,7 +384,7 @@ fn collect_free<'a>(e: &'a Expr, bound: &mut Vec<&'a str>, free: &mut Vec<String
                 collect_free(p.expr(), bound, free);
             }
         }
-        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } => collect_free(recv, bound, free),
+        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } | Expr::Part { recv, .. } => collect_free(recv, bound, free),
         Expr::Index { recv, index, .. } => {
             collect_free(recv, bound, free);
             collect_free(index, bound, free);

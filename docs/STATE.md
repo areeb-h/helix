@@ -169,6 +169,9 @@ now: a certificate made at test time, rustls's server as the peer.
 `channel_binding=require|disable` in the URL. A Bool column holds `missing`, so a nullable
 `boolean` is a Bool column. `connect` tries every address a name resolves to.
 
+**Positional destructuring (ADR 0053, 2026-09-23).** `[a, b] = xs` in `let`, `do`, `where` and
+as a statement, `...rest`, the wrong length an error; the bare `a, b = xs` is the same form.
+
 **Still open:** a cursor for results larger than memory.
 
 ### A method call is resolved by its receiver (ADR 0045)

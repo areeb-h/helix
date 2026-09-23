@@ -39,7 +39,7 @@ pub fn walk_expr(e: &Expr, f: &mut impl FnMut(&Expr)) {
                 walk_expr(p.expr(), f);
             }
         }
-        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } => walk_expr(recv, f),
+        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } | Expr::Part { recv, .. } => walk_expr(recv, f),
         Expr::Unary { expr, .. } | Expr::Try { expr, .. } => walk_expr(expr, f),
         Expr::Binary { left, right, .. } => {
             walk_expr(left, f);
@@ -114,9 +114,7 @@ pub fn walk_expr(e: &Expr, f: &mut impl FnMut(&Expr)) {
 /// Call `f` on every expression a statement holds (and everything beneath).
 pub fn walk_stmt(s: &Stmt, f: &mut impl FnMut(&Expr)) {
     match s {
-        Stmt::Assign { value, .. } | Stmt::Destructure { value, .. } | Stmt::Expr(value) => {
-            walk_expr(value, f)
-        }
+        Stmt::Assign { value, .. } | Stmt::Expr(value) => walk_expr(value, f),
         Stmt::Func { defaults, body, .. } => {
             for d in defaults.iter().flatten() {
                 walk_expr(d, f);
@@ -141,6 +139,7 @@ pub fn expr_pos(e: &Expr) -> Option<(usize, usize)> {
             | Expr::RecordUpdate { line, col, .. }
             | Expr::Field { line, col, .. }
             | Expr::FieldOrMissing { line, col, .. }
+            | Expr::Part { line, col, .. }
             | Expr::Unary { line, col, .. }
             | Expr::Binary { line, col, .. }
             | Expr::Call { line, col, .. }

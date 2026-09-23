@@ -84,6 +84,12 @@ fn render(spec) = do {
   and the checker already catches the case a marker would protect against — a typo against
   a known shape.
 
+## Addendum 2026-09-23 — the positional twin
+
+[ADR 0053](0053-positional-destructuring.md) gives sequences the same four positions with
+brackets — `let [a, b] = xs in …`, and `[a, ...rest] = xs` — on this ADR's desugar, and
+retires the separate `Stmt::Destructure` the bare `a, b = xs` statement used to be.
+
 ## Addendum 2026-09-04 — the statement form
 
 `{where, limit} = spec` at the top level, with `mut` and `export` in front as for any

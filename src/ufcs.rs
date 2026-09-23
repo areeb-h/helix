@@ -50,7 +50,6 @@ pub fn resolve_by_type(program: &mut [Stmt], types: &TypeMap) {
             Stmt::Assign { name, .. } => {
                 globals.insert(name.clone());
             }
-            Stmt::Destructure { names, .. } => globals.extend(names.iter().cloned()),
             _ => {}
         }
     }
@@ -61,9 +60,7 @@ pub fn resolve_by_type(program: &mut [Stmt], types: &TypeMap) {
                 let bound: HashSet<String> = params.iter().map(|(p, _)| p.clone()).collect();
                 walk(body, &cx, &bound);
             }
-            Stmt::Assign { value, .. } | Stmt::Destructure { value, .. } => {
-                walk(value, &cx, &HashSet::new())
-            }
+            Stmt::Assign { value, .. } => walk(value, &cx, &HashSet::new()),
             Stmt::Expr(e) => walk(e, &cx, &HashSet::new()),
             Stmt::Import { .. } => {}
         }
@@ -111,7 +108,7 @@ fn walk(e: &mut Expr, cx: &Cx, bound: &HashSet<String>) {
                 walk(p.expr_mut(), cx, bound);
             }
         }
-        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } => walk(recv, cx, bound),
+        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } | Expr::Part { recv, .. } => walk(recv, cx, bound),
         Expr::Unary { expr, .. } => walk(expr, cx, bound),
         Expr::Binary { left, right, .. } => {
             walk(left, cx, bound);

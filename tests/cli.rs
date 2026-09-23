@@ -1074,12 +1074,10 @@ fn foreign_syntax_gets_the_hint_it_actually_needs() {
         ("use lib.util\nprint(1)", "Helix imports by module path"),
         ("from lib import util\nprint(1)", "import lib.stats as st"),
         ("require lib.util\nprint(1)", "to bring names in unqualified"),
-        // Destructuring a BINDING. The feature half-exists — a lambda parameter
-        // destructures today — so the hint names the half that WORKS instead of
-        // reporting a dead end, and instead of the statement-boundary message a
-        // tuple followed by `=` used to earn. A field report listed destructuring
-        // as flatly open without noticing the lambda form.
-        ("(a, b) = (1, 2)\nprint(a + b)", "where it DOES work"),
+        // Destructuring a BINDING with parentheses. Parentheses make a tuple; the pattern
+        // is written in brackets (ADR 0053), and the hint says so — instead of the
+        // statement-boundary message a tuple followed by `=` used to earn.
+        ("(a, b) = (1, 2)\nprint(a + b)", "`[a, b] = p`"),
     ];
     for (src, want) in cases {
         let (_, err, code) = run_source(src, &[], &format!("foreign_{}", want.len()));
@@ -15464,6 +15462,64 @@ fn a_default_parameter_is_visible_above_its_definition() {
     assert_ne!(code, Some(0));
     assert!(err.contains("must be a literal constant"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `[a, b] = e` binds by POSITION (ADR 0053) — in `let`, in a `do` block, in a `where` clause
+/// and as a statement — and `a, b = e`, the bare statement, is the same form. A tuple's parts
+/// are typed one by one at check time; a tuple of the wrong length is refused there; and the
+/// run-time refusals are one sentence on every engine. (The corpus program `arr_destructure`
+/// pins the outputs across the three engines and both DataFrame backends.)
+#[test]
+fn positional_destructuring_binds_by_position_in_every_form() {
+    let src = "fn f(p) = let [a, b] = p in a * 10 + b\n\
+               fn g(xs) = do {\n  [h, ...t] = xs\n  t.count() * 100 + h\n}\n\
+               fn n(v) = x + y where [x, y] = v\n\
+               [p, q] = (1, 2)\n\
+               mut [m, ...r] = [5, 6, 7]\n\
+               m = m + 1\n\
+               print(f([1, 2]), f((3, 4)), g([9, 8, 7]), n((5, 6)), p + q, m, r)\n";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run_source(src, env, "positional");
+        assert_eq!(code, Some(0), "{env:?}: {err}");
+        assert_eq!(out.trim(), "12 34 209 11 3 6 [6, 7]", "{env:?}");
+    }
+    // THE CHECKER: a tuple's parts by position, and its length.
+    let (_, err, code) = run_source("print(let [n, s] = (1, \"x\") in n + s)\n", &[], "positional_typed");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("operator `+` needs numbers, but got a String"), "{err}");
+    let (_, err, _) = run_source("print(let [n, s] = (1, \"x\", true) in n)\n", &[], "positional_len");
+    assert!(err.contains("cannot destructure 3 values into 2 names"), "{err}");
+    let (_, err, _) = run_source("print(let [n] = 5 in n)\n", &[], "positional_int");
+    assert!(err.contains("cannot destructure a value of type Int into 1 name"), "{err}");
+    let (_, err, _) = run_source("p = (1, 2)\nprint(p[2])\n", &[], "positional_index");
+    assert!(err.contains("index 2 is out of bounds for a tuple of 2 values"), "{err}");
+    // THE ENGINES, through a parameter the checker cannot see: one sentence each.
+    for (src, want) in [
+        ("fn f(v) = let [a, b] = v in a\nprint(f(5))\n", "cannot destructure a value of type Int into 2 names"),
+        ("fn f(v) = let [a, b] = v in a\nprint(f([1, 2, 3]))\n", "cannot destructure 3 values into 2 names"),
+        ("fn f(v) = let [a, b, ...r] = v in r\nprint(f([1]))\n", "cannot destructure 1 value into 2 names and a rest"),
+        ("fn f(v) = let [a] = v in a\nprint(f([]))\n", "cannot destructure 0 values into 1 name"),
+    ] {
+        for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+            let (_, err, code) = run_source(src, env, "positional_dyn");
+            assert_eq!(code, Some(1), "{env:?}: {src}");
+            assert!(err.contains(want), "{env:?}: {src}\n{err}");
+        }
+    }
+    // THE PARSER: its own refusals, in its own words.
+    for (src, want) in [
+        ("[a, a] = [1, 2]\n", "`a` appears twice in this pattern"),
+        ("[...r, a] = [1, 2]\n", "`...rest` must come last in a pattern"),
+        ("[a, ...r, ...s] = [1, 2]\n", "`...rest` must come last in a pattern"),
+        ("fn f() = do {\n  a, b = [1, 2]\n  a\n}\n", "a pattern inside a block is written in brackets"),
+    ] {
+        let (_, err, code) = run_source(src, &[], "positional_parse");
+        assert_eq!(code, Some(1), "{src}");
+        assert!(err.contains(want), "{src}\n{err}");
+    }
+    // The bare statement is the same form: the same sentence at the same place.
+    let (_, err, _) = run_source("a, b = [1, 2, 3]\nprint(a)\n", &[], "positional_bare");
+    assert!(err.contains("cannot destructure 3 values into 2 names") && err.contains(":1:1"), "{err}");
 }
 
 /// `let {a, b} = e in …` destructures a record (or a dict) — and `{a, b} = e` inside a

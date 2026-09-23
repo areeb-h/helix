@@ -1646,12 +1646,12 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 }
                 stack.push(crate::interp::eval_slice(&recv, start, stop, step, line, col)?);
             }
-            Op::Destructure(slots) => {
-                let v = stack.pop().unwrap();
-                let parts = crate::interp::destructure_parts(&v, slots.len(), line, col)?;
-                for (slot, val) in slots.iter().zip(parts) {
-                    globals[*slot as usize] = val;
-                }
+            Op::Part { index, names, rest } => {
+                // Cannot panic: the compiler emits the receiver immediately before this
+                // op — the stack-shape invariant `GetField` relies on. Counted in the
+                // panic budget (`no_new_panicking_calls_on_user_reachable_paths`).
+                let recv = stack.pop().unwrap();
+                stack.push(crate::interp::part_of(&recv, *index as usize, *names as usize, *rest, line, col)?);
             }
             Op::DestructureBind(slots) => {
                 // A comprehension multi-binder pattern: split the current element

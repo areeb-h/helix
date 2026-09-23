@@ -208,8 +208,9 @@ fn statement_boundary_hint(opened_with: &Tok, before: &Tok, found: &Tok) -> &'st
     // destructuring as flatly open without noticing. Naming the half that works turns a
     // dead end into a workaround.
     if matches!(opened_with, Tok::LParen) && matches!(found, Tok::Eq) {
-        return "a binding takes one name — destructure by indexing (`p[0]` / `p[1]`), or in a \
-                lambda parameter, where it DOES work: `xs.map((a, b) => a + b)`.";
+        return "parentheses make a tuple; a pattern is written in brackets — `[a, b] = p` — in a \
+                `let`, a `do` block, a `where` clause or as a statement (and a lambda parameter \
+                destructures as `xs.map((a, b) => a + b)`).";
     }
     // `x := 1` — Go's short declaration. The `x` parses as an expression and the `:` is the
     // surprise, so the statement neither opens nor ends with anything foreign-looking.
@@ -957,14 +958,8 @@ fn reject_do_binding_over_mut_global(
 ) -> Result<(), HelixError> {
     let mut muts: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for s in program {
-        match s {
-            Stmt::Assign { name, mutable: true, .. } => {
-                muts.insert(name.as_str());
-            }
-            Stmt::Destructure { names, mutable: true, .. } => {
-                muts.extend(names.iter().map(String::as_str));
-            }
-            _ => {}
+        if let Stmt::Assign { name, mutable: true, .. } = s {
+            muts.insert(name.as_str());
         }
     }
     for (name, line, col) in do_bindings {
@@ -1052,19 +1047,22 @@ impl Parser {
             k += 1;
         }
         let is_where = matches!(self.peek_at(k), Tok::Ident(n) if n == "where");
-        // `where NAME =`, or `where {a, b} =` — the record binder ADR 0046 gave `let`.
+        // `where NAME =`, `where {a, b} =` — the record binder ADR 0046 gave `let` — or
+        // `where [a, b] =`, the positional one.
         let gate = is_where
             && ((matches!(self.peek_at(k + 1), Tok::Ident(_))
                 && matches!(self.peek_at(k + 2), Tok::Eq))
                 || (matches!(self.peek_at(k + 1), Tok::LBrace)
-                    && self.record_binder_from(self.pos + k + 1)));
+                    && self.record_binder_from(self.pos + k + 1))
+                || (matches!(self.peek_at(k + 1), Tok::LBracket)
+                    && self.array_binder_from(self.pos + k + 1)));
         if !gate {
             // NEAR-MISS teaching (the sweep's three natural mistakes all fell
             // through to a generic "no `;`" error that misdescribed them):
             // `where` followed by a NAME but no `=` is a malformed clause —
             // a missing `=`, an attempted destructure, or a stray token —
             // never two statements.
-            if is_where && matches!(self.peek_at(k + 1), Tok::Ident(_) | Tok::LBrace) {
+            if is_where && matches!(self.peek_at(k + 1), Tok::Ident(_) | Tok::LBrace | Tok::LBracket) {
                 for _ in 0..=k {
                     self.advance();
                 }
@@ -1075,8 +1073,8 @@ impl Parser {
                     c,
                 )
                 .hint(
-                    "a binding is `where NAME = value` or `where {a, b} = record`; several \
-                     separate with commas (`where a = 1, b = a + 2`). One `where` per fn.",
+                    "a binding is `where NAME = value`, `where {a, b} = record` or `where [a, b] = \
+                     pair`; several separate with commas (`where a = 1, b = a + 2`). One `where` per fn.",
                 ));
             }
             return Ok(body);
@@ -1089,6 +1087,9 @@ impl Parser {
             if matches!(self.peek(), Tok::LBrace) {
                 let tmp = format!("$rec{}", bindings.len());
                 self.destructure_record(&mut bindings, tmp)?;
+            } else if matches!(self.peek(), Tok::LBracket) {
+                let tmp = format!("$arr{}", bindings.len());
+                self.destructure_positions(&mut bindings, tmp)?;
             } else {
                 let name = self.ident_name("after `where`")?;
                 self.eat(&Tok::Eq, "after the `where` binding's name")
@@ -1306,6 +1307,7 @@ impl Parser {
                 Tok::Fn | Tok::Mut => true,
                 Tok::Ident(_) => matches!(self.peek_at(2), Tok::Eq | Tok::Comma),
                 Tok::LBrace => self.record_binder_from(self.pos + 1),
+                Tok::LBracket => self.array_binder_from(self.pos + 1),
                 _ => false,
             };
         if exported {
@@ -1363,12 +1365,16 @@ impl Parser {
             if matches!(self.peek(), Tok::LBrace) {
                 return self.destructure_record_stmt(true, exported, l, c);
             }
+            if matches!(self.peek(), Tok::LBracket) {
+                return self.destructure_positions_stmt(true, exported, l, c);
+            }
             let first = self.ident_name("after `mut`")?;
             if matches!(self.peek(), Tok::Comma) {
+                let (nl, nc) = (l, c);
                 let names = self.finish_target_list(first)?;
                 self.eat(&Tok::Eq, "in destructuring assignment")?;
                 let value = self.expr()?;
-                return Ok(Stmt::Destructure { names, mutable: true, exported, value, line: l, col: c });
+                return self.positional_stmt(names, value, true, exported, nl, nc);
             }
             self.eat(&Tok::Eq, "in assignment")?;
             let value = self.expr()?;
@@ -1386,14 +1392,19 @@ impl Parser {
             let (l, c) = self.pos();
             return self.destructure_record_stmt(false, exported, l, c);
         }
-        // `a, b = ...` — destructuring (2+ names ending in `=`)
+        // `[a, b] = …` — positional destructuring as a statement (ADR 0053).
+        if matches!(self.peek(), Tok::LBracket) && self.array_binder_ahead() {
+            let (l, c) = self.pos();
+            return self.destructure_positions_stmt(false, exported, l, c);
+        }
+        // `a, b = …` — the same, in the bare spelling a statement has always taken.
         if self.at_destructure() {
             let (l, c) = self.pos();
             let first = self.ident_name("")?;
             let names = self.finish_target_list(first)?;
             self.eat(&Tok::Eq, "in destructuring assignment")?;
             let value = self.expr()?;
-            return Ok(Stmt::Destructure { names, mutable: false, exported, value, line: l, col: c });
+            return self.positional_stmt(names, value, false, exported, l, c);
         }
         // `x = ...`  (only when an identifier is immediately followed by a single `=`)
         if matches!(self.peek(), Tok::Ident(_)) && matches!(self.peek_at(1), Tok::Eq) {
@@ -1694,16 +1705,201 @@ impl Parser {
         self.temps += 1;
         let mut bindings = Vec::new();
         self.destructure_record(&mut bindings, tmp)?;
+        self.assignments_of(bindings, true, mutable, exported, l, c)
+    }
+
+    /// `[a, b] = value`, `[a, b, ...rest] = value` — one binding per position (ADR 0053).
+    /// The value is bound ONCE to a throwaway name (`$arr<N>`; `$` cannot appear in user
+    /// code, so it shadows nothing) and each position is read from it through `Part`, which
+    /// holds the value to the pattern: a tuple or an array of exactly as many parts as there
+    /// are names — or at least as many, when the pattern ends in a rest, which is then bound
+    /// to what is left. Nothing downstream knows the form exists.
+    fn destructure_positions(
+        &mut self,
+        bindings: &mut Vec<(String, Expr)>,
+        tmp: String,
+    ) -> Result<bool, HelixError> {
+        let shape = "destructuring looks like `let [a, b] = pair in …`, or `[first, ...rest] = xs`.";
+        let (l, c) = self.pos();
+        self.eat(&Tok::LBracket, "to start the positions to destructure")?;
+        let mut names: Vec<(String, usize, usize)> = Vec::new();
+        let mut rest: Option<(String, usize, usize)> = None;
+        loop {
+            self.skip_newlines();
+            if matches!(self.peek(), Tok::RBracket) && (!names.is_empty() || rest.is_some()) {
+                break; // a trailing comma
+            }
+            let (nl, nc) = self.pos();
+            if matches!(self.peek(), Tok::DotDotDot) {
+                if rest.is_some() {
+                    return Err(HelixError::new("a pattern takes one `...rest`", nl, nc).hint(shape));
+                }
+                self.advance();
+                let name = self.ident_name("after `...` — the name for the rest")?;
+                rest = Some((name, nl, nc));
+                self.skip_newlines();
+                if matches!(self.peek(), Tok::Comma) {
+                    self.advance();
+                    self.skip_newlines();
+                }
+                if !matches!(self.peek(), Tok::RBracket) {
+                    let (el, ec) = self.pos();
+                    return Err(HelixError::new("`...rest` must come last in a pattern", el, ec).hint(shape));
+                }
+                break;
+            }
+            let name = self.ident_name("as a position to destructure")?;
+            names.push((name, nl, nc));
+            self.skip_newlines();
+            if matches!(self.peek(), Tok::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.skip_newlines();
+        self.eat(&Tok::RBracket, "to close the positions to destructure").map_err(|e| e.hint(shape))?;
+        if names.is_empty() && rest.is_none() {
+            return Err(HelixError::new("a pattern needs at least one name", l, c).hint(shape));
+        }
+        Self::refuse_twice(names.iter().chain(&rest))?;
+        self.eat(&Tok::Eq, "after the positions to destructure").map_err(|e| e.hint(shape))?;
+        let value = self.expr()?;
+        Ok(Self::push_positions(bindings, tmp, names, rest, value))
+    }
+
+    /// A name twice in one pattern binds nothing twice: refused by name, where the two
+    /// assignments it would desugar to would only say the second reassigns the first.
+    fn refuse_twice<'a>(names: impl Iterator<Item = &'a (String, usize, usize)>) -> Result<(), HelixError> {
+        let mut seen: Vec<&str> = Vec::new();
+        for (name, l, c) in names {
+            if seen.contains(&name.as_str()) {
+                return Err(HelixError::new(format!("`{name}` appears twice in this pattern"), *l, *c)
+                    .hint("each position binds its own name."));
+            }
+            seen.push(name);
+        }
+        Ok(())
+    }
+
+    /// The desugar itself: the value under `tmp`, then one `Part` read per name — and one
+    /// for the rest, at the index after the last name. A value that is already a NAME needs
+    /// no temp — `[a, b] = p` reads `p` twice, pure and one lookup each, and the binding it
+    /// saves is a third of the form's cost — unless a pattern name is `p` itself, where the
+    /// first read would replace what the second reads from. Answers whether a temp was bound.
+    fn push_positions(
+        bindings: &mut Vec<(String, Expr)>,
+        tmp: String,
+        names: Vec<(String, usize, usize)>,
+        rest: Option<(String, usize, usize)>,
+        value: Expr,
+    ) -> bool {
+        let count = names.len();
+        let has_rest = rest.is_some();
+        let source = match &value {
+            Expr::Ident { name, .. } if !names.iter().chain(&rest).any(|(n, _, _)| n == name) => name.clone(),
+            _ => {
+                bindings.push((tmp.clone(), value));
+                tmp
+            }
+        };
+        let has_temp = source.starts_with('$');
+        for (index, (name, nl, nc)) in names.into_iter().chain(rest).enumerate() {
+            let recv = Box::new(Expr::Ident { name: source.clone(), line: nl, col: nc });
+            bindings.push((name, Expr::Part { recv, index, names: count, rest: has_rest, line: nl, col: nc }));
+        }
+        has_temp
+    }
+
+    /// `[a, b] = value` as a STATEMENT — and `a, b = value`, its bare spelling, through
+    /// `positional_stmt`: the `let` desugar spread over assignments, exactly as the record
+    /// form is (`destructure_record_stmt`). The first assignment is returned, the rest
+    /// queued in `pending`; the temp is never exported and never `mut`.
+    fn destructure_positions_stmt(
+        &mut self,
+        mutable: bool,
+        exported: bool,
+        l: usize,
+        c: usize,
+    ) -> Result<Stmt, HelixError> {
+        let tmp = format!("$arr{}", self.temps);
+        self.temps += 1;
+        let mut bindings = Vec::new();
+        let has_temp = self.destructure_positions(&mut bindings, tmp)?;
+        self.assignments_of(bindings, has_temp, mutable, exported, l, c)
+    }
+
+    /// The bare statement `a, b = value`: the same desugar as `[a, b] = value` (a bare
+    /// pattern has no rest — that spelling needs the brackets).
+    fn positional_stmt(
+        &mut self,
+        names: Vec<String>,
+        value: Expr,
+        mutable: bool,
+        exported: bool,
+        l: usize,
+        c: usize,
+    ) -> Result<Stmt, HelixError> {
+        let tmp = format!("$arr{}", self.temps);
+        self.temps += 1;
+        let mut bindings = Vec::new();
+        let names: Vec<(String, usize, usize)> = names.into_iter().map(|n| (n, l, c)).collect();
+        Self::refuse_twice(names.iter())?;
+        let has_temp = Self::push_positions(&mut bindings, tmp, names, None, value);
+        self.assignments_of(bindings, has_temp, mutable, exported, l, c)
+    }
+
+    /// A destructure's bindings as top-level assignments: the first returned, the rest
+    /// queued; each name `mut` and `export` as written, and the temp — when there is one, it
+    /// comes first — neither.
+    fn assignments_of(
+        &mut self,
+        bindings: Vec<(String, Expr)>,
+        has_temp: bool,
+        mutable: bool,
+        exported: bool,
+        l: usize,
+        c: usize,
+    ) -> Result<Stmt, HelixError> {
         let mut it = bindings.into_iter();
-        // `destructure_record` binds the value first, always; the `ok_or_else` is a
-        // refusal rather than a panic on purpose.
+        // A pattern binds at least one name; the `ok_or_else` is a refusal rather than a
+        // panic on purpose.
         let (name, value) =
             it.next().ok_or_else(|| HelixError::new("destructuring binds nothing", l, c))?;
-        let first = Stmt::Assign { name, mutable: false, exported: false, value, line: l, col: c };
+        let (m, x) = if has_temp { (false, false) } else { (mutable, exported) };
+        let first = Stmt::Assign { name, mutable: m, exported: x, value, line: l, col: c };
         self.pending.extend(
             it.map(|(name, value)| Stmt::Assign { name, mutable, exported, value, line: l, col: c }),
         );
         Ok(first)
+    }
+
+    /// Whether the `[` at the cursor opens a positional binder — `[a, b] = …`,
+    /// `[a, ...rest] = …` — rather than an array expression: names and commas (a `...name`
+    /// last) up to `]`, then a single `=`. `==` is its own token, so nothing that is an
+    /// expression matches. Decided by looking, like `record_binder_ahead`.
+    fn array_binder_ahead(&self) -> bool {
+        self.array_binder_from(self.pos)
+    }
+
+    /// Deliberately loose about the INSIDE — any run of names, commas and `...` — so that a
+    /// pattern with its rest in the wrong place, two rests, or no names at all reaches
+    /// `destructure_positions` and is refused in its own words, rather than parsing as an
+    /// array expression and failing on the `=` after it.
+    fn array_binder_from(&self, at: usize) -> bool {
+        let tok = |i: usize| self.toks.get(i).map(|t| &t.tok);
+        let mut i = at + 1;
+        loop {
+            match tok(i) {
+                Some(Tok::Ident(_) | Tok::Comma | Tok::DotDotDot | Tok::Newline) => i += 1,
+                Some(Tok::RBracket) => {
+                    i += 1;
+                    break;
+                }
+                _ => return false,
+            }
+        }
+        matches!(tok(i), Some(Tok::Eq))
     }
 
     /// Whether the `{` at the cursor opens a destructuring binder — `{a, b} = …` — rather
@@ -3016,6 +3212,25 @@ impl Parser {
                 self.skip_newlines();
                 continue;
             }
+            // `[a, b] = value` — the positional one (ADR 0053).
+            if matches!(self.peek(), Tok::LBracket) && self.array_binder_ahead() {
+                let (bl, bc) = self.pos();
+                let first = bindings.len();
+                let tmp = format!("$arr{first}");
+                let has_temp = self.destructure_positions(&mut bindings, tmp)?;
+                for (name, _) in &bindings[first + usize::from(has_temp)..] {
+                    self.do_bindings.push((name.clone(), bl, bc));
+                }
+                self.skip_newlines();
+                continue;
+            }
+            // `a, b = value` inside a block: the bare spelling is a statement's; in a block
+            // the pattern is written in brackets. Named, rather than "unexpected `,`".
+            if self.at_destructure() {
+                let (bl, bc) = self.pos();
+                return Err(HelixError::new("a pattern inside a block is written in brackets", bl, bc)
+                    .hint("`[a, b] = value` — the bare `a, b = value` is a top-level statement."));
+            }
             if matches!(self.peek(), Tok::RBrace) {
                 return Err(HelixError::new("a `do` block must end with a result expression", l, c)
                     .hint("add a final line that produces the block's value, e.g. `do { x = 1\\n  x + 1 }`."));
@@ -3088,7 +3303,9 @@ impl Parser {
                     Self::relocate(p.expr_mut(), l, c);
                 }
             }
-            Expr::Field { recv, line, col, .. } | Expr::FieldOrMissing { recv, line, col, .. } => {
+            Expr::Field { recv, line, col, .. }
+            | Expr::FieldOrMissing { recv, line, col, .. }
+            | Expr::Part { recv, line, col, .. } => {
                 *line = l;
                 *col = c;
                 Self::relocate(recv, l, c);
@@ -3287,6 +3504,9 @@ impl Parser {
                     if matches!(self.peek(), Tok::LBrace) {
                         let tmp = format!("$rec{}", bindings.len());
                         self.destructure_record(&mut bindings, tmp)?;
+                    } else if matches!(self.peek(), Tok::LBracket) {
+                        let tmp = format!("$arr{}", bindings.len());
+                        self.destructure_positions(&mut bindings, tmp)?;
                     } else {
                         let name = self.ident_name("as a `let` binding")?;
                         self.eat(&Tok::Eq, "in a `let` binding")

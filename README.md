@@ -158,8 +158,8 @@ db.execute("insert into people (name, age) values ($1, $2) returning id", ["Ada"
 postgres_execute("postgres://user:pw@host/db", "delete from people where age < $1", [18]).affected
 
 # Several statements in ONE round trip (and one transaction): an Array in, an Array of frames out.
-page = db.query([{sql: "select * from people where id = $1", params: [7]},
-                 {sql: "select * from posts where author_id = $1", params: [7]}])
+[person, posts] = db.query([{sql: "select * from people where id = $1", params: [7]},
+                            {sql: "select * from posts where author_id = $1", params: [7]}])
 
 # A transaction is a VALUE: dropped without `commit()` — an error unwinding past it — it rolls back.
 tx = db.begin()
@@ -191,10 +191,10 @@ More in [`examples/`](examples/), the full [stdlib reference](docs/reference.md)
   expressions that yield values. No statements-vs-expressions friction, no truthiness coercion.
 - **Records, tuples, destructuring** — `{name: "Ada", age: 41}` with `.field` access, and
   `let {name, age} = person in …` — or `{name, age} = person` as a statement — to read
-  fields (an absent one is `missing`, ADR 0046);
-  `(a, b)` tuples that unpack (`q, r = divmod(17, 5)`) and destructure in lambda params
-  (`pairs.map((k, v) => …)`) and take defaults (`(x, n = 10) => …`). Record spread/update:
-  `{ ...base, status: 500 }`.
+  fields (an absent one is `missing`, ADR 0046); `let [a, b] = pair in …`, `[head, ...tail]
+  = xs` and `q, r = divmod(17, 5)` to unpack a tuple or an array by position (ADR 0053);
+  `(a, b)` tuples that destructure in lambda params (`pairs.map((k, v) => …)`) and take
+  defaults (`(x, n = 10) => …`). Record spread/update: `{ ...base, status: 500 }`.
 - **Pattern matching** — `match` with literal, range (half-open, matched by magnitude), or-,
   guard, and binding patterns.
 - **Dicts and UFCS** — string-keyed dict literals that spread into records; any user function is

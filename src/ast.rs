@@ -231,6 +231,22 @@ pub enum Expr {
         line: usize,
         col: usize,
     },
+    /// A DESTRUCTURED position — `let [a, b] = e in …` reads `a` and `b` through this node,
+    /// and so does the statement `a, b = e`. Part `index` of a value that must be a tuple or
+    /// an array of exactly `names` parts — or, when the pattern ends in `...rest`, of at least
+    /// `names`, the read at `index == names` answering the rest (an array's rest is an array,
+    /// a tuple's a tuple). A value of another type, or of the wrong length, is the error
+    /// `a, b = …` has always given; a plain `e[i]` would say "index out of bounds" and let
+    /// `[a, b] = [1, 2, 3]` pass. Written only by the parser's `destructure_positions`; there
+    /// is no surface spelling for it.
+    Part {
+        recv: Box<Expr>,
+        index: usize,
+        names: usize,
+        rest: bool,
+        line: usize,
+        col: usize,
+    },
     Unary {
         op: UnOp,
         expr: Box<Expr>,
@@ -386,6 +402,7 @@ impl Expr {
             | Expr::Column { line, col, .. }
             | Expr::Field { line, col, .. }
             | Expr::FieldOrMissing { line, col, .. }
+            | Expr::Part { line, col, .. }
             | Expr::Unary { line, col, .. }
             | Expr::Binary { line, col, .. }
             | Expr::Call { line, col, .. }
@@ -431,15 +448,6 @@ pub enum Stmt {
     /// level — it marks the binding as part of the module's public surface; ADR 0019).
     Assign {
         name: String,
-        mutable: bool,
-        exported: bool,
-        value: Expr,
-        line: usize,
-        col: usize,
-    },
-    /// `a, b = expr` — destructure a tuple/array into multiple bindings.
-    Destructure {
-        names: Vec<String>,
         mutable: bool,
         exported: bool,
         value: Expr,

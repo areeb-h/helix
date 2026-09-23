@@ -1863,6 +1863,21 @@ Define a function. Parameter and return annotations are optional, checked by `he
 12
 ```
 
+### `destructure positions`
+
+Bind the parts of a tuple or an array by position; `[first, ...rest]` takes the rest.
+
+`let [a, b] = pair in expr`
+
+**Note:** The same four positions as a record pattern: `let [a, b] = p in …`, `[a, b] = p` inside `do { }`, `… where [x, y] = v` after a function, and `[a, b] = p` as a statement (with `mut` and `export` as for any assignment) — and `a, b = p`, the bare statement, is the same form. The value is evaluated once. It must be a tuple or an array of exactly as many parts as the pattern names (or at least as many, with a `...rest`, which is then an array's array or a tuple's tuple); the wrong length is an error, not `missing`, as `xs[5]` on a short array is. Where the checker knows a tuple's shape, each part gets its own type and the wrong length is refused before anything runs. Parentheses make a tuple, not a pattern; a pattern does not nest — an element that is a pair is destructured in turn. Keywords: pattern, unpack, tuple, array, positions, rest, head, tail, ADR 0053.
+
+```
+>>> fn f(p) = let [a, b] = p in a * 10 + b
+>>> [h, ...t] = [1, 2, 3]
+>>> print(f((1, 2)), f([3, 4]), h, t)
+12 34 1 [2, 3]
+```
+
 ### `destructure`
 
 Bind fields of a record by name; an absent field is `missing`, and `field: name` binds it under another name.

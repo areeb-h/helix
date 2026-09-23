@@ -123,7 +123,7 @@ pub fn to_record(e: &Expr) -> Result<Expr, HelixError> {
 pub fn desugar_program(stmts: &mut [Stmt]) -> Result<(), HelixError> {
     for s in stmts.iter_mut() {
         match s {
-            Stmt::Assign { value, .. } | Stmt::Destructure { value, .. } | Stmt::Expr(value) => rewrite(value)?,
+            Stmt::Assign { value, .. } | Stmt::Expr(value) => rewrite(value)?,
             Stmt::Func { defaults, body, .. } => {
                 for d in defaults.iter_mut().flatten() {
                     rewrite(d)?;
@@ -166,7 +166,7 @@ fn rewrite(e: &mut Expr) -> Result<(), HelixError> {
                 rewrite(p.expr_mut())?;
             }
         }
-        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } | Expr::Unary { expr: recv, .. } | Expr::Try { expr: recv, .. } => {
+        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } | Expr::Part { recv, .. } | Expr::Unary { expr: recv, .. } | Expr::Try { expr: recv, .. } => {
             rewrite(recv)?
         }
         Expr::Binary { left, right, .. } => {

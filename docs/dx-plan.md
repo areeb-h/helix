@@ -614,6 +614,26 @@ takes). `connect_timeout=N`. TCP keepalive on every connection (`libc`, Unix: 60
 A limit is NOT the default: `statement_timeout` bounds streaming too, and would end large
 reads that work today. Live: `target/bench/f93/timeouts.helix`.
 
+**Positional destructuring (2026-09-23), DONE — ADR 0053.** Asked while the batch example
+read `page = db.query([…])`, `page[0]`, `page[1]`: `a, b = xs` existed as a top-level statement
+ONLY (its own `Stmt::Destructure`, `Op::Destructure`, checker arm), no brackets, nothing in
+`let`/`do`/`where`. Now `[a, b] = xs` in all four positions on ADR 0046's desugar: the temp
+`$arr<N>`, then one `Expr::Part { recv, index, names, rest }` per name (`part_of` shared by
+both engines; `Op::Part`); the bare statement desugars the same way and the old node is
+GONE (~20 arms across bytecode/vm/types/fold/module/ufcs/visit/predicate). `...rest` trailing
+only; a tuple's rest is a tuple. Wrong length = error (not `missing` — a position is not an
+optional key). Checker: tuple parts by position, wrong length refused at check time, and
+`p[0]` on a known tuple is now `els[0]` (was the join). Specializer folds a `Part` of a known
+`Seq`. A value that is already a NAME gets no temp (`[a, b] = p` reads `p` twice; not when a
+pattern name is `p`) — a third of the form's cost, and then `let [a, b] = p` costs exactly
+`let a = p[0], b = p[1]` on both engines (172 vs 170 ns VM, 281 vs 281 walker). CANDIDATE:
+the record form's `$rec` temp could take the same shortcut. Formatter: `where [x, y] = v`
+keeps its space (`position_binder_at`). Parser lookahead
+is deliberately LOOSE inside the brackets so the binder's own refusals fire (`...` not last,
+two rests, empty, a name twice). Bare-form differential: 63 (program, engine) pairs identical
+to the previous binary but for one added help line. Refused on purpose: `(a, b) = t` (hint
+names the brackets), nesting, the bare spelling inside a block.
+
 **Channel binding (2026-09-22), DONE — ADR 0044's last security honest cost.**
 `SCRAM-SHA-256-PLUS` / `tls-server-end-point`: `scram::Binding::{None, Unoffered, EndPoint}` =
 the GS2 headers `n,,` / `y,,` / `p=tls-server-end-point,,`; `end_point_hash` walks the

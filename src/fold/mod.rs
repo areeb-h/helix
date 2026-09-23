@@ -188,7 +188,6 @@ impl Sandbox {
             .iter()
             .flat_map(|s| match s {
                 Stmt::Assign { name, mutable: true, .. } => vec![name.clone()],
-                Stmt::Destructure { names, mutable: true, .. } => names.clone(),
                 _ => Vec::new(),
             })
             .collect();
@@ -199,7 +198,6 @@ impl Sandbox {
             .iter()
             .flat_map(|s| match s {
                 Stmt::Assign { name, .. } => vec![name.clone()],
-                Stmt::Destructure { names, .. } => names.clone(),
                 _ => Vec::new(),
             })
             .collect();
@@ -210,7 +208,6 @@ impl Sandbox {
             .iter()
             .flat_map(|s| match s {
                 Stmt::Assign { name, .. } => vec![name.as_str()],
-                Stmt::Destructure { names, .. } => names.iter().map(String::as_str).collect(),
                 _ => Vec::new(),
             })
             .collect();
@@ -369,7 +366,6 @@ impl Sandbox {
 fn stmt_names(stmt: &Stmt) -> Vec<String> {
     match stmt {
         Stmt::Assign { name, .. } => vec![name.clone()],
-        Stmt::Destructure { names, .. } => names.clone(),
         _ => Vec::new(),
     }
 }
@@ -433,13 +429,13 @@ pub(crate) fn fold_program_budgeted(
                     bound.extend(params.iter().map(|(n, _)| n.clone()));
                     fold_expr(body, &mut sb, &mut sp, done, &mut bound, false)?;
                 }
-                Stmt::Assign { value, .. } | Stmt::Destructure { value, .. } => {
+                Stmt::Assign { value, .. } => {
                     fold_expr(value, &mut sb, &mut sp, done, &mut bound, true)?
                 }
                 Stmt::Expr(e) => fold_expr(e, &mut sb, &mut sp, done, &mut bound, true)?,
                 Stmt::Import { .. } => {}
             }
-            if matches!(stmt, Stmt::Assign { mutable: false, .. } | Stmt::Destructure { mutable: false, .. }) {
+            if matches!(stmt, Stmt::Assign { mutable: false, .. }) {
                 sb.note_top(i, stmt);
             }
         }
@@ -508,7 +504,7 @@ fn dump(stmts: &[Stmt], made: &[String]) {
 /// The root expression of a statement — inline in the statement, so it moves with it.
 fn root_of(s: &Stmt) -> Option<*const Expr> {
     match s {
-        Stmt::Assign { value, .. } | Stmt::Destructure { value, .. } | Stmt::Expr(value) => Some(value as *const Expr),
+        Stmt::Assign { value, .. } | Stmt::Expr(value) => Some(value as *const Expr),
         Stmt::Func { body, .. } => Some(body as *const Expr),
         Stmt::Import { .. } => None,
     }
@@ -566,7 +562,7 @@ fn fold_expr(
                 fold_expr(p.expr_mut(), sb, sp, done, bound, unconditional)?;
             }
         }
-        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } => {
+        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } | Expr::Part { recv, .. } => {
             fold_expr(recv, sb, sp, done, bound, unconditional)?
         }
         Expr::Unary { expr, .. } => fold_expr(expr, sb, sp, done, bound, unconditional)?,
@@ -948,9 +944,11 @@ fn known_closed_in(e: &Expr, sb: &Sandbox, bound: &[String], inner: &mut Vec<Str
         Expr::Array(xs) | Expr::Tuple(xs) => xs.iter().all(|x| known_closed_in(x, sb, bound, inner)),
         Expr::Record(fields) => fields.iter().all(|(_, v)| known_closed_in(v, sb, bound, inner)),
         Expr::RecordUpdate { parts, .. } => parts.iter().all(|p| known_closed_in(p.expr(), sb, bound, inner)),
-        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } | Expr::Unary { expr: recv, .. } | Expr::Try { expr: recv, .. } => {
-            known_closed_in(recv, sb, bound, inner)
-        }
+        Expr::Field { recv, .. }
+        | Expr::FieldOrMissing { recv, .. }
+        | Expr::Part { recv, .. }
+        | Expr::Unary { expr: recv, .. }
+        | Expr::Try { expr: recv, .. } => known_closed_in(recv, sb, bound, inner),
         Expr::Binary { left, right, .. } => known_closed_in(left, sb, bound, inner) && known_closed_in(right, sb, bound, inner),
         Expr::Call { args, .. } => args.iter().all(|a| known_closed_in(a, sb, bound, inner)),
         Expr::CallValue { callee, args, .. } => {
@@ -986,9 +984,11 @@ pub(super) fn unshare_lambdas(e: &mut Expr) {
         Expr::Array(xs) | Expr::Tuple(xs) => xs.iter_mut().for_each(unshare_lambdas),
         Expr::Record(fields) => fields.iter_mut().for_each(|(_, v)| unshare_lambdas(v)),
         Expr::RecordUpdate { parts, .. } => parts.iter_mut().for_each(|p| unshare_lambdas(p.expr_mut())),
-        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } | Expr::Unary { expr: recv, .. } | Expr::Try { expr: recv, .. } => {
-            unshare_lambdas(recv)
-        }
+        Expr::Field { recv, .. }
+        | Expr::FieldOrMissing { recv, .. }
+        | Expr::Part { recv, .. }
+        | Expr::Unary { expr: recv, .. }
+        | Expr::Try { expr: recv, .. } => unshare_lambdas(recv),
         Expr::Binary { left, right, .. } => {
             unshare_lambdas(left);
             unshare_lambdas(right);

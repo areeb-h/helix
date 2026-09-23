@@ -311,7 +311,7 @@ fn mentions_column(e: &Expr) -> bool {
         Expr::Array(items) | Expr::Tuple(items) => items.iter().any(mentions_column),
         Expr::Record(fields) => fields.iter().any(|(_, v)| mentions_column(v)),
         Expr::RecordUpdate { parts, .. } => parts.iter().any(|p| mentions_column(p.expr())),
-        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } => mentions_column(recv),
+        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } | Expr::Part { recv, .. } => mentions_column(recv),
         Expr::Unary { expr, .. } => mentions_column(expr),
         Expr::Binary { left, right, .. } => mentions_column(left) || mentions_column(right),
         Expr::Call { args, .. } => args.iter().any(mentions_column),
@@ -1213,65 +1213,6 @@ impl Compiler {
                 b.emit(Op::Pop, 0, 0);
                 Ok(())
             }
-            Stmt::Destructure { names, mutable, value, line, col, .. } => {
-                self.compile_expr(b, value)?;
-                // Same fn-declaration rule as `Assign`: a destructure target that
-                // names a top-level `fn` (not owned by a mutable global) rejects,
-                // `mut` or plain — see the Assign arm for why.
-                for name in names {
-                    if !self.globals.iter().any(|g| g == name)
-                        && self
-                            .func_names
-                            .iter()
-                            .position(|f| f == name)
-                            .is_some_and(|i| self.fn_slot_defined_above(i))
-                    {
-                        let (msg, hint) = crate::error::immutable_reassign(name);
-                        b.emit(
-                            Op::raise(std::rc::Rc::new(msg), std::rc::Rc::new(hint)),
-                            *line,
-                            *col,
-                        );
-                        return Ok(());
-                    }
-                }
-                // Same mutability rule as `Assign`: `mut a, b = …` (re)declares each
-                // as mutable; a plain destructure reassigning an *immutable* global
-                // is an error. (The tree-walker checks arity first, then mutability;
-                // an arity mismatch *and* an immutable target is a rare error-on-error
-                // edge where the message may differ — both still reject.)
-                if !*mutable {
-                    for name in names {
-                        if let Some(i) = self.globals.iter().position(|g| g == name)
-                            && !self.global_mut[i] {
-                                let (msg, hint) = crate::error::immutable_reassign(name);
-                                b.emit(
-                                    Op::raise(std::rc::Rc::new(msg), std::rc::Rc::new(hint)),
-                                    *line,
-                                    *col,
-                                );
-                                return Ok(());
-                            }
-                    }
-                }
-                let mut slots: Vec<u32> = Vec::with_capacity(names.len());
-                for name in names {
-                    if let Some(i) = self.globals.iter().position(|g| g == name) {
-                        if *mutable {
-                            self.global_mut[i] = true; // `mut …` re-declares as mutable
-                        }
-                        slots.push(i as u32);
-                    } else {
-                        let i = self.globals.len() as u32;
-                        self.globals.push(name.clone());
-                        self.global_mut.push(*mutable);
-                        self.global_init.push(Value::Unit);
-                        slots.push(i);
-                    }
-                }
-                b.emit(Op::Destructure(std::rc::Rc::new(slots)), *line, *col);
-                Ok(())
-            }
         }
     }
 
@@ -1823,6 +1764,15 @@ impl Compiler {
             Expr::FieldOrMissing { recv, name, line, col } => {
                 self.compile_expr(b, recv)?;
                 b.emit(Op::GetFieldOrMissing(crate::symbol::Symbol::intern(name)), *line, *col);
+            }
+            Expr::Part { recv, index, names, rest, line, col } => {
+                self.compile_expr(b, recv)?;
+                // A pattern of four billion names is not one anyone writes;  stays
+                // total all the same.
+                let (Ok(index), Ok(names)) = (u32::try_from(*index), u32::try_from(*names)) else {
+                    return Err(Unsupported);
+                };
+                b.emit(Op::Part { index, names, rest: *rest }, *line, *col);
             }
             Expr::Method { recv, name, args, ufcs, line, col, .. } => {
                 use crate::types::Type;

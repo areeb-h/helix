@@ -4,6 +4,23 @@
 
 ### Added
 
+- **Positional destructuring, `[a, b] = xs` — in `let`, in a `do` block, after `where` and as
+  a statement (ADR 0053).** `a, b = pair` had unpacked a tuple or an array as a top-level
+  statement since the beginning, and nowhere else; records had all four positions since ADR
+  0046. Now `let [a, b] = p in …`, `do { [h, ...t] = xs … }`, `… where [x, y] = v`,
+  `[person, posts] = db.query([q1, q2])`, with `mut` and `export` as for any assignment, and
+  a trailing `...rest` that takes what is left (an array's rest is an array, a tuple's a
+  tuple). The value is a tuple or an array of exactly as many parts as the pattern names —
+  the wrong length is an error, as it always was for `a, b = …` and as `xs[5]` is — and the
+  same sentence on every engine. The checker types a tuple's parts one by one (`[n, s] =
+  (1, "x")`: an Int and a String), refuses a tuple of the wrong length before anything runs,
+  and with it `p[0]` on a known tuple is that element's type and `p[2]` on a pair is refused
+  at check time. The bare statement `a, b = xs` is now the same form under the hood: one
+  desugar, one node (`Expr::Part`), and the separate statement node, VM op and checker arm it
+  had are gone. `(a, b) = t` is refused with a hint naming the brackets; nested patterns are
+  not a thing. Pinned by `positional_destructuring_binds_by_position_in_every_form` and the
+  corpus program `arr_destructure`.
+
 - **A PostgreSQL login is bound to the TLS session it runs over (`SCRAM-SHA-256-PLUS`).** TLS
   proves the other end holds a certificate issued for this name, SCRAM proves it knows the
   password, and neither proves they are the SAME other end: a relay holding a mis-issued

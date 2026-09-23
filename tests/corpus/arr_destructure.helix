@@ -1,0 +1,48 @@
+# Positional destructuring: `[a, b] = xs` binds by position (ADR 0053) — in `let`, in a `do`
+# block, in a `where` clause and as a statement — and the bare statement `a, b = xs` is the
+# same form. A tuple and an array both destructure; the pattern names every part, or ends in
+# `...rest` and takes the rest, however many.
+[a, b] = [1, 2]
+print("{a} {b}")
+c, d = (3, "x")
+print("{c} {d}")
+mut [e, f] = [5, 6]
+e = e + f
+print(e)
+[first, ...rest] = [10, 20, 30]
+print("{first} {rest}")
+[only, ...none] = [7]
+print("{only} {none}")
+[p, q, ...tail] = (1, "two", 3.0, true)
+print("{p} {q} {tail}")
+
+print(let [x, y] = [3, 4] in x * y)
+# A pattern may reuse the value's own name: `[p, q] = p` reads all of `p` before it rebinds it.
+fn firsts(p) = let [p, q] = p in "{p} {q}"
+print(firsts((8, 9)))
+print(let [h, ...t] = "a b c".split(" ") in "{h}|{t.count()}")
+
+fn swap(pair) = do {
+  [u, v] = pair
+  (v, u)
+}
+print(swap((1, 2)))
+
+fn norm(v) = sqrt(x * x + y * y) where [x, y] = v
+print(norm([3.0, 4.0]))
+
+# Nested patterns are not a thing: an element that is itself a pair is destructured in turn.
+pairs = [(1, 2), (3, 4)]
+print(pairs.map(let [m, n] = it in m + n))
+
+# A value that is not a tuple or an array, or has the wrong number of parts, is refused —
+# on every engine, in one sentence. (Through a parameter: written as literals, the checker
+# refuses them before anything runs, in the same words.)
+fn two(v) = let [i, j] = v in i
+fn two_and_more(v) = let [i, j, ...more] = v in more
+fn one(v) = let [i] = v in i
+print((try two(5)).error)
+print((try two([1, 2, 3])).error)
+print((try two_and_more([1])).error)
+print((try one([])).error)
+print(two_and_more((1, 2)))

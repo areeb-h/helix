@@ -385,7 +385,7 @@ impl Interp {
     /// stood in the file. `fn use(v) = round(v)` now means the user's `round` on both sides
     /// of `fn round`'s definition, not the builtin above it and the user's below.
     ///
-    /// COLLISIONS DO NOT MOVE. A name that a top-level `Assign`/`Destructure` binds, or that
+    /// COLLISIONS DO NOT MOVE. A name that a top-level `Assign` binds, or that
     /// is already a seeded global, is skipped — so `fn inf(x)` over the immutable `inf`, and
     /// `mut f = 5` followed by `fn f(x)`, keep their definition-point behaviour exactly.
     /// Both sets are known statically, before anything runs.
@@ -394,7 +394,6 @@ impl Interp {
             .iter()
             .flat_map(|s| match s {
                 Stmt::Assign { name, .. } => vec![name.as_str()],
-                Stmt::Destructure { names, .. } => names.iter().map(String::as_str).collect(),
                 _ => Vec::new(),
             })
             .collect();
@@ -431,24 +430,6 @@ impl Interp {
             } => {
                 let v = self.eval(value)?;
                 self.bind(name, v.clone(), *mutable, *line, *col)?;
-                Ok(StmtOutcome {
-                    value: Value::Unit,
-                    is_expr: false,
-                })
-            }
-            Stmt::Destructure {
-                names,
-                mutable,
-                value,
-                line,
-                col,
-                ..
-            } => {
-                let v = self.eval(value)?;
-                let parts = destructure_parts(&v, names.len(), *line, *col)?;
-                for (n, val) in names.iter().zip(parts) {
-                    self.bind(n, val, *mutable, *line, *col)?;
-                }
                 Ok(StmtOutcome {
                     value: Value::Unit,
                     is_expr: false,
@@ -695,6 +676,10 @@ impl Interp {
             Expr::FieldOrMissing { recv, name, line, col } => {
                 let r = self.eval(recv)?;
                 eval_field_or_missing(&r, Symbol::intern(name), *line, *col)
+            }
+            Expr::Part { recv, index, names, rest, line, col } => {
+                let r = self.eval(recv)?;
+                part_of(&r, *index, *names, *rest, *line, *col)
             }
             Expr::Unary { op, expr, line, col } => {
                 let v = self.eval(expr)?;

@@ -280,6 +280,13 @@ fn needs_space(prev: &Tok, next: &Tok, line: &[&Token], i: usize) -> bool {
     if matches!(prev, LParen | LBracket) || matches!(next, RParen | RBracket | Comma | Colon) {
         return false;
     }
+    // `where [x, y] = v` — a where-clause opening with a positional binder (ADR 0053). The
+    // bracket would otherwise hug `where` as an index does (`xs[0]`); it is a binder, not an
+    // index, exactly when what follows is names up to `]` and then a single `=`, which no
+    // index can be followed by.
+    if matches!(next, LBracket) && matches!(prev, Ident(n) if n == "where") && position_binder_at(line, i) {
+        return true;
+    }
     // A SLICE colon hugs both sides — `xs[0:2]`, `xs[::-1]` — while a record colon
     // takes its space (`{a: 1}`). They are the same token, so only the bracket still
     // open tells them apart. Every slice in the repository lives inside a string
@@ -468,8 +475,29 @@ fn is_unary_minus(line: &[&Token], at: usize) -> bool {
 /// where) and `where(x)` (a call) keep their own indentation.
 fn starts_where_clause(code: &[&Token]) -> bool {
     matches!(code.first().map(|t| &t.tok), Some(Tok::Ident(n)) if n == "where")
-        && matches!(code.get(1).map(|t| &t.tok), Some(Tok::Ident(_)))
-        && matches!(code.get(2).map(|t| &t.tok), Some(Tok::Eq))
+        && ((matches!(code.get(1).map(|t| &t.tok), Some(Tok::Ident(_)))
+            && matches!(code.get(2).map(|t| &t.tok), Some(Tok::Eq)))
+            // …or a binder: `where {a, b} = …` (ADR 0046), `where [a, b] = …` (ADR 0053).
+            || (matches!(code.get(1).map(|t| &t.tok), Some(Tok::LBrace | Tok::LBracket))
+                && position_binder_at(code, 1)))
+}
+
+/// Does the `[` (or `{`) at `at` open a destructuring binder — names, commas, at most a
+/// `...name`, the closer, then a single `=`? The parser's `array_binder_from`, over a line.
+fn position_binder_at(line: &[&Token], at: usize) -> bool {
+    let (close, mut i) = match line.get(at).map(|t| &t.tok) {
+        Some(Tok::LBracket) => (Tok::RBracket, at + 1),
+        Some(Tok::LBrace) => (Tok::RBrace, at + 1),
+        _ => return false,
+    };
+    loop {
+        match line.get(i).map(|t| &t.tok) {
+            Some(Tok::Ident(_) | Tok::Comma | Tok::DotDotDot | Tok::Colon) => i += 1,
+            Some(t) if *t == close => break,
+            _ => return false,
+        }
+    }
+    matches!(line.get(i + 1).map(|t| &t.tok), Some(Tok::Eq))
 }
 
 fn continues_before_this_line(t: &Tok) -> bool {

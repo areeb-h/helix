@@ -1029,7 +1029,6 @@ struct Ctx {
 fn offset_stmt_line(s: &mut Stmt, off: usize) {
     match s {
         Stmt::Assign { line, .. }
-        | Stmt::Destructure { line, .. }
         | Stmt::Func { line, .. }
         | Stmt::Import { line, .. } => *line += off,
         Stmt::Expr(_) => {}
@@ -1042,6 +1041,7 @@ fn offset_expr_line(e: &mut Expr, off: usize) {
         Expr::Ident { line, .. }
         | Expr::Field { line, .. }
         | Expr::FieldOrMissing { line, .. }
+        | Expr::Part { line, .. }
         | Expr::Unary { line, .. }
         | Expr::Binary { line, .. }
         | Expr::Call { line, .. }
@@ -1121,15 +1121,6 @@ fn rewrite_module(
                     refuse_seeded(name, *line + line_offset, *col)?;
                 }
             }
-            Stmt::Destructure { names, mutable, line, col, .. } => {
-                for n in names {
-                    if *mutable {
-                        mut_shadows.insert(n.clone());
-                    } else if !mut_shadows.contains(n) {
-                        refuse_seeded(n, *line + line_offset, *col)?;
-                    }
-                }
-            }
             Stmt::Func { name, line, col, .. } if !mut_shadows.contains(name) => {
                 refuse_seeded(name, *line + line_offset, *col)?;
             }
@@ -1150,9 +1141,6 @@ fn exported_names(stmts: &[Stmt]) -> HashSet<String> {
             Stmt::Func { name, exported: true, .. } | Stmt::Assign { name, exported: true, .. } => {
                 names.insert(name.clone());
             }
-            Stmt::Destructure { names: ns, exported: true, .. } => {
-                names.extend(ns.iter().cloned());
-            }
             _ => {}
         }
     }
@@ -1166,11 +1154,6 @@ fn top_level_names(stmts: &[Stmt]) -> HashSet<String> {
         match s {
             Stmt::Func { name, .. } | Stmt::Assign { name, .. } => {
                 names.insert(name.clone());
-            }
-            Stmt::Destructure { names: ns, .. } => {
-                for n in ns {
-                    names.insert(n.clone());
-                }
             }
             _ => {}
         }
@@ -1192,12 +1175,6 @@ fn rewrite_stmt(s: &mut Stmt, ctx: &Ctx) -> Result<(), HelixError> {
         }
         Stmt::Assign { name, value, .. } => {
             *name = mangle(&ctx.prefix, name);
-            rw(value, ctx, &HashSet::new())?;
-        }
-        Stmt::Destructure { names, value, .. } => {
-            for n in names.iter_mut() {
-                *n = mangle(&ctx.prefix, n);
-            }
             rw(value, ctx, &HashSet::new())?;
         }
         Stmt::Expr(e) => rw(e, ctx, &HashSet::new())?,
@@ -1282,7 +1259,7 @@ fn rw(e: &mut Expr, ctx: &Ctx, bound: &HashSet<String>) -> Result<(), HelixError
                 rw(p.expr_mut(), ctx, bound)?;
             }
         }
-        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } => rw(recv, ctx, bound)?,
+        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } | Expr::Part { recv, .. } => rw(recv, ctx, bound)?,
         Expr::Unary { expr, .. } => rw(expr, ctx, bound)?,
         Expr::Binary { left, right, .. } => {
             rw(left, ctx, bound)?;

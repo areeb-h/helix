@@ -128,36 +128,67 @@ pub(crate) fn eval_slice(
 
 /// Unpack a tuple/array into exactly `n` values for destructuring (shared by
 /// both engines). Errors if the value isn't a tuple/array, or the arity is wrong.
-pub(crate) fn destructure_parts(
+/// `Expr::Part` / `Op::Part` — part `index` of `v`, which must be a tuple or an array of
+/// exactly `names` parts, or of at least `names` when the pattern has a `...rest` (and then
+/// the read at `index == names` is the rest itself). The single source of truth for both
+/// engines, so the two cannot diverge on the sentence: a value of another type, or of the
+/// wrong length, is refused in the words `a, b = …` has always used.
+pub(crate) fn part_of(
     v: &Value,
-    n: usize,
+    index: usize,
+    names: usize,
+    rest: bool,
     line: usize,
     col: usize,
-) -> Result<Vec<Value>, HelixError> {
-    let parts = match v {
-        Value::Tuple(t) => (**t).clone(),
-        Value::Array(a) => a.to_values().into_owned(),
+) -> Result<Value, HelixError> {
+    let len = match v {
+        Value::Tuple(t) => t.len(),
+        Value::Array(a) => a.len(),
         other => {
             return Err(HelixError::new(
                 format!(
-                    "cannot destructure a value of type {} into {} names",
+                    "cannot destructure a value of type {} into {} name{}{}",
                     other.type_name(),
-                    n
+                    names,
+                    if names == 1 { "" } else { "s" },
+                    if rest { " and a rest" } else { "" }
                 ),
                 line,
                 col,
             )
-            .hint("the right-hand side must be a tuple or array, e.g. `a, b = (1, 2)`."))
+            .hint("the right-hand side must be a tuple or array, e.g. `[a, b] = (1, 2)`."))
         }
     };
-    if parts.len() != n {
+    if if rest { len < names } else { len != names } {
         return Err(HelixError::new(
-            format!("cannot destructure {} values into {} names", parts.len(), n),
+            format!(
+                "cannot destructure {} value{} into {} name{}{}",
+                len,
+                if len == 1 { "" } else { "s" },
+                names,
+                if names == 1 { "" } else { "s" },
+                if rest { " and a rest" } else { "" }
+            ),
             line,
             col,
-        ));
+        )
+        .hint(if rest {
+            "`[a, b, ...rest]` needs at least as many values as names; `rest` takes what is left."
+        } else {
+            "the pattern names every part — `[a, b, ...rest]` takes the rest, however many."
+        }));
     }
-    Ok(parts)
+    Ok(match (v, rest && index == names) {
+        (Value::Tuple(t), false) => t.get(index).cloned().unwrap_or(Value::Missing),
+        (Value::Tuple(t), true) => Value::Tuple(Rc::new(t.get(index..).map(<[Value]>::to_vec).unwrap_or_default())),
+        // In range: the length was held to the pattern above.
+        (Value::Array(a), false) if index < a.len() => a.get(index),
+        (Value::Array(a), true) => {
+            // The same tail  answers, packed the same way.
+            Value::array(a.to_values().iter().skip(index).cloned().collect())
+        }
+        _ => Value::Missing,
+    })
 }
 
 /// Split a comprehension element into `n` parts for a multi-binder pattern

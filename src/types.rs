@@ -563,67 +563,6 @@ impl Checker {
                 self.env.insert(name.clone(), t);
                 Ok(())
             }
-            Stmt::Destructure {
-                names,
-                mutable,
-                value,
-                line,
-                col,
-                ..
-            } => {
-                if *mutable {
-                    for n in names {
-                        self.mut_globals.insert(n.clone());
-                    }
-                }
-                let t = self.synth(value)?;
-                for n in names.iter() {
-                    self.check_rebind(n, *mutable, *line, *col)?;
-                    self.value_globals.insert(n.clone());
-                }
-                match &t {
-                    Type::Tuple(els) => {
-                        if els.len() != names.len() {
-                            return Err(HelixError::new(
-                                format!(
-                                    "cannot destructure {} values into {} names",
-                                    els.len(),
-                                    names.len()
-                                ),
-                                *line,
-                                *col,
-                            ));
-                        }
-                        for (n, et) in names.iter().zip(els.iter()) {
-                            self.env.insert(n.clone(), et.clone());
-                        }
-                    }
-                    Type::Array(el) => {
-                        // array length is dynamic — each name gets the element type
-                        for n in names {
-                            self.env.insert(n.clone(), (**el).clone());
-                        }
-                    }
-                    Type::Unknown | Type::Missing | Type::Never => {
-                        for n in names {
-                            self.env.insert(n.clone(), Type::Unknown);
-                        }
-                    }
-                    other => {
-                        return Err(HelixError::new(
-                            format!(
-                                "cannot destructure a value of type {} into {} names",
-                                other,
-                                names.len()
-                            ),
-                            *line,
-                            *col,
-                        )
-                        .hint("the right-hand side must be a tuple or array."))
-                    }
-                }
-                Ok(())
-            }
             Stmt::Func {
                 name,
                 params,
@@ -1135,6 +1074,52 @@ impl Checker {
                     .hint("destructuring reads the fields of a record, or the keys of a dict.")),
                 }
             }
+            // A destructured position (ADR 0053). A tuple's parts are typed one by one — the
+            // precision `a, b = (1, "x")` always had — and a tuple of the wrong length is refused
+            // here, before anything runs, in the run-time sentence; an array's length is dynamic,
+            // so every part is the element type and the rest is the array's own. A receiver the
+            // checker can prove has no parts is refused here too.
+            Expr::Part { recv, index, names, rest, line, col } => {
+                let rt = self.synth(recv)?;
+                let is_rest = *rest && index == names;
+                match &rt {
+                    Type::Tuple(els) => {
+                        if if *rest { els.len() < *names } else { els.len() != *names } {
+                            return Err(HelixError::new(
+                                format!(
+                                    "cannot destructure {} value{} into {} name{}{}",
+                                    els.len(),
+                                    if els.len() == 1 { "" } else { "s" },
+                                    names,
+                                    if *names == 1 { "" } else { "s" },
+                                    if *rest { " and a rest" } else { "" }
+                                ),
+                                *line,
+                                *col,
+                            ));
+                        }
+                        Ok(if is_rest {
+                            Type::Tuple(els.get(*index..).map(<[Type]>::to_vec).unwrap_or_default())
+                        } else {
+                            els.get(*index).cloned().unwrap_or(Type::Unknown)
+                        })
+                    }
+                    Type::Array(el) => Ok(if is_rest { rt.clone() } else { (**el).clone() }),
+                    Type::Unknown | Type::Missing | Type::Never | Type::AnyTuple => Ok(Type::Unknown),
+                    other => Err(HelixError::new(
+                        format!(
+                            "cannot destructure a value of type {} into {} name{}{}",
+                            other,
+                            names,
+                            if *names == 1 { "" } else { "s" },
+                            if *rest { " and a rest" } else { "" }
+                        ),
+                        *line,
+                        *col,
+                    )
+                    .hint("the right-hand side must be a tuple or array.")),
+                }
+            }
             Expr::Unary {
                 op, expr, line, col,
             } => self.synth_unary(op, expr, *line, *col),
@@ -1239,6 +1224,21 @@ impl Checker {
                 }
                 Ok(match rt {
                     Type::Array(el) => *el,
+                    // A LITERAL index into a known tuple is that element, exactly — `p[0]`
+                    // on `(Int, String)` is an Int — and one past the end is refused here.
+                    Type::Tuple(els) if matches!(**index, Expr::Int(_)) => {
+                        let Expr::Int(i) = **index else { unreachable!() };
+                        match usize::try_from(i).ok().and_then(|i| els.get(i)) {
+                            Some(t) => t.clone(),
+                            None => {
+                                return Err(HelixError::new(
+                                    format!("index {i} is out of bounds for a tuple of {} values", els.len()),
+                                    *line,
+                                    *col,
+                                ))
+                            }
+                        }
+                    }
                     // index is dynamic, so a tuple element is the join of all
                     // element types (precise when homogeneous, e.g. `(Int, Int)`).
                     Type::Tuple(els) => els.iter().fold(Type::Missing, |a, t| join(&a, t)),

@@ -123,9 +123,10 @@ pub enum Op {
     /// Slice a receiver. The bitmask says which of start/stop/step were supplied
     /// (bit 0/1/2); those bound values were pushed after the receiver, in order.
     Slice(u8),
-    /// Pop a tuple/array and store its elements into the given global slots
-    /// (`a, b = pair`).
-    Destructure(std::rc::Rc<Vec<u32>>),
+    /// A destructured position: part `index` of the tuple or array on the stack, which must
+    /// have exactly `names` parts — or at least `names` with a `rest`, the read at
+    /// `index == names` being the rest (`[a, b, ...rest] = e`, and `a, b = e`).
+    Part { index: u32, names: u32, rest: bool },
     /// Pop a tuple/array element and store its parts into the given *local* slots
     /// — a comprehension's multi-binder pattern (`xs.map((a, b) => ...)`). Raises
     /// the same "cannot destructure …"/"lambda expects N values …" errors as the
