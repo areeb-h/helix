@@ -874,13 +874,16 @@ pub extern "C" fn jit_host_normal_pdf(x: f64) -> f64 { crate::stats::normal_pdf(
 pub extern "C" fn jit_host_relu(x: f64) -> f64 { x.max(0.0) }
 pub extern "C" fn jit_host_sigmoid(x: f64) -> f64 { 1.0 / (1.0 + (-x).exp()) }
 
-/// `a ** b` on floats: the walker's `eval_binary` rule verbatim (`src/interp/ops.rs`) — an
-/// integral exponent within `i32` is `powi` (strength-reduced, as numpy does), anything else
-/// `powf`. Two `Int` operands never reach a kernel (the analyses decline them: `Int ** Int`
-/// is an Int unless it overflows, when the walker answers a Float — a kind no typed kernel
-/// can promise per element).
+/// `a ** b` on floats: the walker's own rule (`interp::float_pow` — an integral exponent
+/// within `i32` is `powi`, anything else `powf`), called rather than copied, so a kernel and
+/// the walker cannot drift apart. Two `Int` operands never reach a kernel (the analyses
+/// decline them: `Int ** Int` is an Int unless it overflows, when the walker answers a Float —
+/// a kind no typed kernel can promise per element). Only a build with the JIT has a caller
+/// (`codegen` imports it), which is why it is gated where the unary table above is not: that
+/// table the ungated analyses read for its NAMES.
+#[cfg(feature = "jit")]
 pub extern "C" fn jit_host_pow(a: f64, b: f64) -> f64 {
-    if b.fract() == 0.0 && b.abs() <= i32::MAX as f64 { a.powi(b as i32) } else { a.powf(b) }
+    crate::interp::float_pow(a, b)
 }
 
 /// The unary host functions by the Helix name a body calls — the walker's `a_sqrt` table

@@ -170,6 +170,15 @@
 
 ### Fixed
 
+- **CI's `--no-default-features --features appliance` clippy job, red since 449f258.** The
+  JIT's `**` host call was the walker's rule copied verbatim, and nothing referenced the copy
+  in a build without the JIT. The rule is now ONE function (`interp::pow_rule` / `float_pow`)
+  that the walker's scalar and array paths, the VM and the JIT's host call all decide by — the
+  same bits wherever `x ** y` runs, and a kernel that cannot drift from the walker. The
+  machine code of the evaluator and of the VM's loop is instruction-for-instruction what it
+  was. And `cargo check --no-default-features` built with five dead-code warnings (an engine's
+  fields and functions, in a build with no engine); it builds with none.
+
 - **`postgres_open` tries every address a name resolves to.** It tried only the first, and
   `localhost` is two on most machines — `::1` first — so a server listening on IPv4 alone was
   "connection refused" by name and fine by number.

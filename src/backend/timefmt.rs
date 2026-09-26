@@ -8,6 +8,7 @@
 //! engines produce the identical bytes.
 
 /// Days since 1970-01-01 → (year, month, day). Howard Hinnant's civil_from_days.
+#[cfg_attr(not(any(feature = "native-df", feature = "dataframes")), allow(dead_code))]
 pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -24,6 +25,7 @@ pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
 /// A naive timestamp: value in the unit → `%Y-%m-%d %H:%M:%S`, plus the
 /// fractional group at the unit's width only when nonzero (the polars bridge's
 /// display convention). `unit_per_sec` ∈ {1e3, 1e6, 1e9}; `width` ∈ {3, 6, 9}.
+#[cfg_attr(not(any(feature = "native-df", feature = "dataframes")), allow(dead_code))]
 pub fn timestamp_str(v: i64, unit_per_sec: i64, width: usize) -> String {
     let secs = v.div_euclid(unit_per_sec);
     let frac = v.rem_euclid(unit_per_sec);

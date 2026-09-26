@@ -293,8 +293,10 @@ impl AggKind {
 }
 
 /// One output column of a grouped `agg`: its name, the aggregate, and the column expression it
-/// folds (`None` only for `count`, which counts rows).
+/// folds (`None` only for `count`, which counts rows). Read by an engine; a build with none
+/// (`--no-default-features`) builds the spec and nothing folds it.
 #[derive(Debug, Clone)]
+#[cfg_attr(not(any(feature = "native-df", feature = "dataframes")), allow(dead_code))]
 pub struct AggSpec {
     pub name: String,
     pub kind: AggKind,

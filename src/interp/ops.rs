@@ -39,6 +39,7 @@ pub(crate) fn float_order(a: f64, b: f64) -> std::cmp::Ordering {
 /// The same order as a sortable `u64` key, for engines that sort by key rather than
 /// by comparator. `float_order(a, b) == float_key(a).cmp(&float_key(b))`, which is
 /// asserted over a boundary table in `float_order_is_one_order`.
+#[cfg_attr(not(any(feature = "native-df", feature = "dataframes")), allow(dead_code))]
 pub(crate) fn float_key(x: f64) -> u64 {
     if x.is_nan() {
         // Above every finite key AND above +inf (0xFFF0_0000_0000_0000), so all
@@ -59,6 +60,34 @@ pub(crate) fn float_key(x: f64) -> u64 {
 pub(crate) fn nan_compare_error(line: usize, col: usize) -> HelixError {
     HelixError::new("cannot compare these values (NaN?)", line, col)
         .hint("a NaN has no order — guard it first with `is_nan(x)` / `is_finite(x)`.")
+}
+
+/// How `**` raises a Float to a Float exponent: an integral exponent within `i32` is `powi`
+/// (strength-reduced — `x ** 2` is x*x, far cheaper than the exp/log of `powf`, and what
+/// numpy does), anything else `powf`.
+///
+/// THIS IS THE ONE RULE, on every engine. The walker's scalar and array paths, the VM (which
+/// runs `eval_binary`) and the JIT's host call (`jit_host_pow`) all decide by it, so `x ** y`
+/// is the same bits wherever it runs — the JIT used to carry a copy, which was also dead code
+/// in a build without `jit`.
+pub(crate) enum PowRule {
+    Powi(i32),
+    Powf(f64),
+}
+
+/// The rule for exponent `b`.
+#[inline]
+pub(crate) fn pow_rule(b: f64) -> PowRule {
+    if b.fract() == 0.0 && b.abs() <= i32::MAX as f64 { PowRule::Powi(b as i32) } else { PowRule::Powf(b) }
+}
+
+/// `a ** b` on two floats, by [`pow_rule`].
+#[inline]
+pub(crate) fn float_pow(a: f64, b: f64) -> f64 {
+    match pow_rule(b) {
+        PowRule::Powi(n) => a.powi(n),
+        PowRule::Powf(b) => a.powf(b),
+    }
 }
 
 pub(crate) fn eval_binary(
@@ -249,15 +278,7 @@ pub(crate) fn eval_binary(
             _ => {
                 let a = num_operand(op, &l, line, col)?;
                 let b = num_operand(op, &r, line, col)?;
-                // Strength-reduce an integer exponent: `x ** 2` is x*x (powi), far
-                // cheaper than the exp/log `powf` and what numpy does too. A fractional
-                // exponent (e.g. `x ** 0.5`) still uses powf.
-                let v = if b.fract() == 0.0 && b.abs() <= i32::MAX as f64 {
-                    a.powi(b as i32)
-                } else {
-                    a.powf(b)
-                };
-                Ok(Value::Float(v))
+                Ok(Value::Float(float_pow(a, b)))
             }
         },
         // `==`/`!=` are THREE-VALUED at any depth (ADR 0001): a `missing`
@@ -610,13 +631,11 @@ fn typed_broadcast(op: &BinOp, l: &Value, r: &Value) -> Option<Value> {
             (Value::Array(a), s) => match &**a {
                 ArrayData::Floats(fa) => {
                     let sf = scalar_f64(s)?;
-                    // Strength-reduce an integer exponent (`xs ** 2` → x*x via powi),
-                    // matching the scalar path so array and scalar agree to the bit.
-                    let out = if sf.fract() == 0.0 && sf.abs() <= i32::MAX as f64 {
-                        let n = sf as i32;
-                        pm_f64(fa, move |x| x.powi(n))
-                    } else {
-                        pm_f64(fa, move |x| x.powf(sf))
+                    // The scalar rule, decided once for the whole array, so array and
+                    // scalar agree to the bit.
+                    let out = match pow_rule(sf) {
+                        PowRule::Powi(n) => pm_f64(fa, move |x| x.powi(n)),
+                        PowRule::Powf(b) => pm_f64(fa, move |x| x.powf(b)),
                     };
                     Some(Value::float_array(out))
                 }
