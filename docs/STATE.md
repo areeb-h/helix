@@ -183,6 +183,11 @@ functional honest cost. Found on the way and FIXED: transaction control went thr
 prepared-statement cache, so a `commit` whose name went stale (`DEALLOCATE ALL`, a pooler's
 other backend) failed its transaction and stranded the connection; it is never cached now.
 
+**A transaction's BEGIN rides with its first statement (2026-09-26).** `begin()` sends
+nothing; the first exchange carries the BEGIN (the snapshot is taken at the first statement
+anyway). begin/update/commit 0.71x; an empty transaction never reaches the server; a stale
+name in the first exchange is prepared again instead of failing the transaction (ADR 0047).
+
 **Still open:** loading rows through `COPY … FROM STDIN` (a frame as the rows) — the driver
 refuses every COPY, having nothing to hand the server.
 

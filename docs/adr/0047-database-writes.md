@@ -141,7 +141,8 @@ back when dropped would be undoing work it was never given.
 
 **One honest cost.** Inside a transaction, ANY error ends it — including the two the
 statement cache normally absorbs (`26000`, `0A000`: a prepared statement made stale by a
-concurrent `ALTER TABLE` or `DISCARD ALL`). Outside a transaction those are re-prepared
+concurrent `ALTER TABLE` or `DISCARD ALL`) — except in the transaction's FIRST exchange, which
+carries its BEGIN and is prepared again (addendum 2026-09-26). Outside a transaction those are re-prepared
 invisibly; inside one the re-prepare could only be answered `25P02`, so the original error is
 reported instead, saying what happened and what to do: roll back and run it again. Every
 driver that prepares statements has this property; the ones that hide it do so with a
@@ -150,3 +151,31 @@ savepoint per statement, a round trip each.
 No new capability: `begin` spends nothing a connection did not already hold. What a
 transaction can DO is decided where the session was opened — `execute` through a transaction's
 value is `db-write` exactly as it is through the connection.
+
+## Addendum 2026-09-26 — the BEGIN rides with the transaction's first exchange
+
+`tx = c.begin()` sent `BEGIN` in a round trip of its own, before the caller had said anything
+the transaction was for. It sends nothing now: the transaction's value OWES its BEGIN
+(`Shared::begin_owed`), and the transaction's first exchange — a statement, a flight or a
+cursor — carries it at its head, in the same round trip.
+
+- **The same transaction.** PostgreSQL takes a transaction's snapshot at its first statement,
+  not at `BEGIN` — READ COMMITTED takes one per statement anyway — so a BEGIN sent with the
+  first statement starts the transaction a caller would have had. Verified live against the
+  parent commit: a `repeatable read` transaction whose second connection commits a row between
+  `begin()` and its first statement, and another after it, sees the same counts on both.
+- **A round trip sooner.** `begin`, one update and `commit` took 545 us and take 390
+  (paired median 0.71): three round trips became two. A transaction of N statements costs
+  N + 1 round trips where it cost N + 2.
+- **A transaction that sends nothing never reaches the server.** Committed, rolled back or
+  dropped, it has nothing to end; each still ends its value, and the connection is its own.
+- **A stale name in the first exchange is prepared again** — the one place the "honest cost"
+  above gives way. The BEGIN went with it, so the transaction holds nothing of the caller's yet:
+  it is rolled back and the exchange goes again, once, BEGIN and all. Behind a pooler that moved
+  the session to another backend between transactions, a transaction's first statement used to
+  fail it; now it just runs. A later exchange still reports the error with what to do.
+- **The BEGIN is owed until an exchange that carried it leaves the session inside a
+  transaction.** A BEGIN that failed, or a flight that could not be framed and was never sent,
+  leaves it owed; an error in the caller's first statement has begun (and failed) the
+  transaction, as it always did, and `commit()` rolls back and says so. An error in a first
+  FLIGHT is counted among the caller's statements (`statement 2 of 2`), not the BEGIN.

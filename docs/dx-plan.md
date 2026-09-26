@@ -581,6 +581,17 @@ primitives themselves. Candidate found along the way, NOT built: a builtin call 
 even though the compiler already assigned the index — `type_of` as an op measured ~4 ns
 against `abs()`'s ~41, so some of that 36 ns gap is name dispatch that every builtin call
 in every program pays.
+**A transaction's BEGIN rides with its first exchange (2026-09-26), DONE — ADR 0047
+addendum.** `Shared::begin_owed: Cell<Option<&'static str>>` holds the BEGIN text `begin()`
+used to send; `Shared::exchange_items` (behind `run` and `fly`) and `open_cursor` put it at the
+head of the transaction's first exchange; it stays owed until an exchange that carried it
+leaves `status != 'I'`. `commit`/`rollback`/`Drop` of a transaction that never sent anything
+send nothing. A stale/taken name in that first exchange: rollback (unnamed) and go again once,
+BEGIN and all. An error's statement index is shifted past the BEGIN (`checked_sub(head)`).
+Same snapshot semantics (PostgreSQL snapshots at the first statement; `f99/live_lazy.helix`
+prints the same counts on the parent and the tree). begin/update/commit 545 -> 390 us
+(0.71x paired). Each new test shown to fail with its part reverted (`f99/teeth.sh`).
+
 **A result larger than memory, a page at a time (2026-09-26), DONE — ADR 0044 addendum.**
 `c.cursor(sql, params?, batch?)` / `cur.next()` (`src/pg/cursor.rs`): the statement bound as
 `query` binds it (the cache, the plan, the formats) to a NAMED portal and Executed with a row
@@ -736,7 +747,8 @@ into the session while it is open; `Session.status` (the byte every `ReadyForQue
 is how `commit()` on a FAILED transaction rolls back and raises instead of reporting the
 server's silent `COMMIT` -> `ROLLBACK`, and how `begin()` refuses a session already in a
 SQL-begun transaction. A stale prepared statement INSIDE a transaction reports its own error
-with what to do, rather than the `25P02` a re-prepare would get. Live: `target/bench/f91/tx.helix`
+with what to do, rather than the `25P02` a re-prepare would get — except in the transaction's
+first exchange, which since 2026-09-26 carries the BEGIN and is prepared again. Live: `target/bench/f91/tx.helix`
 prints the same under walker, VM and JIT.
 
 **The interner hashes a cell once (2026-09-20), DONE.** Followed from the driver's profile:

@@ -3776,7 +3776,11 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
                     `commit` unwinds past `tx` and the rollback has been sent by the time a `try` around it \
                     answers. So `fn transfer(c) = do { tx = c.begin(); _ = tx.execute(…); _ = tx.execute(…); \
                     tx.commit() }` commits when every statement succeeded and undoes all of them when one \
-                    raised, with nothing to remember. While a transaction is open its value is the only way \
+                    raised, with nothing to remember. NOTHING IS SENT UNTIL ITS FIRST STATEMENT: the BEGIN \
+                    rides with the transaction's first exchange (a statement, a flight or a cursor) — the \
+                    server takes the snapshot at the first statement anyway, so it is the same transaction a \
+                    round trip sooner, and one that sends nothing never reaches the server, nor costs \
+                    anything to end. While a transaction is open its value is the only way \
                     in: a statement through the connection's own value would land inside it silently, so it \
                     is refused. `isolation` is `\"read committed\"` (the server's default), `\"repeatable \
                     read\"` or `\"serializable\"` — on a read-only connection `begin(\"repeatable read\")` \

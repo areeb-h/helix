@@ -64,7 +64,7 @@ use conninfo::parse_url;
 #[cfg(feature = "postgres")]
 use proto::write_msg;
 #[cfg(feature = "postgres")]
-use statement::{run_flight, run_prepared, run_statement, Fail, Fetch, Item, Outcome, Owed, Portal, Session};
+use statement::{run_flight, run_prepared, run_statement, Fail, Fetch, FlightFail, Item, Outcome, Owed, Portal, Session};
 #[cfg(feature = "postgres")]
 use types::ColBuf;
 
@@ -150,6 +150,13 @@ struct Shared {
     /// The open transaction was begun for a cursor: it ends when the cursor does, and the
     /// refusal a statement meets meanwhile says so.
     paging: std::cell::Cell<bool>,
+    /// THE BEGIN A TRANSACTION'S VALUE OWES THE SERVER — its text, until the transaction's first
+    /// exchange carries it at its head. `begin()` sends nothing: the server takes a
+    /// transaction's snapshot at its first statement, not at `BEGIN`, so the two in one round
+    /// trip are the same transaction a caller would have had — one round trip sooner, and a
+    /// transaction that never sends a statement never reaches the server at all. Owed until an
+    /// exchange that carried it leaves the session inside a transaction.
+    begin_owed: std::cell::Cell<Option<&'static str>>,
 }
 
 /// A connection is open, or it is closed and says why.
@@ -249,9 +256,15 @@ impl Shared {
         }
     }
 
-    /// Run one statement on this session.
+    /// Run one statement on this session — through the cache, or, as the first of a transaction
+    /// whose BEGIN is owed, with that BEGIN at its head (`exchange_items`).
     fn run(&self, sql: &str, params: &[Value]) -> Result<Outcome, String> {
-        self.with_session(|session| run_prepared(session, sql, params))
+        if self.begin_owed.get().is_none() {
+            return self.with_session(|session| run_prepared(session, sql, params));
+        }
+        let one = [Item { sql, params, fetch: Fetch::ALL, fresh: false }];
+        let mut outs = self.exchange_items(&one).map_err(|(_, text)| text)?;
+        outs.pop().ok_or_else(|| "the server answered nothing".to_string())
     }
 
     /// Run one TRANSACTION CONTROL statement — `begin`, `commit`, `rollback` — as the unnamed
@@ -300,19 +313,22 @@ impl Shared {
     /// not ended the transaction its `begin` opened. Inside the caller's transaction, which
     /// carries on, the portal that was bound is closed with the next exchange; an error the
     /// server raised there has failed that transaction, which is the caller's to end.
-    fn open_cursor(&self, sql: &str, params: &[Value], batch: u32, begin: bool) -> Result<cursor::Cursor, String> {
+    fn open_cursor(&self, sql: &str, params: &[Value], batch: u32, owns: bool) -> Result<cursor::Cursor, String> {
+        // The BEGIN this exchange carries: the cursor's own transaction's — or, opened as the
+        // first exchange of a transaction's value, that transaction's owed one.
+        let begin = if owns { Some("begin") } else { self.begin_owed.get() };
         self.with_session(|session| {
             session.portals += 1;
             let id = session.portals;
             let page = Item { sql, params, fetch: Fetch { portal: Portal::Named(id), limit: batch }, fresh: false };
-            let opening = [Item { sql: "begin", params: &[], fetch: Fetch::ALL, fresh: true }, page];
-            let items: &[Item<'_>] = if begin { &opening } else { &opening[1..] };
-            let mut again = begin;
-            loop {
+            let opening = [Item { sql: begin.unwrap_or("begin"), params: &[], fetch: Fetch::ALL, fresh: true }, page];
+            let items: &[Item<'_>] = if begin.is_some() { &opening } else { &opening[1..] };
+            let mut again = begin.is_some();
+            let opened = loop {
                 let failed = match run_flight(session, items) {
                     Ok(mut outs) => match outs.pop() {
                         Some(out) => match cursor::Cursor::opened(id, batch, out, session) {
-                            Ok(cur) => return Ok(cur),
+                            Ok(cur) => break Ok(cur),
                             Err(text) => Fail::answered(text),
                         },
                         None => Fail::answered("the server answered nothing".to_string()),
@@ -320,23 +336,34 @@ impl Shared {
                     Err(failed) => failed.fail,
                 };
                 if failed.broken {
-                    return Err(failed);
+                    break Err(failed);
                 }
-                if !begin {
-                    if session.status == b'T' {
-                        session.owe(Owed::Portal(id));
+                let retry = again && (failed.stale() || failed.taken());
+                if begin.is_some() && session.status != b'I' && (owns || retry) {
+                    // The BEGIN this exchange carried took, and nothing of the caller's is inside:
+                    // the cursor's own transaction always goes; the first exchange of a
+                    // transaction's value goes only to be tried again — any other error has failed
+                    // that transaction, which is the caller's to end.
+                    if let Err(f) = run_statement(session, "rollback", &[]) {
+                        break Err(f);
                     }
-                    return Err(failed);
+                    if retry {
+                        again = false;
+                        continue;
+                    }
+                } else if !owns && session.status == b'T' {
+                    // Inside the caller's transaction, which carries on: the portal that was bound
+                    // is closed with the next exchange.
+                    session.owe(Owed::Portal(id));
                 }
-                if session.status != b'I' {
-                    run_statement(session, "rollback", &[])?;
-                }
-                if again && (failed.stale() || failed.taken()) {
-                    again = false;
-                    continue;
-                }
-                return Err(failed);
+                break Err(failed);
+            };
+            // A transaction value's BEGIN is owed until an exchange that carried it leaves the
+            // session inside a transaction.
+            if !owns && begin.is_some() && session.status != b'I' {
+                self.begin_owed.set(None);
             }
+            opened
         })
     }
 
@@ -358,24 +385,65 @@ impl Shared {
     /// Run several statements on this session in one round trip (`statement::run_flight`).
     /// An error that belongs to one of them says which, counting as a person does.
     fn fly(&self, items: &[Item<'_>]) -> Result<Vec<Outcome>, String> {
-        let mut guard =
-            self.state.try_borrow_mut().map_err(|_| "this connection is already in use".to_string())?;
+        self.exchange_items(items).map_err(|(at, text)| match at {
+            Some(k) => format!("statement {} of {}: {text}", k + 1, items.len()),
+            None => text,
+        })
+    }
+
+    /// The statements `items` in ONE round trip — with the owed BEGIN of a transaction's value
+    /// at their head, when this is that transaction's first exchange (`begin_owed`). Answers
+    /// their outcomes, or an error and which of THEM it belongs to (the BEGIN is not counted).
+    ///
+    /// A NAME GONE STALE IN THAT FIRST EXCHANGE is prepared again, once, BEGIN and all, after a
+    /// rollback: the transaction holds nothing of the caller's yet — what this exchange did, the
+    /// rollback undoes — which no later exchange of it can say (there the error says to roll back
+    /// and run it again, as it always has).
+    fn exchange_items(&self, items: &[Item<'_>]) -> Result<Vec<Outcome>, (Option<usize>, String)> {
+        let mut guard = self
+            .state
+            .try_borrow_mut()
+            .map_err(|_| (None, "this connection is already in use".to_string()))?;
         let session = match &mut *guard {
             State::Open(session) => session,
             State::Closed(why) => {
-                return Err(format!("this connection is closed — an earlier statement on it failed with: {why}"))
+                return Err((None, format!("this connection is closed — an earlier statement on it failed with: {why}")))
             }
         };
         let (limit, started) = (session.limit, std::time::Instant::now());
-        run_flight(session, items).map_err(|failed| {
+        let begin = self.begin_owed.get();
+        let head = usize::from(begin.is_some());
+        let mut all: Vec<Item<'_>> = Vec::with_capacity(items.len() + head);
+        all.extend(begin.map(|sql| Item { sql, params: &[], fetch: Fetch::ALL, fresh: true }));
+        all.extend_from_slice(items);
+        let mut again = begin.is_some();
+        let ran = loop {
+            match run_flight(session, &all) {
+                Ok(mut outs) => {
+                    outs.drain(..head);
+                    break Ok(outs);
+                }
+                Err(failed) => {
+                    let fail = &failed.fail;
+                    if again && !fail.broken && (fail.stale() || fail.taken()) && session.status != b'I' {
+                        if let Err(f) = run_statement(session, "rollback", &[]) {
+                            break Err(FlightFail { at: None, fail: f });
+                        }
+                        again = false;
+                        continue;
+                    }
+                    break Err(failed);
+                }
+            }
+        };
+        if begin.is_some() && session.status != b'I' {
+            self.begin_owed.set(None);
+        }
+        ran.map_err(|failed| {
             if failed.fail.broken {
                 *guard = State::Closed(failed.fail.text.clone());
             }
-            let text = said(failed.fail, limit, started);
-            match failed.at {
-                Some(k) => format!("statement {} of {}: {text}", k + 1, items.len()),
-                None => text,
-            }
+            (failed.at.and_then(|k| k.checked_sub(head)), said(failed.fail, limit, started))
         })
     }
 }
@@ -422,6 +490,7 @@ pub fn postgres_open(args: &[Value], line: usize, col: usize) -> Result<Value, H
             open_tx: std::cell::Cell::new(None),
             begun: std::cell::Cell::new(0),
             paging: std::cell::Cell::new(false),
+            begin_owed: std::cell::Cell::new(None),
         }),
         tx: None,
         cursor: None,
@@ -458,7 +527,10 @@ impl Drop for Conn {
                 return;
             }
         }
-        let _ = self.shared.control("rollback");
+        // A transaction that sent nothing never began on the server: nothing to roll back.
+        if self.shared.begin_owed.take().is_none() {
+            let _ = self.shared.control("rollback");
+        }
         self.shared.open_tx.set(None);
         self.shared.paging.set(false);
     }
@@ -619,7 +691,8 @@ pub fn conn_method(
                 return Err(conn_err("a transaction begun in SQL is open on this connection".to_string())
                     .hint("end it the way it was begun — `execute(\"commit\")` or `execute(\"rollback\")` — or begin transactions with `begin()`."));
             }
-            c.shared.control(sql).map_err(&conn_err)?;
+            // Nothing is sent: the BEGIN rides with the transaction's first exchange.
+            c.shared.begin_owed.set(Some(sql));
             let id = c.shared.begun.get() + 1;
             c.shared.begun.set(id);
             c.shared.open_tx.set(Some(id));
@@ -632,6 +705,12 @@ pub fn conn_method(
                     .hint(format!("`tx = c.begin()` opens one; `tx.{name}()` ends it.")));
             }
             c.may_speak().map_err(&conn_err)?;
+            // A transaction that sent nothing never began on the server: there is nothing to end,
+            // and no round trip to spend saying so.
+            if c.shared.begin_owed.take().is_some() {
+                c.shared.open_tx.set(None);
+                return Ok(Value::Missing);
+            }
             // A TRANSACTION THAT HAS FAILED CANNOT COMMIT — the server answers `COMMIT` with
             // `ROLLBACK` and no error, which a caller would take for success. It is rolled
             // back by name instead, and `commit` says so.

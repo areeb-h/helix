@@ -891,6 +891,7 @@ fn send_and_read(se: &mut Session, answer: &mut Answer) -> Result<(), Fail> {
 
 /// One statement of a flight: its text, its parameters, and through which portal how many rows
 /// are asked for (`Fetch::ALL` for a statement).
+#[derive(Clone, Copy)]
 pub struct Item<'a> {
     pub sql: &'a str,
     pub params: &'a [Value],

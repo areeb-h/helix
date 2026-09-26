@@ -127,6 +127,16 @@
 
 ### Performance
 
+- **A PostgreSQL transaction's `BEGIN` rides with its first statement.** `tx = c.begin()` sent
+  `BEGIN` in a round trip of its own; it sends nothing now, and the transaction's first exchange
+  — a statement, a flight or a cursor — carries it. PostgreSQL takes a transaction's snapshot at
+  its first statement, not at `BEGIN`, so it is the same transaction a round trip sooner:
+  `begin`, one update and `commit` took 545 us and take 390 (paired median
+  0.71). A transaction that sends nothing never reaches the server. And a name gone stale in
+  a transaction's first exchange (a pooler's other backend, `DEALLOCATE ALL`) is now prepared
+  again after a rollback — the transaction held nothing of the caller's yet — where it used to
+  fail the transaction.
+
 - **Building a text column hashes each cell once.** The native engine stores text
   dictionary-encoded, and every string column — `dataframe()`, `read_csv`, `read_parquet`,
   `to_dataframe`, a database result — is built by one hash-consing builder. Its index was a

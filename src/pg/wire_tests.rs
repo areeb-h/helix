@@ -790,12 +790,21 @@ fn a_transaction_dropped_without_committing_rolls_back() {
     conn_method(&c, "execute", &[sv("insert into t values (2)")], 1, 1).unwrap();
     // And an explicit rollback sends exactly one.
     let tx = begin(&c, &[]);
+    conn_method(&tx, "execute", &[sv("insert into t values (3)")], 1, 1).unwrap();
     assert!(matches!(conn_method(&tx, "rollback", &[], 1, 1).unwrap(), Value::Missing));
     drop(tx);
     drop(c);
     assert_eq!(
         h.join().unwrap().executed,
-        ["begin isolation level serializable", "insert into t values (1)", "rollback", "insert into t values (2)", "begin", "rollback"]
+        [
+            "begin isolation level serializable",
+            "insert into t values (1)",
+            "rollback",
+            "insert into t values (2)",
+            "begin",
+            "insert into t values (3)",
+            "rollback"
+        ]
     );
 }
 
@@ -1043,7 +1052,7 @@ fn a_cursor_inside_a_transaction_reads_beside_its_statements() {
         ["begin", sql, "select 9 as n", sql, sql, "select 9 as n", "commit", "begin", sql, "select 9 as n", "commit", "begin", sql, "rollback"]
     );
     assert_eq!(seen.portals_closed, ["_helix_cursor_1", "_helix_cursor_2"]);
-    assert_eq!(seen.syncs, 14, "7 + 4 + 3 round trips: no Close took one of its own");
+    assert_eq!(seen.syncs, 11, "6 + 3 + 2 round trips: each BEGIN rode with its transaction's first exchange, and no Close took one of its own");
 }
 
 /// A CURSOR'S PAGES CROSS IN BINARY once its statement is known — bound as `query` binds it, so
@@ -1168,11 +1177,12 @@ fn a_cursor_that_fails_to_open_leaves_no_transaction_behind() {
     assert!(e.message.contains("column `n`: `x` is not an integer"), "{}", e.message);
     conn_method(&c, "query", &[sv("select 1 as n")], 1, 1).unwrap();
     let tx = begin(&c, &[]);
+    conn_method(&tx, "query", &[sv("select 2 as n")], 1, 1).unwrap();
     conn_method(&tx, "commit", &[], 1, 1).unwrap();
     drop(tx);
     drop(c);
     let seen = h.join().unwrap();
-    assert_eq!(seen.executed, ["begin", "select n from t", "rollback", "select 1 as n", "begin", "commit"]);
+    assert_eq!(seen.executed, ["begin", "select n from t", "rollback", "select 1 as n", "begin", "select 2 as n", "commit"]);
 }
 
 /// A CURSOR'S OWN COMMIT THAT FAILS IS THE LAST PAGE'S ERROR. Over a statement that writes, a
@@ -1196,6 +1206,101 @@ fn a_cursor_whose_transaction_cannot_commit_says_so() {
     drop(c);
     let seen = h.join().unwrap();
     assert_eq!(seen.executed, ["begin", sql, sql, "insert into t values (9)"]);
+}
+
+/// A TRANSACTION'S BEGIN RIDES WITH ITS FIRST EXCHANGE. The server takes a transaction's
+/// snapshot at its first statement, not at `BEGIN`, so the two in one round trip are the same
+/// transaction — and `begin()` no longer costs a round trip of its own. A first exchange that is
+/// a flight carries it at its head.
+#[test]
+fn a_transactions_begin_rides_with_its_first_exchange() {
+    let (port, h) = serve(Script { expect_read_only: false, columns: vec![], rows: vec![], tag: "UPDATE 1" });
+    let c = write_conn(port);
+    let first = begin(&c, &[sv("serializable")]);
+    conn_method(&first, "execute", &[sv("update t set n = 1")], 1, 1).unwrap();
+    conn_method(&first, "commit", &[], 1, 1).unwrap();
+    let second = begin(&c, &[]);
+    let flight = array(vec![sv("update t set n = 2"), sv("update t set n = 3")]);
+    conn_method(&second, "execute", std::slice::from_ref(&flight), 1, 1).unwrap();
+    conn_method(&second, "commit", &[], 1, 1).unwrap();
+    drop(first);
+    drop(second);
+    drop(c);
+    let seen = h.join().unwrap();
+    assert_eq!(
+        seen.executed,
+        ["begin isolation level serializable", "update t set n = 1", "commit", "begin", "update t set n = 2", "update t set n = 3", "commit"]
+    );
+    assert_eq!(seen.syncs, 4, "each transaction: its BEGIN with its first exchange, then its COMMIT");
+}
+
+/// A TRANSACTION THAT SENDS NOTHING COSTS NOTHING: committed, rolled back or dropped, it never
+/// reached the server — and each still ends, leaving the connection its own.
+#[test]
+fn a_transaction_that_sends_nothing_costs_nothing() {
+    let (port, h) = serve(Script { expect_read_only: true, columns: vec!["n"], rows: vec![vec!["1"]], tag: "SELECT 1" });
+    let Value::Db(c) = postgres_open(&[sv(&url(port))], 1, 1).unwrap() else { panic!("not a connection") };
+    let committed = begin(&c, &[]);
+    assert!(matches!(conn_method(&committed, "commit", &[], 1, 1).unwrap(), Value::Missing));
+    let rolled_back = begin(&c, &[sv("repeatable read")]);
+    assert!(matches!(conn_method(&rolled_back, "rollback", &[], 1, 1).unwrap(), Value::Missing));
+    {
+        let _dropped = begin(&c, &[]);
+    }
+    for (tx, verb) in [(&committed, "commit"), (&rolled_back, "rollback")] {
+        let e = conn_method(tx, verb, &[], 1, 1).unwrap_err();
+        assert!(e.message.contains("this transaction has ended"), "{verb}: {}", e.message);
+    }
+    conn_method(&c, "query", &[sv("select 1 as n")], 1, 1).unwrap();
+    drop(committed);
+    drop(rolled_back);
+    drop(c);
+    let seen = h.join().unwrap();
+    assert_eq!(seen.executed, ["select 1 as n"]);
+    assert_eq!(seen.syncs, 1, "three transactions and a query: one round trip");
+}
+
+/// A NAME GONE STALE IN A TRANSACTION'S FIRST EXCHANGE is prepared again: the BEGIN rode with it,
+/// so the transaction holds nothing of the caller's yet — it is rolled back, and the exchange goes
+/// again, once, BEGIN and all. (It used to fail the transaction: the BEGIN had gone alone, and the
+/// stale name then failed a transaction already under way.)
+#[test]
+fn a_stale_name_in_a_transactions_first_exchange_is_prepared_again() {
+    let script = Script { expect_read_only: false, columns: vec![], rows: vec![], tag: "UPDATE 1" };
+    // Bind 1 caches the update; the server forgets it before Bind 3 — the update again, in the
+    // transaction's first exchange (Bind 2 is its BEGIN).
+    let (port, h) = serve_with(script, Twists { forget_at: Some(3), ..Twists::default() });
+    let c = write_conn(port);
+    let sql = "update t set n = n + 1";
+    conn_method(&c, "execute", &[sv(sql)], 1, 1).unwrap();
+    let tx = begin(&c, &[]);
+    conn_method(&tx, "execute", &[sv(sql)], 1, 1).unwrap();
+    conn_method(&tx, "commit", &[], 1, 1).unwrap();
+    drop(tx);
+    drop(c);
+    let seen = h.join().unwrap();
+    assert_eq!(seen.executed, [sql, "begin", "rollback", "begin", sql, "commit"]);
+    assert_eq!(seen.closes, ["_helix_1"], "the stale name closed with the rollback");
+}
+
+/// AN ERROR IN A TRANSACTION'S FIRST FLIGHT names the caller's statement — the BEGIN at its head
+/// is not counted — and has failed the transaction, which began: `commit()` says so.
+#[test]
+fn an_error_in_a_transactions_first_flight_counts_the_callers_statements() {
+    let script = Script { expect_read_only: false, columns: vec![], rows: vec![], tag: "INSERT 0 1" };
+    // Execute 1 is the BEGIN, 3 the flight's second statement.
+    let (port, h) = serve_with(script, Twists { fail_at: Some(3), ..Twists::default() });
+    let c = write_conn(port);
+    let tx = begin(&c, &[]);
+    let flight = array(vec![sv("insert into t values (1)"), sv("insert into t values (1) -- again")]);
+    let e = conn_method(&tx, "execute", std::slice::from_ref(&flight), 1, 1).unwrap_err();
+    assert!(e.message.contains("statement 2 of 2: duplicate key"), "{}", e.message);
+    let e = conn_method(&tx, "commit", &[], 1, 1).unwrap_err();
+    assert!(e.message.contains("rolled back, not committed"), "{}", e.message);
+    drop(tx);
+    drop(c);
+    let seen = h.join().unwrap();
+    assert_eq!(seen.executed, ["begin", "insert into t values (1)", "rollback"]);
 }
 
 /// TRANSACTION CONTROL IS NEVER CACHED. A server that forgets its prepared statements between
