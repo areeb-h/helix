@@ -836,7 +836,7 @@ const _: () = assert!(
 /// Every name [`Value::type_name`] can answer, in `type_slot` order. A name missing from
 /// this list costs an allocation in [`Value::type_value`] and nothing else, so the list can
 /// never make a program wrong — only slower than it could be.
-const TYPE_NAME_LIST: [&str; 23] = [
+const TYPE_NAME_LIST: [&str; 24] = [
     "Int",
     "Float",
     "Rational",
@@ -860,6 +860,7 @@ const TYPE_NAME_LIST: [&str; 23] = [
     "Net",
     "Connection",
     "Lock",
+    "Cursor",
 ];
 
 thread_local! {
@@ -894,6 +895,7 @@ fn type_slot(name: &str) -> Option<usize> {
         "Net" => 20,
         "Connection" => 21,
         "Lock" => 22,
+        "Cursor" => 23,
         _ => return None,
     })
 }
@@ -1071,7 +1073,7 @@ impl Value {
             Value::Headers(_) => "Headers",
             Value::Dict(_) => "Dict",
             Value::Net(_) => "Net",
-            Value::Db(_) => "Connection",
+            Value::Db(c) => c.type_name(),
             Value::Lock(_) => "Lock",
         }
     }
@@ -1202,7 +1204,7 @@ impl fmt::Display for Value {
             },
             // Opaque, and prints as such: a connection has no value form, and printing
             // the target would put a host and user into program output by accident.
-            Value::Db(_) => write!(f, "<postgres-connection>"),
+            Value::Db(c) => f.write_str(c.display_name()),
             Value::Lock(h) => {
                 if h.is_released() {
                     write!(f, "<lock released: {}>", h.path)

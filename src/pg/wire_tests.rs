@@ -52,14 +52,24 @@ struct Seen {
     startup: String,
     /// How many times the client said Sync: once per round trip.
     syncs: usize,
+    /// The row limit of every Execute, in order (0 is all of them).
+    limits: Vec<i32>,
+    /// Every portal the client closed, by name.
+    portals_closed: Vec<String>,
 }
 
 /// What a server can do beyond answering its script.
 #[derive(Default)]
 struct Twists {
     /// FORGET every prepared statement before this Bind (1-based) — what `DEALLOCATE ALL`,
-    /// `DISCARD ALL` or a pooler's other backend does to a name.
+    /// `DISCARD ALL` or a pooler's other backend does to a name. (Their NAMES: a portal bound
+    /// from one survives, as it does on PostgreSQL 17 — measured.)
     forget_at: Option<usize>,
+    /// And forget them all again before this Bind: a second `DEALLOCATE ALL`.
+    forget_also_at: Option<usize>,
+    /// On this Execute (1-based), answer one row whose one cell is not its column's type — a
+    /// refusal this client makes and the server knows nothing of.
+    bad_at: Option<usize>,
     /// From the second Execute on, answer these rows instead of the script's.
     later_rows: Option<Vec<Vec<&'static str>>>,
     /// On this Execute (1-based), send one row and HANG UP — no completion, no ReadyForQuery.
@@ -132,14 +142,24 @@ fn serve_with(script: Script, twists: Twists) -> (u16, std::thread::JoinHandle<S
         let mut binds = 0usize;
         let (mut describes, mut executes) = (0usize, 0usize);
         let mut binary_columns: Vec<usize> = Vec::new();
-        // The formats the last Bind asked for: none means every column as text.
-        let mut formats: Vec<i16> = Vec::new();
         // After an error the server discards messages until `Sync`, as the protocol says.
         let mut skipping = false;
         // Waiting for COPY data: a Sync that arrives now was sent before the client could know,
         // and is ignored — as the protocol says.
         let mut copying = false;
         let mut syncs = 0usize;
+        // Per portal: its statement's text, the formats its Bind asked for, and how many rows it
+        // has sent — a named portal suspends at its limit and is Executed again for the rest.
+        let mut portal_text: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut portal_formats: std::collections::HashMap<String, Vec<i16>> = std::collections::HashMap::new();
+        let mut sent: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut limits: Vec<i32> = Vec::new();
+        let mut portals_closed: Vec<String> = Vec::new();
+        // The named portals that exist, each with the statement it was bound from. A portal lives
+        // from its Bind until it is closed, its transaction ends, or — the protocol's documented
+        // contract, stricter than PostgreSQL 17, which keeps the portal — the statement it was
+        // bound from is closed. A client that passes here works against both.
+        let mut portal_stmt: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         loop {
             let (tag, body) = read_one(&mut s, true);
             if tag == b'S' {
@@ -161,7 +181,18 @@ fn serve_with(script: Script, twists: Twists) -> (u16, std::thread::JoinHandle<S
                 put_cstr(&mut out, "terminating connection because protocol synchronization was lost");
                 out.push(0);
                 send(&mut s, b'E', &out);
-                return Seen { sql, parses, closes, describes, binary_columns, executed, startup: text, syncs };
+                return Seen { sql, parses, closes, describes, binary_columns, executed, startup: text, syncs, limits, portals_closed };
+            }
+            // AN EXECUTE RUNS THE PORTAL IT NAMES: its statement's text is what `bound` means from
+            // here, whatever was bound last — and a named portal has to exist.
+            let mut no_portal: Option<String> = None;
+            if tag == b'E' {
+                let portal = String::from_utf8_lossy(body.split(|b| *b == 0).next().unwrap()).into_owned();
+                if !portal.is_empty() && !portal_stmt.contains_key(&portal) {
+                    no_portal = Some(portal);
+                } else if let Some(text) = portal_text.get(&portal) {
+                    bound = text.clone();
+                }
             }
             match tag {
                 // Parse: the statement's name (empty for the unnamed one), then its text.
@@ -169,30 +200,47 @@ fn serve_with(script: Script, twists: Twists) -> (u16, std::thread::JoinHandle<S
                     let mut parts = body.split(|b| *b == 0);
                     let name = String::from_utf8_lossy(parts.next().unwrap()).into_owned();
                     sql = String::from_utf8_lossy(parts.next().unwrap()).into_owned();
-                    if !name.is_empty() {
+                    if name.is_empty() {
+                        // A new unnamed statement replaces the old one — and, by the documented
+                        // contract, the portals bound from it.
+                        portal_stmt.retain(|_, from| !from.is_empty());
+                    } else {
                         known.push(name.clone());
                     }
                     texts.insert(name.clone(), sql.clone());
                     parses.push(name);
                     send(&mut s, b'1', &[]);
                 }
-                // Close: `S` and a statement's name. Never an error, known or not.
+                // Close: `S` and a statement's name, or `P` and a portal's. Never an error,
+                // known or not.
                 b'C' => {
                     let name = String::from_utf8_lossy(body[1..].split(|b| *b == 0).next().unwrap()).into_owned();
-                    known.retain(|k| *k != name);
-                    closes.push(name);
+                    if body[0] == b'P' {
+                        portal_stmt.remove(&name);
+                        sent.remove(&name);
+                        portals_closed.push(name);
+                    } else {
+                        known.retain(|k| *k != name);
+                        // The documented contract: closing a statement closes its portals.
+                        portal_stmt.retain(|_, from| *from != name);
+                        closes.push(name);
+                    }
                     send(&mut s, b'3', &[]);
                 }
                 // Bind: the portal, then the statement it binds — which must still exist.
                 b'B' => {
                     binds += 1;
-                    if forget_at == Some(binds) {
+                    if forget_at == Some(binds) || twists.forget_also_at == Some(binds) {
                         known.clear();
                     }
                     let mut parts = body.split(|b| *b == 0);
-                    let _portal = parts.next();
+                    let portal = String::from_utf8_lossy(parts.next().unwrap()).into_owned();
                     let stmt = String::from_utf8_lossy(parts.next().unwrap()).into_owned();
                     if !stmt.is_empty() && !known.contains(&stmt) {
+                        // An error inside a transaction fails it, as the real server's does.
+                        if status == b'T' {
+                            status = b'E';
+                        }
                         let mut out = Vec::new();
                         out.push(b'S');
                         put_cstr(&mut out, "ERROR");
@@ -205,8 +253,15 @@ fn serve_with(script: Script, twists: Twists) -> (u16, std::thread::JoinHandle<S
                         skipping = true;
                     } else {
                         bound = texts.get(&stmt).cloned().unwrap_or_default();
-                        formats = result_formats(&body);
+                        let formats = result_formats(&body);
                         binary_columns.push(formats.iter().filter(|f| **f == 1).count());
+                        // A Bind makes the portal afresh, whatever it had sent before.
+                        portal_text.insert(portal.clone(), bound.clone());
+                        portal_formats.insert(portal.clone(), formats);
+                        if !portal.is_empty() {
+                            portal_stmt.insert(portal.clone(), stmt);
+                        }
+                        sent.insert(portal, 0);
                         send(&mut s, b'2', &[]);
                     }
                 }
@@ -228,6 +283,25 @@ fn serve_with(script: Script, twists: Twists) -> (u16, std::thread::JoinHandle<S
                         }
                         send(&mut s, b'T', &out);
                     }
+                }
+                // A named portal that does not exist: never bound, closed, ended with its
+                // transaction, or taken by its statement's Close.
+                b'E' if no_portal.is_some() => {
+                    executes += 1;
+                    if status == b'T' {
+                        status = b'E';
+                    }
+                    let name = no_portal.take().unwrap_or_default();
+                    let mut out = Vec::new();
+                    out.push(b'S');
+                    put_cstr(&mut out, "ERROR");
+                    out.push(b'C');
+                    put_cstr(&mut out, "34000");
+                    out.push(b'M');
+                    put_cstr(&mut out, &format!("portal \"{name}\" does not exist"));
+                    out.push(0);
+                    send(&mut s, b'E', &out);
+                    skipping = true;
                 }
                 b'E' if twists.copy_in_at == Some(executes + 1) => {
                     executes += 1;
@@ -261,7 +335,12 @@ fn serve_with(script: Script, twists: Twists) -> (u16, std::thread::JoinHandle<S
                     } else {
                         ("23505", "duplicate key value violates unique constraint")
                     };
-                    if status == b'T' {
+                    // An error inside a transaction fails it; a COMMIT that fails has ENDED it —
+                    // rolled back, as a deferred constraint's failure does — portals and all.
+                    if bound == "commit" {
+                        status = b'I';
+                        portal_stmt.clear();
+                    } else if status == b'T' {
                         status = b'E';
                     }
                     let mut out = Vec::new();
@@ -297,18 +376,43 @@ fn serve_with(script: Script, twists: Twists) -> (u16, std::thread::JoinHandle<S
                     executes += 1;
                     executed.push(bound.clone());
                     status = if bound.starts_with("begin") { b'T' } else { b'I' };
+                    if status == b'I' {
+                        portal_stmt.clear();
+                    }
                     let mut out = Vec::new();
                     put_cstr(&mut out, &bound.to_uppercase());
                     send(&mut s, b'C', &out);
                 }
                 b'E' => {
                     executes += 1;
-                    executed.push(bound.clone());
+                    // Execute: the portal, and how many rows (0 is all of them). A named portal
+                    // keeps its place between Executes, as the real one does; an unnamed one was
+                    // bound afresh just before.
+                    let portal = String::from_utf8_lossy(body.split(|b| *b == 0).next().unwrap()).into_owned();
+                    let at = portal.len() + 1;
+                    let limit = i32::from_be_bytes([body[at], body[at + 1], body[at + 2], body[at + 3]]);
+                    limits.push(limit);
+                    executed.push(portal_text.get(&portal).cloned().unwrap_or_else(|| bound.clone()));
+                    if twists.bad_at == Some(executes) {
+                        // One row, its one cell `x` as text: not an int4 whatever format was asked.
+                        let mut out = Vec::new();
+                        out.extend_from_slice(&1i16.to_be_bytes());
+                        out.extend_from_slice(&1i32.to_be_bytes());
+                        out.push(b'x');
+                        send(&mut s, b'D', &out);
+                        let mut out = Vec::new();
+                        put_cstr(&mut out, script.tag);
+                        send(&mut s, b'C', &out);
+                        continue;
+                    }
+                    let formats = portal_formats.get(&portal).cloned().unwrap_or_default();
                     let rows = match &twists.later_rows {
                         Some(later) if executes > 1 => later,
                         _ => &script.rows,
                     };
-                    for r in rows {
+                    let from = sent.get(&portal).copied().unwrap_or(0).min(rows.len());
+                    let take = if limit > 0 { (limit as usize).min(rows.len() - from) } else { rows.len() - from };
+                    for r in &rows[from..from + take] {
                         let mut out = Vec::new();
                         out.extend_from_slice(&(r.len() as i16).to_be_bytes());
                         for (k, v) in r.iter().enumerate() {
@@ -325,22 +429,32 @@ fn serve_with(script: Script, twists: Twists) -> (u16, std::thread::JoinHandle<S
                         }
                         send(&mut s, b'D', &out);
                         if twists.hang_up_at == Some(executes) {
-                            return Seen { sql, parses, closes, describes, binary_columns, executed, startup: text, syncs };
+                            return Seen { sql, parses, closes, describes, binary_columns, executed, startup: text, syncs, limits, portals_closed };
                         }
                     }
-                    let mut out = Vec::new();
-                    put_cstr(&mut out, script.tag);
-                    send(&mut s, b'C', &out);
+                    sent.insert(portal, from + take);
+                    // The real server suspends the moment the limit is reached — before it
+                    // knows whether a row follows — and completes on the Execute that runs short.
+                    if limit > 0 && take == limit as usize {
+                        send(&mut s, b's', &[]);
+                    } else {
+                        let mut out = Vec::new();
+                        put_cstr(&mut out, script.tag);
+                        send(&mut s, b'C', &out);
+                    }
                 }
                 b'S' => {
                     skipping = false;
+                    if status == b'I' {
+                        portal_stmt.clear();
+                    }
                     send(&mut s, b'Z', &[status])
                 }
                 b'X' => break,
                 other => panic!("unexpected message {:?}", other as char),
             }
         }
-        Seen { sql, parses, closes, describes, binary_columns, executed, startup: text, syncs }
+        Seen { sql, parses, closes, describes, binary_columns, executed, startup: text, syncs, limits, portals_closed }
     });
     (port, h)
 }
@@ -793,6 +907,352 @@ fn statement(sql: &str, params: Vec<Value>) -> Value {
         (crate::symbol::Symbol::intern("sql"), sv(sql)),
         (crate::symbol::Symbol::intern("params"), array(params)),
     ]))
+}
+
+fn cursor(c: &std::rc::Rc<super::Conn>, sql: &str, batch: i64) -> std::rc::Rc<super::Conn> {
+    let Value::Db(cur) = conn_method(c, "cursor", &[sv(sql), Value::Missing, Value::Int(batch)], 1, 1).unwrap() else {
+        panic!("`cursor` answers a cursor value")
+    };
+    cur
+}
+
+fn page(cur: &std::rc::Rc<super::Conn>) -> Vec<i64> {
+    ints_of(&conn_method(cur, "next", &[], 1, 1).unwrap(), "n")
+}
+
+fn numbered(n: usize) -> Vec<Vec<&'static str>> {
+    ["1", "2", "3", "4", "5", "6", "7"][..n].iter().map(|s| vec![*s]).collect()
+}
+
+/// A CURSOR READS A RESULT A PAGE AT A TIME (ADR 0044 addendum 2026-09-26): the statement is
+/// bound to a named portal and Executed with a row limit; each `next()` is one more Execute of
+/// the same portal; the page after the last is empty, at no round trip, then and thereafter.
+/// Opened on the connection, it has a transaction of its own — begun in the round trip that
+/// reads its first page, committed after its last — and the connection answers nothing else
+/// meanwhile. A cursor's value answers `next()` and nothing else; `next` on the connection is
+/// refused by name.
+#[test]
+fn a_cursor_reads_a_result_a_page_at_a_time() {
+    let (port, h) = serve(Script { expect_read_only: true, columns: vec!["n"], rows: numbered(5), tag: "SELECT 5" });
+    let Value::Db(c) = postgres_open(&[sv(&url(port))], 1, 1).unwrap() else { panic!("not a connection") };
+    let cur = cursor(&c, "select n from t", 2);
+    assert_eq!(cur.type_name(), "Cursor");
+    assert_eq!(format!("{}", Value::Db(cur.clone())), "<postgres-cursor>");
+    let e = conn_method(&c, "query", &[sv("select 1 as n")], 1, 1).unwrap_err();
+    assert!(e.message.contains("a cursor is open on this connection"), "{}", e.message);
+    assert_eq!(page(&cur), vec![1, 2]);
+    assert_eq!(page(&cur), vec![3, 4]);
+    assert_eq!(page(&cur), vec![5]);
+    assert_eq!(page(&cur), Vec::<i64>::new());
+    assert_eq!(page(&cur), Vec::<i64>::new());
+    // Read to its end, it has let the connection go.
+    conn_method(&c, "query", &[sv("select 1 as n")], 1, 1).unwrap();
+    for verb in ["query", "execute", "begin", "commit", "rollback", "cursor"] {
+        let e = conn_method(&cur, verb, &[sv("select 1")], 1, 1).unwrap_err();
+        assert!(e.message.contains(&format!("a Cursor has no method `{verb}`")), "{verb}: {}", e.message);
+    }
+    let e = conn_method(&c, "next", &[], 1, 1).unwrap_err();
+    assert!(e.message.contains("this is the connection itself"), "{}", e.message);
+    let e = conn_method(&cur, "next", &[Value::Int(1)], 1, 1).unwrap_err();
+    assert!(e.message.contains("`next` takes no arguments"), "{}", e.message);
+    drop(cur);
+    drop(c);
+    let seen = h.join().unwrap();
+    assert_eq!(seen.executed, ["begin", "select n from t", "select n from t", "select n from t", "commit", "select 1 as n"]);
+    assert_eq!(seen.limits, [2, 2, 2, 0], "a page of two, three times; then the query, all of it");
+    assert_eq!(seen.syncs, 5, "the open with its first page, two more pages, the commit, the query");
+    assert!(seen.portals_closed.is_empty(), "the transaction's end took the portal with it");
+}
+
+/// A RESULT THAT FITS ONE PAGE has been read to its end by the round trip that opened the
+/// cursor: its transaction is committed at once, and the connection is free before `next()`
+/// was ever called.
+#[test]
+fn a_result_that_fits_one_page_ends_its_cursor_at_once() {
+    let (port, h) = serve(Script { expect_read_only: true, columns: vec!["n"], rows: numbered(3), tag: "SELECT 3" });
+    let Value::Db(c) = postgres_open(&[sv(&url(port))], 1, 1).unwrap() else { panic!("not a connection") };
+    let cur = cursor(&c, "select n from t", 10);
+    conn_method(&c, "query", &[sv("select 1 as n")], 1, 1).unwrap();
+    assert_eq!(page(&cur), vec![1, 2, 3]);
+    assert_eq!(page(&cur), Vec::<i64>::new());
+    drop(cur);
+    drop(c);
+    let seen = h.join().unwrap();
+    assert_eq!(seen.executed, ["begin", "select n from t", "commit", "select 1 as n"]);
+    assert_eq!(seen.syncs, 3);
+}
+
+/// DROPPED BEFORE ITS END, a cursor's value takes its transaction with it — the rollback is
+/// what ends the portal — and the connection is its own again the moment the value is gone.
+#[test]
+fn a_cursor_dropped_before_its_end_takes_its_transaction_with_it() {
+    let (port, h) = serve(Script { expect_read_only: true, columns: vec!["n"], rows: numbered(5), tag: "SELECT 5" });
+    let Value::Db(c) = postgres_open(&[sv(&url(port))], 1, 1).unwrap() else { panic!("not a connection") };
+    {
+        let cur = cursor(&c, "select n from t", 2);
+        assert_eq!(page(&cur), vec![1, 2]);
+    }
+    conn_method(&c, "query", &[sv("select 1 as n")], 1, 1).unwrap();
+    drop(c);
+    let seen = h.join().unwrap();
+    assert_eq!(seen.executed, ["begin", "select n from t", "rollback", "select 1 as n"]);
+    assert!(seen.portals_closed.is_empty());
+}
+
+/// INSIDE A TRANSACTION'S VALUE, a cursor reads beside its statements: the transaction answers
+/// queries between pages and ends by its own value; a cursor read to its end has its portal
+/// closed and leaves the transaction alone, one dropped early has it closed too — each Close
+/// riding with the next exchange, never a round trip of its own — and one whose transaction
+/// ended under it says so, after handing over the page it already held.
+#[test]
+fn a_cursor_inside_a_transaction_reads_beside_its_statements() {
+    let (port, h) = serve(Script { expect_read_only: true, columns: vec!["n"], rows: numbered(4), tag: "SELECT 4" });
+    let Value::Db(c) = postgres_open(&[sv(&url(port))], 1, 1).unwrap() else { panic!("not a connection") };
+    {
+        let tx = begin(&c, &[]);
+        let cur = cursor(&tx, "select n from t", 2);
+        assert_eq!(page(&cur), vec![1, 2]);
+        conn_method(&tx, "query", &[sv("select 9 as n")], 1, 1).unwrap();
+        assert_eq!(page(&cur), vec![3, 4]);
+        // Four rows in pages of two: the third Execute answers no rows, and the portal is closed.
+        assert_eq!(page(&cur), Vec::<i64>::new());
+        conn_method(&tx, "query", &[sv("select 9 as n")], 1, 1).unwrap();
+        conn_method(&tx, "commit", &[], 1, 1).unwrap();
+    }
+    {
+        let tx = begin(&c, &[]);
+        let cur = cursor(&tx, "select n from t", 2);
+        assert_eq!(page(&cur), vec![1, 2]);
+        drop(cur);
+        conn_method(&tx, "query", &[sv("select 9 as n")], 1, 1).unwrap();
+        conn_method(&tx, "commit", &[], 1, 1).unwrap();
+    }
+    {
+        let tx = begin(&c, &[]);
+        let cur = cursor(&tx, "select n from t", 2);
+        conn_method(&tx, "rollback", &[], 1, 1).unwrap();
+        assert_eq!(page(&cur), vec![1, 2], "the page that came with the open is already here");
+        let e = conn_method(&cur, "next", &[], 1, 1).unwrap_err();
+        assert!(e.message.contains("this cursor's transaction has ended"), "{}", e.message);
+    }
+    drop(c);
+    let seen = h.join().unwrap();
+    let sql = "select n from t";
+    assert_eq!(
+        seen.executed,
+        ["begin", sql, "select 9 as n", sql, sql, "select 9 as n", "commit", "begin", sql, "select 9 as n", "commit", "begin", sql, "rollback"]
+    );
+    assert_eq!(seen.portals_closed, ["_helix_cursor_1", "_helix_cursor_2"]);
+    assert_eq!(seen.syncs, 14, "7 + 4 + 3 round trips: no Close took one of its own");
+}
+
+/// A CURSOR'S PAGES CROSS IN BINARY once its statement is known — bound as `query` binds it, so
+/// the formats are fixed for every page of the portal — and a statement the connection has not
+/// run is described on the open and read as text, as its first run always is.
+#[test]
+fn a_cursor_pages_in_binary_once_its_statement_is_known() {
+    let rows = vec![vec!["7"], vec!["-1"], vec!["2147483647"]];
+    let (port, h) = serve(Script { expect_read_only: true, columns: vec!["n"], rows, tag: "SELECT 3" });
+    let Value::Db(c) = postgres_open(&[sv(&url(port))], 1, 1).unwrap() else { panic!("not a connection") };
+    let first = cursor(&c, "select n from t", 2);
+    assert_eq!(page(&first), vec![7, -1]);
+    assert_eq!(page(&first), vec![2147483647]);
+    let second = cursor(&c, "select n from t", 2);
+    assert_eq!(page(&second), vec![7, -1]);
+    assert_eq!(page(&second), vec![2147483647]);
+    drop(first);
+    drop(second);
+    drop(c);
+    let seen = h.join().unwrap();
+    assert_eq!(seen.describes, 5, "begin and commit every time (transaction control is never cached), the first cursor's statement once, the second's not at all");
+    assert_eq!(seen.binary_columns, [0, 0, 0, 0, 1, 0], "text on the first open, binary on the second — the Binds of begin and commit ask nothing");
+}
+
+/// A PAGE THAT FAILS ENDS THE CURSOR: the error is the caller's, the transaction begun for the
+/// cursor is rolled back at once, the connection is free, and the cursor answers empty pages
+/// from then on.
+#[test]
+fn a_page_that_fails_ends_the_cursor_and_frees_the_connection() {
+    let script = Script { expect_read_only: true, columns: vec!["n"], rows: numbered(5), tag: "SELECT 5" };
+    let (port, h) = serve_with(script, Twists { fail_at: Some(3), ..Twists::default() });
+    let Value::Db(c) = postgres_open(&[sv(&url(port))], 1, 1).unwrap() else { panic!("not a connection") };
+    let cur = cursor(&c, "select n from t", 2);
+    assert_eq!(page(&cur), vec![1, 2]);
+    let e = conn_method(&cur, "next", &[], 1, 1).unwrap_err();
+    assert!(e.message.contains("23505"), "{}", e.message);
+    assert_eq!(page(&cur), Vec::<i64>::new());
+    conn_method(&c, "query", &[sv("select 1 as n")], 1, 1).unwrap();
+    drop(cur);
+    drop(c);
+    let seen = h.join().unwrap();
+    assert_eq!(seen.executed, ["begin", "select n from t", "rollback", "select 1 as n"]);
+}
+
+/// A CURSOR WHOSE STATEMENT WENT STALE UNDER IT rolls back the transaction its `begin` opened
+/// and opens again — once, however often it happens. Found live: `deallocate all` between
+/// caching a statement and opening a cursor on it. The cursor is `begin; <statement>` in one
+/// flight, so the stale name's `26000` arrives INSIDE the transaction the begin opened and fails
+/// it; the retry has to wait for that transaction's rollback — and the rollback has to be the
+/// unnamed statement, because a CACHED `rollback` goes stale with everything else. The second
+/// open below is where it did: the retry then ran inside the failed transaction (`25P02`).
+#[test]
+fn a_cursor_whose_statement_went_stale_rolls_back_and_opens_again() {
+    let script = Script { expect_read_only: true, columns: vec!["n"], rows: numbered(3), tag: "SELECT 3" };
+    // Forgotten before the third Bind (the first cursor's statement, cached by the query) and
+    // again before the ninth (the second cursor's, cached by the first one's retry).
+    let twists = Twists { forget_at: Some(3), forget_also_at: Some(9), ..Twists::default() };
+    let (port, h) = serve_with(script, twists);
+    let Value::Db(c) = postgres_open(&[sv(&url(port))], 1, 1).unwrap() else { panic!("not a connection") };
+    let sql = "select n from t";
+    conn_method(&c, "query", &[sv(sql)], 1, 1).unwrap();
+    let first = cursor(&c, sql, 2);
+    assert_eq!(page(&first), vec![1, 2]);
+    drop(first);
+    let second = cursor(&c, sql, 2);
+    assert_eq!(page(&second), vec![1, 2]);
+    assert_eq!(page(&second), vec![3]);
+    assert_eq!(page(&second), Vec::<i64>::new());
+    conn_method(&c, "query", &[sv("select 1 as n")], 1, 1).unwrap();
+    drop(second);
+    drop(c);
+    let seen = h.join().unwrap();
+    assert_eq!(
+        seen.executed,
+        [sql, "begin", "rollback", "begin", sql, "rollback", "begin", "rollback", "begin", sql, sql, "commit", "select 1 as n"],
+        "each open: its flight fails, an unnamed rollback ends it, the retry opens — and the connection carries on"
+    );
+    assert_eq!(seen.closes, ["_helix_1", "_helix_2"], "each stale name closed by the rollback that followed it");
+}
+
+/// A CURSOR'S STATEMENT IS NEVER THE ONE DISPLACED. The protocol's documented contract is that
+/// closing a prepared statement closes the portals bound from it, and the cache's own eviction
+/// is such a Close: a transaction that runs more distinct statements between two pages than the
+/// cache holds would make the cursor's statement the least recently used. (PostgreSQL 17 keeps
+/// the portal — measured — but this server keeps the documented contract.) The pin lasts as long
+/// as the portal: once the transaction is over, the statement is the next to go.
+#[test]
+fn a_cursors_statement_is_never_the_one_displaced() {
+    let (port, h) = serve(Script { expect_read_only: true, columns: vec!["n"], rows: numbered(3), tag: "SELECT 3" });
+    let Value::Db(c) = postgres_open(&[sv(&url(port))], 1, 1).unwrap() else { panic!("not a connection") };
+    let tx = begin(&c, &[]);
+    let cur = cursor(&tx, "select n from t", 1);
+    assert_eq!(page(&cur), vec![1]);
+    for i in 0..MAX_PREPARED {
+        conn_method(&tx, "query", &[sv(&format!("select {i} as n"))], 1, 1).unwrap();
+    }
+    assert_eq!(page(&cur), vec![2], "the portal outlived {MAX_PREPARED} other statements");
+    assert_eq!(page(&cur), vec![3]);
+    conn_method(&tx, "commit", &[], 1, 1).unwrap();
+    for i in MAX_PREPARED..MAX_PREPARED + 2 {
+        conn_method(&c, "query", &[sv(&format!("select {i} as n"))], 1, 1).unwrap();
+    }
+    drop(cur);
+    drop(tx);
+    drop(c);
+    let seen = h.join().unwrap();
+    assert_eq!(seen.closes, ["_helix_2", "_helix_1", "_helix_3"], "spared while its portal lived, the next to go once it had not");
+}
+
+/// A CURSOR THAT FAILS TO OPEN LEAVES NO TRANSACTION BEHIND. Its `begin` took, then something went
+/// wrong — here this client refusing a cell that is not its column's type, which the server knows
+/// nothing of: the transaction is still open there, and a cursor that returned the error without
+/// ending it left the connection inside a transaction nobody had begun. It is rolled back, and
+/// the connection is its own.
+#[test]
+fn a_cursor_that_fails_to_open_leaves_no_transaction_behind() {
+    let script = Script { expect_read_only: true, columns: vec!["n"], rows: numbered(3), tag: "SELECT 3" };
+    // Execute 1 is the begin, 2 the cursor's first page.
+    let (port, h) = serve_with(script, Twists { bad_at: Some(2), ..Twists::default() });
+    let Value::Db(c) = postgres_open(&[sv(&url(port))], 1, 1).unwrap() else { panic!("not a connection") };
+    let e = conn_method(&c, "cursor", &[sv("select n from t"), Value::Missing, Value::Int(2)], 1, 1).unwrap_err();
+    assert!(e.message.contains("column `n`: `x` is not an integer"), "{}", e.message);
+    conn_method(&c, "query", &[sv("select 1 as n")], 1, 1).unwrap();
+    let tx = begin(&c, &[]);
+    conn_method(&tx, "commit", &[], 1, 1).unwrap();
+    drop(tx);
+    drop(c);
+    let seen = h.join().unwrap();
+    assert_eq!(seen.executed, ["begin", "select n from t", "rollback", "select 1 as n", "begin", "commit"]);
+}
+
+/// A CURSOR'S OWN COMMIT THAT FAILS IS THE LAST PAGE'S ERROR. Over a statement that writes, a
+/// deferred constraint or a serialization failure refuses the COMMIT after the last page — and
+/// undoes everything the pages said had happened. It used to be dropped, and the last page came
+/// back as if all were well.
+#[test]
+fn a_cursor_whose_transaction_cannot_commit_says_so() {
+    let script = Script { expect_read_only: false, columns: vec!["n"], rows: numbered(3), tag: "INSERT 0 3" };
+    // Execute 1 is the begin, 2 and 3 the pages, 4 the commit — which fails.
+    let (port, h) = serve_with(script, Twists { fail_at: Some(4), ..Twists::default() });
+    let c = write_conn(port);
+    let sql = "insert into t select g from generate_series(1, 3) g returning g as n";
+    let cur = cursor(&c, sql, 2);
+    assert_eq!(page(&cur), vec![1, 2]);
+    let e = conn_method(&cur, "next", &[], 1, 1).unwrap_err();
+    assert!(e.message.contains("23505"), "{}", e.message);
+    assert_eq!(page(&cur), Vec::<i64>::new(), "and the cursor is over");
+    conn_method(&c, "execute", &[sv("insert into t values (9)")], 1, 1).unwrap();
+    drop(cur);
+    drop(c);
+    let seen = h.join().unwrap();
+    assert_eq!(seen.executed, ["begin", sql, sql, "insert into t values (9)"]);
+}
+
+/// TRANSACTION CONTROL IS NEVER CACHED. A server that forgets its prepared statements between
+/// a `begin` and its end (`DEALLOCATE ALL`, a pooler's other backend) used to be answered a
+/// stale `commit` — a `26000` INSIDE the transaction, which failed it, with nothing left to
+/// end it: the session was stuck. `begin`, `commit` and `rollback` go as the unnamed statement,
+/// so a transaction's value and a cursor's own transaction end whatever the server forgot.
+#[test]
+fn transaction_control_is_never_cached() {
+    let script = Script { expect_read_only: false, columns: vec![], rows: vec![], tag: "INSERT 0 1" };
+    // Forgotten before the third Bind: `begin`, the insert, then `commit` — which must not care.
+    let (port, h) = serve_with(script, Twists { forget_at: Some(3), ..Twists::default() });
+    let c = write_conn(port);
+    let tx = begin(&c, &[]);
+    conn_method(&tx, "execute", &[sv("insert into t values (1)")], 1, 1).unwrap();
+    conn_method(&tx, "commit", &[], 1, 1).unwrap();
+    conn_method(&c, "execute", &[sv("insert into t values (2)")], 1, 1).unwrap();
+    drop(tx);
+    drop(c);
+    let seen = h.join().unwrap();
+    assert_eq!(seen.executed, ["begin", "insert into t values (1)", "commit", "insert into t values (2)"]);
+    assert_eq!(seen.parses, ["", "_helix_1", "", "_helix_2"], "control unnamed every time; the insert prepared again after the server forgot it");
+
+    // And a cursor's own transaction: forgotten before its `commit` (begin, the statement, commit).
+    let script = Script { expect_read_only: true, columns: vec!["n"], rows: numbered(3), tag: "SELECT 3" };
+    let (port, h) = serve_with(script, Twists { forget_at: Some(3), ..Twists::default() });
+    let Value::Db(c) = postgres_open(&[sv(&url(port))], 1, 1).unwrap() else { panic!("not a connection") };
+    let cur = cursor(&c, "select n from t", 2);
+    assert_eq!(page(&cur), vec![1, 2]);
+    assert_eq!(page(&cur), vec![3]);
+    conn_method(&c, "query", &[sv("select 1 as n")], 1, 1).unwrap();
+    drop(cur);
+    drop(c);
+    let seen = h.join().unwrap();
+    assert_eq!(seen.executed, ["begin", "select n from t", "select n from t", "commit", "select 1 as n"]);
+}
+
+/// WHAT `cursor` TAKES is checked before a byte is sent: one statement, its parameters as an
+/// Array, and a page size that is a positive Int — each refusal naming the spelling.
+#[test]
+fn a_cursor_is_checked_before_it_is_sent() {
+    let (port, h) = serve(Script { expect_read_only: true, columns: vec!["n"], rows: numbered(1), tag: "SELECT 1" });
+    let Value::Db(c) = postgres_open(&[sv(&url(port))], 1, 1).unwrap() else { panic!("not a connection") };
+    let refused = |args: &[Value], want: &str| {
+        let e = conn_method(&c, "cursor", args, 1, 1).unwrap_err();
+        let text = format!("{e:?}").replace("\\\"", "\"");
+        assert!(text.contains(want), "{want:?} not in {text}");
+    };
+    refused(&[], "takes a SQL string");
+    refused(&[array(vec![sv("select 1")])], "reads one statement a page at a time");
+    refused(&[sv("select 1"), Value::Int(5)], "the page size comes third");
+    refused(&[sv("select 1"), sv("x")], "parameters must be an array");
+    refused(&[sv("select 1"), Value::Missing, Value::Int(0)], "between 1 and 2147483647 rows");
+    refused(&[sv("select 1"), Value::Missing, sv("many")], "a positive number of rows, got a String");
+    refused(&[sv("select 1"), Value::Missing, Value::Int(2), Value::Int(3)], "at most three arguments");
+    drop(c);
+    assert_eq!(h.join().unwrap().syncs, 0, "nothing was sent");
 }
 
 fn ints_of(v: &Value, column: &str) -> Vec<i64> {

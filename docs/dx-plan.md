@@ -581,6 +581,31 @@ primitives themselves. Candidate found along the way, NOT built: a builtin call 
 even though the compiler already assigned the index — `type_of` as an op measured ~4 ns
 against `abs()`'s ~41, so some of that 36 ns gap is name dispatch that every builtin call
 in every program pays.
+**A result larger than memory, a page at a time (2026-09-26), DONE — ADR 0044 addendum.**
+`c.cursor(sql, params?, batch?)` / `cur.next()` (`src/pg/cursor.rs`): the statement bound as
+`query` binds it (the cache, the plan, the formats) to a NAMED portal and Executed with a row
+limit (`statement::Fetch`); `PortalSuspended` ends a page as `CommandComplete` ends a statement
+(`Answer::suspended`); `run_page` is an Execute of the same portal and a Sync. Always inside a
+transaction (a portal lives in one): on the connection, `begin` rides in the flight that reads
+the first page (an `Item::fresh`, i.e. unnamed) and the last page commits it (`Paging.owns_tx`);
+on a transaction's value, the cursor shares it. The end is an EMPTY frame, deliberately not
+`missing`. `type_of` says `Cursor` (`Conn::type_name`; still `Value::Db`). Not `DECLARE CURSOR`:
+a SQL cursor is planned for a fast start (`cursor_tuple_fraction`). Two protocol facts asked of
+PostgreSQL 17 before the design settled (`target/bench/f98/probe.helix`): closing a statement
+does NOT close its portals there, though the documentation says it does — so a portal PINS its
+statement against eviction (`Prepared.pinned`), keeping the documented contract; and
+`statement_timeout` bounds each page. What is let go of is OWED (`Session::owe`, `Owed`) and
+closed at the head of the next exchange; out of a transaction (`Session::saw_ready`) pins and
+owed portal Closes are dropped. A review of the first version found four more before commit: a
+cursor's own failed COMMIT was swallowed (silent loss over a writing statement); an open that
+this client refused after its `begin` took left a transaction open; the cursor's `rollback` went
+through the cache and went stale (found LIVE: `25P02` on the retry); and — the one that had
+shipped — `begin`/`commit`/`rollback` all went through the cache, so a stale `commit` failed its
+transaction and stranded the connection. Transaction control is unnamed now (`Shared::control`),
+measured 1.006x on begin/update/commit. Each fix's test was shown to FAIL with only that fix
+reverted (`target/bench/f98/teeth.sh`). Live: ten pages of 10^6 rows at 0.79x the whole
+read, a hundred at 0.89x. CANDIDATE LEFT: `COPY … FROM STDIN` with a frame as its rows.
+
 **The driver, again (2026-09-20) — a result decoded where it arrives; DONE.** Asked to go
 further, measured first from OUTSIDE the process (user and system time against the wall): a
 small query is 7–13 µs of client in 150–190 µs, so nothing was claimed there; a result of any
@@ -946,7 +971,8 @@ different session (the startup packet omits the read-only default) and spends `d
 as well as `net`. `{affected, rows}` always, `RETURNING` rows in the same round trip,
 `execute` refused on a read-only connection before a byte is sent. The gate now builds
 `--features postgres` and a fake wire server proves the startup packet and the completion
-tag; live verification is the field build's. Open: a transaction spanning statements.
+tag; live verification is the field build's. (A transaction spanning statements: DONE
+2026-09-20, `c.begin()` — see "A transaction is a value" above.)
 
 ### Record destructuring — `let {where, limit} = spec in …` (2026-09-04)
 

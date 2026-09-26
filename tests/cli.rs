@@ -15839,10 +15839,15 @@ fn a_capability_refusal_names_the_missing_grant() {
     assert!(err.contains("needs `db-write` authority"), "{err}");
     let (_, err, _) = run_source(exec, &[("HELIX_CAP", "enforce")], "grant_missing_both");
     assert!(err.contains("needs `db-write` authority"), "{err}");
-    // The type's method list names the write verb.
+    // The type's method list names the write verb, and the cursor.
     let (out, _, code) = run(&["doc", "Connection"], &[], "");
     assert_eq!(code, Some(0));
     assert!(out.contains("execute(sql, params?)") && out.contains("query(sql, params?)"), "{out}");
+    assert!(out.contains("cursor(sql, params?, batch?)"), "{out}");
+    // A cursor's own table: it reads, and that is all it does.
+    let (out, _, code) = run(&["doc", "Cursor"], &[], "");
+    assert_eq!(code, Some(0));
+    assert!(out.contains("Cursor methods (1)") && out.contains("next()"), "{out}");
 }
 
 /// A bare bound name as the argument of `map`/`any`/`all` reaches a FUNCTION VALUE as the

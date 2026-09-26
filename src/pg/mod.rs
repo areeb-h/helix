@@ -35,6 +35,8 @@ mod conninfo;
 #[cfg(feature = "postgres")]
 mod connect;
 #[cfg(feature = "postgres")]
+mod cursor;
+#[cfg(feature = "postgres")]
 mod proto;
 #[cfg(feature = "postgres")]
 mod scram;
@@ -62,7 +64,7 @@ use conninfo::parse_url;
 #[cfg(feature = "postgres")]
 use proto::write_msg;
 #[cfg(feature = "postgres")]
-use statement::{run_flight, run_prepared, run_statement, Fail, Item, Outcome, Session};
+use statement::{run_flight, run_prepared, run_statement, Fail, Fetch, Item, Outcome, Owed, Portal, Session};
 #[cfg(feature = "postgres")]
 use types::ColBuf;
 
@@ -88,9 +90,47 @@ pub struct Conn {
     /// The session, which a transaction's value shares with the connection it was begun on.
     #[cfg(feature = "postgres")]
     shared: std::rc::Rc<Shared>,
-    /// `Some` on the value `begin()` answered: which transaction it speaks for.
+    /// `Some` on the value `begin()` answered, and on a cursor's: which transaction it speaks
+    /// for, or reads inside.
     #[cfg(feature = "postgres")]
     tx: Option<u64>,
+    /// `Some` on the value `cursor()` answered: the portal it reads, a page at a time.
+    #[cfg(feature = "postgres")]
+    cursor: Option<Paging>,
+}
+
+/// A cursor's value: its portal, and whether the transaction it reads inside was begun FOR it
+/// — in which case that transaction ends when the cursor does.
+#[cfg(feature = "postgres")]
+struct Paging {
+    cursor: std::cell::RefCell<cursor::Cursor>,
+    owns_tx: bool,
+}
+
+/// Rows a cursor's page holds unless the caller says otherwise.
+#[cfg(feature = "postgres")]
+const DEFAULT_PAGE: u32 = 10_000;
+
+impl Conn {
+    /// What `type_of` answers: a `Connection`, or the `Cursor` that `cursor()` opened.
+    pub fn type_name(&self) -> &'static str {
+        if self.is_cursor() { "Cursor" } else { "Connection" }
+    }
+
+    /// How the value prints: opaque, naming no host and no user.
+    pub fn display_name(&self) -> &'static str {
+        if self.is_cursor() { "<postgres-cursor>" } else { "<postgres-connection>" }
+    }
+
+    #[cfg(feature = "postgres")]
+    fn is_cursor(&self) -> bool {
+        self.cursor.is_some()
+    }
+
+    #[cfg(not(feature = "postgres"))]
+    fn is_cursor(&self) -> bool {
+        false
+    }
 }
 
 /// What a connection value and the transactions begun on it have in common: one session.
@@ -107,6 +147,9 @@ struct Shared {
     /// begun, which is what tells one transaction's value from the next.
     open_tx: std::cell::Cell<Option<u64>>,
     begun: std::cell::Cell<u64>,
+    /// The open transaction was begun for a cursor: it ends when the cursor does, and the
+    /// refusal a statement meets meanwhile says so.
+    paging: std::cell::Cell<bool>,
 }
 
 /// A connection is open, or it is closed and says why.
@@ -155,14 +198,41 @@ impl Conn {
         self.shared.fly(items)
     }
 
-    /// While a transaction is open, only its own value uses the session.
+    /// While a transaction is open, only its own value uses the session — and a cursor's
+    /// value, which reads inside it.
     fn may_speak(&self) -> Result<(), String> {
         match (self.tx, self.shared.open_tx.get()) {
             (None, None) => Ok(()),
             (Some(mine), Some(open)) if mine == open => Ok(()),
+            (None, Some(_)) if self.shared.paging.get() => Err("a cursor is open on this connection, which answers nothing else until the cursor has been read to its end or dropped".to_string()),
             (None, Some(_)) => Err("a transaction is open on this connection, so statements go through the transaction's own value until it commits or rolls back".to_string()),
+            (Some(_), _) if self.cursor.is_some() => Err("this cursor's transaction has ended — it was committed or rolled back — and the cursor with it".to_string()),
             (Some(_), _) => Err("this transaction has ended — it was committed or rolled back".to_string()),
         }
+    }
+
+    /// A cursor with nothing more to read — its last page taken, or a page failed — lets go of
+    /// what it held: the portal (its statement unpinned; inside somebody else's transaction,
+    /// which carries on, its Close owed to the next exchange), and the transaction begun for it
+    /// — committed after the last page, rolled back after a failure; nothing but the cursor was
+    /// ever in it.
+    ///
+    /// A COMMIT THAT FAILS IS THE CALLER'S TO HEAR. Over a statement that writes (a cursor on a
+    /// `"write"` connection reading `insert … returning`), a deferred constraint or a
+    /// serialization failure refuses the commit and undoes what every page said had happened —
+    /// so it is answered, not dropped.
+    fn ended_paging(&self, paging: &Paging, cur: &mut cursor::Cursor, completed: bool) -> Result<(), String> {
+        if self.shared.open_tx.get() != self.tx {
+            return Ok(());
+        }
+        self.shared.release_cursor(cur, !paging.owns_tx);
+        if !paging.owns_tx {
+            return Ok(());
+        }
+        let ended = self.shared.control(if completed { "commit" } else { "rollback" });
+        self.shared.open_tx.set(None);
+        self.shared.paging.set(false);
+        ended.map(|_| ())
     }
 }
 
@@ -180,12 +250,24 @@ impl Shared {
     }
 
     /// Run one statement on this session.
+    fn run(&self, sql: &str, params: &[Value]) -> Result<Outcome, String> {
+        self.with_session(|session| run_prepared(session, sql, params))
+    }
+
+    /// Run one TRANSACTION CONTROL statement — `begin`, `commit`, `rollback` — as the unnamed
+    /// statement, cached by nobody (`Item::fresh` says why).
+    fn control(&self, sql: &str) -> Result<Outcome, String> {
+        self.with_session(|session| run_statement(session, sql, &[]))
+    }
+
+    /// One exchange on the open session: the borrow, the closed check, and — for an exchange
+    /// that did not reach `ReadyForQuery` — closing the connection, in one place.
     ///
     /// `try_borrow_mut` rather than `borrow_mut`: nothing here calls back into Helix while
     /// the borrow is held, so a conflict should be impossible — but "should be impossible"
     /// is what a host abort is made of, and ADR 0024 says user input must never abort the
     /// process. A clean error costs one line.
-    fn run(&self, sql: &str, params: &[Value]) -> Result<Outcome, String> {
+    fn with_session<T>(&self, exchange: impl FnOnce(&mut Session) -> Result<T, Fail>) -> Result<T, String> {
         let mut guard =
             self.state.try_borrow_mut().map_err(|_| "this connection is already in use".to_string())?;
         let session = match &mut *guard {
@@ -195,7 +277,7 @@ impl Shared {
             }
         };
         let (limit, started) = (session.limit, std::time::Instant::now());
-        run_prepared(session, sql, params).map_err(|f| {
+        exchange(session).map_err(|f| {
             if f.broken {
                 // Dropping the session closes the socket. No goodbye: the protocol state is
                 // unknown, so there is nothing safe to say.
@@ -203,6 +285,74 @@ impl Shared {
             }
             said(f, limit, started)
         })
+    }
+
+    /// Open a cursor: the statement bound to a named portal and Executed for its first page —
+    /// after a `begin` in the SAME round trip when the cursor is to have a transaction of its
+    /// own (`begin`).
+    ///
+    /// NOTHING IS LEFT BEHIND WHEN IT FAILS. With a transaction of its own, whatever went wrong
+    /// after the `begin` took — the server refusing the statement, or this client refusing what
+    /// came back — that transaction holds nothing of the caller's, and is rolled back by the
+    /// UNNAMED `rollback`: a cached one can have gone stale with everything else (found live,
+    /// when the retry then ran inside the failed transaction). A name that went stale, or that a
+    /// user's `PREPARE` took, is then tried again, once — as a flight would have, had the error
+    /// not ended the transaction its `begin` opened. Inside the caller's transaction, which
+    /// carries on, the portal that was bound is closed with the next exchange; an error the
+    /// server raised there has failed that transaction, which is the caller's to end.
+    fn open_cursor(&self, sql: &str, params: &[Value], batch: u32, begin: bool) -> Result<cursor::Cursor, String> {
+        self.with_session(|session| {
+            session.portals += 1;
+            let id = session.portals;
+            let page = Item { sql, params, fetch: Fetch { portal: Portal::Named(id), limit: batch }, fresh: false };
+            let opening = [Item { sql: "begin", params: &[], fetch: Fetch::ALL, fresh: true }, page];
+            let items: &[Item<'_>] = if begin { &opening } else { &opening[1..] };
+            let mut again = begin;
+            loop {
+                let failed = match run_flight(session, items) {
+                    Ok(mut outs) => match outs.pop() {
+                        Some(out) => match cursor::Cursor::opened(id, batch, out, session) {
+                            Ok(cur) => return Ok(cur),
+                            Err(text) => Fail::answered(text),
+                        },
+                        None => Fail::answered("the server answered nothing".to_string()),
+                    },
+                    Err(failed) => failed.fail,
+                };
+                if failed.broken {
+                    return Err(failed);
+                }
+                if !begin {
+                    if session.status == b'T' {
+                        session.owe(Owed::Portal(id));
+                    }
+                    return Err(failed);
+                }
+                if session.status != b'I' {
+                    run_statement(session, "rollback", &[])?;
+                }
+                if again && (failed.stale() || failed.taken()) {
+                    again = false;
+                    continue;
+                }
+                return Err(failed);
+            }
+        })
+    }
+
+    /// The next page of a cursor's portal.
+    fn page(&self, cur: &mut cursor::Cursor) -> Result<Vec<ColBuf>, String> {
+        self.with_session(|session| cur.next(session))
+    }
+
+    /// Let go of a cursor's portal — with no exchange of its own: what that owes the server
+    /// rides with the next one (`cursor::Cursor::release`).
+    fn release_cursor(&self, cur: &mut cursor::Cursor, close: bool) {
+        if let Ok(mut guard) = self.state.try_borrow_mut()
+            && let State::Open(session) = &mut *guard
+        {
+            cur.release(session, close);
+        }
     }
 
     /// Run several statements on this session in one round trip (`statement::run_flight`).
@@ -271,8 +421,10 @@ pub fn postgres_open(args: &[Value], line: usize, col: usize) -> Result<Value, H
             writable,
             open_tx: std::cell::Cell::new(None),
             begun: std::cell::Cell::new(0),
+            paging: std::cell::Cell::new(false),
         }),
         tx: None,
+        cursor: None,
     })))
 }
 
@@ -286,17 +438,29 @@ pub fn postgres_open(args: &[Value], line: usize, col: usize) -> Result<Value, H
 
 #[cfg(feature = "postgres")]
 impl Drop for Conn {
-    /// A transaction's value that goes without having committed takes what it did with it.
+    /// A transaction's value that goes without having committed takes what it did with it —
+    /// and so does a cursor's, dropped before its end: the transaction begun for it goes with
+    /// it, portal and all; inside somebody else's transaction the portal alone is let go of,
+    /// its Close riding with the next exchange (none of its own, in a `Drop`).
     ///
     /// Failure is ignored, as below: if the rollback cannot be sent the session is closed,
     /// and a session that closes mid-transaction is rolled back by the server.
     fn drop(&mut self) {
-        if let Some(mine) = self.tx
-            && self.shared.open_tx.get() == Some(mine)
-        {
-            let _ = self.shared.run("rollback", &[]);
-            self.shared.open_tx.set(None);
+        let Some(mine) = self.tx else { return };
+        if self.shared.open_tx.get() != Some(mine) {
+            return;
         }
+        if let Some(paging) = &self.cursor {
+            if let Ok(mut cur) = paging.cursor.try_borrow_mut() {
+                self.shared.release_cursor(&mut cur, !paging.owns_tx);
+            }
+            if !paging.owns_tx {
+                return;
+            }
+        }
+        let _ = self.shared.control("rollback");
+        self.shared.open_tx.set(None);
+        self.shared.paging.set(false);
     }
 }
 
@@ -329,6 +493,16 @@ pub fn conn_method(
     col: usize,
 ) -> Result<Value, HelixError> {
     let err = |m: String| HelixError::new(m, line, col);
+    // A CURSOR'S VALUE READS, AND THAT IS ALL IT DOES. Statements go through the connection or
+    // the transaction it was opened on.
+    if let Some(paging) = &c.cursor {
+        return match name {
+            "next" => next_page(c, paging, args, line, col),
+            other => Err(err(format!("a Cursor has no method `{other}`")).hint(
+                "a Cursor answers `next()`: the next page of its result as a DataFrame, and an empty one once it has been read to its end. Statements go through the connection or transaction it was opened on.",
+            )),
+        };
+    }
     match name {
         "query" | "execute" => {
             // A read-only connection refuses BEFORE a byte is sent, with the spelling that
@@ -348,8 +522,10 @@ pub fn conn_method(
                 if statements.is_empty() {
                     return Ok(Value::Array(std::rc::Rc::new(crate::value::ArrayData::Values(Vec::new()))));
                 }
-                let items: Vec<Item<'_>> =
-                    statements.iter().map(|(sql, params)| Item { sql: sql.as_str(), params }).collect();
+                let items: Vec<Item<'_>> = statements
+                    .iter()
+                    .map(|(sql, params)| Item { sql: sql.as_str(), params, fetch: Fetch::ALL, fresh: false })
+                    .collect();
                 let outs = c.fly(&items).map_err(&conn_err)?;
                 let mut answers = Vec::with_capacity(outs.len());
                 for out in outs {
@@ -372,6 +548,44 @@ pub fn conn_method(
             }
             frame_of(out.cols, line, col).map(|df| Value::DataFrame(std::rc::Rc::new(df)))
         }
+        "cursor" => {
+            let conn_err = |m: String| err(format!("postgres {}: {m}", c.shared.label));
+            let (sql, params, batch) = cursor_args(args, line, col)?;
+            c.may_speak().map_err(&conn_err)?;
+            // ON THE CONNECTION ITSELF, A CURSOR HAS A TRANSACTION OF ITS OWN — a portal lives
+            // in one — begun in the round trip that reads its first page and ended by its last,
+            // or by its value's drop; the connection answers nothing else meanwhile. On a
+            // transaction's value, the cursor reads inside that transaction, which carries on
+            // answering statements between pages.
+            let owns_tx = c.tx.is_none();
+            if owns_tx && c.shared.status().map_err(&conn_err)? != b'I' {
+                return Err(conn_err("a transaction begun in SQL is open on this connection".to_string())
+                    .hint("end it the way it was begun — `execute(\"commit\")` or `execute(\"rollback\")` — or begin transactions with `begin()`, whose value opens cursors inside them."));
+            }
+            let cur = c.shared.open_cursor(sql.as_str(), &params, batch, owns_tx).map_err(&conn_err)?;
+            let tx = if owns_tx {
+                let id = c.shared.begun.get() + 1;
+                c.shared.begun.set(id);
+                c.shared.open_tx.set(Some(id));
+                c.shared.paging.set(true);
+                Some(id)
+            } else {
+                c.tx
+            };
+            let paging = Paging { cursor: std::cell::RefCell::new(cur), owns_tx };
+            let value = Conn { shared: c.shared.clone(), tx, cursor: Some(paging) };
+            // A result that fits in one page has been read to its end already — and a transaction
+            // of its own that cannot commit is this call's error.
+            if let Some(paging) = &value.cursor
+                && let Ok(mut cur) = paging.cursor.try_borrow_mut()
+                && cur.is_done()
+            {
+                value.ended_paging(paging, &mut cur, true).map_err(&conn_err)?;
+            }
+            Ok(Value::Db(std::rc::Rc::new(value)))
+        }
+        "next" => Err(err("`next` reads a cursor's next page, and this is the connection itself".to_string())
+            .hint("`cur = c.cursor(sql, params?, batch?)` opens one; `cur.next()` is its next page.")),
         "begin" => {
             let conn_err = |m: String| err(format!("postgres {}: {m}", c.shared.label));
             if c.tx.is_some() {
@@ -405,11 +619,11 @@ pub fn conn_method(
                 return Err(conn_err("a transaction begun in SQL is open on this connection".to_string())
                     .hint("end it the way it was begun — `execute(\"commit\")` or `execute(\"rollback\")` — or begin transactions with `begin()`."));
             }
-            c.shared.run(sql, &[]).map_err(&conn_err)?;
+            c.shared.control(sql).map_err(&conn_err)?;
             let id = c.shared.begun.get() + 1;
             c.shared.begun.set(id);
             c.shared.open_tx.set(Some(id));
-            Ok(Value::Db(std::rc::Rc::new(Conn { shared: c.shared.clone(), tx: Some(id) })))
+            Ok(Value::Db(std::rc::Rc::new(Conn { shared: c.shared.clone(), tx: Some(id), cursor: None })))
         }
         "commit" | "rollback" => {
             let conn_err = |m: String| err(format!("postgres {}: {m}", c.shared.label));
@@ -422,7 +636,7 @@ pub fn conn_method(
             // `ROLLBACK` and no error, which a caller would take for success. It is rolled
             // back by name instead, and `commit` says so.
             let failed = c.shared.status().map_err(&conn_err)? == b'E';
-            let ran = c.shared.run(if name == "commit" && !failed { "commit" } else { "rollback" }, &[]);
+            let ran = c.shared.control(if name == "commit" && !failed { "commit" } else { "rollback" });
             // Whatever the server said, this value has spoken its last.
             c.shared.open_tx.set(None);
             ran.map_err(&conn_err)?;
@@ -436,8 +650,79 @@ pub fn conn_method(
             "{} has no method `{other}`",
             crate::value::with_article("Connection")
         ))
-            .hint("a Connection answers `query(sql, params?)`, `execute(sql, params?)` when opened with `\"write\"`, and `begin()` — whose value also answers `commit()` and `rollback()`.")),
+            .hint("a Connection answers `query(sql, params?)`, `execute(sql, params?)` when opened with `\"write\"`, `begin()` — whose value also answers `commit()` and `rollback()` — and `cursor(sql, params?, batch?)`, whose value answers `next()`.")),
     }
+}
+
+/// `cur.next()`: the next page of the cursor's result, as a frame — empty once the result has
+/// been read to its end, and empty again on every later call, at no round trip.
+#[cfg(feature = "postgres")]
+fn next_page(c: &std::rc::Rc<Conn>, paging: &Paging, args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
+    let err = |m: String| HelixError::new(m, line, col);
+    if !args.is_empty() {
+        return Err(err(format!("`next` takes no arguments, got {}", args.len())));
+    }
+    let conn_err = |m: String| err(format!("postgres {}: {m}", c.shared.label));
+    let mut cur = paging.cursor.try_borrow_mut().map_err(|_| conn_err("this cursor is already in use".to_string()))?;
+    let frame = |cols: Vec<ColBuf>| frame_of(cols, line, col).map(|df| Value::DataFrame(std::rc::Rc::new(df)));
+    // The first page came with the open and is already here; the page after the last costs
+    // nothing either. Neither asks anything of the session.
+    if let Some(first) = cur.take_first() {
+        return frame(first);
+    }
+    if cur.is_done() {
+        return frame(cur.empty());
+    }
+    c.may_speak().map_err(&conn_err)?;
+    let page = c.shared.page(&mut cur);
+    if cur.is_done() {
+        let ended = c.ended_paging(paging, &mut cur, page.is_ok());
+        // The last page is the caller's only once its transaction has committed.
+        if page.is_ok() {
+            ended.map_err(&conn_err)?;
+        }
+    }
+    frame(page.map_err(&conn_err)?)
+}
+
+/// The arguments of `cursor(sql, params?, batch?)`: one statement's text, its parameters as
+/// `query` takes them, and how many rows a page holds — `DEFAULT_PAGE` unless said.
+#[cfg(feature = "postgres")]
+fn cursor_args(args: &[Value], line: usize, col: usize) -> Result<(std::rc::Rc<String>, Vec<Value>, u32), HelixError> {
+    let err = |m: String| HelixError::new(m, line, col);
+    let sql = match args.first() {
+        Some(Value::Str(sql)) => sql.clone(),
+        Some(Value::Array(_)) => {
+            return Err(err("`cursor` reads one statement a page at a time, not several".to_string())
+                .hint("several statements in one round trip is `query([…])`; a cursor is for a result too large to hold at once."))
+        }
+        _ => {
+            return Err(err("`cursor` takes a SQL string, then its parameters, then how many rows a page holds".to_string())
+                .hint("e.g. `cur = c.cursor(\"select * from events where ts > $1\", [t0], 50000)`, then `cur.next()` for each page — an empty frame once the result is read to its end."))
+        }
+    };
+    if args.len() > 3 {
+        return Err(err(format!("`cursor` takes at most three arguments, got {}", args.len())));
+    }
+    if let (Some(Value::Int(n)), None) = (args.get(1), args.get(2)) {
+        return Err(err("the page size comes third: the parameters, an Array, come second".to_string())
+            .hint(format!("`c.cursor(sql, [], {n})` for a statement with no parameters.")));
+    }
+    let params = statement_params("cursor", args.get(1), line, col)?;
+    let batch = match args.get(2) {
+        None | Some(Value::Missing) => DEFAULT_PAGE,
+        Some(Value::Int(n)) if (1..=i64::from(i32::MAX)).contains(n) => *n as u32,
+        Some(Value::Int(n)) => {
+            return Err(err(format!("a page holds between 1 and {} rows, not {n}", i32::MAX)))
+        }
+        Some(other) => {
+            return Err(err(format!(
+                "a page holds a positive number of rows, got {}",
+                crate::value::with_article(other.type_name())
+            )))
+        }
+    };
+    Ok((sql, params, batch))
 }
 
 /// The same method surface without the feature — unreachable, because a `Connection` can

@@ -12,6 +12,11 @@
 //! makes a page of five queries faster — sending the five together does. Each is framed as it
 //! would be alone, and ONE Sync ends them all, which also makes the flight one transaction:
 //! every statement takes effect or none does.
+//!
+//! AND A RESULT CAN BE READ A PAGE AT A TIME (`super::cursor`): bound to a NAMED portal and
+//! Executed with a row limit, a statement answers that many rows and `PortalSuspended`, and
+//! [`run_page`] asks the same portal for the next page — one round trip each, the same plan
+//! and the same formats the whole read would have had.
 
 use std::collections::HashMap;
 use std::io::Write as _;
@@ -31,13 +36,31 @@ pub struct Session {
     /// Whether this server prints `float8` with round-trip digits (PostgreSQL 12 and later),
     /// which is what makes a binary `float8` the same value as its text (`types`).
     exact_float_text: bool,
-    /// Where the server says the session stands, from its last `ReadyForQuery`: `I` idle, `T`
-    /// in a transaction, `E` in a transaction that has failed and will answer nothing but its
-    /// end.
+    /// Where the server says the session stands, from its last `ReadyForQuery` (`saw_ready`):
+    /// `I` idle, `T` in a transaction, `E` in a transaction that has failed and will answer
+    /// nothing but its end.
     pub status: u8,
     /// How long the server was asked to let one statement run on this session (`timeout=N`);
     /// `None` when it was not asked.
     pub limit: Option<std::time::Duration>,
+    /// How many named portals this session has opened: what the next one's name is made from.
+    pub portals: u64,
+    /// What this connection has let go of and the server still holds, closed at the head of the
+    /// NEXT exchange — whatever it is — at no round trip of its own (`Owed`).
+    owed: Vec<Owed>,
+}
+
+/// Something the server holds that this connection has let go of (`Session::owe`).
+#[derive(Clone, Copy)]
+pub enum Owed {
+    /// A prepared statement forgotten because its name went stale where it could not be
+    /// prepared again — inside a transaction an error is the end of it. A name forgotten here
+    /// and left there would sit on the server for the life of the connection.
+    Statement(u64),
+    /// A cursor's portal, let go of inside a transaction that carries on: read to its end (the
+    /// server holds a finished portal until it is closed or its transaction ends) or dropped
+    /// before.
+    Portal(u64),
 }
 
 /// A framing buffer is kept between exchanges up to this size and let go past it, so one
@@ -46,7 +69,50 @@ const KEEP_WIRE: usize = 1024 * 1024;
 
 impl Session {
     pub fn new(stream: Stream, exact_float_text: bool) -> Session {
-        Session { stream, prepared: Prepared::default(), wire: Vec::new(), exact_float_text, status: b'I', limit: None }
+        Session {
+            stream,
+            prepared: Prepared::default(),
+            wire: Vec::new(),
+            exact_float_text,
+            status: b'I',
+            limit: None,
+            portals: 0,
+            owed: Vec::new(),
+        }
+    }
+
+    /// Whether this server prints `float8` with round-trip digits — what decides if a binary
+    /// `float8` is the same value as its text.
+    pub fn exact_float_text(&self) -> bool {
+        self.exact_float_text
+    }
+
+    /// A cursor's portal was bound from statement `id`: keep that statement from being displaced
+    /// while the portal lives (`super::cursor` says why).
+    pub fn pin(&mut self, id: u64) {
+        self.prepared.pinned.push(id);
+    }
+
+    /// The portal bound from `id` has been let go of: one pin fewer.
+    pub fn unpin(&mut self, id: u64) {
+        if let Some(at) = self.prepared.pinned.iter().position(|p| *p == id) {
+            self.prepared.pinned.swap_remove(at);
+        }
+    }
+
+    /// Close `what` with the next exchange.
+    pub fn owe(&mut self, what: Owed) {
+        self.owed.push(what);
+    }
+
+    /// `ReadyForQuery`: where the server says the session now stands. OUT OF A TRANSACTION NO
+    /// PORTAL SURVIVES — so no statement needs a pin any longer, and no portal a Close.
+    fn saw_ready(&mut self, status: u8) {
+        self.status = status;
+        if status == b'I' {
+            self.prepared.pinned.clear();
+            self.owed.retain(|what| matches!(what, Owed::Statement(_)));
+        }
     }
 }
 
@@ -55,6 +121,17 @@ impl Session {
 pub struct Outcome {
     pub cols: Vec<ColBuf>,
     pub affected: i64,
+    /// The portal was SUSPENDED at its row limit — a cursor's page — rather than run to its
+    /// end.
+    pub suspended: bool,
+    /// What the statement returns, when known: remembered from an earlier run, or learned
+    /// from this one. A cursor reads its later pages into buffers of this shape.
+    pub desc: Option<Rc<RowDesc>>,
+    /// Bind asked for the fixed-width columns in binary — it could, because what the statement
+    /// returns was known before it went.
+    pub binary: bool,
+    /// The prepared statement the Bind named — `None` for the unnamed one. A cursor pins it.
+    pub bound: Option<u64>,
 }
 
 /// What a statement returns: each column's name and type OID. Learned from the server's
@@ -64,11 +141,15 @@ pub struct RowDesc {
 }
 
 impl RowDesc {
-    /// The buffers a result is read into — each column in the format its Bind asked for.
-    fn bufs(&self, exact_float_text: bool) -> Vec<ColBuf> {
+    /// The buffers a result is read into — each column in the format its Bind asked for: the
+    /// fixed-width ones in binary when `binary`, everything else as text.
+    pub fn bufs(&self, binary: bool, exact_float_text: bool) -> Vec<ColBuf> {
         self.cols
             .iter()
-            .map(|(name, oid)| ColBuf::with_format(name.clone(), *oid, binary_width(*oid, exact_float_text)))
+            .map(|(name, oid)| {
+                let width = binary_width(*oid, exact_float_text).filter(|_| binary);
+                ColBuf::with_format(name.clone(), *oid, width)
+            })
             .collect()
     }
 }
@@ -115,6 +196,9 @@ struct Prepared {
     by_sql: HashMap<String, Entry>,
     tick: u64,
     next: u64,
+    /// Statements an open cursor's portal was bound from, once per cursor (`Session::pin`):
+    /// never the one displaced to make room while the portal lives.
+    pinned: Vec<u64>,
 }
 
 impl Prepared {
@@ -130,8 +214,9 @@ impl Prepared {
 
     /// A fresh statement number — and, when the cache is full, the least recently used
     /// statement's, to be closed on the server in the round trip that follows. `spoken_for` are
-    /// statements the same flight binds or has already chosen to displace; with every one of
-    /// them spoken for there is nobody to displace, and the caller uses the unnamed statement.
+    /// statements the same flight binds or has already chosen to displace, and a statement an
+    /// open cursor's portal was bound from is never displaced either (`pinned`); with every one
+    /// of them spoken for there is nobody to displace, and the caller uses the unnamed statement.
     ///
     /// CHOOSING IS NOT YET FORGETTING. The victim stays in the cache until the `Close` that
     /// names it has been on the wire ([`Prepared::forget`]) — a statement forgotten here and
@@ -146,7 +231,7 @@ impl Prepared {
         let victim = self
             .by_sql
             .values()
-            .filter(|e| !spoken_for.contains(&e.id))
+            .filter(|e| !spoken_for.contains(&e.id) && !self.pinned.contains(&e.id))
             .min_by_key(|e| e.used)
             .map(|e| e.id)?;
         self.next += 1;
@@ -201,6 +286,23 @@ impl Fail {
         self.code == "57014"
     }
 
+    /// The statement's name went STALE under it: the server no longer has it (`26000`), or
+    /// its result type changed (`0A000`). Prepared again, once.
+    pub fn stale(&self) -> bool {
+        self.code == "26000" || self.code == "0A000"
+    }
+
+    /// The name is TAKEN by a user's own prepared statement (`42P05`): the unnamed one works.
+    pub fn taken(&self) -> bool {
+        self.code == "42P05"
+    }
+
+    /// The exchange reached `ReadyForQuery`, and what came back was not usable: the connection
+    /// is where the next statement expects it, and this says what was wrong.
+    pub fn answered(text: String) -> Fail {
+        Fail { text, code: String::new(), parsed: false, broken: false, unsent: false }
+    }
+
     /// Refused before a byte was sent: the connection is exactly where it was.
     fn unsent(text: String) -> Fail {
         Fail { text, code: String::new(), parsed: false, broken: false, unsent: true }
@@ -222,6 +324,16 @@ enum Name {
     Cached(u64),
 }
 
+impl Name {
+    /// The prepared statement's number, when it is one this connection keeps.
+    fn cached(self) -> Option<u64> {
+        match self {
+            Name::Cached(id) => Some(id),
+            Name::Unnamed => None,
+        }
+    }
+}
+
 /// A statement's server-side name, as the NUL-terminated string the protocol takes.
 fn put_name(out: &mut Vec<u8>, name: Name) {
     if let Name::Cached(id) = name {
@@ -231,24 +343,62 @@ fn put_name(out: &mut Vec<u8>, name: Name) {
     out.push(0);
 }
 
+/// Which portal an Execute runs, and how many rows it asks for: the unnamed portal and all of
+/// them for a statement; a named one and a page of them for a cursor (`super::cursor`), which
+/// comes back for the next page while the server says the portal was suspended.
+#[derive(Clone, Copy)]
+pub struct Fetch {
+    pub portal: Portal,
+    /// Rows an Execute asks for; 0 is all of them.
+    pub limit: u32,
+}
+
+impl Fetch {
+    /// The whole result through the unnamed portal: what a statement is.
+    pub const ALL: Fetch = Fetch { portal: Portal::Unnamed, limit: 0 };
+}
+
+/// The unnamed portal, or one this connection named for a cursor.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Portal {
+    Unnamed,
+    Named(u64),
+}
+
+/// A portal's name, as the NUL-terminated string the protocol takes.
+fn put_portal(out: &mut Vec<u8>, portal: Portal) {
+    if let Portal::Named(id) = portal {
+        let _ = write!(out, "_helix_cursor_{id}");
+    }
+    out.push(0);
+}
+
 /// Run one statement on a connection that keeps what it prepares.
 pub fn run_prepared(se: &mut Session, sql: &str, params: &[Value]) -> Result<Outcome, Fail> {
+    run_fetching(se, sql, params, Fetch::ALL)
+}
+
+/// The same, through the portal `fetch` names and for as many rows as it asks: how a cursor's
+/// first page is read (the portal stays, suspended, for [`run_page`]).
+pub fn run_fetching(se: &mut Session, sql: &str, params: &[Value], fetch: Fetch) -> Result<Outcome, Fail> {
     // A statement found stale below, to be closed by the exchange that replaces it: a name
     // whose result type changed (`0A000`) is useless and STILL THERE, and would otherwise sit
     // on the server for the life of the connection. Closing one that is gone is not an error.
     let mut stale: Option<u64> = None;
     // A HIT: Bind and Execute against the name — no Parse, and once it has run, no Describe.
     if let Some((id, desc)) = se.prepared.touch(sql) {
-        match exchange(se, Name::Cached(id), None, params, desc.as_ref()) {
+        match exchange(se, Framing { name: Name::Cached(id), parse: None, known: desc.as_ref(), fetch }, params) {
             // The server no longer has it, or its result type changed under it: forget the
             // name and prepare the text again below — once.
-            Err(f) if !f.broken && (f.code == "26000" || f.code == "0A000") => {
+            Err(f) if !f.broken && f.stale() => {
                 se.prepared.by_sql.remove(sql);
                 stale = Some(id);
                 // UNLESS THAT ERROR JUST ENDED A TRANSACTION. Inside one, any error is the
                 // end of it: preparing again would only be answered `25P02`, which says
-                // nothing about why. The cause is reported instead, with what to do.
+                // nothing about why. The cause is reported instead, with what to do — and the
+                // stale name is closed by the next exchange, whatever that is.
                 if se.status == b'E' {
+                    se.owe(Owed::Statement(id));
                     let text = format!(
                         "{} — the statement was prepared before a change that made it stale, and an error inside a transaction ends the transaction: roll back and run it again",
                         f.text
@@ -271,7 +421,7 @@ pub fn run_prepared(se: &mut Session, sql: &str, params: &[Value]) -> Result<Out
     };
     // One `Close` rides with the Parse: the stale statement, whose leaving made the room —
     // or, with nothing stale, whatever was displaced.
-    let ran = exchange(se, Name::Cached(id), Some((sql, stale.or(evicted))), params, None);
+    let ran = exchange(se, Framing { name: Name::Cached(id), parse: Some((sql, stale.or(evicted))), known: None, fetch }, params);
     // The `Close` went first, so whatever became of the rest, it was read — unless nothing went.
     if let (None, Some(old)) = (stale, evicted)
         && !matches!(&ran, Err(f) if f.unsent)
@@ -284,8 +434,8 @@ pub fn run_prepared(se: &mut Session, sql: &str, params: &[Value]) -> Result<Out
             Ok(out)
         }
         // The name is a user's own prepared statement: the unnamed one always works.
-        Err(f) if !f.broken && f.code == "42P05" => {
-            exchange(se, Name::Unnamed, Some((sql, None)), params, None).map(|(out, _)| out)
+        Err(f) if !f.broken && f.taken() => {
+            exchange(se, Framing { name: Name::Unnamed, parse: Some((sql, None)), known: None, fetch }, params).map(|(out, _)| out)
         }
         Err(f) => {
             if f.parsed && !f.broken {
@@ -299,7 +449,7 @@ pub fn run_prepared(se: &mut Session, sql: &str, params: &[Value]) -> Result<Out
 /// Run one parameterised statement as the UNNAMED statement: its rows, and what it affected.
 /// What a connection opened for one query uses.
 pub fn run_statement(se: &mut Session, sql: &str, params: &[Value]) -> Result<Outcome, Fail> {
-    exchange(se, Name::Unnamed, Some((sql, None)), params, None).map(|(out, _)| out)
+    exchange(se, Framing { name: Name::Unnamed, parse: Some((sql, None)), known: None, fetch: Fetch::ALL }, params).map(|(out, _)| out)
 }
 
 /// A parameter, rendered as the text the server will parse, straight into the Bind message.
@@ -404,40 +554,60 @@ fn put_quoted(out: &mut Vec<u8>, text: &[u8]) {
     out.push(b'"');
 }
 
-/// Frame one exchange into `wire`: one statement's messages, and Sync.
-fn frame(
-    wire: &mut Vec<u8>,
+/// How one statement goes out: which name it binds, whether (under what text, closing whom)
+/// it is Parsed first, what it is known to return, and through which portal how many rows are
+/// asked for.
+#[derive(Clone, Copy)]
+struct Framing<'a> {
     name: Name,
-    parse: Option<(&str, Option<u64>)>,
-    params: &[Value],
-    known: Option<&Rc<RowDesc>>,
-    exact_float_text: bool,
-) -> Result<(), String> {
+    parse: Option<(&'a str, Option<u64>)>,
+    known: Option<&'a Rc<RowDesc>>,
+    fetch: Fetch,
+}
+
+/// Frame one exchange into `wire`: every Close owed from earlier exchanges, one statement's
+/// messages, and Sync.
+fn frame(wire: &mut Vec<u8>, owed: &[Owed], how: Framing<'_>, params: &[Value], exact_float_text: bool) -> Result<(), String> {
     wire.clear();
-    frame_statement(wire, name, parse, params, known, exact_float_text)?;
+    frame_closes(wire, owed)?;
+    frame_statement(wire, how, params, exact_float_text)?;
     let at = begin_msg(wire, b'S');
     end_msg(wire, at)
 }
 
-/// Append one statement's messages to `wire`: optionally Close a displaced statement and Parse
-/// `sql` under `name`, then Bind, Describe (only when what the statement returns is not yet
-/// `known`) and Execute. No Sync: a flight of several ends with one.
-fn frame_statement(
-    wire: &mut Vec<u8>,
-    name: Name,
-    parse: Option<(&str, Option<u64>)>,
-    params: &[Value],
-    known: Option<&Rc<RowDesc>>,
-    exact_float_text: bool,
-) -> Result<(), String> {
-    if let Some((sql, evicted)) = parse {
-        // Closing a name the server does not have is not an error, so this needs no answer
-        // of its own; `CloseComplete` is skipped with the other messages nobody waits for.
-        if let Some(old) = evicted {
-            let at = begin_msg(wire, b'C');
+/// Close what this connection let go of: a prepared statement (`S`) or a portal (`P`). Closing
+/// a name the server does not have is not an error, so this needs no answer of its own;
+/// `CloseComplete` is skipped with the other messages nobody waits for.
+fn frame_close(wire: &mut Vec<u8>, what: Owed) -> Result<(), String> {
+    let at = begin_msg(wire, b'C');
+    match what {
+        Owed::Statement(id) => {
             wire.push(b'S');
-            put_name(wire, Name::Cached(old));
-            end_msg(wire, at)?;
+            put_name(wire, Name::Cached(id));
+        }
+        Owed::Portal(id) => {
+            wire.push(b'P');
+            put_portal(wire, Portal::Named(id));
+        }
+    }
+    end_msg(wire, at)
+}
+
+/// Every Close owed, at the head of an exchange.
+fn frame_closes(wire: &mut Vec<u8>, owed: &[Owed]) -> Result<(), String> {
+    owed.iter().try_for_each(|what| frame_close(wire, *what))
+}
+
+/// Append one statement's messages to `wire`: optionally Close a displaced statement and Parse
+/// `sql` under `name`, then Bind (to the portal `fetch` names), Describe (only when what the
+/// statement returns is not yet `known`) and Execute (for as many rows as `fetch` asks). No
+/// Sync: a flight of several ends with one.
+fn frame_statement(wire: &mut Vec<u8>, how: Framing<'_>, params: &[Value], exact_float_text: bool) -> Result<(), String> {
+    let Framing { name, parse, known, fetch } = how;
+    if let Some((sql, evicted)) = parse {
+        // The statement this one displaces goes first.
+        if let Some(old) = evicted {
+            frame_close(wire, Owed::Statement(old))?;
         }
         // Parse: no declared parameter types (the server infers them from the text).
         let at = begin_msg(wire, b'P');
@@ -450,7 +620,7 @@ fn frame_statement(
     // Bind: parameters as text; results as text, except the fixed-width columns of a
     // statement whose columns are known.
     let at = begin_msg(wire, b'B');
-    wire.push(0); // the unnamed portal
+    put_portal(wire, fetch.portal);
     put_name(wire, name);
     wire.extend_from_slice(&0i16.to_be_bytes()); // parameter formats: all text
     let n = i16::try_from(params.len()).map_err(|_| "too many parameters".to_string())?;
@@ -479,13 +649,18 @@ fn frame_statement(
     if known.is_none() {
         let at = begin_msg(wire, b'D');
         wire.push(b'P');
-        wire.push(0);
+        put_portal(wire, fetch.portal);
         end_msg(wire, at)?;
     }
+    frame_execute(wire, fetch)
+}
 
+/// Execute: the portal, and how many rows (0 is all of them).
+fn frame_execute(wire: &mut Vec<u8>, fetch: Fetch) -> Result<(), String> {
     let at = begin_msg(wire, b'E');
-    wire.push(0); // the unnamed portal
-    wire.extend_from_slice(&0i32.to_be_bytes()); // unlimited rows
+    put_portal(wire, fetch.portal);
+    let limit = i32::try_from(fetch.limit).map_err(|_| "a page of more rows than an Execute can ask for".to_string())?;
+    wire.extend_from_slice(&limit.to_be_bytes());
     end_msg(wire, at)
 }
 
@@ -505,11 +680,17 @@ fn refuse_copy(se: &mut Session) -> Result<(), String> {
 struct Answer {
     cols: Vec<ColBuf>,
     described: bool,
+    /// What the statement was known to return before it went — so its fixed-width columns
+    /// were asked for in binary.
+    known: Option<Rc<RowDesc>>,
     /// What the statement returns, when the server was asked and said.
     learned: Option<Rc<RowDesc>>,
     /// ParseComplete arrived: the statement exists on the server from here on.
     parsed: bool,
     affected: i64,
+    /// PortalSuspended arrived: the row limit was reached, and the portal stays for the next
+    /// page.
+    suspended: bool,
     /// The first cell that was not its column's type. The rows after it are still READ — the
     /// connection has to reach `ReadyForQuery` — and the error is reported once it has.
     bad_cell: Option<String>,
@@ -518,13 +699,21 @@ struct Answer {
 impl Answer {
     fn new(known: Option<&Rc<RowDesc>>, exact_float_text: bool) -> Answer {
         Answer {
-            cols: known.map(|d| d.bufs(exact_float_text)).unwrap_or_default(),
+            cols: known.map(|d| d.bufs(true, exact_float_text)).unwrap_or_default(),
             described: known.is_some(),
+            known: known.cloned(),
             learned: None,
             parsed: false,
             affected: 0,
+            suspended: false,
             bad_cell: None,
         }
+    }
+
+    /// A page of a portal described when it was opened: read into buffers of the shape and
+    /// formats its first page had.
+    fn page(cols: Vec<ColBuf>) -> Answer {
+        Answer { cols, described: true, known: None, learned: None, parsed: false, affected: 0, suspended: false, bad_cell: None }
     }
 
     /// Take one message. Answers whether it was the statement's LAST — CommandComplete, or
@@ -581,6 +770,12 @@ impl Answer {
                 self.affected = rows_affected(Cur::new(body).cstr_ref()?);
                 return Ok(true);
             }
+            // PortalSuspended: the row limit was reached; the rest of the result waits for the
+            // next Execute of the same portal.
+            b's' => {
+                self.suspended = true;
+                return Ok(true);
+            }
             // EmptyQueryResponse stands in for CommandComplete.
             b'I' => return Ok(true),
             _ => {}
@@ -598,7 +793,10 @@ impl Answer {
         if let Some(text) = self.bad_cell {
             return Err(failed(text, self.parsed));
         }
-        Ok((Outcome { cols: self.cols, affected: self.affected }, self.learned))
+        let binary = self.known.is_some();
+        let desc = self.known.or_else(|| self.learned.clone());
+        let out = Outcome { cols: self.cols, affected: self.affected, suspended: self.suspended, desc, binary, bound: None };
+        Ok((out, self.learned))
     }
 }
 
@@ -616,23 +814,49 @@ fn drain_to_ready(s: &mut Stream) -> Result<u8, String> {
 
 /// One round trip. Answers what the statement produced and — when the server was asked to
 /// describe the result — what it returns, for the caller to keep.
-fn exchange(
-    se: &mut Session,
-    name: Name,
-    parse: Option<(&str, Option<u64>)>,
-    params: &[Value],
-    known: Option<&Rc<RowDesc>>,
-) -> Result<(Outcome, Option<Rc<RowDesc>>), Fail> {
-    // The whole exchange, framed, to go out in ONE write. Nothing has been sent until it is
-    // whole, so a parameter that cannot be framed leaves the connection untouched.
-    frame(&mut se.wire, name, parse, params, known, se.exact_float_text).map_err(Fail::unsent)?;
+fn exchange(se: &mut Session, how: Framing<'_>, params: &[Value]) -> Result<(Outcome, Option<Rc<RowDesc>>), Fail> {
+    // The whole exchange, framed, to go out in ONE write — every Close owed from earlier at its
+    // head. Nothing has been sent until it is whole, so a parameter that cannot be framed leaves
+    // the connection untouched, and the Closes owed for the next.
+    let owed = std::mem::take(&mut se.owed);
+    if let Err(text) = frame(&mut se.wire, &owed, how, params, se.exact_float_text) {
+        se.owed.extend(owed);
+        return Err(Fail::unsent(text));
+    }
+    let mut answer = Answer::new(how.known, se.exact_float_text);
+    send_and_read(se, &mut answer)?;
+    let (mut out, learned) = answer.finish()?;
+    out.bound = how.name.cached();
+    Ok((out, learned))
+}
+
+/// One more page of a suspended portal: every Close owed, then Execute and Sync — its rows read
+/// into `cols`, buffers of the shape and formats its first page had — and whether the portal
+/// was suspended again or has now run to its end (`Outcome::suspended`).
+pub fn run_page(se: &mut Session, fetch: Fetch, cols: Vec<ColBuf>) -> Result<Outcome, Fail> {
+    let owed = std::mem::take(&mut se.owed);
+    se.wire.clear();
+    let framed = frame_closes(&mut se.wire, &owed).and_then(|()| frame_execute(&mut se.wire, fetch)).and_then(|()| {
+        let at = begin_msg(&mut se.wire, b'S');
+        end_msg(&mut se.wire, at)
+    });
+    if let Err(text) = framed {
+        se.owed.extend(owed);
+        return Err(Fail::unsent(text));
+    }
+    let mut answer = Answer::page(cols);
+    send_and_read(se, &mut answer)?;
+    answer.finish().map(|(out, _)| out)
+}
+
+/// Send what `wire` holds — one exchange, ending in Sync — and read its answer to
+/// `ReadyForQuery`.
+fn send_and_read(se: &mut Session, answer: &mut Answer) -> Result<(), Fail> {
     let sent = send_framed(&mut se.stream, &se.wire);
     if se.wire.capacity() > KEEP_WIRE {
         se.wire = Vec::new();
     }
     sent?;
-
-    let mut answer = Answer::new(known, se.exact_float_text);
     loop {
         let (tag, body) = se.stream.next_msg()?;
         match tag {
@@ -642,7 +866,7 @@ fn exchange(
                 // state even though this query is finished. If that fails it is not.
                 let drained = drain_to_ready(&mut se.stream);
                 if let Ok(status) = drained {
-                    se.status = status;
+                    se.saw_ready(status);
                 }
                 return Err(Fail { text, code, parsed: answer.parsed, broken: drained.is_err(), unsent: false });
             }
@@ -654,21 +878,31 @@ fn exchange(
             b'G' => refuse_copy(se)?,
             // ReadyForQuery — the synchronisation point, and where the session stands.
             b'Z' => {
-                se.status = body.first().copied().unwrap_or(b'I');
-                break;
+                let status = body.first().copied().unwrap_or(b'I');
+                se.saw_ready(status);
+                return Ok(());
             }
             _ => {
                 answer.take(tag, body)?;
             }
         }
     }
-    answer.finish()
 }
 
-/// One statement of a flight: its text and its parameters.
+/// One statement of a flight: its text, its parameters, and through which portal how many rows
+/// are asked for (`Fetch::ALL` for a statement).
 pub struct Item<'a> {
     pub sql: &'a str,
     pub params: &'a [Value],
+    pub fetch: Fetch,
+    /// Run as the UNNAMED statement, cached by nobody: transaction control (`begin`, `commit`,
+    /// `rollback`). A cached name can go stale — `DEALLOCATE ALL`, a pooler's other backend —
+    /// and a statement that goes stale INSIDE a transaction cannot be prepared again there;
+    /// for the statement that was to END the transaction, that would leave the session in one
+    /// that has failed, with nothing left to end it. Parsing `commit` afresh costs the server
+    /// microseconds; a session stuck in an aborted transaction costs the caller everything
+    /// after.
+    pub fresh: bool,
 }
 
 /// Why a flight failed, and at which statement (counted from 0) when it was one's doing.
@@ -709,7 +943,13 @@ struct Plan {
 pub fn run_flight(se: &mut Session, items: &[Item<'_>]) -> Result<Vec<Outcome>, FlightFail> {
     // A flight of one is that statement: nothing to share, nothing that can deadlock.
     if let [only] = items {
-        return run_prepared(se, only.sql, only.params).map(|out| vec![out]).map_err(|fail| FlightFail { at: Some(0), fail });
+        let ran = if only.fresh {
+            exchange(se, Framing { name: Name::Unnamed, parse: Some((only.sql, None)), known: None, fetch: only.fetch }, only.params)
+                .map(|(out, _)| out)
+        } else {
+            run_fetching(se, only.sql, only.params, only.fetch)
+        };
+        return ran.map(|out| vec![out]).map_err(|fail| FlightFail { at: Some(0), fail });
     }
     // A COPY GOES ALONE. `COPY … FROM STDIN` makes the server read what follows as COPY data;
     // what follows in a flight is the next statement, and a real server does not skip that to
@@ -723,15 +963,14 @@ pub fn run_flight(se: &mut Session, items: &[Item<'_>]) -> Result<Vec<Outcome>, 
         let text = "a `COPY` cannot share a round trip — the server reads whatever follows it as COPY data — so it goes on its own".to_string();
         return Err(FlightFail { at: Some(k), fail: Fail::unsent(text) });
     }
-    let (mut named, mut close_first) = (true, Vec::new());
+    let mut named = true;
     let (mut went_stale, mut was_taken) = (false, false);
     loop {
-        let failed = match fly(se, items, named, &close_first) {
+        let failed = match fly(se, items, named) {
             Ok(outs) => return Ok(outs),
             Err(f) => f,
         };
-        let stale = failed.fail.code == "26000" || failed.fail.code == "0A000";
-        let taken = failed.fail.code == "42P05";
+        let (stale, taken) = (failed.fail.stale(), failed.fail.taken());
         if failed.fail.broken || !(stale || taken) || (stale && went_stale) || (taken && was_taken) {
             return Err(failed);
         }
@@ -739,12 +978,13 @@ pub fn run_flight(se: &mut Session, items: &[Item<'_>]) -> Result<Vec<Outcome>, 
             // ONE STALE NAME IS RARELY ALONE. `DEALLOCATE ALL`, `DISCARD ALL`, a pooler's other
             // backend: every name went together, and a flight that forgot only the one the
             // server happened to refuse would be refused for the next, and the next. So every
-            // cached statement the flight binds is forgotten — and CLOSED at the head of the
-            // next attempt, so that one which was still there (`0A000` spares the others) is
-            // not left behind. Closing a name that is gone is not an error.
+            // cached statement the flight binds is forgotten — and CLOSED by the next exchange
+            // (the next attempt, or whatever follows an error that ended a transaction), so
+            // that one which was still there (`0A000` spares the others) is not left behind.
+            // Closing a name that is gone is not an error.
             for item in items {
                 if let Some(e) = se.prepared.by_sql.remove(item.sql) {
-                    close_first.push(e.id);
+                    se.owe(Owed::Statement(e.id));
                 }
             }
         }
@@ -795,19 +1035,22 @@ fn starts_with_copy(sql: &str) -> bool {
     rest.get(..4).is_some_and(|w| w.eq_ignore_ascii_case("copy")) && rest.get(4..).is_some_and(|r| r.chars().next().is_none_or(word_ends))
 }
 
-/// One attempt at a flight. `close_first` are statements an earlier attempt found stale.
-fn fly(se: &mut Session, items: &[Item<'_>], named: bool, close_first: &[u64]) -> Result<Vec<Outcome>, FlightFail> {
+/// One attempt at a flight.
+fn fly(se: &mut Session, items: &[Item<'_>], named: bool) -> Result<Vec<Outcome>, FlightFail> {
     let whole = |fail: Fail| FlightFail { at: None, fail };
 
     // PLAN. First every statement this connection already has — all of them, so that none is
     // the one displaced to make room for a new statement EARLIER in the same flight — then the
     // new ones, `spoken_for` growing with each name taken and each victim chosen.
-    let hits: Vec<Option<(u64, Option<Rc<RowDesc>>)>> = items.iter().map(|item| se.prepared.touch(item.sql)).collect();
+    let hits: Vec<Option<(u64, Option<Rc<RowDesc>>)>> =
+        items.iter().map(|item| if item.fresh { None } else { se.prepared.touch(item.sql) }).collect();
     let mut spoken_for: Vec<u64> = hits.iter().flatten().map(|(id, _)| *id).collect();
     let mut plans: Vec<Plan> = Vec::with_capacity(items.len());
     for (i, (item, hit)) in items.iter().zip(hits).enumerate() {
         let twin = items.get(..i).unwrap_or(&[]).iter().position(|earlier| earlier.sql == item.sql);
-        let plan = if let Some((id, known)) = hit {
+        let plan = if item.fresh {
+            Plan { name: Name::Unnamed, parse: true, new_id: None, evict: None, known: None }
+        } else if let Some((id, known)) = hit {
             Plan { name: Name::Cached(id), parse: false, new_id: None, evict: None, known }
         } else if let Some(id) = twin.and_then(|j| plans.get(j)).and_then(|p| p.new_id) {
             // The same text, earlier in this flight: parsed there, bound here.
@@ -826,21 +1069,24 @@ fn fly(se: &mut Session, items: &[Item<'_>], named: bool, close_first: &[u64]) -
         plans.push(plan);
     }
 
-    // FRAME. Nothing has been sent until the flight is whole.
+    // FRAME. Nothing has been sent until the flight is whole — and the Closes owed from earlier,
+    // which ride at its head, stay owed to the next exchange if it is not.
     se.wire.clear();
-    for old in close_first {
-        let at = begin_msg(&mut se.wire, b'C');
-        se.wire.push(b'S');
-        put_name(&mut se.wire, Name::Cached(*old));
-        end_msg(&mut se.wire, at).map_err(|text| whole(Fail::unsent(text)))?;
+    let owed = std::mem::take(&mut se.owed);
+    let framed = frame_closes(&mut se.wire, &owed).map_err(|text| whole(Fail::unsent(text))).and_then(|()| {
+        for (k, (item, plan)) in items.iter().zip(&plans).enumerate() {
+            let parse = plan.parse.then_some((item.sql, plan.evict));
+            let how = Framing { name: plan.name, parse, known: plan.known.as_ref(), fetch: item.fetch };
+            frame_statement(&mut se.wire, how, item.params, se.exact_float_text)
+                .map_err(|text| FlightFail { at: Some(k), fail: Fail::unsent(text) })?;
+        }
+        let at = begin_msg(&mut se.wire, b'S');
+        end_msg(&mut se.wire, at).map_err(|text| whole(Fail::unsent(text)))
+    });
+    if let Err(failed) = framed {
+        se.owed.extend(owed);
+        return Err(failed);
     }
-    for (k, (item, plan)) in items.iter().zip(&plans).enumerate() {
-        let parse = plan.parse.then_some((item.sql, plan.evict));
-        frame_statement(&mut se.wire, plan.name, parse, item.params, plan.known.as_ref(), se.exact_float_text)
-            .map_err(|text| FlightFail { at: Some(k), fail: Fail::unsent(text) })?;
-    }
-    let at = begin_msg(&mut se.wire, b'S');
-    end_msg(&mut se.wire, at).map_err(|text| whole(Fail::unsent(text)))?;
     let sent = se.stream.send_draining(&se.wire);
     if se.wire.capacity() > KEEP_WIRE {
         se.wire = Vec::new();
@@ -867,7 +1113,8 @@ fn fly(se: &mut Session, items: &[Item<'_>], named: bool, close_first: &[u64]) -
             // finds out is the next one.)
             b'G' if cur + 1 == items.len() => refuse_copy(se).map_err(|text| whole(Fail::from(text)))?,
             b'Z' => {
-                se.status = body.first().copied().unwrap_or(b'I');
+                let status = body.first().copied().unwrap_or(b'I');
+                se.saw_ready(status);
                 break;
             }
             _ => {
@@ -905,8 +1152,10 @@ fn fly(se: &mut Session, items: &[Item<'_>], named: bool, close_first: &[u64]) -
         return Err(whole(Fail { text, code: String::new(), parsed: false, broken: false, unsent: false }));
     }
     let mut outs = Vec::with_capacity(answers.len());
-    for (k, answer) in answers.into_iter().enumerate() {
-        outs.push(answer.finish().map_err(|fail| FlightFail { at: Some(k), fail })?.0);
+    for (k, (answer, plan)) in answers.into_iter().zip(&plans).enumerate() {
+        let mut out = answer.finish().map_err(|fail| FlightFail { at: Some(k), fail })?.0;
+        out.bound = plan.name.cached();
+        outs.push(out);
     }
     Ok(outs)
 }
@@ -956,13 +1205,16 @@ mod tests {
             assert_eq!(at, wire.len(), "the framing covers the buffer exactly");
             out
         };
+        fn all<'a>(name: Name, parse: Option<(&'a str, Option<u64>)>, known: Option<&'a Rc<RowDesc>>) -> Framing<'a> {
+            Framing { name, parse, known, fetch: Fetch::ALL }
+        }
         let mut wire = Vec::new();
-        frame(&mut wire, Name::Cached(7), Some(("select 1", Some(3))), &[Value::Int(5)], None, true).unwrap();
+        frame(&mut wire, &[], all(Name::Cached(7), Some(("select 1", Some(3))), None), &[Value::Int(5)], true).unwrap();
         assert_eq!(tags(&wire), "CPBDES");
         assert!(wire.windows(9).any(|w| w == b"_helix_7\0") && wire.windows(9).any(|w| w == b"_helix_3\0"));
 
         let desc = Rc::new(RowDesc { cols: vec![("id".into(), 20), ("name".into(), 25), ("score".into(), 701)] });
-        frame(&mut wire, Name::Cached(7), None, &[Value::Int(5), Value::Missing], Some(&desc), true).unwrap();
+        frame(&mut wire, &[], all(Name::Cached(7), None, Some(&desc)), &[Value::Int(5), Value::Missing], true).unwrap();
         assert_eq!(tags(&wire), "BES");
         // Bind's tail: three result formats — binary, text, binary.
         let bind_len = 1 + i32::from_be_bytes([wire[1], wire[2], wire[3], wire[4]]) as usize;
@@ -972,13 +1224,30 @@ mod tests {
 
         // Before PostgreSQL 12 a float's text is rounded, so it stays text; and a statement
         // with nothing fixed-width asks for nothing.
-        frame(&mut wire, Name::Cached(7), None, &[], Some(&desc), false).unwrap();
+        frame(&mut wire, &[], all(Name::Cached(7), None, Some(&desc)), &[], false).unwrap();
         let bind_len = 1 + i32::from_be_bytes([wire[1], wire[2], wire[3], wire[4]]) as usize;
         assert_eq!(&wire[bind_len - 8..bind_len], &[0, 3, 0, 1, 0, 0, 0, 0]);
         let text_only = Rc::new(RowDesc { cols: vec![("name".into(), 25)] });
-        frame(&mut wire, Name::Unnamed, None, &[], Some(&text_only), true).unwrap();
+        frame(&mut wire, &[], all(Name::Unnamed, None, Some(&text_only)), &[], true).unwrap();
         let bind_len = 1 + i32::from_be_bytes([wire[1], wire[2], wire[3], wire[4]]) as usize;
         assert_eq!(&wire[bind_len - 2..bind_len], &[0, 0]);
+
+        // A CURSOR'S FIRST PAGE: bound to a named portal, Executed for a page of rows — and what
+        // earlier exchanges let go of closed at the head: a statement found stale, a portal a
+        // cursor was done with. Its later pages are an Execute of the same portal and a Sync.
+        let page = Fetch { portal: Portal::Named(4), limit: 500 };
+        let owed = [Owed::Statement(9), Owed::Portal(11)];
+        frame(&mut wire, &owed, Framing { name: Name::Cached(7), parse: None, known: Some(&desc), fetch: page }, &[], true).unwrap();
+        assert_eq!(tags(&wire), "CCBES");
+        let holds = |w: &[u8], part: &[u8]| w.windows(part.len()).any(|x| x == part);
+        assert!(holds(&wire, b"S_helix_9\0"), "the statement's Close names it");
+        assert!(holds(&wire, b"P_helix_cursor_11\0"), "the portal's Close names it");
+        assert_eq!(wire.windows(16).filter(|w| *w == b"_helix_cursor_4\0").count(), 2, "Bind and Execute name the portal");
+        assert_eq!(&wire[wire.len() - 9..wire.len() - 5], &500i32.to_be_bytes(), "Execute's row limit, then the Sync");
+        wire.clear();
+        frame_execute(&mut wire, page).unwrap();
+        assert_eq!(tags(&wire), "E");
+        assert!(wire.ends_with(b"_helix_cursor_4\0\0\0\x01\xf4"));
     }
 
     fn param(v: Value) -> String {

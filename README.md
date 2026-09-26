@@ -167,6 +167,13 @@ tx.execute("update accounts set balance = balance - $1 where id = $2", [10, 1])
 tx.execute("update accounts set balance = balance + $1 where id = $2", [10, 2])
 tx.commit()
 
+# A result larger than memory is read a page at a time — the plan `query` would run, one
+# round trip a page, and an empty frame once it has been read to its end.
+cur = db.cursor("select * from events where day = $1", ["2026-09-26"], 50000)
+fn buys(cur, n) = let page = cur.next() in
+  if page.count() == 0 then n else buys(cur, n + page.where(@kind == "buy").count())
+buys(cur, 0)
+
 # First-class genomics.
 seq = dna("ATGCGTAC")
 seq.gc_content()

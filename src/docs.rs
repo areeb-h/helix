@@ -731,7 +731,7 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         doc: "Open one PostgreSQL connection and reuse it for every query made through it.",
         example: "postgres_open(\"postgres://me:pw@localhost/app\")",
         example_out: "",
-        notes: "The connection is opened ONCE and reused for every query inside, and each distinct statement is PREPARED once on it — the server parses a text the first time it is sent and only binds and executes it after that (up to 256 of them; invisible to a caller, and a statement the server forgets is simply prepared again). What a statement returns is remembered with it, so from its second run the result is not described again and its `int2`/`int4`/`int8`/`bool`/`float8` columns cross in binary — the same values, without the server printing them. A connection whose exchange was cut short (a timeout, a dropped socket) closes itself, and every later call on it says so: it never reads a previous statement's leftover replies as its own. THE LOGIN IS BOUND TO THE TLS SESSION (`SCRAM-SHA-256-PLUS`): the client signs a hash of the certificate it was shown into the password exchange, so a relay holding some other certificate for the name cannot pass the login through — on by default, and `channel_binding=require` refuses to log in without it, `channel_binding=disable` is for a proxy that re-encrypts the connection on purpose. HOW LONG A STATEMENT MAY TAKE is the URL's to say: nothing keeps the default — the server may be silent for 30 s, after which the connection is given up on — `?timeout=300` asks the SERVER to end a statement that runs past five minutes (an ordinary error, SQLSTATE 57014, and the connection carries on), and `timeout=0` waits as long as it takes; `connect_timeout=` (10) bounds the TCP connection. Reuse is the whole point: a connection costs a TCP handshake plus a SCRAM exchange — measured at 4.7 ms against PostgreSQL 19, the same for `select 1` as for a full table — so five queries through `postgres_query` spend ~24 ms before doing any work. There is no close to forget: Helix values are reference-counted, so the socket shuts when the last handle to it goes. The connection answers `query(sql, params?)`, with the same parameter discipline and the same server-enforced read-only session as `postgres_query`. Opened with mode `\"write\"` — which spends the `db-write` capability (ADR 0047) — it also answers `execute(sql, params?)`, `{affected, rows}` exactly as `postgres_execute` does, on the reused socket. `begin()` opens a transaction as a value of its own (see `Connection.begin`). Keywords: postgres, connection, pool, reuse, handshake, scope, transaction, write.",
+        notes: "The connection is opened ONCE and reused for every query inside, and each distinct statement is PREPARED once on it — the server parses a text the first time it is sent and only binds and executes it after that (up to 256 of them; invisible to a caller, and a statement the server forgets is simply prepared again). What a statement returns is remembered with it, so from its second run the result is not described again and its `int2`/`int4`/`int8`/`bool`/`float8` columns cross in binary — the same values, without the server printing them. A connection whose exchange was cut short (a timeout, a dropped socket) closes itself, and every later call on it says so: it never reads a previous statement's leftover replies as its own. THE LOGIN IS BOUND TO THE TLS SESSION (`SCRAM-SHA-256-PLUS`): the client signs a hash of the certificate it was shown into the password exchange, so a relay holding some other certificate for the name cannot pass the login through — on by default, and `channel_binding=require` refuses to log in without it, `channel_binding=disable` is for a proxy that re-encrypts the connection on purpose. HOW LONG A STATEMENT MAY TAKE is the URL's to say: nothing keeps the default — the server may be silent for 30 s, after which the connection is given up on — `?timeout=300` asks the SERVER to end a statement that runs past five minutes (an ordinary error, SQLSTATE 57014, and the connection carries on), and `timeout=0` waits as long as it takes; `connect_timeout=` (10) bounds the TCP connection. Reuse is the whole point: a connection costs a TCP handshake plus a SCRAM exchange — measured at 4.7 ms against PostgreSQL 19, the same for `select 1` as for a full table — so five queries through `postgres_query` spend ~24 ms before doing any work. There is no close to forget: Helix values are reference-counted, so the socket shuts when the last handle to it goes. The connection answers `query(sql, params?)`, with the same parameter discipline and the same server-enforced read-only session as `postgres_query`. Opened with mode `\"write\"` — which spends the `db-write` capability (ADR 0047) — it also answers `execute(sql, params?)`, `{affected, rows}` exactly as `postgres_execute` does, on the reused socket. `begin()` opens a transaction as a value of its own (see `Connection.begin`), and `cursor(sql, params?, batch?)` reads a result too large to hold at once a page at a time (see `Connection.cursor`). Keywords: postgres, connection, pool, reuse, handshake, scope, transaction, write, cursor.",
     },
     DocEntry {
         name: "postgres_query",
@@ -3810,6 +3810,54 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
             example_out: "",
             notes: "What dropping the value without `commit()` does by itself — spelled out for the caller \
                     who decides, rather than fails, to stop. Keywords: transaction, rollback, undo, abort.",
+        },
+    ),
+    (
+        "Connection",
+        DocEntry {
+            name: "cursor",
+            sig: "cursor(sql, params?, batch?)",
+            doc: "Read a result a page at a time: returns a Cursor whose `next()` answers the next `batch` rows as a DataFrame (10 000 unless said), and an empty frame once the result has been read to its end.",
+            example: "cur = conn.cursor(\"select * from events where day = $1\", [\"2026-09-26\"], 50000)",
+            example_out: "",
+            notes: "FOR A RESULT TOO LARGE TO HOLD AT ONCE. The statement is prepared, planned and bound exactly \
+                    as `query` would bind it — the same rows in the same order, the same plan, the same formats \
+                    — but to a named portal on the server, Executed for `batch` rows at a time: each `next()` \
+                    is one round trip, and nothing is read that was not asked for. A portal lives inside a \
+                    transaction, so on the connection's own value the cursor has one of its own — begun in the \
+                    round trip that reads the first page, committed after the last, rolled back if the value is \
+                    dropped before then — and the connection answers nothing else until it ends. On a \
+                    transaction's value (`tx = conn.begin(); cur = tx.cursor(…)`) the cursor reads inside that \
+                    transaction, which keeps answering statements between pages, and the transaction ending \
+                    ends the cursor. The END is an EMPTY frame — the same columns, no rows — which every later \
+                    `next()` answers again at no round trip, so `fn drain(cur, n) = let page = cur.next() in \
+                    if page.count() == 0 then n else drain(cur, n + page.count())` reads everything. (Not \
+                    `missing`: `missing == missing` is `missing`, and a page that could be `missing` is a page \
+                    a loop mistests.) `timeout=` in the URL bounds each PAGE, not the whole cursor — each page \
+                    is its own exchange: pages of 0.6 s ran under `timeout=1` where the whole read was \
+                    cancelled at 1 s. An error on a page (a cancellation, a cell that is not its column's type) \
+                    is raised by that `next()` and ends the cursor; so is a COMMIT that fails after the last \
+                    page, over a statement that writes, because it undid what the pages said. `type_of(cur)` \
+                    is `\"Cursor\"`; it answers `next()` and nothing else. Keywords: cursor, page, batch, \
+                    stream, large result, portal, fetch, iterate, chunk.",
+        },
+    ),
+    (
+        "Cursor",
+        DocEntry {
+            name: "next",
+            sig: "next()",
+            doc: "The next page of the cursor's result as a DataFrame — empty once the result has been read to its end.",
+            example: "cur.next()",
+            example_out: "",
+            notes: "One round trip a page, except the first (which came with the open) and every page after \
+                    the end (empty, answered at once). A page holds at most the `batch` rows the cursor was \
+                    opened with, and `page.count() == 0` is the end — a result that is an exact multiple of \
+                    `batch` ends with a full page and then an empty one, because the server cannot know a \
+                    portal is finished until it is asked for more. Read to its end, the cursor has let go of \
+                    what it held: the transaction begun for it is committed (a commit that fails is raised \
+                    here), or — inside the transaction it was opened on — its portal is closed along with that \
+                    transaction's next statement. Keywords: page, fetch, batch, next, iterate.",
         },
     ),
     (

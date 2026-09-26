@@ -177,8 +177,8 @@ visible in `describe`, which is where a reader can see the trade.
 - ~~**No channel binding.**~~ Implemented 2026-09-22 (`SCRAM-SHA-256-PLUS`,
   `tls-server-end-point`); see the addendum of that date.
 - ~~**One statement per call.**~~ Several statements share a round trip since 2026-09-21 (the
-  addendum of that date). Still no cursor: a query is sent, executed, and fully read, and a
-  result larger than memory has no streaming form yet.
+  addendum of that date). ~~Still no cursor.~~ A result larger than memory is read a page at a
+  time since 2026-09-26 (`cursor`; the addendum of that date).
 - **Type inference is the server's.** Parameters are sent with unspecified OIDs so the
   server infers each from its use, which is what `libpq` does. A parameter in a position
   the server cannot infer (`select $1`) needs a cast, exactly as it does from psql.
@@ -234,7 +234,8 @@ other backend) or its result type changed under it (`0A000`: `ALTER TABLE` benea
 falls back to the unnamed statement, which always works. A text that does not parse is never
 remembered; one that parsed and was then refused at Bind (a parameter of the wrong shape) is,
 because the statement exists. There is no knob: behind a transaction-mode pooler the cache
-stays correct and merely re-prepares. The one-shot verbs (`postgres_query(url, …)`,
+stays correct and merely re-prepares — outside a transaction; inside one, and for transaction
+control itself, see the addendum of 2026-09-26. The one-shot verbs (`postgres_query(url, …)`,
 `postgres_execute(url, …)`) keep the unnamed statement — a connection that lives for one
 query has nothing to reuse.
 
@@ -550,3 +551,79 @@ tests at all; it now reproduces RFC 7677's published exchange to the byte.
 Also: `connect` tries EVERY address a name resolves to, in order, where it tried only the
 first. `localhost` is two addresses on most machines, `::1` first, and a server listening on
 one of them is an ordinary configuration.
+
+## Addendum 2026-09-26 — a result larger than memory, a page at a time
+
+The last functional cost above: a query was sent, executed and read to its end, so a result
+larger than memory had no form at all. `cur = c.cursor(sql, params?, batch?)` reads one a page
+at a time — `cur.next()` is a frame of at most `batch` rows (10 000 unless said), and an empty
+frame once the result has been read to its end.
+
+- **It is the protocol's own cursor, not SQL's.** The statement is prepared and bound exactly
+  as `query` binds it — the same cache, the same plan, the same formats — but to a NAMED
+  portal, and Executed with a row limit; the server answers that many rows and
+  `PortalSuspended`, and each `next()` Executes the same portal again, one round trip a page.
+  A `DECLARE … CURSOR` is planned for a fast START (`cursor_tuple_fraction`), which for a full
+  read can be a slower plan than the whole read's; a portal with a row limit runs the plan
+  `query` runs, so a cursor reads exactly what `query` reads, in pages. And it costs no SQL of
+  its own: no `DECLARE`, no `FETCH` text to fill the prepared-statement cache with, no `CLOSE`.
+- **A cursor is always inside a transaction, because a portal is.** Opened on the connection's
+  own value it has one of its own: `begin` goes in the same round trip as the first page (one
+  flight), the last page commits it, and a value dropped before its end rolls it back — the
+  rule a transaction's value already lives by, and nothing but the cursor was ever in it. The
+  connection answers nothing else meanwhile, and says so. Opened on a transaction's value it
+  reads INSIDE that transaction, which keeps answering statements between pages (the unnamed
+  portal those use is not the cursor's); the transaction ending ends the cursor, whose `next()`
+  says so — after handing over the page it already held.
+- **The end is an empty frame, not `missing`.** `missing == missing` is `missing` (ADR 0001),
+  so a page that could be `missing` is a page a loop mistests; a frame with the result's
+  columns and no rows is a value every verb takes, and `page.count() == 0` is the test. Every
+  `next()` after the end answers it again at no round trip.
+- **`timeout=` bounds a page.** Each page is its own Execute and Sync, and the server's
+  `statement_timeout` runs from one to the next: ten rows of `pg_sleep(0.3)` in pages of two
+  read in 3.0 s under `timeout=1`, where the whole read was cancelled at 1.0 s (measured).
+- **Nothing is left behind, and nothing is dropped.** A page that fails ends the cursor, and
+  the transaction begun for it is rolled back at once. A cursor that fails to OPEN after its
+  `begin` took — the server refusing the statement, or this client refusing what came back —
+  rolls that transaction back too (a client-side refusal had left the connection inside a
+  transaction nobody had begun). And the COMMIT after the last page is that page's to answer
+  for: over a statement that writes, a deferred constraint or a serialization failure refuses
+  it and undoes what the pages said had happened, so `next()` raises it.
+- **A portal pins its statement.** The protocol's documented contract is that closing a
+  prepared statement closes the portals bound from it, and the cache's own eviction is such a
+  Close: a transaction that runs more distinct statements between two pages than the cache
+  holds would make the cursor's statement the least recently used. So the statement a live
+  portal was bound from is never the one displaced. PostgreSQL 17 does not in fact close the
+  portal — measured, through an eviction and through `deallocate all` — but the documented
+  contract is the stricter one, and it is the one kept. A transaction's end frees every pin.
+- **What is let go of is closed by the next exchange.** A portal a cursor is done with inside a
+  transaction that carries on, and a statement found stale where it could not be prepared
+  again, are closed at the head of the NEXT exchange, whatever it is — never by a round trip of
+  their own, which for a cursor dropped early would have been a blocking round trip in a `Drop`.
+- **Transaction control is never cached — a fix to what had shipped.** `begin`, `commit` and
+  `rollback` went through the prepared-statement cache like any statement, and a cached name
+  can go stale (`DEALLOCATE ALL`, `DISCARD ALL`, a transaction-mode pooler's other backend).
+  Inside a transaction a stale name cannot be prepared again — the error fails the transaction
+  — and for the COMMIT that was the transaction's work lost and the session left in a failed
+  transaction nothing on the connection could end: on the parent commit, `commit()` after a
+  `deallocate all` failed with `26000`, the next query with `25P02`, and `begin()` was refused;
+  on this one it commits and the connection carries on. They now go as the unnamed statement,
+  which cannot go stale. (Found live, through the cursor's own `rollback`, which went stale the
+  same way when an open had to be retried.) It costs the server a Parse of `commit`: `begin`,
+  one update and `commit` measured 1.006 of the parent's time, paired.
+- **The 2026-09-19 addendum overstated the pooler case.** Outside a transaction, a name gone
+  with a pooler's other backend is merely prepared again. Inside one, the first statement to
+  find its name gone fails the transaction and says to roll back and run it again — the honest
+  answer, since the session moved between backends is what broke the transaction.
+
+Verified live against PostgreSQL 17 on a million rows of five mixed columns: the pages,
+stacked, are the whole read column for column; ten pages of 100 000 cost 0.79 of the
+whole read (0.457 s against 0.576), a hundred pages of 10 000 0.89 — a
+page's price is its round trip; a cursor inside a `repeatable read` transaction pages beside a
+`count(*)`; one dropped inside a function frees the connection when the function returns; a
+one-page result frees it at the open; and both ways a prepared name goes stale under an open
+(`alter table … add column` → `0A000`, `deallocate all` → `26000`) are prepared again once, the
+new column present. In the gate the fake server learned named portals — alive from their Bind
+until their Close, their transaction's end, or (the documented contract) their statement's
+Close — row limits and `PortalSuspended`, and twelve tests pin the shape; the test of each of
+the five fixes above was shown to fail with that one fix reverted.

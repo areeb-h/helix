@@ -4,6 +4,25 @@
 
 ### Added
 
+- **A PostgreSQL result larger than memory is read a page at a time: `cur = c.cursor(sql,
+  params?, batch?)`, then `cur.next()` for each page (ADR 0044 addendum).** The statement is
+  prepared, planned and bound exactly as `query` binds it — the same rows in the same order,
+  the same plan, the same formats — but to a named portal on the server, Executed for `batch`
+  rows (10 000 unless said) at a time: one round trip a page, and nothing read that was not
+  asked for. The end is an EMPTY frame with the result's columns, answered again by every
+  later `next()` at no round trip — so `fn drain(cur, n) = let page = cur.next() in if
+  page.count() == 0 then n else drain(cur, n + page.count())` reads everything. A portal lives
+  inside a transaction: on the connection's own value the cursor has one of its own, begun in
+  the round trip that reads the first page, committed after the last, rolled back if the value
+  is dropped before then (the connection answers nothing else meanwhile, and says so); on a
+  transaction's value it reads inside that transaction, which keeps answering statements
+  between pages. `timeout=` bounds each page, not the whole cursor. A page that fails ends the
+  cursor and frees the connection, and so does a COMMIT that fails after the last page — raised
+  by that `next()`, because over a statement that writes it undid what the pages said.
+  `type_of(cur)` is `"Cursor"`, and it answers `next()` and nothing else. Live against
+  PostgreSQL 17: a million rows in ten pages cost 0.79x the whole read, in a hundred
+  pages 0.89x — a page's price is its round trip.
+
 - **Positional destructuring, `[a, b] = xs` — in `let`, in a `do` block, after `where` and as
   a statement (ADR 0053).** `a, b = pair` had unpacked a tuple or an array as a top-level
   statement since the beginning, and nowhere else; records had all four positions since ADR
@@ -169,6 +188,17 @@
   server that now knows statement names, `Close` and how to forget.
 
 ### Fixed
+
+- **Transaction control is never a cached name: a `commit` could fail, and strand its
+  connection, after `DEALLOCATE ALL` or a pooler's backend switch.** `begin`, `commit` and
+  `rollback` went through the prepared-statement cache like any statement, and a cached name can
+  go stale. Inside a transaction a stale name cannot be prepared again — the error fails the
+  transaction — so a stale COMMIT lost the transaction's work and left the session in a failed
+  transaction nothing on the connection could end: the next query answered `25P02` and
+  `begin()` was refused. Found live while building the cursor, whose own `rollback` hit the
+  same thing. Transaction control now goes as the unnamed statement, which cannot go stale;
+  `begin`, one update and `commit` measured 1.006x the parent's time, paired. Pinned by
+  `transaction_control_is_never_cached`, shown to fail on the parent's code.
 
 - **CI's `--no-default-features --features appliance` clippy job, red since 449f258.** The
   JIT's `**` host call was the walker's rule copied verbatim, and nothing referenced the copy

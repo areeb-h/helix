@@ -460,7 +460,12 @@ pub static TUPLE_METHODS: &[&str] = &["count", "length", "values"];
 /// over: `helix doc Connection` answers everywhere, and `type_owns_method` answers TRUE,
 /// which is what stops a user's `fn query(c, sql)` from silently taking a call meant for
 /// the database (ADR 0045's fallback declines for any type that owns the name).
-pub static CONNECTION_METHODS: &[&str] = &["query", "execute", "begin", "commit", "rollback"];
+pub static CONNECTION_METHODS: &[&str] = &["query", "execute", "begin", "commit", "rollback", "cursor"];
+
+/// The value `Connection.cursor` answers reads its result a page at a time, and does nothing
+/// else — so `type_owns_method("Cursor", "next")` is what keeps a user's `fn next(c)` from
+/// taking the call, as above.
+pub static CURSOR_METHODS: &[&str] = &["next"];
 
 pub static NET_METHODS: &[&str] = &[
     "accept", "poll", "request", "respond", "sse", "stream", "send", "next", "status",
@@ -497,7 +502,7 @@ pub fn methods_of(table: &[&'static str]) -> Vec<&'static str> {
 
 /// The method tables by receiver type — the single source for `helix doc <Type>`
 /// introspection and the method-uniqueness test.
-pub fn type_method_tables() -> [(&'static str, &'static [&'static str]); 13] {
+pub fn type_method_tables() -> [(&'static str, &'static [&'static str]); 14] {
     [
         ("Array", ARRAY_METHODS),
         ("String", STRING_METHODS),
@@ -509,6 +514,7 @@ pub fn type_method_tables() -> [(&'static str, &'static [&'static str]); 13] {
         ("Dict", DICT_METHODS),
         ("Net", NET_METHODS),
         ("Connection", CONNECTION_METHODS),
+        ("Cursor", CURSOR_METHODS),
         ("Record", RECORD_METHODS),
         // Late deliberately, for the same reason Headers is last: `count` belongs to
         // Array in a did-you-mean, not to the three-element thing `zip` just returned.

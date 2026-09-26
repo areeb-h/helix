@@ -172,7 +172,19 @@ now: a certificate made at test time, rustls's server as the peer.
 **Positional destructuring (ADR 0053, 2026-09-23).** `[a, b] = xs` in `let`, `do`, `where` and
 as a statement, `...rest`, the wrong length an error; the bare `a, b = xs` is the same form.
 
-**Still open:** a cursor for results larger than memory.
+**A result larger than memory, a page at a time (2026-09-26).** `cur = c.cursor(sql, params?,
+batch?)`; `cur.next()` a frame of at most `batch` rows, an empty one at the end (not
+`missing`). A named portal Executed with a row limit — the plan and the formats `query` would
+have had — inside a transaction of its own (begun with the first page, committed after the last,
+rolled back by an early drop; the connection waits and says so) or inside the transaction it
+was opened on, beside that transaction's statements. `type_of` says `Cursor`; `timeout=` bounds
+a page. Live: ten pages of a million rows cost 0.79x the whole read. ADR 0044's last
+functional honest cost. Found on the way and FIXED: transaction control went through the
+prepared-statement cache, so a `commit` whose name went stale (`DEALLOCATE ALL`, a pooler's
+other backend) failed its transaction and stranded the connection; it is never cached now.
+
+**Still open:** loading rows through `COPY … FROM STDIN` (a frame as the rows) — the driver
+refuses every COPY, having nothing to hand the server.
 
 ### A method call is resolved by its receiver (ADR 0045)
 
