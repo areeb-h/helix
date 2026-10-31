@@ -12,10 +12,12 @@
 //! EARLIEST row's error wins — thread count can never change output or error.
 //! Writing stays on the `csv` crate.
 
+use std::collections::hash_map::RandomState;
 use std::rc::Rc;
 
 use rayon::prelude::*;
 
+use crate::backend::strbuild::Interner;
 use crate::error::HelixError;
 
 use super::columns::Col;
@@ -261,18 +263,21 @@ enum Seg {
     I64(Vec<i64>, Vec<bool>),
     F64(Vec<f64>, Vec<bool>),
     Bool(Vec<bool>, Vec<bool>),
-    Str { dict: Vec<String>, index: std::collections::HashMap<String, u32>, codes: Vec<u32>, valid: Vec<bool> },
+    /// Text is interned as the column will intern it, only holding plain `String`s (an `Rc` may
+    /// not leave its thread) — see `backend::strbuild`.
+    Str { texts: Interner<String>, codes: Vec<u32>, valid: Vec<bool> },
 }
 
 impl Seg {
-    fn new(ty: Ty, cap: usize) -> Seg {
+    /// `key` is the read's one hashing key: every chunk interns under it, so a hash computed
+    /// on a worker is still good at the splice, in a table another chunk began.
+    fn new(ty: Ty, cap: usize, key: &RandomState) -> Seg {
         match ty {
             Ty::Int => Seg::I64(Vec::with_capacity(cap), Vec::with_capacity(cap)),
             Ty::Float => Seg::F64(Vec::with_capacity(cap), Vec::with_capacity(cap)),
             Ty::Bool => Seg::Bool(Vec::with_capacity(cap), Vec::with_capacity(cap)),
             Ty::Unknown | Ty::Str => Seg::Str {
-                dict: Vec::new(),
-                index: std::collections::HashMap::new(),
+                texts: Interner::with_key(key),
                 codes: Vec::with_capacity(cap),
                 valid: Vec::with_capacity(cap),
             },
@@ -319,23 +324,14 @@ impl Seg {
                 }
                 other => return Err(ctx(other, "true or false")),
             },
-            Seg::Str { dict, index, codes, valid } => {
+            Seg::Str { texts, codes, valid } => {
                 // RFC 4180: `""` (quoted, empty) is an empty STRING; only an
                 // unquoted empty field is missing.
                 if field.is_empty() && !quoted {
                     codes.push(0);
                     valid.push(false);
                 } else {
-                    let code = match index.get(field) {
-                        Some(&c) => c,
-                        None => {
-                            let c = dict.len() as u32;
-                            dict.push(field.to_string());
-                            index.insert(field.to_string(), c);
-                            c
-                        }
-                    };
-                    codes.push(code);
+                    codes.push(texts.intern(field));
                     valid.push(true);
                 }
             }
@@ -383,13 +379,15 @@ pub fn read_csv(path: &str, line: usize, col: usize) -> Result<crate::backend::D
     // Parallel pass: fixed row ranges -> typed segments, spliced in order. The
     // chunk size keeps per-thread work meaningful on small files.
     let chunk = (rows.len() / (rayon::current_num_threads() * 4).max(1)).max(4096);
+    // One random key for every text table of this read (see `Seg::new`).
+    let key = RandomState::new();
     let results: Vec<Result<Vec<Seg>, (usize, String)>> = rows
         .par_chunks(chunk)
         .enumerate()
         .map(|(ci, spans)| {
             let base = ci * chunk; // first row index of this chunk (0-based data row)
             let mut segs: Vec<Seg> =
-                tys.iter().map(|t| Seg::new(*t, spans.len())).collect();
+                tys.iter().map(|t| Seg::new(*t, spans.len(), &key)).collect();
             let mut fspans: Vec<(usize, usize, bool, bool)> = Vec::with_capacity(ncol);
             let mut scratch = String::new();
             for (r, &(s, e)) in spans.iter().enumerate() {
@@ -441,7 +439,8 @@ pub fn read_csv(path: &str, line: usize, col: usize) -> Result<crate::backend::D
 
     // Splice: typed columns extend; string columns hash-cons into their
     // dictionary (chunk workers hand over plain Strings — Send — and the
-    // builder dedups here, single-threaded but per-distinct, not per-cell).
+    // builder dedups here, single-threaded but per-distinct, not per-cell:
+    // a probe under the hash the worker computed, and a new text MOVED in).
     enum Acc {
         I(Vec<i64>, Vec<bool>),
         F(Vec<f64>, Vec<bool>),
@@ -473,18 +472,9 @@ pub fn read_csv(path: &str, line: usize, col: usize) -> Result<crate::backend::D
                     vals.extend(v);
                     valid.extend(m);
                 }
-                (Acc::S(b), Seg::Str { dict, codes, valid, .. }) => {
-                    // Remap: per-chunk dict entry -> global code, once per
-                    // DISTINCT value; the 5M cells are integer rewrites.
-                    let trans: Vec<u32> = dict.iter().map(|s| b.intern(s)).collect();
-                    for (code, ok) in codes.iter().zip(valid) {
-                        if ok {
-                            b.push_code(trans[*code as usize]);
-                        } else {
-                            b.push_missing();
-                        }
-                    }
-                }
+                // Remap: per-chunk dict entry -> global code, once per
+                // DISTINCT value; the 5M cells are integer rewrites.
+                (Acc::S(b), Seg::Str { texts, codes, valid }) => b.append(texts, &codes, &valid),
                 _ => {
                     return Err(err("internal: CSV segment dtype drift".to_string()));
                 }

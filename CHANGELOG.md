@@ -127,6 +127,30 @@
 
 ### Performance
 
+- **A chunked read interns its text once, on the thread that parsed it.** `read_csv` parses in
+  parallel, and an `Rc` may not leave its thread, so each chunk interned its text through an
+  interner of its own: a `HashMap<String, u32>` beside a `Vec<String>`. Every distinct text was
+  stored TWICE and hashed by `get`, by `insert` and by every growth of the map — and then the
+  splice, on the main thread where nothing is parallel, hashed each chunk's texts a further
+  time and copied them a third, into the column. `read_parquet` carried the same interner
+  three times over, and then interned the finished dictionary AGAIN to be handed back the
+  codes it started with. The engine's one builder (`backend::strbuild`) is now generic over
+  how a text is HELD — `Rc<String>` in a column, plain `String` on a worker — so the workers
+  use it: one hash a cell, one copy of a distinct text. A read's chunks intern under ONE
+  random key, so the splice finds a text by the hash its worker computed and, when it is new,
+  MOVES it into the column; the first chunk's table becomes the column's outright, so a file
+  of one chunk (4 096 rows or fewer) is never probed; a parquet dictionary is wrapped where it
+  lies. `read_csv` of 200 000 rows: four distinct text columns 90.3 → 50.3 ms, text that
+  repeats across chunks 37.2 → 20.2, five low-cardinality columns 8.5 → 8.0 (a repeated cell
+  costs what it did: one SipHash, one probe); a million rows of distinct text 270 → 163 ms,
+  615 → 283 under `HELIX_THREADS=1`; a 3 000-row file 462 → 300 µs; `read_parquet` of 200 000
+  distinct names 26.6 → 10.8 ms; peak memory of the million-row read 472 → 442 MB. The
+  builder's own per-cell code did not move — `push_str` and `push_rc` compile to the same
+  instructions — and `dataframe()`, `to_dataframe`, `read_gff` and an outer join measure
+  1.00. STILL SipHash, keyed per read. The splice had run in NO test — every CSV in the suite
+  and the corpus was one chunk — and `csv_text_is_one_dictionary_across_chunks` now reads one
+  that is not. ADR 0033's addendum has the table and what was measured and declined.
+
 - **A PostgreSQL transaction's `BEGIN` rides with its first statement.** `tx = c.begin()` sent
   `BEGIN` in a round trip of its own; it sends nothing now, and the transaction's first exchange
   — a statement, a flight or a cursor — carries it. PostgreSQL takes a transaction's snapshot at

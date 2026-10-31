@@ -261,3 +261,90 @@ each entry's hash is kept beside the dictionary so growth re-reads no string. 76
 distinct cell at 1 000 values, 94 → 49 at 100 000; a repeated value costs what it did. The
 hash is still SipHash under a random key — a column's cells are data from strangers — and
 `hashbrown` was already in every build, so this added an edge to the lock and no crate.
+
+## Addendum 2026-09-22 — the readers' worker threads intern through the same builder
+
+The addendum above named what it left. The parallel readers intern on worker threads, where
+an `Rc` may not go, so each kept an interner of its own — std's `HashMap<String, u32>` beside
+a `Vec<String>`. `read_csv` had one a chunk a column; `read_parquet` had the same thing three
+times in one file. A distinct text was stored TWICE, hashed by `get`, by `insert` and by every
+growth of the map, and then — at the splice, on the main thread, where nothing is parallel —
+hashed a further time and copied a third, into the column. Parquet's splice was stranger: its
+worker interns the WHOLE column, so the main thread was interning a dictionary that already
+was one, to be handed back the codes 0, 1, 2, … it started with.
+
+**One interner, generic over how a text is held.** `backend::strbuild::Interner<S>` is the
+index alone — dictionary, cached hashes, `hashbrown::HashTable<u32>`, key — with `S` an
+`Rc<String>` in a column and a plain `String` in a worker's chunk, which is `Send`.
+`StrBuilder` is an `Interner<Rc<String>>` plus codes and validity, and compiles to what it
+was: `push_str` and `push_rc` are the same 223 and 201 instructions before and after, one
+alignment no-op apart.
+
+**One key a read, so a text is hashed once.** Every chunk of a `read_csv` interns under the
+same `RandomState`. The first chunk to reach the splice becomes the column's dictionary, table
+and all — nothing is probed, so a file of one chunk (4 096 rows or fewer) never probes — and
+each later chunk is looked up under the hashes its worker computed; a text the column had not
+met is MOVED into its `Rc`, not copied. A hash is only as good as its key, and a lookup under
+the wrong one does not fail: it MISSES, and interns a second copy — two codes for one text,
+and a group-by that splits a group in two. So `absorb` hashes one text of each chunk again to
+see that the chunk was made under its key, and hashes them all if it was not. Sharing the key
+gives nothing away: it is as random, and as unobservable, across a read's tables as in one.
+A parquet dictionary is simply wrapped where it lies.
+
+One codegen unit and a fresh build on both sides, five interleaved rounds, the minimum of
+each row, the load average under 0.9 before every round, and a checksum of every text column
+that must agree before a number is read. The programs were scratch under `target/bench/` and
+are not kept, so the inputs are written down: every row is `read_csv(path)` timed in-process
+(the best of five to nine runs). `hi` is an `id` and four all-distinct text columns (one
+holding a comma, so quoted); `lo` is five text columns of 40, 7, 3, 100 and 12 distinct
+values; `mid` is an int, a float, text columns of 5 000, 20 000 and 50 000 distinct values,
+and one of 1 000 with every tenth cell missing; `hi1m` is a million rows of an `id` and two
+all-distinct text columns; `small` is 3 000 rows read a hundred times. The f90 rows are an
+`id`, a distinct text column and a 40-value one. 200 000 rows unless said:
+
+| ms | before | after | | `HELIX_THREADS=1` before | after | |
+|---|--:|--:|--:|--:|--:|--:|
+| `read_csv`, 4 distinct text columns | 90.29 | 50.30 | 0.56 | 163.67 | 93.82 | 0.57 |
+| `read_csv`, text repeating across chunks, holes | 37.16 | 20.20 | 0.54 | 73.34 | 53.38 | 0.73 |
+| `read_csv`, 5 low-cardinality text columns | 8.50 | 8.03 | 0.94 | 31.70 | 32.02 | 1.01 |
+| `read_csv`, 1 000 000 rows x 2 distinct text columns | 269.61 | 163.10 | 0.60 | 614.72 | 283.43 | 0.46 |
+| `read_csv`, 3 000 rows (one chunk), x 100 | 46.20 | 30.00 | 0.65 | 46.53 | 29.94 | 0.64 |
+| f90: `read_csv`, distinct + 40-value text | 21.45 | 14.53 | 0.68 | 42.85 | 31.20 | 0.73 |
+| f90: `read_parquet`, same columns | 26.60 | 10.82 | 0.41 | 25.30 | 10.84 | 0.43 |
+| f90: `dataframe()`, same columns | 15.96 | 15.77 | 0.99 | 16.03 | 16.33 | 1.02 |
+| f90: `to_dataframe` of 50 000 records | 12.02 | 12.12 | 1.01 | 12.35 | 12.40 | 1.00 |
+| `read_gff`, 100 000 features (`push_str`) | 69.59 | 68.58 | 0.99 | | | |
+| outer join on a text key (`push_rc`) | 22.45 | 22.50 | 1.00 | | | |
+
+Peak RSS of the million-row read: 472 → 442 MB. The `dataframe()` row is this harness's
+noise floor: no thread count reaches it and its code did not change, and it reads 0.99 and
+1.02. A repeated cell costs what it did — one SipHash, one probe — which is the
+low-cardinality row at one thread. What that read gains at six is in the splice, the one part
+of it this change touched: a chunk's cells are rewritten in one `extend` where they were two
+pushes each.
+
+**Measured and declined: inlining the probe.** Between two builds of this change a column of
+repeated text read 5% apart (30.7 against 32.3 ms a million cells), and the symbol table had
+an explanation ready: hashbrown's `entry` — probe and insertion in one walk — is inlined only
+while it has one caller, and the parquet reader had become `intern`'s second. So the probe
+was split from the insertion and forced inline (`find`, then an out-of-line `insert_unique`):
+repeated text 4.5% faster, a million rows of distinct text 1.3% slower, the second walk
+showing in a table too big for the cache. Then the control: a build with the split probe for
+cells and the single walk for the splice. Its per-cell code IS the fast build's — `Seg::push`
+the same 392 instructions at the same address, the worker's row loop the same 622
+instructions 48 bytes away — and it timed like the SLOW one; so does the engine before this
+change, which shares none of that code. The 5% follows where a loop LANDED, not what is in
+it. One walk and no attributes is what shipped, and a few percent between two builds is not
+evidence of a design on this machine, one codegen unit on both sides or not: the control is
+a build that holds the code still and moves something else.
+
+What is left of a distinct-text read is the representation, not the interning: an
+`Rc<String>` a text is two allocations made on one thread, and two frees when the frame is
+dropped.
+
+The splice had run in no test. Every CSV in the suite and in the corpus was a single chunk,
+so a differential over the whole corpus had never spliced one. `csv_text_is_one_dictionary_
+across_chunks` reads 20 000 rows — text that repeats across chunks, text that never repeats,
+a column whose first texts arrive with a LATER chunk, the empty string, a comma, a quote —
+and asks that every cell read back as written and that the dictionary hold each text once,
+in first-seen order. It passes before this change as well as after: that is what it is for.

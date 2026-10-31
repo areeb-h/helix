@@ -760,9 +760,43 @@ hash computed once and cached beside each entry; 76 → 52 ns a distinct cell (9
 resistance to an attacker who can time it). It is the engine's ONE text builder, so
 `dataframe()`, `read_csv`, `read_parquet` and `to_dataframe` gained with the driver.
 `hashbrown` 0.17 was already in every build (indexmap -> toml_edit): the lock gained an edge,
-no crate. CANDIDATE LEFT: the CSV reader's per-chunk segments intern with their own
-`HashMap<String, u32>` + `Vec<String>` (two copies of each distinct text, get-then-insert,
-then a third hash at the splice) — the same table would serve them.
+no crate. CANDIDATE LEFT (taken 2026-09-22, the next entry): the CSV reader's per-chunk
+segments intern with their own `HashMap<String, u32>` + `Vec<String>` (two copies of each
+distinct text, get-then-insert, then a third hash at the splice) — the same table would
+serve them.
+
+**The readers' worker threads intern through it too (2026-09-22), DONE.** The candidate the
+entry above left, and not only in the CSV reader: `parquet_io/read.rs` held the same
+`HashMap<String, u32>` + `Vec<String>` THREE times (dictionary pages, the rendered kinds'
+`cons!`, the plain-string arm), and `PendingCol::finish` re-interned the finished dictionary
+through `StrBuilder` to be handed back the codes it started with. `backend::strbuild` is now
+`Interner<S: Held>` — dictionary, cached hashes, `HashTable<u32>`, key — with `S` either
+`Rc<String>` (under `StrBuilder`, which adds codes and validity) or plain `String` (a
+worker's chunk; `Send`). `read_csv` makes ONE `RandomState` a read and every chunk interns
+under it, so `StrBuilder::append` takes the first chunk's interner whole (`into_shared`:
+nothing probed — a one-chunk file never probes) and `absorb`s each later one under the hashes
+its worker computed, a new text MOVED into its `Rc`. `absorb` re-hashes one text a chunk to
+see that the chunk really was made under its key, and hashes them all if not: a wrong-keyed
+lookup would not fail, it would MISS and intern a duplicate — two codes for one text. Parquet's
+`finish` wraps the worker's dictionary where it lies. 200 000 rows of `read_csv`: 4 distinct
+text columns 90.3 → 50.3 ms, text repeating across chunks 37.2 → 20.2, 1M rows of distinct
+text 270 → 163 (615 → 283 at one thread), 3 000 rows 462 → 300 µs, `read_parquet` of distinct
+names 26.6 → 10.8; `push_str`/`push_rc` are instruction-identical and everything built
+through them measures 1.00 (table: ADR 0033's addendum). MEASURED AND DECLINED: splitting the
+probe (`find`, forced inline) from the insertion (`insert_unique`, out of line) — it read
+repeated text 4.5% faster and big distinct text 1.3% slower, until a control build with the
+SAME per-cell instructions (`Seg::push` at the same address, even) timed like the slow one:
+the 5% was where a loop landed. LESSON FOR THE NEXT A/B: one codegen unit on both sides does
+not make a few percent mean a design; the control is a build that holds the code in question
+still and moves something else (`nm -S --size-sort` + `objdump -d` of the one function, with
+addresses erased, is a two-minute check and ten lines of shell, not kept). NEW TEST, and the gap it
+closes: every CSV in the suite and the corpus was ONE chunk, so the splice had run in no test
+and under no differential; `csv_text_is_one_dictionary_across_chunks` reads 20 000 rows and
+passes before the change as well as after. WHAT IS LEFT of a distinct-text read is the
+representation: an `Rc<String>` a text is two allocations on one thread and two frees when
+the frame drops. NOT MEASURED, only reasoned about: reserving the column's table for the sum
+of the chunks' dictionaries — it would save the re-inserts growth costs all-distinct text,
+and size a 5 000-text table for 120 000 when every chunk repeats the same texts.
 
 **§1.61 (2026-09-19) — a statement is prepared once per connection, DONE.** The web field
 build measured Helix's raw PostgreSQL connection equal to pgx with its statement cache OFF,

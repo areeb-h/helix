@@ -7,7 +7,6 @@
 //! API. Nested schemas are refused at the ROOT (optional groups raise def
 //! levels without repetition, so checking rep levels alone would miss them).
 
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use parquet::basic::{ConvertedType, LogicalType, Repetition, TimeUnit, Type as PhysicalType};
@@ -15,10 +14,11 @@ use parquet::column::reader::ColumnReader;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::schema::types::ColumnDescriptor;
 
+use crate::backend::strbuild::Interner;
 use crate::backend::Df;
 use crate::error::HelixError;
 
-use super::super::columns::{Col, StrBuilder};
+use super::super::columns::Col;
 use super::super::NativeFrame;
 use super::foreign;
 use super::pq_err;
@@ -126,13 +126,11 @@ impl PendingCol {
             SendCol::I64(vals, valid) => Col::I64 { vals, valid },
             SendCol::F64(vals, valid) => Col::F64 { vals, valid },
             SendCol::Bool(vals, valid) => Col::Bool { vals, valid },
+            // The worker interned the WHOLE column, so its dictionary is the column's: each
+            // text is wrapped where it lies. (It used to be interned a second time here —
+            // hashed and copied again, per distinct value, to arrive at the same codes.)
             SendCol::Str { dict, codes, valid } => {
-                let mut b = StrBuilder::with_capacity(0);
-                for s in &dict {
-                    b.intern(s);
-                }
-                b.set_codes(codes, valid);
-                b.finish()
+                Col::Str { dict: Rc::new(dict.into_iter().map(Rc::new).collect()), codes, valid }
             }
         }
     }
@@ -273,8 +271,7 @@ fn read_str_pages(
     use parquet::basic::Encoding;
     use parquet::column::page::Page;
 
-    let mut dict: Vec<String> = Vec::new();
-    let mut index: HashMap<String, u32> = HashMap::new();
+    let mut texts: Interner<String> = Interner::new();
     let mut codes: Vec<u32> = Vec::new();
     let mut valid: Vec<bool> = Vec::new();
 
@@ -308,16 +305,7 @@ fn read_str_pages(
                         pos += len;
                         let s = std::str::from_utf8(s)
                             .map_err(|_| "column holds non-UTF-8 bytes".to_string())?;
-                        let g = match index.get(s) {
-                            Some(&g) => g,
-                            None => {
-                                let g = dict.len() as u32;
-                                index.insert(s.to_string(), g);
-                                dict.push(s.to_string());
-                                g
-                            }
-                        };
-                        local.push(g);
+                        local.push(texts.intern(s));
                     }
                 }
                 Page::DataPage {
@@ -397,7 +385,7 @@ fn read_str_pages(
             }
         }
     }
-    Ok(Some(SendCol::Str { dict, codes, valid }))
+    Ok(Some(SendCol::Str { dict: texts.into_texts(), codes, valid }))
 }
 
 /// A decoded primitive column: values plus validity.
@@ -611,23 +599,15 @@ fn read_column(
     let mut ivals = Vec::new();
     let mut fvals = Vec::new();
     let mut bvals = Vec::new();
-    let mut dict: Vec<String> = Vec::new();
-    let mut index: HashMap<String, u32> = HashMap::new();
+    let mut texts: Interner<String> = Interner::new();
     let mut codes: Vec<u32> = Vec::new();
     let mut valid = Vec::with_capacity(total_rows);
 
+    // A cell whose text was RENDERED for it (a timestamp, a decimal): the `String` is kept
+    // when the text is new and dropped when it is not — never copied.
     macro_rules! cons {
         ($s:expr, $valid:expr, $codes:expr) => {{
-            let s: String = $s;
-            let code = match index.get(s.as_str()) {
-                Some(&c) => c,
-                None => {
-                    let c = dict.len() as u32;
-                    index.insert(s.clone(), c);
-                    dict.push(s);
-                    c
-                }
-            };
+            let code = texts.intern_owned($s);
             $codes.push(code);
             $valid.push(true);
         }};
@@ -913,20 +893,8 @@ fn read_column(
                             .as_utf8()
                             .map_err(|_| format!("column `{name}` holds non-UTF-8 bytes"))?;
                         // Hash-cons without allocating on dictionary hits.
-                        match index.get(s) {
-                            Some(&c) => {
-                                codes.push(c);
-                                valid.push(true);
-                            }
-                            None => {
-                                let owned = s.to_string();
-                                let c = dict.len() as u32;
-                                index.insert(owned.clone(), c);
-                                dict.push(owned);
-                                codes.push(c);
-                                valid.push(true);
-                            }
-                        }
+                        codes.push(texts.intern(s));
+                        valid.push(true);
                         Ok(())
                         }
                         None => {
@@ -970,7 +938,7 @@ fn read_column(
         Kind::Bool => SendCol::Bool(bvals, valid),
         Kind::Float | Kind::F32Widen => SendCol::F64(fvals, valid),
         Kind::Int | Kind::UintWiden => SendCol::I64(ivals, valid),
-        _ => SendCol::Str { dict, codes, valid },
+        _ => SendCol::Str { dict: texts.into_texts(), codes, valid },
     })
 }
 

@@ -675,6 +675,70 @@ fn csv_integer_overflow_stays_text() {
 }
 
 #[test]
+fn csv_text_is_one_dictionary_across_chunks() {
+    // A READ PAST 4 096 ROWS IS CHUNKED: worker threads intern each chunk's text on their own
+    // and the chunks are spliced in order. No test had read a file that long — every CSV in
+    // the suite and the corpus was ONE chunk — so the splice ran in no test at all. Here `tag`
+    // repeats across chunks, `id` never repeats, `late` is missing through the whole first
+    // chunk (the column's first texts arrive with a LATER one), and `q` holds the empty
+    // string, a comma and a quote. Asked of each: every cell reads back as written, and the
+    // dictionary holds each text ONCE, in the order the file first shows it — a code is what
+    // a group-by and a join compare, so two codes for one text would split a group in two.
+    let rows = 20_000usize;
+    let cell = |name: &str, i: usize| -> Option<String> {
+        match name {
+            "tag" => Some(format!("tag {}", i % 7)),
+            "id" => Some(format!("id-{i}")),
+            "late" => (i >= 9_000 && !i.is_multiple_of(3)).then(|| format!("late {}", i % 1_000)),
+            _ => Some(match i % 4 {
+                0 => String::new(),
+                1 => "a, b".to_string(),
+                2 => "say \"hi\"".to_string(),
+                _ => format!("q{}", i % 50),
+            }),
+        }
+    };
+    let names = ["tag", "id", "late", "q"];
+    let written = super::build_frame(
+        names
+            .iter()
+            .map(|n| (n.to_string(), ColData::StrOpt((0..rows).map(|i| cell(n, i)).collect())))
+            .collect(),
+        0,
+        0,
+    )
+    .unwrap();
+    let dir = std::env::temp_dir().join("helix_native_csv_chunks");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("chunks.csv");
+    let p = path.to_str().unwrap();
+    written.write_csv(p, b',', 0, 0).unwrap();
+    let back = super::csv::read_csv(p, 0, 0).unwrap();
+    let nf = back.as_any().downcast_ref::<NativeFrame>().expect("native frame");
+    assert_eq!(nf.len(), rows);
+    for name in names {
+        assert_eq!(
+            reprs(&back.column_values(name, 0, 0).unwrap()),
+            reprs(&written.column_values(name, 0, 0).unwrap()),
+            "`{name}` reads back as written"
+        );
+        let super::columns::Col::Str { dict, .. } = nf.col(name, 0, 0).unwrap() else {
+            panic!("`{name}` is text");
+        };
+        let mut first_seen: Vec<String> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for text in (0..rows).filter_map(|i| cell(name, i)) {
+            if seen.insert(text.clone()) {
+                first_seen.push(text);
+            }
+        }
+        let held: Vec<&str> = dict.iter().map(|s| s.as_str()).collect();
+        assert_eq!(held, first_seen, "`{name}`: one entry a text, in first-seen order");
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn join_key_dtype_mismatch_refuses() {
     // Int keys left, Float keys right: the hash keys can never collide, so the
     // old behavior was a silent 0-row inner join — exit 0 hiding a schema bug.
