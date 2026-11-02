@@ -36,8 +36,9 @@ HTTP, mimalloc, and the DataFrame engine ([ADR 0033](adr/0033-native-dataframe-e
 cargo build --no-default-features --features appliance
 ```
 
-That is **12.5 MB stripped (gate profile) against 19.3 MB** for the default build —
-measured 2026-09-01, and both figures moved when the DataFrame engine changed: polars is
+That is **14.0 MB stripped (gate profile) against 21.1 MB** for the default build —
+measured 2026-11-02 (12.5 against 19.3 on 2026-09-01), and both figures moved when the
+DataFrame engine changed: polars is
 no longer in the default build at all, so the appliance's saving is now the genomics
 readers, the JIT and regex rather than a DataFrame backend. Frames run
 on the native engine (where/filter/select/with/rename/sort/group/join/unique/vstack/
