@@ -598,7 +598,7 @@ pub fn conn_method(
                     .iter()
                     .map(|(sql, params)| Item { sql: sql.as_str(), params, fetch: Fetch::ALL, fresh: false })
                     .collect();
-                let outs = c.fly(&items).map_err(&conn_err)?;
+                let outs = c.fly(&items).map_err(conn_err)?;
                 let mut answers = Vec::with_capacity(outs.len());
                 for out in outs {
                     answers.push(if name == "execute" {
@@ -614,7 +614,7 @@ pub fn conn_method(
                     .hint(format!("e.g. `c.{name}(\"select * from users where id = $1\", [7])`, or `c.{name}([{{sql: \"…\", params: [7]}}, \"select …\"])`.")));
             };
             let params = statement_params(name, args.get(1), line, col)?;
-            let out = c.run(sql.as_str(), &params).map_err(&conn_err)?;
+            let out = c.run(sql.as_str(), &params).map_err(conn_err)?;
             if name == "execute" {
                 return outcome_value(out, line, col);
             }
@@ -623,18 +623,18 @@ pub fn conn_method(
         "cursor" => {
             let conn_err = |m: String| err(format!("postgres {}: {m}", c.shared.label));
             let (sql, params, batch) = cursor_args(args, line, col)?;
-            c.may_speak().map_err(&conn_err)?;
+            c.may_speak().map_err(conn_err)?;
             // ON THE CONNECTION ITSELF, A CURSOR HAS A TRANSACTION OF ITS OWN — a portal lives
             // in one — begun in the round trip that reads its first page and ended by its last,
             // or by its value's drop; the connection answers nothing else meanwhile. On a
             // transaction's value, the cursor reads inside that transaction, which carries on
             // answering statements between pages.
             let owns_tx = c.tx.is_none();
-            if owns_tx && c.shared.status().map_err(&conn_err)? != b'I' {
+            if owns_tx && c.shared.status().map_err(conn_err)? != b'I' {
                 return Err(conn_err("a transaction begun in SQL is open on this connection".to_string())
                     .hint("end it the way it was begun — `execute(\"commit\")` or `execute(\"rollback\")` — or begin transactions with `begin()`, whose value opens cursors inside them."));
             }
-            let cur = c.shared.open_cursor(sql.as_str(), &params, batch, owns_tx).map_err(&conn_err)?;
+            let cur = c.shared.open_cursor(sql.as_str(), &params, batch, owns_tx).map_err(conn_err)?;
             let tx = if owns_tx {
                 let id = c.shared.begun.get() + 1;
                 c.shared.begun.set(id);
@@ -652,7 +652,7 @@ pub fn conn_method(
                 && let Ok(mut cur) = paging.cursor.try_borrow_mut()
                 && cur.is_done()
             {
-                value.ended_paging(paging, &mut cur, true).map_err(&conn_err)?;
+                value.ended_paging(paging, &mut cur, true).map_err(conn_err)?;
             }
             Ok(Value::Db(std::rc::Rc::new(value)))
         }
@@ -684,10 +684,10 @@ pub fn conn_method(
                     )))
                 }
             };
-            c.may_speak().map_err(&conn_err)?;
+            c.may_speak().map_err(conn_err)?;
             // A `begin` sent as SQL is the caller's to end: a value that rolled it back when
             // dropped would be undoing work it was never given.
-            if c.shared.status().map_err(&conn_err)? != b'I' {
+            if c.shared.status().map_err(conn_err)? != b'I' {
                 return Err(conn_err("a transaction begun in SQL is open on this connection".to_string())
                     .hint("end it the way it was begun — `execute(\"commit\")` or `execute(\"rollback\")` — or begin transactions with `begin()`."));
             }
@@ -704,7 +704,7 @@ pub fn conn_method(
                 return Err(err(format!("`{name}` ends a transaction, and this is the connection itself"))
                     .hint(format!("`tx = c.begin()` opens one; `tx.{name}()` ends it.")));
             }
-            c.may_speak().map_err(&conn_err)?;
+            c.may_speak().map_err(conn_err)?;
             // A transaction that sent nothing never began on the server: there is nothing to end,
             // and no round trip to spend saying so.
             if c.shared.begin_owed.take().is_some() {
@@ -714,11 +714,11 @@ pub fn conn_method(
             // A TRANSACTION THAT HAS FAILED CANNOT COMMIT — the server answers `COMMIT` with
             // `ROLLBACK` and no error, which a caller would take for success. It is rolled
             // back by name instead, and `commit` says so.
-            let failed = c.shared.status().map_err(&conn_err)? == b'E';
+            let failed = c.shared.status().map_err(conn_err)? == b'E';
             let ran = c.shared.control(if name == "commit" && !failed { "commit" } else { "rollback" });
             // Whatever the server said, this value has spoken its last.
             c.shared.open_tx.set(None);
-            ran.map_err(&conn_err)?;
+            ran.map_err(conn_err)?;
             if name == "commit" && failed {
                 return Err(conn_err("the transaction was rolled back, not committed: a statement in it had failed".to_string())
                     .hint("an error inside a transaction ends it — the statements before it are undone too."));
@@ -752,16 +752,16 @@ fn next_page(c: &std::rc::Rc<Conn>, paging: &Paging, args: &[Value], line: usize
     if cur.is_done() {
         return frame(cur.empty());
     }
-    c.may_speak().map_err(&conn_err)?;
+    c.may_speak().map_err(conn_err)?;
     let page = c.shared.page(&mut cur);
     if cur.is_done() {
         let ended = c.ended_paging(paging, &mut cur, page.is_ok());
         // The last page is the caller's only once its transaction has committed.
         if page.is_ok() {
-            ended.map_err(&conn_err)?;
+            ended.map_err(conn_err)?;
         }
     }
-    frame(page.map_err(&conn_err)?)
+    frame(page.map_err(conn_err)?)
 }
 
 /// The arguments of `cursor(sql, params?, batch?)`: one statement's text, its parameters as
@@ -1050,7 +1050,7 @@ pub fn postgres_execute(args: &[Value], line: usize, col: usize) -> Result<Value
         )
     };
     // A WRITABLE SESSION: the startup packet without `default_transaction_read_only`.
-    let mut session = connect(&target, false).map_err(&err)?;
+    let mut session = connect(&target, false).map_err(err)?;
     let (limit, started) = (session.limit, std::time::Instant::now());
     let out = run_statement(&mut session, sql.as_str(), &params).map_err(|f| err(said(f, limit, started)))?;
     let _ = write_msg(&mut session.stream, Some(b'X'), &[]);
@@ -1091,7 +1091,7 @@ fn query(
     // trips where one will do, and a window (however short) in which the session was not
     // yet read-only. A guarantee that holds from the first byte is both cheaper and
     // stronger than one a client remembers to ask for.
-    let mut session = connect(&target, true).map_err(&err)?;
+    let mut session = connect(&target, true).map_err(err)?;
 
     let (limit, started) = (session.limit, std::time::Instant::now());
     let cols = run_statement(&mut session, sql, params).map_err(|f| err(said(f, limit, started)))?.cols;

@@ -213,6 +213,47 @@
 
 ### Fixed
 
+- **Dependencies with published vulnerabilities are updated, and `cargo audit` is green
+  again.** `rustls` 0.23.40 → 0.23.46, `rustls-webpki` 0.103.13 → 0.103.16 and
+  `webpki-roots` 1.0.8 → 1.0.11 — the TLS under every `http_get` and `postgres_open`, which
+  carried four advisories including a ServerHello that could downgrade later connections'
+  key exchange (RUSTSEC-2026-0349) and certificate verification that could accept distrusted
+  intermediates (RUSTSEC-2026-0382) — plus `h2`, `quinn-proto`, `tokio`, `zstd`/`zstd-safe`/
+  `zstd-sys` (memory-safety advisories published 2026-10-16), `anyhow`, `event-listener`,
+  `memmap2` 0.9 and two yanked crates. Every update is semver-compatible and resolves under
+  the declared `rust-version` (1.96). What `cargo audit` still reports is three warnings it
+  already allows: two unmaintained crates, and `memmap2` 0.2.3, which a dependency pins to an
+  old major version.
+
+- **A `--features python` build compiles again.** `ArrayData::Shared` — the append-only
+  buffer an accumulated array lives in — had no arm in the CPython conversion, so the python
+  build has failed to compile since that buffer landed. CI's job for it was red; it crosses
+  now as the values it holds, the way a lazy `zip` does.
+
+- **A CSV the reader refuses says what to do about it.** An empty file, an unterminated quoted
+  field, non-UTF-8 bytes and a duplicate column name each stopped with an error and no
+  `help:` line — 61 of the newcomer programs in `scripts/stranger.py` ended there. Each now
+  carries one (a quote inside a quoted field is `""`; re-encode, or `read_bytes(path)`; a
+  header line is required; rename one of the duplicate columns), and the stranger ratchet's
+  baseline tightens from 303 to 265.
+
+- **`- -9223372036854775808` is i64::MIN, not an internal error, in a debug build.** The
+  parser folds a minus into an integer literal, and the one integer only writable negatively
+  folds to i64::MIN; minus THAT was folded with a plain `-`, which wraps in a release build
+  and aborted a debug one ("internal error … attempt to negate with overflow"). It wraps now,
+  as `-x` always has at run time. Seven differential fuzz tests hit it in the dev-profile
+  test run CI performs — a run nothing had reached since the python step began failing.
+  Pinned by the corpus program `neg_min_literal`, which fails on the previous code in a
+  debug build.
+
+- **CI is green on the current toolchain.** Clippy 1.99 flags passing a closure by reference
+  where it is already a function value (17 sites in `src/pg/mod.rs` and `src/writers.rs`) and
+  `chunks_exact(3)` where `as_chunks::<3>()` says the same at compile time (`Dna.codons`).
+  And `fold::tests::what_the_sandbox_refuses_stays_a_call` recursed 1,000 deep on a test
+  thread's 2 MiB stack, which an unoptimized build overflows — a SIGABRT that ended the
+  dual-engine test run CI performs in the dev profile, unseen because the python step before
+  it had already failed. It runs on the stack `main` gives evaluation now.
+
 - **Transaction control is never a cached name: a `commit` could fail, and strand its
   connection, after `DEALLOCATE ALL` or a pooler's backend switch.** `begin`, `commit` and
   `rollback` went through the prepared-statement cache like any statement, and a cached name can

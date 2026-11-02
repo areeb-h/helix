@@ -496,8 +496,10 @@ borrows too.
 ## Things to know before touching this
 
 - **Gate with `bash scripts/gate.sh < /dev/null`**, never `cargo test`. Debug builds have
-  three pre-existing failures (tree-walker stack overflow at 50k frames) that pass in
-  release. Verified by stashing and reproducing on an untouched tree.
+  three tests that overflow the stack (the tree-walker reaching its 20,000-frame cap needs
+  ~2.8 GB of debug frames, against the 1 GiB a debug build gives evaluation) and pass in
+  release. A debug run passes with `HELIX_STACK_MB=8192`, which is how CI runs its
+  dev-profile `cargo test --features dataframes`.
 - **Never edit `src/` while a cargo build is running** — the result is a snapshot you cannot
   attribute. It cost one wasted 20-minute build this session.
 - **`gh run view --json` reports `conclusion` as `""`, not `null`**, while a job runs. jq's

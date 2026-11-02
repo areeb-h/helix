@@ -203,7 +203,7 @@ pub fn to_table(args: &[Value], line: usize, col: usize) -> Result<Value, HelixE
     for row in &rows {
         s.push('\n');
         let cells: Vec<String> = (0..headers.len())
-            .map(|c| pad(&row.get(c).map(&cell_text).unwrap_or_default(), widths[c], numeric[c]))
+            .map(|c| pad(&row.get(c).map(cell_text).unwrap_or_default(), widths[c], numeric[c]))
             .collect();
         s.push_str(cells.join("  ").trim_end());
     }

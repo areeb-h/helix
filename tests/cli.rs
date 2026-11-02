@@ -6162,8 +6162,12 @@ fn oversized_materialization_is_an_error_not_an_abort() {
     ] {
         // The engine switch is EXPORTED before the `exec`: `exec VAR=1 cmd` is not an
         // assignment in sh, it looks for a command literally named `VAR=1`.
+        //
+        // `HELIX_STACK_MB` is UNSET: the cap is sized for the default evaluation stack, and
+        // CI's dev-profile run exports 8192 for the deep-recursion tests — a stack this
+        // cap could not reserve, so the child died at startup instead of at the limit.
         let script = format!(
-            "ulimit -v 3670016; {}exec {} {} < /dev/null",
+            "ulimit -v 3670016; unset HELIX_STACK_MB; {}exec {} {} < /dev/null",
             extra,
             env!("CARGO_BIN_EXE_helix"),
             path.display()
@@ -6254,7 +6258,7 @@ fn unique_on_a_packed_array_does_not_abort() {
         ("walker", "export HELIX_NOVM=1; "),
     ] {
         let script = format!(
-            "ulimit -v 3670016; {}exec {} {} < /dev/null",
+            "ulimit -v 3670016; unset HELIX_STACK_MB; {}exec {} {} < /dev/null",
             extra,
             env!("CARGO_BIN_EXE_helix"),
             path.display()

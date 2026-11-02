@@ -245,7 +245,7 @@ pub(crate) fn dna_method(
             let count = bytes.len() / 3;
             window_count_guard("codons", count, line, col)?;
             let mut out = Vec::with_capacity(count);
-            for chunk in bytes.chunks_exact(3) {
+            for chunk in bytes.as_chunks::<3>().0 {
                 out.push(Value::Str(Rc::new(String::from_utf8_lossy(chunk).into_owned())));
             }
             Ok(Value::array(out))

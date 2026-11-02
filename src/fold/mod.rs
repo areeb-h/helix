@@ -1169,8 +1169,22 @@ mod tests {
     /// from context, a loop over more elements than the budget (`reduce` charges up front,
     /// as every comprehension does), a frame, a value too big to hold — and a method on a
     /// binding that is not a record.
+    ///
+    /// ON THE STACK `main` EVALUATES ON. `deep(1000)` recurses in the sandbox the way it
+    /// would at load time, and an unoptimized frame is large enough that a thousand of
+    /// them overflow a test thread's default 2 MiB — a SIGABRT that takes every later test
+    /// in the binary with it (`cargo test --features dataframes`, which CI runs in the
+    /// dev profile). `main` gives evaluation `serve::eval_stack_size()`; so does this.
     #[test]
     fn what_the_sandbox_refuses_stays_a_call() {
+        std::thread::Builder::new()
+            .stack_size(crate::serve::eval_stack_size())
+            .spawn(what_the_sandbox_refuses_stays_a_call_body)
+            .expect("spawn the test on an evaluation-sized stack")
+            .join()
+            .expect("the test body panicked");
+    }
+    fn what_the_sandbox_refuses_stays_a_call_body() {
         for src in [
             "fn loud(x) = do {\n  print(x)\n  x\n}\ny = loud(1)",
             "fn rd() = read_text(\"x\")\ny = rd()",
