@@ -54,7 +54,7 @@ carries one has to be cut as `minor` by hand. This cycle is one.
 **This cycle is a MINOR, not a patch** — positional destructuring is new syntax, and
 `begin`, `commit`, `rollback` and `cursor` are new methods (so the
 release guard would refuse a patch anyway). Gate green at **1,035 tests**
-(608 lib + 392 CLI + 3 other + 32 dual-engine), **155** dfdiff programs with 0 undeclared
+(608 lib + 392 CLI + 3 other + 32 dual-engine), **156** dfdiff programs with 0 undeclared
 divergence, 99 files type-checked. The full list is `CHANGELOG.md`'s `Unreleased`; the shape
 of it:
 
@@ -74,6 +74,11 @@ of it:
 - **Specialization reaches further** — a recursion spends no depth, a call through a record
   built at run time is devirtualized, and a clone is remade for a shallower site only when the
   ceiling had cut it short.
+- **CI is green again** (it had been red on four of six jobs since September): 16 dependency
+  vulnerabilities patched (the TLS stack under `http_get`/`postgres_open` among them), the
+  `--features python` build compiles, a CSV the reader refuses carries a `help:` line (the
+  stranger baseline 303 → 265), and the first dev-profile test run in weeks found a parser
+  abort on `- -9223372036854775808`, now fixed.
 - **Fixes**: a Bool column holds `missing` (and a nullable PostgreSQL `boolean` is a Bool
   column); `**` on floats follows one rule on every engine; `postgres_open` tries every
   address a name resolves to; `helix fmt` no longer writes `{...a,...b}`.
