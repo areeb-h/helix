@@ -1,0 +1,16 @@
+exit: 0
+--- stdout ---
+removed count=2 b=missing has=false keys=["a", "c"]
+older view untouched count=3 b=2
+reinserted {"a" => 1, "b" => 20, "c" => 3}  and the tombstoned view {"a" => 1, "c" => 3}
+absent remove equal=true count=3
+siblings {"a" => 1, "c" => 3, "x" => 1} {"c" => 3} parent {"a" => 1, "c" => 3}
+equal true
+drained bare count=50 first=[1, 3, 5] 99=9801
+drained field count=0 n=100 empty=true
+counter [(0, 49500), (1, 49600), (2, 49700), (3, 49800), (4, 49900), (5, 50000), (6, 50100), (7, 50200), (8, 50300), (9, 50400)]
+blind [(0, 994), (1, 995), (2, 996), (3, 997), (4, 998), (5, 999), (6, 993)]
+mixed count=167 has1=true has2=false last=499
+early count=10 5=e5  late count=40 5=l285
+fork count=10 5=missing 99=f  early still e5
+--- stderr ---

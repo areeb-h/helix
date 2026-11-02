@@ -7490,11 +7490,12 @@ fn test_json_and_check_lint() {
     assert_eq!(lcode, Some(0), "lints never change the exit code");
     assert!(lout.contains("LAST-wins"), "{lout}");
 
-    // ADR 0029's guarantee stops at a record field for a DICT, and the lint is what makes
-    // that audible. `mut` is top-level only, so a fold carrying two values carries them in
-    // a record — the shape AGENTS.md teaches — and through a field the take-append-store
-    // cannot fire, so `insert` clones the whole map per step: measured 16.6x per 4x the
-    // input and 71 s at n=128,000.
+    // A DICT ACCUMULATED IN A RECORD FIELD IS LINEAR NOW, so its note is gone. It used to
+    // say O(n^2) — `insert` cloned the whole map per step, 71 s at n=128,000 — and `Dict`
+    // now appends inserts and removes to a shared log, which needs no unique `Rc`. A note
+    // that contradicts the runtime is how a checker gets turned off; this fails if they
+    // drift apart again. (`a_dict_drained_in_a_fold_is_linear` holds the runtime
+    // half of the same claim.)
     // The block above removes `dir` before asserting, so re-make it.
     std::fs::create_dir_all(&dir).unwrap();
     let acc = dir.join("acc.helix");
@@ -7507,8 +7508,10 @@ print(r.k)
     .unwrap();
     let (aout, _, acode) = run(&["check", "--lint", acc.to_str().unwrap()], &[], "");
     assert_eq!(acode, Some(0), "lints never change the exit code");
-    assert!(aout.contains("ADR 0029"), "the record-field dict fold must be named: {aout}");
-    assert!(aout.contains("O(n^2)"), "and its class stated: {aout}");
+    assert!(
+        !aout.contains("ADR 0029") && !aout.contains("O(n^2)"),
+        "a dict in a record field is linear now — the lint must not claim otherwise: {aout}"
+    );
 
     // AND THE ARRAY HALF MUST NOW BE SILENT. `ArrayData::Shared` made it linear (3.3x per
     // 4x the input where it was 27.9x, 36 ms where it was 2591 ms at n=160,000), so the
@@ -11331,24 +11334,25 @@ fn check_lint_walks_the_import_graph() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
-    // The quadratic shape lives HERE, in the imported module. It is the DICT spelling: the
-    // array one became linear with `ArrayData::Shared`, so the lint no longer fires on it
-    // and using it as bait would make this test pass for the wrong reason.
+    // The linted shape lives HERE, in the imported module: `reduce(dict(), …)`, whose note
+    // names `to_dict()`. (This used to be the record-field fold, until a dict and then an
+    // array in a field both became linear and their notes were retired — bait the lint no
+    // longer fires on would make this test pass for the wrong reason.)
     std::fs::write(
         dir.join("lib.helix"),
-        "export fn build(n) = range(0, n).reduce({d: dict(), k: 0}, (a, i) => {d: a.d.insert(i, i), k: a.k + 1}).k\n",
+        "export fn build(xs) = xs.reduce(dict(), (d, kv) => d).count()\n",
     )
     .unwrap();
     // The entry is clean — it has nothing to lint of its own.
     let app = dir.join("app.helix");
-    std::fs::write(&app, "import lib\nprint(lib.build(4))\n").unwrap();
+    std::fs::write(&app, "import lib\nprint(lib.build([1, 2]))\n").unwrap();
 
     let (out, _, code) = run(&["check", "--lint", app.to_str().unwrap()], &[], "");
     assert_eq!(code, Some(0), "lints never change the exit code: {out}");
     assert!(out.contains("ok   "), "the entry still reports ok: {out}");
     assert!(
-        out.contains("ADR 0029"),
-        "the imported module's quadratic fold must be reported: {out}"
+        out.contains("LAST-wins"),
+        "the imported module's fold must be reported: {out}"
     );
     assert!(
         out.contains("lib.helix"),
@@ -11363,7 +11367,7 @@ fn check_lint_walks_the_import_graph() {
         "",
     );
     assert_eq!(
-        dout.matches("ADR 0029").count(),
+        dout.matches("LAST-wins").count(),
         1,
         "a module reached twice is linted once: {dout}"
     );
@@ -11385,7 +11389,7 @@ fn check_lint_walks_the_import_graph() {
         .collect();
     assert!(
         notes.iter().any(|n| n["file"].as_str().unwrap_or("").contains("lib.helix")
-            && n["rendered"].as_str().unwrap_or("").contains("ADR 0029")),
+            && n["rendered"].as_str().unwrap_or("").contains("LAST-wins")),
         "the note names the imported module: {jout}"
     );
 
@@ -13588,6 +13592,131 @@ fn a_dict_read_between_inserts_is_linear() {
     );
 }
 
+
+/// Draining a dict in a fold is linear — `remove`, on a bare accumulator and through a
+/// record field — and so is overwriting one through a record field.
+///
+/// `insert` became an append to the dict's shared log, and `remove` did not: "a remove
+/// cannot be expressed as an append", so it settled the view and copied the whole map per
+/// call. 0.54 s at n=8,000 and 9.3 s at n=32,000 — 17x per 4x the input, the cliff the log
+/// was built to remove, one method over. A tombstone in the log (`None`) IS a remove
+/// expressed as an append; now 0.15 s at n=32,000.
+///
+/// A RATIO against overwriting a bare accumulator over the same starting dict, for the
+/// reason `a_dict_read_between_inserts_is_linear` gives. Answers are asserted too, and on
+/// every engine, since the three share the log but each reaches `remove` its own way.
+#[test]
+fn a_dict_drained_in_a_fold_is_linear() {
+    let dir = std::env::temp_dir().join(format!("hx_drain_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    const N: usize = 20_000;
+    let full = format!("full = range(0, {N}).map((i) => (i, i)).to_dict()\n");
+
+    // The control: the same walk overwriting a BARE accumulator — the shape that was linear
+    // before the log existed (`Op::InsertIntoLocal` takes the accumulator out of its slot).
+    let over = dir.join("over.helix");
+    std::fs::write(
+        &over,
+        format!("{full}print(range(0, {N}).reduce(full, (a, i) => a.insert(i, 0)).count())\n"),
+    )
+    .unwrap();
+    // The same overwrite through a RECORD FIELD, where the record keeps the dict aliased and
+    // nothing can take it out of a slot. This is the runtime half of retiring the
+    // `--lint` note that called it O(n^2) (71 s at n=128,000) — see `test_json_and_check_lint`.
+    let over_field = dir.join("over_field.helix");
+    std::fs::write(
+        &over_field,
+        format!(
+            "{full}r = range(0, {N}).reduce({{d: full, k: 0}}, (a, i) => {{d: a.d.insert(i, 0), k: a.k + 1}})\nprint(r.d.count())\n"
+        ),
+    )
+    .unwrap();
+    let field = dir.join("field.helix");
+    std::fs::write(
+        &field,
+        format!(
+            "{full}r = range(0, {N}).reduce({{d: full, k: 0}}, (a, i) => {{d: a.d.remove(i), k: a.k + 1}})\nprint(r.d.count())\n"
+        ),
+    )
+    .unwrap();
+    let bare = dir.join("bare.helix");
+    std::fs::write(
+        &bare,
+        format!("{full}print(range(0, {N}).reduce(full, (a, i) => a.remove(i)).count())\n"),
+    )
+    .unwrap();
+
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let best = |path: &std::path::Path, want: usize| -> std::time::Duration {
+            let mut best = std::time::Duration::from_secs(3600);
+            for _ in 0..3 {
+                let t0 = std::time::Instant::now();
+                let (out, err, code) = run(&["run", path.to_str().unwrap()], env, "");
+                let dt = t0.elapsed();
+                assert_eq!(code, Some(0), "{env:?} {err}");
+                assert_eq!(out.trim(), want.to_string(), "{path:?} {env:?}");
+                best = best.min(dt);
+            }
+            best
+        };
+        let t_over = best(&over, N);
+        for (subject, want) in [(&over_field, N), (&field, 0), (&bare, 0)] {
+            let t = best(subject, want);
+            assert!(
+                t.as_secs_f64() < t_over.as_secs_f64() * 20.0,
+                "a dict fold is not linear on {env:?} ({subject:?}): {t:?} against \
+                 {t_over:?} overwriting a bare accumulator (ratio {:.1}x). Something is \
+                 copying the map rather than appending to its log — a remove that settles, \
+                 or an insert that does.",
+                t.as_secs_f64() / t_over.as_secs_f64()
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A dict that is only ever OVERWRITTEN holds memory for its keys, not for its writes.
+///
+/// The log records every write, so before it was bounded a ten-key dict grew with the
+/// number of inserts: peak RSS 56 MB at 250,000 writes, 189 MB at 1,000,000, 687 MB at
+/// 4,000,000 — every overwritten value kept alive. That is the shape of every counter,
+/// rate limiter and `last_seen` table in a long-running server, where it is a leak. The
+/// log now settles into a fresh base once half of it is dead weight; both runs peak at
+/// ~16 MB.
+///
+/// The program reads its own `VmHWM`, so this is Linux-only, and it asserts the GROWTH
+/// between two sizes rather than an absolute budget: the baseline varies with build and
+/// allocator, and the leak is what scales. 4x the writes may cost at most 32 MB more;
+/// the unbounded log cost 133 MB more.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_overwritten_dict_does_not_grow_with_its_writes() {
+    let src = "fn main(n: Int = 1000) = do {
+  d = range(0, n).reduce(dict(), (acc, i) => acc.insert(i % 10, \"value {i} padded out to a realistic length\"))
+  hwm = read_text(\"/proc/self/status\").split(\"\\n\").filter((l) => l.starts_with(\"VmHWM:\"))[0]
+  print(\"{d.count()} {hwm.split(\":\")[1].trim().split(\" \")[0]}\")
+}
+";
+    let path = std::env::temp_dir().join(format!("hx_hwm_{}.helix", std::process::id()));
+    std::fs::write(&path, src).unwrap();
+    let peak_kb = |n: usize| -> f64 {
+        let (out, err, code) = run(&["run", path.to_str().unwrap(), "--n", &n.to_string()], &[], "");
+        assert_eq!(code, Some(0), "{err}");
+        let mut parts = out.split_whitespace();
+        assert_eq!(parts.next(), Some("10"), "ten keys survive: {out}");
+        parts.next().and_then(|k| k.parse().ok()).unwrap_or_else(|| panic!("no VmHWM in {out:?}"))
+    };
+    let small = peak_kb(250_000);
+    let large = peak_kb(1_000_000);
+    let _ = std::fs::remove_file(&path);
+    assert!(
+        large - small < 32.0 * 1024.0,
+        "peak memory grew {:.0} MB for 4x the overwrites of ten keys ({small} kB -> {large} kB). \
+         The dict's log is not settling — every overwritten value is being kept alive.",
+        (large - small) / 1024.0
+    );
+}
 
 /// `postgres_query` — ADR 0038's decisions over a network connection.
 ///

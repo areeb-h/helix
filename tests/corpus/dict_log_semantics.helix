@@ -30,7 +30,7 @@ b1 = d2.insert("z", 10)
 b2 = d2.insert("z", 20)
 print("branch {b1.get("z")} {b2.get("z")}  base untouched {d2.get("z")}")
 
-# REMOVE cannot be an append.
+# REMOVE appends a tombstone (dict_log_tombstones pins the rest).
 r = d3.remove("a")
 print("remove count {r.count()} a={r.get("a")} b={r.get("b")}")
 
