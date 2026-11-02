@@ -344,8 +344,35 @@ impl Seg {
     }
 }
 
+/// The `help:` line for a CSV the reader refused, keyed by the reason `split_fields` /
+/// `field_text` gave. A malformed file is the newcomer's most likely first error with a
+/// frame, and scripts/stranger.py's help ratchet counts every one of these that arrives
+/// without a way forward.
+fn csv_hint(reason: &str) -> Option<&'static str> {
+    if reason.contains("unterminated quoted field") {
+        Some(
+            "a field that opens with `\"` must close with one; a quote inside a quoted \
+             field is written `\"\"`.",
+        )
+    } else if reason.contains("non-UTF-8") {
+        Some(
+            "Helix text is UTF-8: re-encode the file (e.g. `iconv -f latin1 -t utf-8`), \
+             or read it raw with `read_bytes(path)`.",
+        )
+    } else {
+        None
+    }
+}
+
 pub fn read_csv(path: &str, line: usize, col: usize) -> Result<crate::backend::Df, HelixError> {
-    let err = |m: String| HelixError::new(m, line, col);
+    let err = |m: String| {
+        let hint = csv_hint(&m);
+        let e = HelixError::new(m, line, col);
+        match hint {
+            Some(h) => e.hint(h),
+            None => e,
+        }
+    };
     let bytes =
         std::fs::read(path).map_err(|e| err(format!("could not open CSV `{path}`: {e}")))?;
     // Strip a UTF-8 BOM so the first header name doesn't carry it invisibly.
@@ -353,7 +380,10 @@ pub fn read_csv(path: &str, line: usize, col: usize) -> Result<crate::backend::D
 
     let bounds = record_bounds(bytes);
     if bounds.is_empty() {
-        return Err(err(format!("CSV `{path}` is empty — a header row is required")));
+        return Err(err(format!("CSV `{path}` is empty — a header row is required")).hint(
+            "a CSV starts with a line naming its columns, e.g. `a,b`; `read_text(path)` \
+             reads a file of any shape.",
+        ));
     }
     let mut fields = Vec::new();
     parse_fields(&bytes[bounds[0].0..bounds[0].1], &mut fields)
