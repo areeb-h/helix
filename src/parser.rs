@@ -2434,8 +2434,12 @@ impl Parser {
                 // the next token: postfix binds tighter than unary minus, so `-1.abs()`
                 // is `-(1.abs())`, and its operand does not come back as a bare literal.
                 match e {
-                    // A literal is always non-negative, so the negation cannot overflow.
-                    Expr::Int(n) => Ok(Expr::Int(-n)),
+                    // WRAPPING, because the operand is not always a non-negative literal:
+                    // `- -9223372036854775808` hands this arm the i64::MIN the inner minus
+                    // folded below. `-x` wraps at run time (docs/integer-semantics.md), so
+                    // the fold must too — a plain `-` agreed in a release build and
+                    // aborted a debug one. Pinned by `tests/corpus/neg_min_literal`.
+                    Expr::Int(n) => Ok(Expr::Int(n.wrapping_neg())),
                     // `9223372036854775808` does not fit an i64, but its NEGATION is
                     // exactly `i64::MIN`. Without this, the one integer that cannot be
                     // written positively could not be written at all: it degraded to an

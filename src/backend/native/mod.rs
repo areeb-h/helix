@@ -126,7 +126,8 @@ impl NativeFrame {
         }
         for (i, (name, _)) in cols.iter().enumerate() {
             if cols[..i].iter().any(|(n, _)| n == name) {
-                return Err(HelixError::new(format!("duplicate column `{name}`"), line, col));
+                return Err(HelixError::new(format!("duplicate column `{name}`"), line, col)
+                    .hint("column names must be unique — rename one of them (for a CSV, in its header row)."));
             }
         }
         Ok(NativeFrame {

@@ -1,0 +1,10 @@
+# `-9223372036854775808` is the one integer that can only be written negatively: the
+# parser folds the sign into the literal and gets i64::MIN. Negating THAT again folded
+# with a plain `-`, which wraps in a release build and aborted a debug one ("internal
+# error ... attempt to negate with overflow", found by the dev-profile test run). At
+# run time `-x` wraps, as all i64 arithmetic does (docs/integer-semantics.md), so the
+# fold must too: all three lines print i64::MIN, on every engine and every profile.
+print(- -9223372036854775808)
+print(-(-9223372036854775808))
+x = -9223372036854775808
+print(-x)

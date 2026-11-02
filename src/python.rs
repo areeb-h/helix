@@ -605,7 +605,12 @@ mod imp {
                     // all pass with this arm missing. It was found by running
                     // `cargo check --features python` by hand, which is the only thing that
                     // finds it.
-                    ArrayData::Enumerate { .. } | ArrayData::Zip { .. } => {
+                    //
+                    // `Shared` (the append-only buffer a fold's accumulator lives in, ADR
+                    // 0029) crosses the same way: its value is a prefix of the buffer, and
+                    // `to_values` reads exactly that prefix. It was missing here for the
+                    // reason above — CI's python job now builds this file, and caught it.
+                    ArrayData::Enumerate { .. } | ArrayData::Zip { .. } | ArrayData::Shared { .. } => {
                         let vs = items.to_values();
                         let mut elems = Vec::with_capacity(vs.len());
                         for it in vs.iter() {
