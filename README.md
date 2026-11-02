@@ -55,13 +55,15 @@ separately in [docs/benchmarks.md](docs/benchmarks.md).
 
 Helix ships as a **single self-contained binary** — no runtime to install (no Python, no system
 BLAS; the core links nothing external beyond the C runtime). Measured on the gate profile,
-stripped: the default build is **19.3 MB** and the **appliance profile**
-(`cargo build --release --no-default-features --features appliance`, ADR 0032) is **12.5 MB**.
+stripped (2026-11-02): the default build is **21.1 MB** and the **appliance profile**
+(`cargo build --release --no-default-features --features appliance`, ADR 0032) is **14.0 MB**.
 
 The default build carries Helix's **own** DataFrame engine (ADR 0033). Polars is no longer in
 it: it stays behind `--features dataframes` as the **oracle** every native result is compared
-against, because an engine cannot be its own evidence. That oracle build is **77.5 MB**
-stripped — which is the size of what the default stopped carrying.
+against, because an engine cannot be its own evidence. That oracle build is **82.2 MB**
+stripped — which is the size of what the default stopped carrying. SQLite (`--features db`)
+and PostgreSQL (`--features postgres`) are opt-in builds too; `has_feature(name)` lets a
+program ask which it is running on.
 
 ```sh
 # macOS / Linux — downloads the binary for your platform and verifies its SHA-256:
@@ -89,8 +91,9 @@ helix eval "print(1 + 2)"    # a one-liner
 helix repl                   # interactive session
 helix check script.helix     # type-check without running (takes many paths; `--lint` for advice)
 helix test [path]            # run *_test.helix files and `##` doc examples (`--engines` cross-checks all 3)
-helix fmt script.helix       # format — no options, and it cannot change your program
+helix fmt script.helix       # format — no style options (`--check` reports), and it cannot change your program
 helix effects script.helix   # what each function does and what it carries: authority (or unknown), reproducibility
+helix jit-explain script     # which numeric kernels the JIT compiled, by line (`--json` too)
 helix doc [Type]             # a type's methods (Array/String/Dna/Connection/…) or `builtins`
 helix search <term>          # find a capability by what it does, not by its name
 helix describe [what]        # the whole API as JSON — a name, a Type, or everything
@@ -147,14 +150,16 @@ model.sql({where: adult, order: ["-age"]})          # an ORM renders it: `where 
 # Databases return frames, so the same verbs continue over the result. Parameters are
 # VALUES (`$1`), never text spliced into the statement, and the session is read-only
 # from its first byte — a write comes back as the server's own SQLSTATE, not a guess.
+# (PostgreSQL and SQLite are opt-in builds — `--features postgres` / `--features db` —
+# and not in the installed binary; `has_feature("postgres")` asks before calling.)
 db = postgres_open("postgres://user:pw@host/db")   # TLS on by default, verified
 db.query("select name, age from people where age > $1", [40])
     .where(@age < 55)
     .select(@name)
 
 # A write is a different session and a different grant (ADR 0047): `db-write`, never just `net`.
-db = postgres_open("postgres://user:pw@host/db", "write")
-db.execute("insert into people (name, age) values ($1, $2) returning id", ["Ada", 36]).rows
+rw = postgres_open("postgres://user:pw@host/db", "write")
+rw.execute("insert into people (name, age) values ($1, $2) returning id", ["Ada", 36]).rows
 postgres_execute("postgres://user:pw@host/db", "delete from people where age < $1", [18]).affected
 
 # Several statements in ONE round trip (and one transaction): an Array in, an Array of frames out.
@@ -162,7 +167,7 @@ postgres_execute("postgres://user:pw@host/db", "delete from people where age < $
                             {sql: "select * from posts where author_id = $1", params: [7]}])
 
 # A transaction is a VALUE: dropped without `commit()` — an error unwinding past it — it rolls back.
-tx = db.begin()
+tx = rw.begin()
 tx.execute("update accounts set balance = balance - $1 where id = $2", [10, 1])
 tx.execute("update accounts set balance = balance + $1 where id = $2", [10, 2])
 tx.commit()
@@ -199,12 +204,14 @@ More in [`examples/`](examples/), the full [stdlib reference](docs/reference.md)
 - **Records, tuples, destructuring** — `{name: "Ada", age: 41}` with `.field` access, and
   `let {name, age} = person in …` — or `{name, age} = person` as a statement — to read
   fields (an absent one is `missing`, ADR 0046); `let [a, b] = pair in …`, `[head, ...tail]
-  = xs` and `q, r = divmod(17, 5)` to unpack a tuple or an array by position (ADR 0053);
+  = xs` and `q, r = (17 // 5, 17 % 5)` to unpack a tuple or an array by position (ADR 0053);
   `(a, b)` tuples that destructure in lambda params (`pairs.map((k, v) => …)`) and take
   defaults (`(x, n = 10) => …`). Record spread/update: `{ ...base, status: 500 }`.
 - **Pattern matching** — `match` with literal, range (half-open, matched by magnitude), or-,
   guard, and binding patterns.
-- **Dicts and UFCS** — string-keyed dict literals that spread into records; any user function is
+- **Dicts and UFCS** — dicts keyed by strings, ints, bools or DNA, with O(log n) lookup and
+  `insert`/`remove` that return a new dict in O(1) amortized, so building or draining one in a
+  fold is linear (string-keyed literals spread into records); any user function is
   callable as a method on its first argument, and **which one a call means is decided by the
   RECEIVER, at run time** (ADR 0045). So `where`, `select`, `count` and `join` can be your own
   verbs on your own type while an array keeps its comprehension and a frame keeps its column
@@ -254,13 +261,17 @@ More in [`examples/`](examples/), the full [stdlib reference](docs/reference.md)
   9.0 → **3.2**, `with` 49.0 → **19.8**, `sort` 74.5 → **38.1**, `where` 26.0 → **13.6**. That is
   our use of Polars on our workloads, not a general claim about Polars.
 - **Databases return frames**, so the whole verb surface continues over a query result.
-  **SQLite** bundled (ADR 0038) and **PostgreSQL** spoken directly over the wire (ADR 0044,
-  `--features postgres`) with **zero new dependencies** — the v3 protocol has been frozen since
+  **SQLite** bundled (ADR 0038, `--features db`) and **PostgreSQL** spoken directly over the
+  wire (ADR 0044, `--features postgres`) with **zero new dependencies**. Both are opt-in
+  builds — the release binaries the installers fetch carry neither, and a call says what to
+  rebuild with — the v3 protocol has been frozen since
   2003 and SCRAM-SHA-256 needs only primitives already in the tree. Parameters are values, never
   interpolated text; the session is read-only from the startup packet; and **TLS is on by default
   and the server cannot turn it off** — two modes where `libpq` has six, because its default
   (`prefer`, which Go's `pgx` shares) continues in plaintext whenever something on the path says
-  so.
+  so. Transactions are values that roll back when dropped uncommitted, a result larger than
+  memory is read a page at a time (`c.cursor(…)`), several statements share one round trip,
+  and a login is bound to the TLS session it runs over (SCRAM-SHA-256-PLUS).
 - **Math standard library** that broadcasts over arrays/tensors and propagates `missing`: the full
   transcendental/rounding set plus `hypot`, `atan2`, constants, and the `**` power operator.
 
@@ -345,14 +356,15 @@ tests of the same one. Details in [docs/execution-engine.md](docs/execution-engi
 
 ## Status & roadmap
 
-A mature implementation, **not a prototype**: **848 tests** (481 library + 332 CLI + 3 native-df
-+ 32 dual-engine differential), plus 140 programs run under both DataFrame backends and a
-whole-tree type-check over 98 files — zero compiler warnings, with a differential oracle and a VM/tree-walker
+A mature implementation, **not a prototype**: **1,035 tests** (608 library + 392 CLI + 3
+native-df + 32 dual-engine differential), plus 155 programs run under both DataFrame backends
+and a whole-tree type-check over 99 files — zero compiler warnings, with a differential oracle and a VM/tree-walker
 parity gate on every change. Phase status (full plan in
 [docs/ROADMAP.md](docs/ROADMAP.md)):
 
 1. **Core language & interpreter** — done
-2. **Type checker & module system** — done (package manager pending)
+2. **Type checker, module system & packages** — done (`helix.toml` manifests and
+   workspaces, hash-pinned `helix.lock` via `helix add`/`sync`/`verify`)
 3. **DataFrame engine** (Helix's own, default since v0.9.0; polars retained as the oracle) — done
 4. **Tensor engine & linear algebra** — done
 5. **JIT compilation** — done for numeric kernels (coverage expanding; SIMD is the next lever)

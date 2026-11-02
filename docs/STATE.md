@@ -41,60 +41,45 @@ Last updated: 2026-11-02.
   requests could trigger), peer + HTTP version on a request, a body sent in pieces, the
   capability sandbox findable and no longer failing open on a typo.
 
-**A guard `release.sh` still lacks.** It refuses a patch when it sees a `### Changed`
-heading, and in the 0.8.0 cycle that heading existed only by luck — `html_escape` happened
-to alter `to_html`'s bytes. Every other addition that cycle sat under `### Added`, so a
-`release.sh patch` would have shipped a `[workspace]` table, seventeen builtins, a new
-`Value` type and three DataFrame verbs as a patch. The guard is right about `### Changed`
-and blind to "language-surface addition", which is the other half of the same policy.
-Still open — see the queue.
+**The release guard now asks the source, not just the prose.** `release.sh` used to refuse a
+patch only when `Unreleased` had a `### Changed` heading, which a language-surface addition
+under `### Added` slipped past (in v0.8.0 it fired only because `html_escape` happened to
+change `to_html`'s bytes). It now also compares the builtin and method names in
+`src/registry.rs` against the last tag and refuses a patch when the set grew. Still blind to
+one thing: a SYNTAX addition — `[a, b] = xs` this cycle — adds no name, so the release that
+carries one has to be cut as `minor` by hand. This cycle is one.
 
 ## In flight for the next release
 
-**This cycle is a MINOR, not a patch.** Four language-surface additions have landed since
-`v0.9.0`, and none of them is a `### Changed` — which is precisely the case the guard noted
-above would miss. Gate green throughout at **848** (481 + 332 + 3 + 32), **139** dfdiff
-programs with 0 undeclared divergence, 98 files type-checked.
+**This cycle is a MINOR, not a patch** — positional destructuring is new syntax, and
+`begin`, `commit`, `rollback` and `cursor` are new methods (so the
+release guard would refuse a patch anyway). Gate green at **1,035 tests**
+(608 lib + 392 CLI + 3 other + 32 dual-engine), **155** dfdiff programs with 0 undeclared
+divergence, 99 files type-checked. The full list is `CHANGELOG.md`'s `Unreleased`; the shape
+of it:
 
-- **`df.rename(old, new)`** (`6f3dd0f`) — the last thing blocking a generic
-  relation-attach in a library: aligning a child's foreign key to a parent's key IS a
-  rename, and a frame had no way to say one. Both arguments are ordinary evaluated
-  strings, so a library passes its own parameters through. Written once as a PROVIDED
-  trait method — "copy the column under the new name, then project in the original
-  order" — so the two backends agree by construction rather than by two implementations
-  that happen to match. Renaming onto an occupied name is refused; renaming to itself is
-  a no-op, because refusing that would fail exactly when the child already used the
-  parent's name.
-- **A join type from a binding** (`f972e13`) — `l.join(r, k, {how: how})`. The type was
-  recognised only as a trailing string LITERAL, so a bare name was always a key and a
-  library had to branch over five constants. Deciding the role from the VALUE was
-  rejected on purpose: `l.join(r, k1, k2)` with `k2` = "left" and no such column is a
-  clean error today and would have become a silent left join on `k1` alone. A string
-  literal became a valid key at the same time, which `select` had always accepted.
-- **`has_feature(name)`** (`036e6de`) — ADR 0032 gates the body, not the name, so a
-  gated verb describes itself and says what to rebuild with; what a PROGRAM could not do
-  was ask BEFORE calling. An unknown name is an ERROR, not `false`, because a typo
-  answered with `false` takes the fallback path forever on every build with nothing to
-  see. Its test asserts each answer against the compiler's own `cfg!`, so it stays true
-  in an appliance build.
-- **Tuple answers `count()`/`length()`/`values()`**, and `helix doc Tuple` works
-  (`036e6de`) — it used to reply "unknown type `Tuple`", for a type the stdlib returns
-  from `enumerate`, `zip`, `top`, `frequencies` and both `items()` methods. The
-  interesting half was that teaching the RUNTIME alone left `(1, 2).count()` failing
-  while `{a: 1}.items().map(it.count())` worked — the second receiver is Unknown, so the
-  checker waved it through; a literal tuple has type `Tuple` and the checker had no arm.
+- **PostgreSQL grew up** (ADR 0044/0047 addenda). A transaction is a value that rolls back
+  when dropped uncommitted (`tx = c.begin()`), and its `BEGIN` rides with its first statement
+  instead of costing a round trip. A result larger than memory is read a page at a time
+  (`c.cursor(sql, params?, batch?)`, `cur.next()`). Several statements share one round trip
+  (`c.query([q1, q2, q3])`); an Array or Bytes is a parameter (`where id = any($1)`); a
+  statement's time limit is the URL's `timeout=`; and a login is bound to the TLS session it
+  runs over (SCRAM-SHA-256-PLUS, on by default). Statements are prepared once per connection
+  and decoded where they arrive.
+- **Positional destructuring** (ADR 0053) — `[a, b] = xs` in `let`, `do`, `where` and as a
+  statement, with `...rest`; the old bare `a, b = xs` is now the same form.
+- **A dict is linear to build AND to drain, and bounded by its keys** — `remove` appends a
+  tombstone to the log `insert` writes, and the log settles once half of it is dead weight
+  (queue item 1, below, is closed by it).
+- **Specialization reaches further** — a recursion spends no depth, a call through a record
+  built at run time is devirtualized, and a clone is remade for a shallower site only when the
+  ceiling had cut it short.
+- **Fixes**: a Bool column holds `missing` (and a nullable PostgreSQL `boolean` is a Bool
+  column); `**` on floats follows one rule on every engine; `postgres_open` tries every
+  address a name resolves to; `helix fmt` no longer writes `{...a,...b}`.
 
-Fixes alongside them, none a surface change:
-
-- **`with` keys and join keys take a binding** (`e6e3aa8`) — ADR 0028 decided the READ
-  positions and left the DEFINING one open in as many words. All three engines AGREED on
-  the wrong answer, so the differential oracle could never have found it.
-- **A `String` or `Bool` argument fell off the memo cache** (`086e51e`) — measured 46x on
-  `fib(30)` with a tag threaded through. The eligibility gate and the key projection were
-  two lists that agreed by luck; they are one definition now, because the failure drift
-  produces is that every ineligible value keys as the same `Int(0)`.
-- **The performance gate reported PASS on seven dead workloads** (`086e51e`) — 999 is its
-  own failure sentinel and 999/999 is 1.00. Found by running it.
+The four language-surface additions this section listed before (`df.rename`, a join type from
+a binding, `has_feature`, `Tuple.count()`) shipped in **v0.10.0**.
 
 The sections below shipped in **v0.9.0** and are kept for the reasoning, which is the part
 that outlives the release.
@@ -488,16 +473,12 @@ fix.
 string building, so it matters for the UI library specifically. No lint names it yet — it has
 no `dict()`-like literal to key on, so detecting it needs its own rule.
 
-### 4. Tighten two guards that let something through
+### 4. ~~Tighten two guards that let something through~~ — done
 
-- **`release.sh`** only refuses a patch when `Unreleased` has `### Changed`. A
-  language-surface addition under `### Added` is also a minor by policy and slips past. In
-  v0.8.0 the guard did fire — but only because `html_escape` happened to change `to_html`
-  bytes; without that one entry, a release adding a manifest table, seventeen builtins and a
-  new `Value` type could have shipped as a patch.
-- **The panic ratchet** skips lines starting with `*` to ignore doc-comment continuations,
-  which also skips `*stack.last_mut().expect(...) = …`. `vm.rs` has two uncounted. Tightening
-  it will shift budgets across several files, so it is its own change.
+Both closed: `release.sh` compares the registry's names against the last tag (with the
+syntax-addition gap noted at the top of this file), and the panic ratchet in `tests/cli.rs`
+tells a dereference `*x.unwrap()` from a comment continuation `* `, and counts `RefCell`
+borrows too.
 
 ### 5. Storage: what ADR 0041 still does not promise
 
@@ -507,7 +488,6 @@ no `dict()`-like literal to key on, so detecting it needs its own rule.
 
 ### 6. Smaller, still open
 
-- Forward-reference arity ignores default parameters.
 - `helix check --lint app.helix` output can be noisy now that it walks imports — the
   doc-example lint fires for every exported function in a library.
 
