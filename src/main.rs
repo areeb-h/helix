@@ -2839,42 +2839,12 @@ fn lint_source(shown: &str, src: &str) -> Vec<String> {
                     // `xs.reduce(dict(), …)` — the fold that stands in for
                     // `to_dict()`, with the last-wins rule attached so a
                     // mechanical migration cannot invert a first-wins fold.
-                    // A DICT ACCUMULATED INSIDE A RECORD, which ADR 0029's
-                    // amortized-linear guarantee still does not reach — and which is the
-                    // shape AGENTS.md teaches, because `mut` is top-level only and a fold
-                    // carrying two values has to carry them in a record.
-                    //
-                    // THE ARRAY CASE USED TO BE HERE TOO AND IS NOW A FIX RATHER THAN A
-                    // DIAGNOSTIC. `ArrayData::Shared` gives `concat` an append-only buffer,
-                    // so an array in a record field is linear: measured 2.2x and 3.3x per
-                    // 4x the input where it was 9.3x and 27.9x, and 36 ms where it was
-                    // 2,591 ms at n=160,000. Keeping the note would be a checker
-                    // contradicting the runtime, which trains people to ignore it.
-                    //
-                    // `Dict::insert` has no such buffer: it clones the whole `BTreeMap` per
-                    // call, and `Op::InsertIntoLocal` only rescues the bare-local spelling
-                    // (reading `a.d` clones the `Rc` while the record still holds one, so
-                    // `Rc::get_mut` always fails). Measured per 4x the input: 15.4x then
-                    // 16.6x, and **71 seconds** at n=128,000 against 4 ms for the array. It
-                    // is now the worst remaining cliff of this family, so the diagnostic
-                    // ADR 0026 requires stays until that fix lands.
-                    Expr::Method { name, args, line, .. }
-                        if name == "reduce"
-                            && matches!(args.first(), Some(Expr::Record(fs))
-                                if fs.iter().any(|(_, v)| matches!(v, Expr::Call { name: n, args: a, .. } if n == "dict" && a.is_empty()))) =>
-                    {
-                        notes.push((*line, format!(
-                            "{shown}:{line}: this fold accumulates a DICT inside a record, \
-                             which ADR 0029's amortized-linear guarantee does not reach — \
-                             `insert` clones the whole map per step, and the take-append-store \
-                             that rescues `acc = acc.insert(…)` only fires when the \
-                             accumulator IS the local, so through a field the fold is O(n^2). \
-                             Measured per 4x the input: 16.6x, and 71 s at n=128,000. (An \
-                             ARRAY in a record field is linear as of 0.7.1 — this is the dict \
-                             half only.) Fine for tens or hundreds of steps; for thousands, \
-                             fold the dict on its own and carry the rest beside it."
-                        )));
-                    }
+                    // A DICT ACCUMULATED INSIDE A RECORD used to be noted here as O(n^2)
+                    // (71 s at n=128,000), and the note is gone for the reason the array
+                    // one went before it: `Dict` appends inserts AND removes to a shared
+                    // log, so the fold is linear through a field too, and a checker that
+                    // contradicts the runtime trains people to ignore it.
+                    // `test_json_and_check_lint` asserts both halves stay silent.
                     Expr::Method { name, args, line, .. } if name == "reduce" => {
                         if matches!(args.first(),
                             Some(Expr::Call { name: n, args: a, .. }) if n == "dict" && a.is_empty())

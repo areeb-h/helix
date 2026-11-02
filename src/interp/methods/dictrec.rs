@@ -9,8 +9,9 @@ use std::rc::Rc;
 
 /// Methods on a [`Value::Dict`] (ADR 0020). Lookups (`get`/`contains`) are O(log n);
 /// enumeration (`keys`/`values`/`items`) is sorted by key, so output is deterministic.
-/// `insert`/`remove` are immutable — they return a new dict (the map is cloned, so a
-/// one-shot update is O(n); build in bulk with `pairs.to_dict()` for O(n log n)).
+/// `insert`/`remove` are immutable — they return a new dict — and O(1) amortized: both
+/// append to the dict's log (see [`crate::value::Dict`]), so a fold that builds or drains
+/// a dict is linear however the dict is held, a record field included.
 pub(crate) fn dict_method(
     d: &Rc<crate::value::Dict>,
     name: &str,
@@ -47,6 +48,13 @@ pub(crate) fn dict_method(
         arity(2)?;
         let k = key_of(&args[0])?;
         return Ok(Value::insert_in_place(d.clone(), k, args[1].clone()));
+    }
+    // REMOVE TOO, for the same reason: it appends a tombstone to the log. Settling the
+    // view here copied the whole map per call — 9.3 s at n=32,000 draining a dict.
+    if name == "remove" {
+        arity(1)?;
+        let k = key_of(&args[0])?;
+        return Ok(Value::remove_in_place(d.clone(), k));
     }
 
     // Every remaining method READS, so the merged view is built once here.
@@ -145,14 +153,6 @@ pub(crate) fn dict_method(
                     .map(|(k, v)| Value::Tuple(Rc::new(vec![k.to_value(), v.clone()])))
                     .collect(),
             ))
-        }
-        "remove" => {
-            arity(1)?;
-            let k = key_of(&args[0])?;
-            // A remove cannot be expressed as an append, so this settles the view.
-            let mut new = (*map).clone();
-            new.remove(&k);
-            Ok(Value::dict(new))
         }
         _ => Err(unknown_method(
             "Dict",

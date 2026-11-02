@@ -636,6 +636,10 @@ That was a real cost, not a footnote — it belongs on the list above, not in a 
 
 ### 4.1 The dict cliff — the worst one in the language
 
+> **Done** — built as option 1 below (a shared log, with tombstones for `remove` and a log
+> that settles once half of it is dead weight). `docs/STATE.md`, queue item 1, has the
+> measurements and what is still open.
+
 **71 seconds at n=128,000**, 16.6× per 4× the input. `Dict::insert` clones the whole
 `BTreeMap` per call and the take-append-store rescues only the bare-local spelling.
 

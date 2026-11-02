@@ -1,0 +1,55 @@
+# `remove` appends a TOMBSTONE to a dict's log, and the log settles into a fresh
+# base once it holds 64 entries and twice the base. Both are invisible by design:
+# every line here must print what a plain map would. The rules this pins:
+#
+#   a tombstone hides the key from every reader -- get, count, has, keys, equality --
+#   and a later insert of the same key brings it back;
+#   removing an absent key changes nothing;
+#   an older view reads only its own prefix, before and AFTER the tip settles, and
+#   writing through an older view never moves its siblings.
+
+# REMOVE through the log, then every reader.
+d0 = dict().insert("a", 1).insert("b", 2).insert("c", 3)
+d1 = d0.remove("b")
+print("removed count={d1.count()} b={d1.get("b")} has={d1.has("b")} keys={d1.keys()}")
+print("older view untouched count={d0.count()} b={d0.get("b")}")
+
+# REMOVE THEN RE-INSERT: the last entry for a key wins, tombstone or not.
+d2 = d1.insert("b", 20)
+print("reinserted {d2}  and the tombstoned view {d1}")
+
+# ABSENT KEY: a no-op, equal to what it came from.
+print("absent remove equal={d0.remove("zz") == d0} count={d0.remove("zz").count()}")
+
+# BRANCHING off the tombstoned view: siblings do not see each other.
+s1 = d1.insert("x", 1)
+s2 = d1.remove("a")
+print("siblings {s1} {s2} parent {d1}")
+
+# EQUALITY: removes then inserts, against a literal-built dict.
+print("equal {dict().insert("k", 1).remove("k").insert("j", 2) == dict().insert("j", 2)}")
+
+# DRAIN in a fold, bare accumulator and record field.
+full = range(0, 100).map((i) => (i, i * i)).to_dict()
+half = range(0, 100).filter((i) => i % 2 == 0).reduce(full, (acc, i) => acc.remove(i))
+print("drained bare count={half.count()} first={half.keys().take(3)} 99={half.get(99)}")
+r = range(0, 100).reduce({d: full, n: 0}, (acc, i) => {d: acc.d.remove(i), n: acc.n + 1})
+print("drained field count={r.d.count()} n={r.n} empty={r.d == dict()}")
+
+# OVERWRITES PAST THE SETTLE POINT: ten keys, a thousand writes, reads between.
+c = range(0, 1000).reduce(dict(), (acc, i) => acc.insert(i % 10, acc.get(i % 10, 0) + i))
+print("counter {c.items()}")
+# The same with no reads at all -- nothing ever extends the cache.
+b = range(0, 1000).reduce(dict(), (acc, i) => acc.insert(i % 7, i))
+print("blind {b.items()}")
+# And mixed: insert, remove every third, through a record field.
+m = range(0, 500).reduce({d: dict()}, (acc, i) => {d: if i % 3 == 0 then acc.d.remove(i - 1) else acc.d.insert(i, i)})
+print("mixed count={m.d.count()} has1={m.d.has(1)} has2={m.d.has(2)} last={m.d.keys().last()}")
+
+# AN OLDER VIEW ACROSS A SETTLE: built before the tip passes 64 entries, read after.
+early = range(0, 10).reduce(dict(), (acc, i) => acc.insert(i, "e{i}"))
+late = range(10, 300).reduce(early, (acc, i) => acc.insert(i % 40, "l{i}"))
+print("early count={early.count()} 5={early.get(5)}  late count={late.count()} 5={late.get(5)}")
+# And a write through the old view, after the chain it shares has moved on.
+fork = early.remove(5).insert(99, "f")
+print("fork count={fork.count()} 5={fork.get(5)} 99={fork.get(99)}  early still {early.get(5)}")

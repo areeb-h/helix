@@ -2462,7 +2462,7 @@ The p-th quantile (p in [0, 1]) of the values, linearly interpolated.
 
 Fold left-to-right: the accumulator starts at init, f(acc, x) per element.
 
-**Note:** Building a collection here is amortized LINEAR when the accumulator IS the collection, and ALSO when it is an ARRAY in a record field (ADR 0029): `concat` appends into a shared buffer, measured 3.3x per 4x the input where it was 27.9x, and 36 ms where it was 2591 ms at n=160,000. A DICT in a record field is STILL QUADRATIC — `insert` clones the whole map per step and the take-append-store only fires on a local — measured 16.6x per 4x and 71 s at n=128,000; a STRING built by interpolation in a record field is too (10.1x). That matters because `mut` is top-level only, so a fold carrying two values carries them in a record, which is what AGENTS.md teaches; `helix check --lint` names the dict shape when you write it.
+**Note:** Building a collection here is amortized LINEAR when the accumulator IS the collection, and ALSO when it is an ARRAY in a record field (ADR 0029): `concat` appends into a shared buffer, measured 3.3x per 4x the input where it was 27.9x, and 36 ms where it was 2591 ms at n=160,000. So is a DICT in a record field: `insert` and `remove` append to a log the dict shares with its older views, where `insert` used to clone the whole map per step (71 s at n=128,000). A STRING built by interpolation in a record field is still quadratic (10.1x per 4x). That matters because `mut` is top-level only, so a fold carrying two values carries them in a record, which is what AGENTS.md teaches.
 
 ```
 >>> [1, 2, 3].reduce(0, (acc, x) => acc + x)
@@ -4139,7 +4139,7 @@ The same keys, each value replaced by f's result; a second binder is the key.
 
 ### `remove(k)`
 
-A new dict without the key (absent key is a no-op); the original is unchanged.
+A new dict without the key (absent key is a no-op); the original is unchanged. O(1) amortized, like `insert`, so draining a dict in a fold is linear.
 
 ```
 >>> {"a": 1, "b": 2}.remove("b")

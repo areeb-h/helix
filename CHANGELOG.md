@@ -127,6 +127,20 @@
 
 ### Performance
 
+- **Draining a dict in a fold is linear, and a dict that is only overwritten no longer grows
+  with its writes.** `remove` copied the whole map per call — 9.3 s to remove 32,000 keys one
+  at a time, 17x per 4x the input — because a remove "cannot be an append" to the log `insert`
+  writes. It can: it appends a tombstone now, and the same fold takes 0.15 s, on a bare
+  accumulator or through a record field. And the log recorded every WRITE, not every key, so a
+  ten-key counter, rate limiter or `last_seen` table kept every overwritten value alive: 687 MB
+  after 4,000,000 inserts. At each power-of-two log length the dict now settles into a fresh
+  map if half of what it holds is dead weight — 16 MB for the same run, and ~3x faster
+  (0.81 s → 0.25 s at 1,000,000 writes, best of five interleaved) for no longer allocating it. A fold of distinct keys, where there is nothing
+  to reclaim, keeps its peak memory and its time within noise. Answers are unchanged, on all
+  three engines, byte for byte against the previous binary (`dict_log_tombstones` in the
+  corpus). `helix check --lint` no longer calls a dict accumulated in a record field O(n²):
+  through the same log it has been linear, and the note contradicted the runtime.
+
 - **A PostgreSQL transaction's `BEGIN` rides with its first statement.** `tx = c.begin()` sent
   `BEGIN` in a round trip of its own; it sends nothing now, and the transaction's first exchange
   — a statement, a flight or a cursor — carries it. PostgreSQL takes a transaction's snapshot at

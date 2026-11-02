@@ -1895,7 +1895,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
             doc: "Fold left-to-right: the accumulator starts at init, f(acc, x) per element.",
             example: "[1, 2, 3].reduce(0, (acc, x) => acc + x)",
             example_out: "6",
-            notes: "Building a collection here is amortized LINEAR when the accumulator IS the collection, and ALSO when it is an ARRAY in a record field (ADR 0029): `concat` appends into a shared buffer, measured 3.3x per 4x the input where it was 27.9x, and 36 ms where it was 2591 ms at n=160,000. A DICT in a record field is STILL QUADRATIC — `insert` clones the whole map per step and the take-append-store only fires on a local — measured 16.6x per 4x and 71 s at n=128,000; a STRING built by interpolation in a record field is too (10.1x). That matters because `mut` is top-level only, so a fold carrying two values carries them in a record, which is what AGENTS.md teaches; `helix check --lint` names the dict shape when you write it.",
+            notes: "Building a collection here is amortized LINEAR when the accumulator IS the collection, and ALSO when it is an ARRAY in a record field (ADR 0029): `concat` appends into a shared buffer, measured 3.3x per 4x the input where it was 27.9x, and 36 ms where it was 2591 ms at n=160,000. So is a DICT in a record field: `insert` and `remove` append to a log the dict shares with its older views, where `insert` used to clone the whole map per step (71 s at n=128,000). A STRING built by interpolation in a record field is still quadratic (10.1x per 4x). That matters because `mut` is top-level only, so a fold carrying two values carries them in a record, which is what AGENTS.md teaches.",
         },
     ),
     (
@@ -3578,7 +3578,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
         DocEntry {
             name: "remove",
             sig: "remove(k)",
-            doc: "A new dict without the key (absent key is a no-op); the original is unchanged.",
+            doc: "A new dict without the key (absent key is a no-op); the original is unchanged. O(1) amortized, like `insert`, so draining a dict in a fold is linear.",
             example: "{\"a\": 1, \"b\": 2}.remove(\"b\")",
             example_out: "{\"a\" => 1}",
             notes: "",

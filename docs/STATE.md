@@ -4,7 +4,7 @@ A running note so the thread is not lost between sessions. **Newest first.** Eve
 is measured or gated unless it says otherwise — a claim without a number in this file is a
 claim nobody checked.
 
-Last updated: 2026-09-14.
+Last updated: 2026-11-02.
 
 ---
 
@@ -348,7 +348,7 @@ only a settled prefix and two values cannot observe each other.
 
 | shape | 4n/n | n=128,000 |
 |---|--:|--:|
-| **dict in a record field** | 16.6× | **71 seconds** |
+| **dict in a record field** | 16.6× | **71 seconds** — linear since; see the queue, item 1 |
 | string interpolated in a record field | 10.1× | 243 ms |
 
 `helix check --lint` was narrowed to the dict case rather than deleted.
@@ -402,36 +402,23 @@ page-oriented **binary** store possible.
 
 ## The queue, roughly by value
 
-### 1. The dict cliff — the worst remaining performance bug in the language
+### 1. ~~The dict cliff~~ — fixed; what remains is a constant factor
 
-**71 seconds at n=128,000**, 16.6× per 4× the input. `Dict::insert` clones the whole
-`BTreeMap` per call and `Op::InsertIntoLocal` rescues only the bare-local spelling.
+**Done.** `Dict` is a settled base plus a shared append-only log (`src/value.rs`), the
+"pending-inserts log" candidate below this item used to describe. `insert` appends; `remove`
+appends a tombstone (it used to settle the view, 9.3 s at n=32,000 → 0.15 s); reads extend a
+cache shared along the chain; and the log settles into a fresh base at power-of-two lengths
+once half of it is dead weight, so an overwrite-only dict is bounded by its keys rather than
+its writes (687 MB → 16 MB for ten keys over 4M writes). Pinned by `dict_log_semantics` and
+`dict_log_tombstones` in the corpus and by three ratio/memory tests in `tests/cli.rs`
+(`a_dict_read_between_inserts_is_linear`, `a_dict_drained_in_a_fold_is_linear`,
+`an_overwritten_dict_does_not_grow_with_its_writes`). The `--lint` note on a dict in a record
+field is retired.
 
-The array fix does not transfer unchanged: an append-only buffer works because an array
-appends at the END and a value's prefix is therefore settled forever. A `BTreeMap` insert
-lands anywhere, and can OVERWRITE — so "settled prefix" has no analogue.
-
-Two candidates, thought through but not built:
-
-1. **A pending-inserts log**, which is the closest analogue. `insert` on a shared map returns
-   `{ base, adds: Rc<RefCell<Vec<(DictKey, Value)>>>, len }`; reads merge base + adds once
-   and cache. In a fold nothing reads until the end, so the whole fold is O(n) — exactly why
-   it works for arrays.
-
-   **The trap is `count()`.** It is not `base.len() + adds.len()`: an add that overwrites an
-   existing key adds nothing. Either probe `base` per insert (O(log n) each, O(n log n)
-   total — acceptable) or make `count()` materialize. Getting this wrong is a WRONG ANSWER,
-   not a slow one, so whichever is chosen needs the differential oracle pointed at it.
-
-   Also unlike arrays, an *older* view is not merely a prefix — it is base plus a prefix of
-   `adds` — so branching must copy at exactly the right point.
-
-2. **A persistent map (HAMT/CHAMP)** with structural sharing. The general answer, no cliff
-   anywhere, and a much larger change to a core type.
-
-Do NOT rush this into a release. It is the one remaining item where the failure mode is a
-silently wrong dictionary, and `dfdiff` + `vmparity` + the corpus need to be the net. The
-ADR 0029 amendment records the measurement to beat; the lint narrows again when it lands.
+Still open, deliberately: **branching off an older view copies the map** (once per branch, not
+per write). A backtracking search that inserts into a parent's dict at every level pays O(n)
+per sibling — what it always paid. A persistent map (HAMT/CHAMP) is the general answer and a
+much larger change to a core type; nothing measured so far needs it.
 
 ### 2. ADR 0028's bug survives in `select` / `sort` / `group` — needs an ADR
 
