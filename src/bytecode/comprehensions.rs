@@ -1569,7 +1569,19 @@ impl super::Compiler {
             );
             return Ok(());
         }
-        self.compile_expr(b, body)?;
+        // The RECORD fold: `{s: "{a.s}x", k: a.k + 1}` reads each field of the accumulator
+        // and builds the next one. The accumulator binder gets the same last-read take a
+        // `fn` parameter does (`take_heads_for`), so a string carried in a field extends in
+        // place instead of being copied every step. `pa != pb` for the reason above.
+        let heads: Vec<(String, String)> = if pa != pb {
+            super::take_heads_for(body, pa).into_iter().map(|f| (pa.to_string(), f)).collect()
+        } else {
+            Vec::new()
+        };
+        let saved = std::mem::replace(&mut self.take_heads, heads);
+        let compiled = self.compile_expr(b, body);
+        self.take_heads = saved;
+        compiled?;
         b.emit(Op::StoreLocal(acc), line, col);
         Ok(())
     }

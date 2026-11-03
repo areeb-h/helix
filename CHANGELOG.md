@@ -143,6 +143,16 @@
 
 ### Performance
 
+- **A string built in a record field is linear on the VM and JIT.** A fold that carries a
+  string beside other state — `reduce({s: "", k: 0}, (a, i) => {s: "{a.s}x", k: a.k + 1})`,
+  the shape a fold of two values must take since `mut` is top-level only — copied the whole
+  string every step: 6.8 s at n=512,000. So did the same record threaded through recursion
+  (7.5 s). When the interpolation's head is the last read of that field on every path, the
+  string is now taken out of the record (if nothing else holds it) and extended in place:
+  0.14 s and 0.60 s. Twelve ways the take could be observable — a kept init, a second read, a
+  lambda, error order and more — print exactly what they printed before, on all three engines
+  (`tests/corpus/str_field_take`). The tree-walker still copies (ADR 0029 amendment).
+
 - **Draining a dict in a fold is linear, and a dict that is only overwritten no longer grows
   with its writes.** `remove` copied the whole map per call — 9.3 s to remove 32,000 keys one
   at a time, 17x per 4x the input — because a remove "cannot be an append" to the log `insert`

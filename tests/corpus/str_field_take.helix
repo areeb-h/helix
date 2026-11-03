@@ -1,0 +1,50 @@
+# A string read from a record field as the head of an interpolation is TAKEN, not cloned,
+# when that read is the last read of the field on every path and the record is uniquely
+# held (`take_heads_for`, `Op::AppendStrFromLocalField`; ADR 0029, record-field amendment).
+# That is what makes a string built in a fold's record, or threaded through recursion,
+# linear. Taking must never be observable: every line below is a way it could be — a kept
+# record, a second read, a bare use, a lambda, a closure, error order, a non-String field,
+# a missing record, a caller keeping its argument, exclusive arms, a format spec, a lambda
+# chunk — and each prints what the ordinary lowering prints, on all three engines.
+
+# 1. A KEPT init: the fold must not take from a record someone still holds.
+init = {s: "a", k: 0}
+r1 = range(0, 3).reduce(init, (a, i) => {s: "{a.s}x", k: a.k + 1})
+print("kept init: {init.s} {r1.s}")
+# 2. The field read twice — not eligible, same answer.
+r2 = range(0, 3).reduce({s: "a", t: ""}, (a, i) => {s: "{a.s}x", t: a.s})
+print("read twice: {r2.s} {r2.t}")
+# 3. A bare use of the accumulator after the head.
+r3 = range(0, 2).reduce({s: "a", w: 0}, (a, i) => {s: "{a.s}x", w: a})
+print("bare use: {r3.s} {r3.w}")
+# 4. A read inside a lambda (an inline comprehension runs it per element).
+r4 = range(0, 2).reduce({s: "a", m: []}, (a, i) => {s: "{a.s}x", m: [1, 2].map((z) => "{a.s}{z}")})
+print("in lambda: {r4.s} {r4.m}")
+# 5. A captured accumulator: a closure that outlives the step.
+r5 = range(0, 3).reduce({s: "a", f: (q) => q}, (a, i) => {s: "{a.s}x", f: (q) => "{q}"})
+print("captured: {r5.s}")
+# 6. Error order: a missing field is reported before a failing tail hole runs.
+dyn = """{"s": "a"}""".parse_json()
+fn boom(x) = [1][x]
+fn bad(a) = {s: "{a.nope}{boom(5)}"}
+r6 = try(bad(dyn))
+print("error order: {r6.error}")
+# 7. A non-String field renders as the ordinary lowering does.
+r7 = range(0, 3).reduce({s: 0}, (a, i) => {s: "{a.s}x"})
+print("non-str: {r7.s}")
+# 8. A missing accumulator.
+r8 = try(range(0, 2).reduce(missing, (a, i) => {s: "{a.s}x"}))
+print("missing acc: {r8}")
+# 9. Recursion whose caller keeps its argument.
+fn go(st, i, n) = if i == n then st.s.length() else go({s: "{st.s}x"}, i + 1, n)
+base = {s: "ab"}
+print("recursion: {go(base, 0, 4)} base={base.s}")
+# 10. Exclusive match arms: one read per path.
+fn pick(st, i) = match i { 0 => st.s, _ => "{st.s}!" }
+print("match: {pick({s: "q"}, 0)} {pick({s: "q"}, 1)}")
+# 11. A format spec on the head is not the fast path.
+r11 = range(0, 2).reduce({s: "a"}, (a, i) => {s: "{a.s:>4}"})
+print("spec: [{r11.s}]")
+# 12. A user lambda (its own chunk) building through a param.
+step = (st) => {s: "{st.s}y", n: st.n + 1}
+print("lambda chunk: {range(0, 3).reduce({s: "", n: 0}, (a, i) => step(a)).s}")

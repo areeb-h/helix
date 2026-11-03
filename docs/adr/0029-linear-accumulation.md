@@ -17,6 +17,51 @@
   [ADR 0026 — Library performance boundary](0026-library-performance-boundary.md) (a
   performance cliff is a diagnostic or a fix, never silence).
 
+## Amendment (2026-11-03) — a STRING in a record field: the last read takes
+
+The third and last shape of the record-field table. Measured before the fix, VM, n to 4n:
+
+| shape | n=128,000 | n=512,000 |
+|---|--:|--:|
+| `reduce({s: "", k: 0}, (a, i) => {s: "{a.s}x", k: a.k + 1})` | 0.49 s | **6.8 s** |
+| `fn go(st, i, n) = if i == n then … else go({s: "{st.s}x", …}, i + 1, n)` | 1.0 s | **7.5 s** |
+| `reduce("", (acc, i) => "{acc}x")` (bare, linear since this ADR) | 0.04 s | 0.06 s |
+
+Arrays and dicts were fixed by REPRESENTATION — a shared append-only buffer or log, so an
+older view keeps reading its own prefix. A string is `Value::Str(Rc<String>)` at 385 sites in
+53 files, and a new variant would be caught by catch-all arms rather than by the compiler
+(STATE.md's own warning), so the representation route was the wrong risk for the milder case.
+
+**The fix is a TAKE ON THE LAST READ.** `"{a.s}x"` reads `a.s` only to copy it into a longer
+string. If that is the last read of `a.s` and nothing else holds the record, the read can MOVE
+the string out instead of cloning it, and the append then extends it in place — exactly what
+`Op::AppendStrIntoLocal` does for a bare accumulator, one field down.
+
+- **Statically** (`bytecode::take_heads_for`), for a local `p` that is a `fn` or lambda
+  parameter or a fold's accumulator binder: every use of `p` in the body is a field read;
+  `p` is never rebound (lambda parameter, `let`/`do`, `match` binder); `p.f` is read at most
+  ONCE ON ANY PATH (an `if`'s branches and a `match`'s bodies count as either, not both — so
+  the base case and the step of a recursion are one read each), as the head of an
+  interpolation with no format spec, and not inside a lambda (an inline comprehension runs
+  its body per element).
+- **At run time** (`Op::CheckLocalField` + `Op::AppendStrFromLocalField`): the field is
+  checked first, so a missing field reports before any tail hole runs, as the ordinary
+  lowering's order has it; the head's length and the tail are rendered with `Op::Interp`'s
+  per-part cap and errors; only then, if the record in the slot is uniquely held, the string
+  is taken (the field is left `Unit`, which nothing can read) and extended in place.
+  Otherwise the head is read as `GetField` reads it and the string is built fresh.
+
+After: 0.14 s and 0.60 s at n=512,000 (the recursion carries a constant load-time cost).
+`tests/corpus/str_field_take` pins twelve ways the take could become observable — a kept
+init, a second read, a bare use, a lambda, a closure, error order, a non-String field, a
+missing record, a caller keeping its argument, exclusive arms, a format spec, a lambda chunk —
+byte-identical to the previous binary on all three engines; `a_string_built_in_a_record_field_is_linear`
+pins the class on the bytecode engines.
+
+**Still open:** the tree-walker does not take, so `HELIX_NOVM=1` stays quadratic on this shape
+(same answers, slower). And the take is a recognizer: `{s: a.s + …}`-style spellings that
+are not an interpolation head, or a field read twice on one path, still copy.
+
 ## Amendment (2026-08-29) — the ARRAY half is fixed; the dict half is not
 
 `ArrayData::Shared` closes the array case. Measured on a release build, startup subtracted,
