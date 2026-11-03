@@ -410,67 +410,23 @@ per write). A backtracking search that inserts into a parent's dict at every lev
 per sibling — what it always paid. A persistent map (HAMT/CHAMP) is the general answer and a
 much larger change to a core type; nothing measured so far needs it.
 
-### 2. ADR 0028's bug survives in `select` / `sort` / `group` — needs an ADR
+### 2. Column-name positions — shipped in v0.10.0, recorded in [ADR 0054](adr/0054-column-name-positions.md)
 
-ADR 0028 fixed "a bare name means the COLUMN, not your binding" for `where` / `filter` /
-`with`, on the grounds that otherwise a library author's parameter names become reserved
-words in data they have never seen. It did not cover the COLUMN-NAME positions, and the same
-bug is there. Measured:
+The breaking change this item asked for already shipped in v0.10.0: in `sort`, `select`,
+`group`, an aggregation's value column, `column`, `unique`, `rename`, a join key and a `with`
+key, a String binding in scope wins and `@name` pins the column, identically at top level and
+in a function (measured on all three engines, 2026-11-03). It was recorded only in the CHANGELOG
+and the corpus pin `df_column_name_shadowing`, whose golden already moved.
 
-A bare name here is taken LITERALLY. It is not resolved and then compared — so
-`df.sort(v)` "working" at top level is a coincidence: the identifier happened to match a
-column. It is not a parameter-only problem either; a top-level binding hits it too.
+ADR 0054 (Accepted 2026-11-03, D2/D3 not yet implemented) records that rule and found two
+defects in it:
 
-**The loud form** — a binding with no same-named column:
-
-| written | result |
-|---|---|
-| `df.sort(@v)` | works |
-| `df.sort(v)` at top level | works, BY COINCIDENCE — the ident matched a column |
-| `df.sort("v")` | error: expected a column name |
-| `k2 = "v"` then `df.sort(k2)` | error: no column `k2` |
-| `d.sort(k)` inside a `fn` | error: `sort` needs its columns named at the call site |
-| `d.select(k)` / `d.group(k)` | error: no column `k` |
-
-**The silent form, which is the dangerous one.** When a column of the binding's own name
-exists, the column wins with NO error — measured with `w = "v"` over
-`{v: [2,1,0], w: [10,20,30]}`:
-
-| written | answers | should be |
-|---|---|---|
-| `D.sort(w)` | `[2,1,0]` — sorted by **w** | `[0,1,2]` |
-| `D.select(w)` | `["w"]` | `["v"]` |
-| `G.group(w).sum(@n)` | **3 groups** — by w | 2 groups |
-| `D.with({out: w})` | binding won ✓ | ADR 0028 working, the contrast |
-
-`group` DOES have the silent form; it just needs an aggregation that takes a column
-(`sum(@n)`) to reach — an arity check fires first otherwise.
-
-So `fn top(frame, key) = frame.select(key)` does not merely fail on a caller's schema: on any
-frame that happens to have a column called `key` — a plausible name in real data — it
-silently returns the wrong column. The loud form costs a confused hour; the silent one costs
-correctness.
-
-Pinned by `tests/corpus/df_column_name_shadowing.helix`, whose golden is EXPECTED to change
-when this is fixed, so the change arrives as a reviewable diff rather than a silent shift.
-
-There is no way to name a column at run time in these positions at all; the field report's
-store had to build a permutation with `sort_by` and rebuild through `dataframe(dict)`.
-
-Three things are tangled and should be decided together, not patched apart:
-
-1. Does a binding win in a column-name position, as ADR 0028 decided it does in an
-   expression position? Consistency says yes; it is **breaking**, exactly as 0028 was.
-2. Should a String be accepted there — `df.sort("v")` — given `df.column("v")` already takes
-   one? That is the least surprising half and is NOT breaking.
-3. Why does a bare ident resolve differently at top level than inside a function? That looks
-   like a plain inconsistency rather than a decision.
-
-**Already fixed, and separately:** reaching a column verb with evaluated arguments used to
-report *"a DataFrame has no method `sort` — did you mean `sort`?"* — a message that
-contradicts itself. It now says the verb needs its columns named at the call site, and that a
-name held in a variable is not supported. That is the diagnostic; the decision above is the
-fix.
+- **`@name` is refused by `column`, `unique` and `rename`**, with an error about "a value of
+  type Record". Non-breaking fix: accept the sigil.
+- **A `with` key captures in the other direction, with no escape.** `name = "Ada"` then
+  `P.with({name: "z"})` silently defines a column called `Ada`. `{@name: …}` does not parse,
+  and `with` refuses a string-keyed Dict. Decided: keep binding-wins (no break), and
+  add `{@name: …}` plus a lint note for top-level String bindings. Those two are the work left.
 
 ### 3. String accumulation in a record field
 
