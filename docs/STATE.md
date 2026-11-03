@@ -418,14 +418,14 @@ it, and a `with`/`agg` key can now say `{@name: e}` — and `helix check --lint`
 top-level String used as a bare `with`/`agg` key, the one place the binding winning is a
 silent surprise (`name = "Ada"` then `P.with({name: e})` defines a column called `Ada`).
 
-### 3. ~~String accumulation in a record field~~ — fixed on the bytecode engines
+### 3. ~~String accumulation in a record field~~ — fixed on all three engines
 
 `{s: "{a.s}x", k: a.k + 1}` in a fold, and `go({s: "{st.s}x", …}, i + 1, n)` in a recursion,
-were quadratic (6.8 s and 7.5 s at n=512,000) and are linear on the VM and JIT (0.14 s and
-0.60 s): when the interpolation's head is the LAST read of the field on every path, the
-compiler emits a take that moves the string out of a uniquely held record and extends it in
-place (ADR 0029, 2026-11-03 amendment). Open: the tree-walker still copies, and other spellings
-(the field read twice on one path, a non-interpolation append) still do.
+were quadratic (6.8 s and 7.5 s at n=512,000 on the VM; 7.7 s and 8.4 s on the tree-walker)
+and are linear on every engine (0.14 s and 0.60 s; 0.21 s and 0.35 s): when the interpolation's head is the LAST read of the field on every path, the
+compiler (and the walker's interpolation) takes that moves the string out of a uniquely held record and extends it in
+place (ADR 0029, 2026-11-03 amendment). Open: other spellings (the field read twice on one
+path, a non-interpolation append) still copy.
 
 ### 4. ~~Tighten two guards that let something through~~ — done
 

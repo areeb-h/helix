@@ -32,6 +32,9 @@ pub(crate) const MAX_CALL_DEPTH: usize = 20_000;
 /// is far past any legitimate message and leaves headroom under typical limits.
 pub(crate) const MAX_STRING_LEN: usize = 1 << 30;
 
+/// A body's `(local, field)` pairs whose read may take the field (`bytecode::take_heads_for`).
+type TakeHeads = Rc<Vec<(String, String)>>;
+
 pub struct Interp {
     /// The current frame's LOCALS: parameters, captured upvalues, `let`/binder/
     /// match bindings. Swapped out wholesale at every function-call boundary
@@ -64,11 +67,11 @@ pub struct Interp {
     /// tree-walker's twin of the compiler's `take_heads` (ADR 0029, record-field
     /// amendment). Set per frame by `call_function` and per fold by `reduce`; saved and
     /// restored at the same boundaries as `env`, so a callee never sees its caller's.
-    take_heads: Rc<Vec<(String, String)>>,
+    take_heads: TakeHeads,
     /// `take_heads_for` per function body, computed once. The entry holds the body's `Rc`,
     /// which keeps its address from being reused by a different body (a REPL frees old
     /// statements) — a stale entry would license a take the analysis never proved.
-    take_cache: FxHashMap<usize, (Rc<Expr>, Rc<Vec<(String, String)>>)>,
+    take_cache: FxHashMap<usize, (Rc<Expr>, TakeHeads)>,
     fold_mut_names: std::collections::HashSet<String>,
     /// Every top-level name the program binds — what a frame verb's resolver must tell from
     /// a column's name when the sandbox does not hold it (`fold_unknown_name`).
@@ -1221,12 +1224,12 @@ impl Interp {
     }
 
     /// `take_heads_for` over a function body's parameters, cached per body.
-    fn take_heads_of(&mut self, body: &Rc<Expr>, params: &[String]) -> Rc<Vec<(String, String)>> {
+    fn take_heads_of(&mut self, body: &Rc<Expr>, params: &[String]) -> TakeHeads {
         let key = Rc::as_ptr(body) as usize;
         if let Some((_, heads)) = self.take_cache.get(&key) {
             return heads.clone();
         }
-        let heads: Rc<Vec<(String, String)>> = Rc::new(
+        let heads: TakeHeads = Rc::new(
             params
                 .iter()
                 .flat_map(|p| {
