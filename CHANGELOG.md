@@ -240,6 +240,19 @@
 
 ### Fixed
 
+- **A value that holds its own buffer no longer leaks.** A dict's log and a shared array's
+  buffer keep values behind a shared, mutable cell, so `d.insert("self", d)` — or the same
+  through a record, a closure, or two dicts holding each other's older views, or
+  `a.concat([a])` for an array of strings — stored an `Rc` to the buffer inside it: a
+  reference cycle no drop frees. 0.4 to 1.8 KB leaked per call on all three engines (a dict
+  holding itself, 100k → 400k calls: 103 → 375 MB peak). Such an append now takes the copying
+  path (`value::reaches`, a budgeted scan with a per-buffer "may hold a view" flag so plain
+  shapes are skipped in O(1)): every answer identical, memory flat at 19 MB, and the dict and
+  array benchmarks within noise. `docs/memory-safety.md`, which called such cycles
+  "structurally impossible" because it found no interior mutability in `src/`, now says
+  where the interior mutability is and what keeps it acyclic. Pinned by
+  `a_value_holding_its_own_buffer_is_freed` and `tests/corpus/no_rc_cycles`.
+
 - **Dependencies with published vulnerabilities are updated, and `cargo audit` is green
   again.** `rustls` 0.23.40 → 0.23.46, `rustls-webpki` 0.103.13 → 0.103.16 and
   `webpki-roots` 1.0.8 → 1.0.11 — the TLS under every `http_get` and `postgres_open`, which

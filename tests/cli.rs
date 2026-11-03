@@ -5607,7 +5607,12 @@ fn no_new_panicking_calls_on_user_reachable_paths() {
         // from contending. The slice into the log uses `get(..len)` rather than an
         // index for the same reason: `len` is within the log by construction, but
         // being wrong would abort the host instead of raising a Helix error.
-        ("src/value.rs", 6),
+        //
+        // 6 -> 8: `reaches`, the cycle check on a dict's log and a shared array's buffer,
+        // reads both with SHARED borrows. A shared borrow fails only under a live
+        // `borrow_mut` of the same cell, and the only two (`dict_append`,
+        // `concat_shared`) call `reaches` before taking theirs. Proof at the site.
+        ("src/value.rs", 8),
         // The ADR 0032 split moved jit.rs's one budgeted call into analysis.rs.
         ("src/jit.rs", 0),
         ("src/jit/analysis.rs", 1),
@@ -13900,6 +13905,63 @@ fn an_overwritten_dict_does_not_grow_with_its_writes() {
          The dict's log is not settling — every overwritten value is being kept alive.",
         (large - small) / 1024.0
     );
+}
+
+/// A value that holds the buffer it is appended to never forms a reference cycle — the
+/// leak `docs/memory-safety.md` once called structurally impossible.
+///
+/// A dict's log and a shared array's buffer are values stored behind a shared, mutable
+/// cell. `d.insert("self", d)` stored, inside the log, a value holding an `Rc` to the log —
+/// a cycle no drop frees. Measured on the parent, peak RSS at 100k -> 400k calls that each
+/// build and drop one such value: a dict holding itself 103 -> 375 MB, through a record
+/// 111 -> 407 MB, through a closure 112 -> 412 MB, two chains holding each other's older
+/// views 190 -> 724 MB, an array of strings holding itself 41 -> 125 MB; every control
+/// flat at 19 MB. `value::reaches` now sends such an append down the copying path.
+///
+/// Growth between two sizes rather than a budget, for the reason the overwritten-dict test
+/// gives; on all three engines, because the leak was on all three.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_value_holding_its_own_buffer_is_freed() {
+    let shapes = [
+        ("dict", "d = dict().insert(\"a\", \"{i} padded to cost something\")\n  e = d.insert(\"self\", d)\n  e.count()"),
+        ("record", "d = dict().insert(\"a\", \"{i} padded to cost something\")\n  e = d.insert(\"self\", {inner: d})\n  e.count()"),
+        ("closure", "d = dict().insert(\"a\", \"{i} padded to cost something\")\n  e = d.insert(\"f\", (q) => d.count() + q)\n  e.count()"),
+        ("cross", "c = dict().insert(\"a\", \"{i} padded to cost something\")\n  d = dict().insert(\"b\", \"{i} padded as well\")\n  c2 = c.insert(\"d\", d)\n  d2 = d.insert(\"c\", c)\n  c2.count() + d2.count()"),
+        ("array", "a = [\"p\", \"q\"].concat([\"{i} padded string value\"])\n  b = a.concat([a])\n  b.count()"),
+    ];
+    let dir = std::env::temp_dir().join(format!("hx_cycles_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for (tag, body) in shapes {
+        let path = dir.join(format!("{tag}.helix"));
+        std::fs::write(
+            &path,
+            format!(
+                "fn one(i) = do {{\n  {body}\n}}\nfn main(n: Int = 1) = do {{\n  total = range(0, n).map((i) => one(i)).sum()\n  hwm = read_text(\"/proc/self/status\").split(\"\\n\").filter((l) => l.starts_with(\"VmHWM:\"))[0]\n  print(\"{{total}} {{hwm.split(\":\")[1].trim().split(\" \")[0]}}\")\n}}\n"
+            ),
+        )
+        .unwrap();
+        for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+            let peak_kb = |n: usize| -> f64 {
+                let (out, err, code) = run(&["run", path.to_str().unwrap(), "--n", &n.to_string()], env, "");
+                assert_eq!(code, Some(0), "{tag} {env:?}: {err}");
+                out.split_whitespace()
+                    .nth(1)
+                    .and_then(|k| k.parse().ok())
+                    .unwrap_or_else(|| panic!("{tag}: no VmHWM in {out:?}"))
+            };
+            let small = peak_kb(50_000);
+            let large = peak_kb(200_000);
+            assert!(
+                large - small < 32.0 * 1024.0,
+                "{tag} on {env:?}: peak memory grew {:.0} MB for 4x the calls ({small} kB -> \
+                 {large} kB) — a value holding its own buffer is being kept alive by a cycle.",
+                (large - small) / 1024.0
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// `postgres_query` — ADR 0038's decisions over a network connection.
