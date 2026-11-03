@@ -1686,12 +1686,12 @@ Caps the worker threads used for parallel array work.
 
 ### `HELIX_STACK_MB`
 
-The stack given to the evaluation thread.
+The stack the evaluation thread starts with.
 
 - **Values:** a positive integer, in MiB
 - **Unset:** 128 MiB in a release build, 1 GiB in a debug build
 
-**Note:** For the rare program that recurses deep with large frames. A value that does not parse, or is zero, leaves the default rather than refusing — the parse is a filter, not a validator. Keywords: stack, recursion, overflow, depth, memory.
+**Note:** The tree-walker grows its stack on demand past this, so recursion reaches the 20,000-call limit at any size; a smaller value saves reserved memory on a constrained machine. A value that does not parse, or is zero, leaves the default rather than refusing — the parse is a filter, not a validator. Keywords: stack, recursion, overflow, depth, memory.
 
 ### `HELIX_CACHE`
 

@@ -1705,6 +1705,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "stacker",
  "tar",
  "toml",
  "toml_edit",

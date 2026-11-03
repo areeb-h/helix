@@ -219,14 +219,12 @@ jobs:
       - name: dual DataFrame engines (differential campaign)
         run: cargo test --features dataframes
         # THE DEV PROFILE, DELIBERATELY: it is the one run in CI with overflow checks on,
-        # which is how `- -9223372036854775808` aborting the parser was found. But its
-        # frames are ~25x a release build's, and three CLI tests drive the tree-walker to
-        # its 20,000-frame depth cap — ~2.8 GB of stack against the 1 GiB a debug build
-        # gives evaluation (`serve::eval_stack_size`), so they overflowed instead of
-        # reporting the cap (docs/STATE.md, "three pre-existing failures"). The stack is
-        # virtual; the depth cap, not this number, bounds what is touched.
-        env:
-          HELIX_STACK_MB: "8192"
+        # which is how `- -9223372036854775808` aborting the parser was found. Its frames
+        # are ~25x a release build's, and this step used to set HELIX_STACK_MB=8192
+        # because three CLI tests drove the debug tree-walker past its 1 GiB stack to an
+        # abort. The walker grows its stack on demand now (`STACK_RED_ZONE` in
+        # src/interp.rs), so the step runs at the default it ships with — which is the
+        # check that the growth works in a debug build.
       # The verb-level campaign above was GREEN while sixteen semantic divergences were
       # live (ADR 0036) — they hid in expression shapes no verb test built. This runs
       # every tracked program under both backends and diffs the output, which is the

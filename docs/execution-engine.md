@@ -177,7 +177,11 @@ recurses on the native stack, and it is now reached only for the REPL,
 demand** (`run_on_big_stack`, or a scoped thread in `run_source`), sized by
 `serve::eval_stack_size`: 128 MiB in release, 1 GiB in debug, `HELIX_STACK_MB` to
 override — shared with `listen` shard workers so the primary and its shards can
-never diverge on recursion depth. A normal `helix script.helix` therefore no
+never diverge on recursion depth. That size is where the walker STARTS: each call
+checks the stack it has left and continues on a fresh segment below a red zone
+(`STACK_RED_ZONE`), because what one Helix call costs it — 3.8 KB to 13 KB in an
+optimized build — depends on the function's shape, and no fixed size covers every
+shape at the 20 000-call limit. A normal `helix script.helix` therefore no
 longer reserves a multi-GiB stack in advance.
 
 ## Correctness gates

@@ -120,9 +120,21 @@ rare compile-fallback). Two measures keep them safe:
    `HELIX_STACK_MB` to override), so deep but bounded recursion (e.g. `sum(15000)`)
    succeeds instead of overflowing the default 8 MB main stack.
 2. **`MAX_CALL_DEPTH` (20 000)** converts runaway or excessively deep recursion
-   into a clean Helix error — *"maximum recursion depth exceeded"* — well before the
-   stack could be exhausted (20 000 release frames touch ~19 MiB against 128 MiB),
-   rather than an uncatchable stack-overflow abort. The VM shares the same limit,
-   so every engine refuses at the same depth with the same text.
+   into a clean Helix error — *"maximum recursion depth exceeded"* — rather than an
+   uncatchable stack-overflow abort. The VM shares the same limit, so every engine
+   refuses at the same depth with the same text.
+3. **The walker grows its stack on demand** (`STACK_RED_ZONE` in `src/interp.rs`,
+   via `stacker`): every call checks the native stack it has left, and below 1 MiB
+   (16 MiB in debug) continues on a fresh segment.
+
+   Until 2026-11-03 the second measure claimed more than it did. This section said
+   20 000 frames "touch ~19 MiB against 128 MiB"; measured, one Helix call costs the
+   walker 3.8 KB to 13 KB of native stack depending on the function's shape, so
+   `n + f(n - 1)` needed 108 MiB and a record literal, an array, a `map` callback or
+   a few nested parentheses around the recursive call needed 143 to 247 MiB. Those
+   died of SIGABRT short of the limit while the VM answered — an engine divergence
+   and an abort — and the debug walker aborted `examples/language/recursion.helix`.
+   The depth guard bounds how many calls happen, not how much stack each one takes,
+   so it could never have been the whole answer.
 
 `deep_recursion_is_safe` regression-tests both on the same large-stack thread.
