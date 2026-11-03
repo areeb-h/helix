@@ -11730,7 +11730,7 @@ fn a_fold_through_a_record_field_is_linear() {
 }
 
 /// A STRING built in a record field — or in a record threaded through recursion — is
-/// linear on the bytecode engines (ADR 0029, record-field amendment).
+/// linear on every engine (ADR 0029, record-field amendment).
 ///
 /// `"{a.s}x"` read `a.s` as an `Rc` clone while the record still held one, so the
 /// interpolation copied the whole string every step: 0.49 s at n=128,000 and 6.8 s at
@@ -11743,9 +11743,10 @@ fn a_fold_through_a_record_field_is_linear() {
 /// Ratios, for the reason the array test above gives. The fold is measured against the
 /// bare `"{acc}x"` fold (linear since ADR 0029); the recursion against itself at 4x the
 /// input, because its program carries a constant load-time cost that a cross-program ratio
-/// would mistake for growth. The tree-walker does not take yet, so this runs the two
-/// bytecode engines; every engine's ANSWER is asserted, and `tests/corpus/str_field_take`
-/// pins that the take is never observable.
+/// would mistake for growth. The tree-walker takes too (`Interp::interp_take`, the same
+/// order of operations), measured before it did at 7.7 s and 8.4 s for n=512,000 against
+/// 0.21 s and 0.35 s after. Every engine's ANSWER is asserted, and
+/// `tests/corpus/str_field_take` pins that the take is never observable.
 #[test]
 fn a_string_built_in_a_record_field_is_linear() {
     let dir = std::env::temp_dir().join(format!("hx_strfield_{}", std::process::id()));
@@ -11773,7 +11774,7 @@ fn a_string_built_in_a_record_field_is_linear() {
     };
     let (rec_small, rec_large) = (rec(N / 2), rec(N * 2));
 
-    for env in [&[][..], &[("HELIX_NOJIT", "1")][..]] {
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
         let best = |path: &std::path::Path, extra: &[&str], want: &str| -> std::time::Duration {
             let mut best = std::time::Duration::from_secs(3600);
             for _ in 0..3 {
