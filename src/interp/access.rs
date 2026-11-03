@@ -228,17 +228,39 @@ pub(crate) fn pattern_parts(
     Ok(parts)
 }
 
-/// The single column-name argument of `df.column("age")` — an evaluated string.
+/// A column name from an EVALUATED argument: a String, or the column node `@name`
+/// evaluates to (ADR 0052 — `{kind: "col", name: "age"}`, the value a frame "takes back by
+/// name"). These verbs evaluate their arguments, so `df.column(@age)` arrives as that node,
+/// and refusing it — "found a value of type Record" — made `@name` pin the column in every
+/// column-name position but three (ADR 0054, D2).
+pub(crate) fn column_name_value(v: &Value) -> Option<String> {
+    match v {
+        Value::Str(s) => Some((**s).clone()),
+        Value::Record(fields) if fields.len() == 2 => {
+            let get = |k: &str| fields.iter().find(|(s, _)| s.as_str() == k).map(|(_, v)| v);
+            match (get("kind"), get("name")) {
+                (Some(Value::Str(kind)), Some(Value::Str(name))) if kind.as_str() == "col" => {
+                    Some((**name).clone())
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn column_name_err(who: &str, other: &Value, line: usize, col: usize) -> HelixError {
+    type_err(who, "a column name string or `@name`", other, line, col)
+}
+
+/// The single column-name argument of `df.column("age")` — an evaluated string or `@age`.
 /// Shared by both engines (the tree-walker evaluates the AST arg first).
 pub(crate) fn column_arg(args: &[Value], line: usize, col: usize) -> Result<String, HelixError> {
     if args.len() != 1 {
         return Err(HelixError::new("`column` takes one column name", line, col)
             .hint("e.g. `df.column(\"age\")`."));
     }
-    match &args[0] {
-        Value::Str(s) => Ok((**s).clone()),
-        other => Err(type_err("column", "a column name string", other, line, col)),
-    }
+    column_name_value(&args[0]).ok_or_else(|| column_name_err("column", &args[0], line, col))
 }
 
 /// Extract zero or more column-name strings from evaluated args (for `unique`).
@@ -249,10 +271,7 @@ pub(crate) fn column_args(
     col: usize,
 ) -> Result<Vec<String>, HelixError> {
     args.iter()
-        .map(|v| match v {
-            Value::Str(s) => Ok((**s).clone()),
-            other => Err(type_err(who, "a column name string", other, line, col)),
-        })
+        .map(|v| column_name_value(v).ok_or_else(|| column_name_err(who, v, line, col)))
         .collect()
 }
 

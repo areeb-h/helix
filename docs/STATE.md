@@ -53,8 +53,8 @@ carries one has to be cut as `minor` by hand. This cycle is one.
 
 **This cycle is a MINOR, not a patch** — positional destructuring is new syntax, and
 `begin`, `commit`, `rollback` and `cursor` are new methods (so the
-release guard would refuse a patch anyway). Gate green at **1,035 tests**
-(608 lib + 392 CLI + 3 other + 32 dual-engine), **156** dfdiff programs with 0 undeclared
+release guard would refuse a patch anyway). Gate green at **1,037 tests**
+(608 lib + 394 CLI + 3 other + 32 dual-engine), **156** dfdiff programs with 0 undeclared
 divergence, 99 files type-checked. The full list is `CHANGELOG.md`'s `Unreleased`; the shape
 of it:
 
@@ -410,23 +410,13 @@ per write). A backtracking search that inserts into a parent's dict at every lev
 per sibling — what it always paid. A persistent map (HAMT/CHAMP) is the general answer and a
 much larger change to a core type; nothing measured so far needs it.
 
-### 2. Column-name positions — shipped in v0.10.0, recorded in [ADR 0054](adr/0054-column-name-positions.md)
+### 2. ~~Column-name positions~~ — done, [ADR 0054](adr/0054-column-name-positions.md)
 
-The breaking change this item asked for already shipped in v0.10.0: in `sort`, `select`,
-`group`, an aggregation's value column, `column`, `unique`, `rename`, a join key and a `with`
-key, a String binding in scope wins and `@name` pins the column, identically at top level and
-in a function (measured on all three engines, 2026-11-03). It was recorded only in the CHANGELOG
-and the corpus pin `df_column_name_shadowing`, whose golden already moved.
-
-ADR 0054 (Accepted 2026-11-03, D2/D3 not yet implemented) records that rule and found two
-defects in it:
-
-- **`@name` is refused by `column`, `unique` and `rename`**, with an error about "a value of
-  type Record". Non-breaking fix: accept the sigil.
-- **A `with` key captures in the other direction, with no escape.** `name = "Ada"` then
-  `P.with({name: "z"})` silently defines a column called `Ada`. `{@name: …}` does not parse,
-  and `with` refuses a string-keyed Dict. Decided: keep binding-wins (no break), and
-  add `{@name: …}` plus a lint note for top-level String bindings. Those two are the work left.
+A String binding wins in all nine column-name positions (shipped in v0.10.0, recorded by ADR
+0054), `@name` pins the column in every one of them — `column`/`unique`/`rename` used to refuse
+it, and a `with`/`agg` key can now say `{@name: e}` — and `helix check --lint` notes a
+top-level String used as a bare `with`/`agg` key, the one place the binding winning is a
+silent surprise (`name = "Ada"` then `P.with({name: e})` defines a column called `Ada`).
 
 ### 3. String accumulation in a record field
 

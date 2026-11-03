@@ -100,14 +100,47 @@ pub(crate) fn column_name_args(
 /// join key. Only a `Str` binding counts: a name that happens to be bound to a number or
 /// a frame is not a column name, and treating it as one would turn a type mistake into a
 /// silent lookup of something that will never exist.
+///
+/// A key the parser stored as `@name` (`df.with({@name: e})`, ADR 0054) is the column
+/// literally called `name`, whatever is in scope — the escape every other column-name
+/// position already had, for the one position that is not an expression.
 pub(crate) fn column_name_from_binding(
     name: &str,
     resolve_var: &dyn Fn(&str) -> Option<Value>,
 ) -> String {
+    if let Some(pinned) = name.strip_prefix('@') {
+        return pinned.to_string();
+    }
     match resolve_var(name) {
         Some(Value::Str(s)) => (*s).clone(),
         _ => name.to_string(),
     }
+}
+
+/// A record literal with an `@name` key, built as an ordinary value — so its `with`/`agg`
+/// call did not reach a DataFrame (a user function named `with`, called method-style, or a
+/// receiver that is not a frame). The key only means something to a frame verb, and
+/// building a record with a field literally called `@name` would turn the syntax into a
+/// silently different value, so both engines refuse it here, with one sentence and one
+/// position (the record's first positioned part — the AST carries no position of its own).
+pub(crate) fn pinned_key_outside_frame(fields: &[(String, Expr)]) -> Option<HelixError> {
+    let (key, _) = fields.iter().find(|(k, _)| k.starts_with('@'))?;
+    let (line, col) = fields
+        .iter()
+        .find_map(|(_, v)| crate::visit::expr_pos(v))
+        .unwrap_or((0, 0));
+    Some(
+        HelixError::new(
+            format!("`{{{key}: …}}` only means something to a DataFrame's `with` or `agg`"),
+            line,
+            col,
+        )
+        .hint(format!(
+            "`{key}` pins the column literally called `{}`; this call's receiver is not a \
+             DataFrame, so the record was built as an ordinary value.",
+            &key[1..]
+        )),
+    )
 }
 
 /// Parse the trailing arguments of `a.join(b, key.., [how])`: the key columns are

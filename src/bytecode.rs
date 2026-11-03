@@ -251,7 +251,8 @@ impl Builder {
             // the predicate bug, one position over.
             if let Expr::Record(fields) = a {
                 for (k, _) in fields {
-                    if !names.contains(k) {
+                    // A pinned `@name` key names a column, never a variable (ADR 0054).
+                    if !k.starts_with('@') && !names.contains(k) {
                         names.push(k.clone());
                     }
                 }
@@ -1715,6 +1716,14 @@ impl Compiler {
                 b.emit(Op::MakeTuple(items.len() as u32), 0, 0);
             }
             Expr::Record(fields) => {
+                // An `@name` key built as an ordinary record: the walker's refusal, raised
+                // at run time so a `with` whose receiver turns out to be a frame (which
+                // never evaluates this record) is unaffected (ADR 0054).
+                if let Some(e) = crate::interp::pinned_key_outside_frame(fields) {
+                    let hint = e.hint.clone().unwrap_or_default();
+                    b.emit(Op::raise(std::rc::Rc::new(e.message.clone()), std::rc::Rc::new(hint)), e.line, e.col);
+                    return Ok(());
+                }
                 for (_, v) in fields {
                     self.compile_expr(b, v)?;
                 }

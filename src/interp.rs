@@ -639,6 +639,9 @@ impl Interp {
                 Ok(Value::Tuple(Rc::new(vals)))
             }
             Expr::Record(fields) => {
+                if let Some(e) = dataframe_ops::pinned_key_outside_frame(fields) {
+                    return Err(e);
+                }
                 let mut vals = Vec::with_capacity(fields.len());
                 for (k, v) in fields {
                     vals.push((Symbol::intern(k), self.eval(v)?));

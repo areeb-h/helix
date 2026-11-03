@@ -3141,7 +3141,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
             doc: "Add or replace columns computed from expressions over existing columns.",
             example: "dataframe({a: [1, 2], b: [3.0, 4.5]}).with({c: a + b}).columns()",
             example_out: "[\"a\", \"b\", \"c\"]",
-            notes: " String tests work here too, and this is where their missing rule is visible: `with({hit: @gene.re_match(\"\"\"^BRCA\"\"\")})` writes missing for a missing cell, not false — `where` would have dropped that row either way.",
+            notes: "A KEY names the column it defines by the column-name rule: a String binding in scope wins (`fn rename(f, to) = f.with({to: @a})` defines the caller's name), and `{@name: e}` defines the column literally called `name` whatever is in scope (ADR 0054) — `helix check --lint` notes a top-level String used as a bare key. String tests work here too, and this is where their missing rule is visible: `with({hit: @gene.re_match(\"\"\"^BRCA\"\"\")})` writes missing for a missing cell, not false — `where` would have dropped that row either way.",
         },
     ),
     (
@@ -3174,7 +3174,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
             doc: "Drop duplicate rows; with key columns, keep one row per key combination.",
             example: "dataframe({a: [1, 1, 2]}).unique().count()",
             example_out: "2",
-            notes: "With keys the LAST duplicate wins (upsert-style), not the first-seen row.",
+            notes: "With keys the LAST duplicate wins (upsert-style), not the first-seen row. A key is a String, a String binding, or `@name` (ADR 0054).",
         },
     ),
     (
@@ -3185,7 +3185,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
             doc: "The same column under a different name, in the same position.",
             example: "dataframe({a: [1, 2], b: [3, 4]}).rename(\"a\", \"z\").columns()",
             example_out: "[\"z\", \"b\"]",
-            notes: "Both names are ordinary strings, so a library can pass its own parameters. Renaming onto an existing column is refused rather than silently discarding it.",
+            notes: "Both names are ordinary strings, so a library can pass its own parameters; `@name` names the column literally (ADR 0054). Renaming onto an existing column is refused rather than silently discarding it.",
         },
     ),
     (
@@ -3196,7 +3196,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
             doc: "One column's values as an array.",
             example: "dataframe({a: [1, 2], b: [3.0, 4.5]}).column(\"a\")",
             example_out: "[1, 2]",
-            notes: "",
+            notes: "The name is a String, a String binding, or `@name` — the column literally called that, whatever is in scope (ADR 0054).",
         },
     ),
     (
@@ -3438,7 +3438,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
             doc: "Several aggregates in ONE pass: a frame of the keys plus one column per field, in the order written.",
             example: "dataframe({k: [\"a\",\"a\",\"b\"], v: [1,2,3]}).group(@k).agg({n: count(), m: mean(@v), hi: max(@v * 2)}).sort(@k).column(\"hi\")",
             example_out: "[4, 6]",
-            notes: "The aggregates: count(), mean, sum, min, max, std, median, first, nunique — each over a column EXPRESSION (`mean(@v * 2)`), the syntax `where`/`with` read. A field's name is the output column (a binding in scope names it, as in `with`). `count` counts rows including missing; every other aggregate answers missing when the group holds one (an all-missing group is unknown), except `first`, whose first value is knowable. Keywords: aggregate, group by, summarise, summarize, pivot, multiple, several, one pass.",
+            notes: "The aggregates: count(), mean, sum, min, max, std, median, first, nunique — each over a column EXPRESSION (`mean(@v * 2)`), the syntax `where`/`with` read. A field's name is the output column (a binding in scope names it, as in `with`; `{@name: …}` names it literally, ADR 0054). `count` counts rows including missing; every other aggregate answers missing when the group holds one (an all-missing group is unknown), except `first`, whose first value is knowable. Keywords: aggregate, group by, summarise, summarize, pivot, multiple, several, one pass.",
         },
     ),
     (
