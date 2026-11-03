@@ -46,3 +46,15 @@ print(G.group(@g).sum(vcol).columns())
 # THE CONTRAST that was already true: `with` is covered by ADR 0028, and always was.
 k = 100
 print(D.with({out: k}).column("out"))
+
+# `@name` PINS THE COLUMN IN EVERY COLUMN-NAME POSITION (ADR 0054). `column`, `unique` and
+# `rename` evaluate their argument, and refused `@w` ("a value of type Record") until it was
+# read as the column node it is.
+print(D.column(@w))
+print(D.unique(@w).count())
+print(D.rename(@w, "z").columns())
+
+# THE DEFINING POSITION'S ESCAPE. A bare `with` key follows the binding — `{w: 0}` defines
+# column `v` here — and `{@w: 0}` defines the column literally called `w`.
+print(D.with({w: 0}).column("v"))
+print(D.with({@w: 0}).column("w"))

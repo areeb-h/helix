@@ -5150,6 +5150,100 @@ fn a_query_binds_a_name_to_a_local_before_a_column() {
     }
 }
 
+/// `@name` pins the column in EVERY column-name position (ADR 0054, D2), and a `with` or
+/// `agg` key can say so.
+///
+/// v0.10.0 made a String binding win in all nine column-name positions, and `@name` was the
+/// escape back to the column — except that `column`, `unique` and `rename` refused it ("found
+/// a value of type Record": they evaluate their argument, and `@w` evaluates to an ADR 0052
+/// column node), and a `with` key had no escape at all: `name = "Ada"` then
+/// `P.with({name: "z"})` defined a column called `Ada`, `{@name: …}` did not parse, and a
+/// string-keyed Dict is refused. Every assertion here is a refusal or a parse error on the
+/// previous binary, on all three engines.
+#[test]
+fn at_name_pins_the_column_in_every_column_name_position() {
+    let src = "w = \"v\"\n\
+               D = dataframe({v: [1, 1, 2], w: [10, 20, 30]})\n\
+               print(D.column(@w))\n\
+               print(D.column(w))\n\
+               print(D.unique(@w).count())\n\
+               print(D.unique(w).count())\n\
+               print(D.rename(@w, \"z\").columns())\n\
+               name = \"Ada\"\n\
+               P = dataframe({id: [1, 2], name: [\"x\", \"y\"]})\n\
+               print(P.with({@name: \"z\"}).columns())\n\
+               print(P.with({@name: \"z\"}).column(\"name\"))\n\
+               print(P.with({name: \"z\"}).columns())\n\
+               total = \"sum_n\"\n\
+               G = dataframe({g: [\"a\", \"a\"], n: [1, 2]})\n\
+               print(G.group(@g).agg({@total: sum(@n)}).columns())\n\
+               fn lib(F) = F.with({@name: \"q\"}).column(\"name\")\n\
+               print(lib(P))\n";
+    let want = "[10, 20, 30]\n[1, 1, 2]\n3\n2\n[\"v\", \"z\"]\n[\"id\", \"name\"]\n[\"z\", \"z\"]\n\
+                [\"id\", \"name\", \"Ada\"]\n[\"g\", \"total\"]\n[\"q\", \"q\"]";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run_source(src, env, "at_name_everywhere");
+        assert_eq!(code, Some(0), "env {env:?} stderr: {err}");
+        assert_eq!(out.trim(), want, "env {env:?}");
+    }
+
+    // An `@` key anywhere but a frame verb's record is refused — at parse time where the
+    // parser can see it, and at run time, in one sentence on every engine, where a `with`
+    // turns out not to be a frame's.
+    for (src, needle, tag) in [
+        ("r = {@a: 1}\n", "an `@name` key only means something", "at_key_plain_record"),
+        (
+            "fn with(v, spec) = spec\nprint(5.with({@a: 1}))\n",
+            "only means something to a DataFrame's `with` or `agg`",
+            "at_key_user_with",
+        ),
+    ] {
+        let mut seen = Vec::new();
+        for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+            let (_, err, code) = run_source(src, env, tag);
+            assert_eq!(code, Some(1), "{tag} env {env:?}");
+            assert!(err.contains(needle), "{tag} env {env:?}: {err}");
+            seen.push(err);
+        }
+        assert!(seen.windows(2).all(|w| w[0] == w[1]), "{tag}: engines disagree: {seen:?}");
+    }
+}
+
+/// `helix check --lint` notes a TOP-LEVEL String binding used as a bare `with`/`agg` key
+/// (ADR 0054, D3) — the one place a binding winning is a silent surprise rather than the
+/// point — and stays silent for the library case and every rebinding.
+#[test]
+fn the_lint_notes_a_top_level_string_used_as_a_with_key() {
+    let dir = std::env::temp_dir().join(format!("hx_withkey_lint_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("k.helix");
+    std::fs::write(
+        &f,
+        "P = dataframe({id: [1, 2], name: [\"x\", \"y\"]})\n\
+         early = P.with({name: \"before\"})\n\
+         name = \"Ada\"\n\
+         fires = P.with({name: \"z\"})\n\
+         pinned = P.with({@name: \"z\"})\n\
+         total = \"sum_n\"\n\
+         G = dataframe({g: [\"a\"], n: [1]})\n\
+         agg_fires = G.group(@g).agg({total: sum(@n)})\n\
+         lam = [1].map((name) => P.with({name: name}))\n\
+         let_shadow = let name = \"q\" in P.with({name: 1})\n\
+         fn lib(F, name) = F.with({name: 0})\n\
+         n = 5\n\
+         num_key = P.with({n: 1})\n",
+    )
+    .unwrap();
+    let (out, _, code) = run(&["check", "--lint", f.to_str().unwrap()], &[], "");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code, Some(0), "lints never change the exit code: {out}");
+    let notes: Vec<&str> = out.lines().filter(|l| l.contains("ADR 0054")).collect();
+    assert_eq!(notes.len(), 2, "exactly the `with` on line 4 and the `agg` on line 8: {out}");
+    assert!(notes[0].contains(":4:") && notes[0].contains("the column `Ada`"), "{out}");
+    assert!(notes[1].contains(":8:") && notes[1].contains("`agg`"), "{out}");
+}
+
 /// A deep `x => x => ...` lambda chain must hit the parser depth cap with a
 /// clean error — lambda bodies were the one expr() recursion that skipped the
 /// depth counter, so 2000 nestings overflowed the native stack (SIGABRT).

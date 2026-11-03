@@ -1,8 +1,11 @@
 # ADR 0054 — Column-name positions: one rule, one escape, and the `with` key
 
-- **Status:** **Accepted 2026-11-03 — D4: Option A (a bare `with` key stays binding-wins);
-  D2 and D3 not yet implemented.** D1 records what v0.10.0 already ships. D2 and D3 are
-  additions (nothing that runs today changes meaning), so the whole decision is non-breaking.
+- **Status:** **Accepted & implemented 2026-11-03 — D4: Option A (a bare `with` key stays
+  binding-wins).** D1 records what v0.10.0 already ships; D2 and D3 are additions (nothing that
+  ran before changes meaning), so the whole decision is non-breaking. Pinned by
+  `at_name_pins_the_column_in_every_column_name_position`,
+  `the_lint_notes_a_top_level_string_used_as_a_with_key` and the corpus program
+  `df_column_name_shadowing`.
 - **Date:** 2026-11-03
 - **Deciders:** Areeb + Claude
 - **Related:** [ADR 0028](0028-query-name-resolution.md) (a binding wins in a query's
@@ -108,13 +111,15 @@ do, and `with` accepts `{@name: expr}` to define the column literally called `na
 that runs today changes meaning: each of these is currently a refusal or a parse error. The
 `Record` message disappears with it.
 
-**D3 — Say so when a TOP-LEVEL String binding lands in a column-name position (a lint note).**
-ADR 0028 left "should a shadow be diagnosed?" open; this answers it narrowly. `helix check
---lint` notes a bare name in a column-name position that resolves to a top-level `String`
-binding — "`name` is a String binding (`"Ada"`), so this defines/reads the column `Ada`; write
-`@name` for the column called `name`". Parameters and `let`/`do` locals are exempt: that is
-the library case, where the binding is the whole point and a note on every correct call would
-train people to ignore the lint. Notes never change the exit code.
+**D3 — Say so when a TOP-LEVEL String binding is a bare `with`/`agg` key (a lint note).**
+ADR 0028 left "should a shadow be diagnosed?" open; this answers it narrowly, for the defining
+positions — the only ones where the capture is silent. `helix check --lint` notes a bare `with`
+or `agg` key, in a top-level statement, naming a String bound by an EARLIER top-level
+statement: "`name` in this `with` key is a top-level String, so it defines the column `Ada`,
+not one called `name` — write `@name` for the column called `name` (ADR 0054)". Function
+bodies are exempt, and so is a name the statement rebinds (a lambda parameter, `let`/`do`):
+that is the library case, where the binding is the whole point and a note on every correct call
+would train people to ignore the lint. Notes never change the exit code.
 
 **D4 — What a bare `with` key means. Options, for decision:**
 
@@ -138,15 +143,17 @@ the capture keeps biting, B remains available as one batched break later.
 - D1 closes `docs/STATE.md`'s queue item 2. Its three original questions are answered: a
   binding wins (yes, shipped); a String is accepted (yes, shipped); top level vs a function
   (no longer differs).
-- D2 touches three verbs' argument handling and the `with` record parser. It needs a test per
-  position asserting `X(@w)` reaches column `w` while `X(w)` reaches the binding, on all three
-  engines. As ADR 0028 notes, that test is the only thing that can catch a regression here,
-  because the engines agree either way.
-- D3 is a checker lint over column-name positions with scope information. Its test needs both
-  halves: the top-level case notes, and the parameter case stays silent.
-- Under Option A, `tests/corpus/df_column_name_shadowing.helix` gains the `with`-key escape
-  and keeps its golden otherwise. Under Option B its `with` lines change, which is the point of
-  having that pin.
+- D2, as built: `column`/`unique`/`rename` read a column name from a String or an ADR 0052
+  column node (`access::column_name_value`), which is what `@w` evaluates to. The parser accepts
+  an `@name` key only in a record that opens directly after `.with(` or `.agg(`, storing it as
+  `"@name"` (no identifier starts with `@`); the frame verb's key rule strips it. Anywhere else
+  it is a parse error, and a pinned key built as an ordinary record — a `with` whose receiver
+  is not a frame, such as a user function named `with` — is refused at run time in one
+  sentence on all three engines (`pinned_key_outside_frame`), never turned into a field called
+  `"@name"`.
+- D3, as built: an AST pass in `lint_source` beside the other lints, top-level statements only.
+- The corpus pin `df_column_name_shadowing` gained the `@` escapes for `column`/`unique`/
+  `rename` and the `with`-key escape; its earlier output is unchanged.
 
 ## Open questions
 

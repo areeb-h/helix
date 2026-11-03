@@ -90,6 +90,7 @@ fn parse_expression(
         glob_import: false,
         pending: Vec::new(),
         temps: 0,
+        pinned_keys_at: None,
     };
     p.skip_newlines();
     let e = p.expr()?;
@@ -923,6 +924,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Stmt>, HelixError> {
         glob_import: false,
         pending: Vec::new(),
         temps: 0,
+        pinned_keys_at: None,
     };
     // EVERY SIGNATURE BEFORE THE FIRST CALL IS PARSED — a function may be called above
     // its definition, and its defaults and parameter names must be known there too.
@@ -1021,6 +1023,12 @@ struct Parser {
     /// own IMMUTABLE temp — immutable because a `mut` global reads as `Unknown` in the
     /// checker, and the field reads would lose the record's shape with it.
     temps: usize,
+    /// The token index of a `{` that may use `@name` keys: the record argument that
+    /// opens directly after `.with(` or `.agg(` (ADR 0054). There a key is a column NAME,
+    /// and `{@name: e}` pins the column literally called `name` whatever is in scope —
+    /// the one escape the defining position lacked. Anywhere else an `@` key is refused
+    /// at parse time, so it can only ever reach a frame verb or a runtime refusal.
+    pinned_keys_at: Option<usize>,
 }
 
 impl Parser {
@@ -2509,6 +2517,10 @@ impl Parser {
                     // field access — one obvious way: parens mean a call.
                     if matches!(self.peek(), Tok::LParen) {
                         self.advance();
+                        // A record opening exactly here may pin a key with `@` (ADR 0054).
+                        if name == "with" || name == "agg" {
+                            self.pinned_keys_at = Some(self.pos);
+                        }
                         let (args, named) = self.call_args()?;
                         self.eat(&Tok::RParen, "to close the argument list")?;
                         // Named arguments are only meaningful on a *qualified module call*
@@ -3659,6 +3671,7 @@ impl Parser {
                 // record literal: `{ name: expr, age: expr }`, or a record UPDATE that
                 // starts with a spread: `{ ...base, status: 500 }`.
                 let (l, c) = self.pos();
+                let may_pin = self.pinned_keys_at == Some(self.pos);
                 self.advance();
                 // A leading `...expr` makes this a record update: its parts — spreads and
                 // named fields — apply in written order, a later one winning. The spread
@@ -3807,6 +3820,24 @@ impl Parser {
                             let s = s.clone();
                             self.advance();
                             s
+                        } else if matches!(self.peek(), Tok::At) {
+                            // `{@name: e}` — the column literally called `name` (ADR 0054).
+                            // Stored as `@name`: no identifier starts with `@`, so the key
+                            // cannot collide with a bare one, and the frame verb strips it.
+                            if !may_pin {
+                                return Err(HelixError::new(
+                                    "an `@name` key only means something in a DataFrame's `with` or `agg`",
+                                    kl,
+                                    kc,
+                                )
+                                .hint(
+                                    "`df.with({@name: e})` defines the column literally called `name`; \
+                                     a record's own field is written without the `@`.",
+                                ));
+                            }
+                            self.advance();
+                            let name = self.ident_name("after `@` (a column name)")?;
+                            format!("@{name}")
                         } else {
                             self.member_name("as a record field name")?
                         };

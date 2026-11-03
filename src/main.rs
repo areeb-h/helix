@@ -2904,6 +2904,63 @@ fn lint_source(shown: &str, src: &str) -> Vec<String> {
                 }
             });
         }
+
+        // A `with`/`agg` KEY THAT IS A TOP-LEVEL STRING (ADR 0054, D3). A bare key in that
+        // position names the column its String binding spells — so a script with
+        // `name = "Ada"` and `P.with({name: e})` defines a column called `Ada`, exit 0,
+        // all three engines agreeing. The rule is right for a LIBRARY, where the key is a
+        // parameter, so the note is cut to where the surprise lives: keys in top-level
+        // statements, naming a String bound by an EARLIER top-level statement, not rebound
+        // by a lambda or `let`/`do` in that statement. Function bodies are exempt — a note
+        // on every correct library call would teach people to ignore the lint.
+        let mut top_strings: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        for s in &stmts {
+            if matches!(s, crate::ast::Stmt::Func { .. } | crate::ast::Stmt::Import { .. }) {
+                continue;
+            }
+            let mut local: std::collections::HashSet<String> = std::collections::HashSet::new();
+            crate::visit::walk_stmt(s, &mut |e| match e {
+                Expr::Lambda { params, .. } => local.extend(params.iter().cloned()),
+                Expr::Let { bindings, .. } => local.extend(bindings.iter().map(|(n, _)| n.clone())),
+                _ => {}
+            });
+            crate::visit::walk_stmt(s, &mut |e| {
+                if let Expr::Method { name, args, line, .. } = e
+                    && (name == "with" || name == "agg")
+                    && let [Expr::Record(fields)] = args.as_slice()
+                {
+                    for (k, _) in fields {
+                        let Some(value) = top_strings.get(k) else { continue };
+                        if local.contains(k) {
+                            continue;
+                        }
+                        let names = match value {
+                            Some(v) => format!("the column `{v}`"),
+                            None => "the column its value spells".to_string(),
+                        };
+                        notes.push((*line, format!(
+                            "{shown}:{line}: `{k}` in this `{name}` key is a top-level String, \
+                             so it defines {names}, not one called `{k}` — write `@{k}` for \
+                             the column called `{k}` (ADR 0054)."
+                        )));
+                    }
+                }
+            });
+            if let crate::ast::Stmt::Assign { name, value, .. } = s {
+                match value {
+                    Expr::Str(v) => {
+                        top_strings.insert(name.clone(), Some(v.clone()));
+                    }
+                    Expr::Interp(_) => {
+                        top_strings.insert(name.clone(), None);
+                    }
+                    _ => {
+                        top_strings.remove(name);
+                    }
+                }
+            }
+        }
     }
     // The doc-example lint is TEXTUAL on purpose: comments exist only in
     // source, so text is the correct representation, not a workaround.

@@ -4,6 +4,22 @@
 
 ### Added
 
+- **`@name` pins the column in every column-name position, and a `with` or `agg` key can say
+  so: `df.with({@name: e})` (ADR 0054).** Since v0.10.0 a String binding in scope names the
+  column wherever a frame verb expects a column's name — `sort`, `select`, `group`, an
+  aggregation's value, `column`, `unique`, `rename`, a join key, a `with` key — and `@name` was
+  the way back to the column literally called that. `column`, `unique` and `rename` refused it
+  ("found a value of type Record"); they take it now. A `with` key had no way back at all: with
+  `name = "Ada"` in scope, `P.with({name: "z"})` defines a column called `Ada` — the binding
+  winning, as it should for a library's parameter — and there was no spelling for the column
+  called `name`. `{@name: "z"}` is that spelling, in `with` and `agg`; an `@` key anywhere
+  else is a parse error, and one that reaches a `with` whose receiver is not a frame is refused
+  at run time rather than becoming a field called `"@name"`. And `helix check --lint` now notes
+  a top-level String used as a bare `with`/`agg` key — the script shape of that capture — while
+  staying silent for function parameters, function bodies and anything a lambda or `let`
+  rebinds. ADR 0054 also records the v0.10.0 rule itself, which until now lived only in this
+  file and a corpus comment.
+
 - **A PostgreSQL result larger than memory is read a page at a time: `cur = c.cursor(sql,
   params?, batch?)`, then `cur.next()` for each page (ADR 0044 addendum).** The statement is
   prepared, planned and bound exactly as `query` binds it — the same rows in the same order,
