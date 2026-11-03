@@ -11729,6 +11729,88 @@ fn a_fold_through_a_record_field_is_linear() {
     );
 }
 
+/// A STRING built in a record field — or in a record threaded through recursion — is
+/// linear on the bytecode engines (ADR 0029, record-field amendment).
+///
+/// `"{a.s}x"` read `a.s` as an `Rc` clone while the record still held one, so the
+/// interpolation copied the whole string every step: 0.49 s at n=128,000 and 6.8 s at
+/// 512,000 for `reduce({s: "", k: 0}, (a, i) => {s: "{a.s}x", k: a.k + 1})`, and the
+/// recursive spelling `go({s: "{st.s}x", …}, i + 1, n)` was 7.5 s. When that read is the
+/// LAST read of `a.s` on every path (`take_heads_for`), the compiler now emits a take:
+/// a uniquely held record gives the string up and the append extends it in place —
+/// 0.14 s and 0.60 s.
+///
+/// Ratios, for the reason the array test above gives. The fold is measured against the
+/// bare `"{acc}x"` fold (linear since ADR 0029); the recursion against itself at 4x the
+/// input, because its program carries a constant load-time cost that a cross-program ratio
+/// would mistake for growth. The tree-walker does not take yet, so this runs the two
+/// bytecode engines; every engine's ANSWER is asserted, and `tests/corpus/str_field_take`
+/// pins that the take is never observable.
+#[test]
+fn a_string_built_in_a_record_field_is_linear() {
+    let dir = std::env::temp_dir().join(format!("hx_strfield_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    const N: usize = 200_000;
+    let write = |name: &str, src: String| {
+        let p = dir.join(name);
+        std::fs::write(&p, src).unwrap();
+        p
+    };
+    let bare = write("bare.helix", format!("print(range(0, {N}).reduce(\"\", (a, i) => \"{{a}}x\").length())\n"));
+    let field = write(
+        "field.helix",
+        format!(
+            "r = range(0, {N}).reduce({{s: \"\", k: 0}}, (a, i) => {{s: \"{{a.s}}x\", k: a.k + 1}})\nprint(r.s.length(), r.k)\n"
+        ),
+    );
+    let rec = |n: usize| {
+        write(
+            &format!("rec{n}.helix"),
+            "fn go(st, i, n) = if i == n then st.s.length() else go({s: \"{st.s}x\", k: st.k + 1}, i + 1, n)\nfn main(n: Int = 1) = print(go({s: \"\", k: 0}, 0, n))\n"
+                .to_string(),
+        )
+    };
+    let (rec_small, rec_large) = (rec(N / 2), rec(N * 2));
+
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..]] {
+        let best = |path: &std::path::Path, extra: &[&str], want: &str| -> std::time::Duration {
+            let mut best = std::time::Duration::from_secs(3600);
+            for _ in 0..3 {
+                let mut args = vec!["run", path.to_str().unwrap()];
+                args.extend_from_slice(extra);
+                let t0 = std::time::Instant::now();
+                let (out, err, code) = run(&args, env, "");
+                let dt = t0.elapsed();
+                assert_eq!(code, Some(0), "{env:?} {err}");
+                assert_eq!(out.trim(), want, "{path:?} {env:?}");
+                best = best.min(dt);
+            }
+            best
+        };
+        let t_bare = best(&bare, &[], &N.to_string());
+        let t_field = best(&field, &[], &format!("{N} {N}"));
+        assert!(
+            t_field.as_secs_f64() < t_bare.as_secs_f64() * 10.0,
+            "a string built in a record field is not linear on {env:?}: {t_field:?} against \
+             {t_bare:?} bare (ratio {:.1}x). `a.s` is being cloned rather than taken — check \
+             `take_heads_for` and `Op::AppendStrFromLocalField`.",
+            t_field.as_secs_f64() / t_bare.as_secs_f64().max(1e-9)
+        );
+        let small = (N / 2).to_string();
+        let large = (N * 2).to_string();
+        let t_small = best(&rec_small, &["--n", &small], &small);
+        let t_large = best(&rec_large, &["--n", &large], &large);
+        assert!(
+            t_large.as_secs_f64() < t_small.as_secs_f64() * 3.0,
+            "a string threaded through recursion is not linear on {env:?}: {t_large:?} at \
+             4x the input of {t_small:?} (ratio {:.1}x).",
+            t_large.as_secs_f64() / t_small.as_secs_f64().max(1e-9)
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The append buffer is SHARED, so the cases that could make sharing observable are the
 /// ones worth pinning: an older view must not see a newer append, a branch must copy, the
 /// receiver may alias the argument, and the result must keep the representation the

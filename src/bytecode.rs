@@ -390,6 +390,119 @@ pub struct Compiler {
     /// used to route receiver-polymorphic methods. `None` when compiling without a
     /// prior type-check (tests/fuzzers) — then such methods fall back as before.
     types: Option<crate::types::TypeMap>,
+    /// `(local, field)` pairs whose ONE read, as the head of an interpolation, may move the
+    /// field out of a uniquely held record (`Op::AppendStrFromLocalField`, ADR 0029's
+    /// record-field amendment). Computed per body by [`take_heads_for`] and scoped to it:
+    /// set for a `fn`'s parameters and a fold's accumulator binder, cleared for a lambda
+    /// compiled as its own chunk.
+    take_heads: Vec<(String, String)>,
+}
+
+/// The fields of local `p` whose read may MOVE out of the record, for a body `body` that
+/// binds `p` (a `fn` parameter, a fold's accumulator).
+///
+/// `{s: "{a.s}x", k: a.k + 1}` reads `a.s` once, to copy it into a longer string, and never
+/// again: if nothing else holds the record, that read can take the string instead of cloning
+/// it, and the append then extends it in place. That is what makes a string built inside a
+/// record — the shape a fold carrying two values must have, since `mut` is top-level only —
+/// linear rather than quadratic. Taking is unobservable only if NOTHING can read `p.f`
+/// afterwards, so every condition below is a way that could happen, refused:
+///
+/// - every use of `p` is a field read (a bare `p` — passed on, spread, printed — would show
+///   the taken field);
+/// - `p` is never rebound in the body (a lambda parameter, a `let`/`do` binding, a `match`
+///   binder), so every `p` here is the one this applies to;
+/// - `p.f` is read exactly once, as the head of an interpolation with no format spec, and
+///   not inside a lambda — an inline comprehension runs its body once per element, so a
+///   single occurrence there is many reads.
+///
+/// The record must also be uniquely held at run time; the op checks that and otherwise
+/// clones exactly as `GetField` would, so a kept or captured accumulator stays correct.
+pub(crate) fn take_heads_for(body: &Expr, p: &str) -> Vec<String> {
+    fn binds(pat: &crate::ast::Pattern, p: &str) -> bool {
+        use crate::ast::Pattern as P;
+        match pat {
+            P::Bind(n) => n == p,
+            P::Tuple(ps) | P::Or(ps) => ps.iter().any(|q| binds(q, p)),
+            P::Record(fs) => fs.iter().any(|(_, q)| binds(q, p)),
+            _ => false,
+        }
+    }
+    let field_of = |e: &Expr| -> Option<String> {
+        match e {
+            Expr::Field { recv, name, .. } | Expr::FieldOrMissing { recv, name, .. }
+                if matches!(&**recv, Expr::Ident { name: n, .. } if n == p) =>
+            {
+                Some(name.clone())
+            }
+            _ => None,
+        }
+    };
+    let mut idents = 0usize;
+    let mut reads: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut rebound = false;
+    let mut heads: Vec<String> = Vec::new();
+    let mut in_lambda: Vec<String> = Vec::new();
+    crate::visit::walk_expr(body, &mut |e| {
+        match e {
+            Expr::Ident { name, .. } if name == p => idents += 1,
+            Expr::Lambda { params, body: lb, .. } => {
+                rebound |= params.iter().any(|q| q == p);
+                crate::visit::walk_expr(lb, &mut |x| {
+                    if let Some(f) = field_of(x) {
+                        in_lambda.push(f);
+                    }
+                });
+            }
+            Expr::Let { bindings, .. } => rebound |= bindings.iter().any(|(n, _)| n == p),
+            Expr::Match { arms, .. } => rebound |= arms.iter().any(|a| binds(&a.pattern, p)),
+            Expr::Interp(parts) => {
+                if let Some(crate::ast::InterpPart::Expr(h, None)) = parts.first()
+                    && let Some(f) = field_of(h)
+                {
+                    heads.push(f);
+                }
+            }
+            _ => {}
+        }
+        if let Some(f) = field_of(e) {
+            *reads.entry(f).or_default() += 1;
+        }
+    });
+    if rebound || idents != reads.values().sum::<usize>() {
+        return Vec::new();
+    }
+    // ONE READ ON EVERY PATH, not one in the text: `if i == n then st.s.length() else
+    // go({s: "{st.s}x", …})` reads `st.s` twice, but no run reaches both — the base case and
+    // the step are the two branches. A branch counts its worse side; a `match` adds its
+    // guards (an earlier arm's guard runs before a later arm is chosen) and counts its worst
+    // body. Everything else adds up, which is conservative for `and`/`or`.
+    fn max_reads(e: &Expr, is_read: &dyn Fn(&Expr) -> bool) -> usize {
+        let here = usize::from(is_read(e));
+        match e {
+            Expr::If { cond, then_branch, else_branch, .. } => {
+                here + max_reads(cond, is_read)
+                    + max_reads(then_branch, is_read).max(max_reads(else_branch, is_read))
+            }
+            Expr::Match { scrutinee, arms, .. } => {
+                let guards: usize =
+                    arms.iter().filter_map(|a| a.guard.as_ref()).map(|g| max_reads(g, is_read)).sum();
+                here + max_reads(scrutinee, is_read)
+                    + guards
+                    + arms.iter().map(|a| max_reads(&a.body, is_read)).max().unwrap_or(0)
+            }
+            _ => {
+                let mut n = here;
+                crate::visit::for_each_child(e, &mut |c| n += max_reads(c, is_read));
+                n
+            }
+        }
+    }
+    heads.retain(|f| {
+        !in_lambda.contains(f)
+            && max_reads(body, &|e| field_of(e).as_deref() == Some(f.as_str())) == 1
+    });
+    heads
 }
 
 /// Compile a whole program to bytecode. Total for any type-checked program (see the
@@ -428,6 +541,7 @@ pub fn compile_with_types(program: &[Stmt], types: Option<crate::types::TypeMap>
         jit_fns: crate::jit::int_eligible_fns(program),
         mixed_sigs: crate::jit::mixed_fn_sigs(program),
         types,
+        take_heads: Vec::new(),
     };
 
     // PASS ONE: reserve a function-table slot for every top-level `fn`, before compiling any
@@ -1251,9 +1365,15 @@ impl Compiler {
         for (pname, _) in params {
             fb.declare_local(pname);
         }
+        let heads: Vec<(String, String)> = params
+            .iter()
+            .flat_map(|(p, _)| take_heads_for(body, p).into_iter().map(move |f| (p.clone(), f)))
+            .collect();
+        let saved = std::mem::replace(&mut self.take_heads, heads);
         self.body_depth += 1;
         let compiled = self.compile_expr(&mut fb, body);
         self.body_depth -= 1;
+        self.take_heads = saved;
         compiled?;
         fb.emit(Op::Return, 0, 0);
         tco_peephole(&mut fb.code);
@@ -1300,7 +1420,17 @@ impl Compiler {
         // the walker does. (The converse, a top-level lambda called only after the
         // definition, still does not resolve; that gap predates PASS ONE and is unchanged by
         // it, since at depth 0 the visible set is exactly "definitions compiled so far".)
-        self.compile_expr(&mut fb, body)?;
+        //
+        // The take set is THIS chunk's, never the enclosing body's: an outer `(p, f)` must
+        // not apply to a lambda parameter that happens to share the name (ADR 0029).
+        let heads: Vec<(String, String)> = params
+            .iter()
+            .flat_map(|p| take_heads_for(body, p).into_iter().map(move |f| (p.clone(), f)))
+            .collect();
+        let saved = std::mem::replace(&mut self.take_heads, heads);
+        let compiled = self.compile_expr(&mut fb, body);
+        self.take_heads = saved;
+        compiled?;
         fb.emit(Op::Return, 0, 0);
         tco_peephole(&mut fb.code);
 
@@ -1702,6 +1832,26 @@ impl Compiler {
                 b.emit(Op::Index, *line, *col);
             }
             Expr::Interp(parts) => {
+                // `"{p.f}…"` where this is the last read of `p.f` (`take_heads_for`): check the
+                // field first — `GetField`'s error, before any tail hole runs, which is the
+                // order the ordinary lowering reports in — then the tail holes, then one op
+                // that takes the string out of a uniquely held record and extends it in place.
+                if let Some(InterpPart::Expr(h, None)) = parts.first()
+                    && let Expr::Field { recv, name: f, line: fl, col: fc } = &**h
+                    && let Expr::Ident { name: p, .. } = &**recv
+                    && self.take_heads.iter().any(|(tp, tf)| tp == p && tf == f)
+                    && let Some(slot) = b.resolve_local(p)
+                {
+                    let sym = crate::symbol::Symbol::intern(f);
+                    b.emit(Op::CheckLocalField(slot, sym), *fl, *fc);
+                    for part in &parts[1..] {
+                        if let InterpPart::Expr(e, _) = part {
+                            self.compile_expr(b, e)?;
+                        }
+                    }
+                    b.emit(Op::append_str_from_local_field(slot, sym, parts.clone()), 0, 0);
+                    return Ok(());
+                }
                 for part in parts {
                     if let InterpPart::Expr(e, _) = part {
                         self.compile_expr(b, e)?;

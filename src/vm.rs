@@ -1189,6 +1189,120 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     locals[at] = Value::Str(std::rc::Rc::new(s));
                 }
             }
+            Op::CheckLocalField(slot, field) => {
+                // `GetField`'s error, nothing pushed — the dropped clone is a refcount bump
+                // and back, so a uniquely held record is still unique for the take after it.
+                let at = frames[fi].base + *slot as usize;
+                drop(crate::interp::eval_field(&locals[at], *field, line, col)?);
+            }
+            Op::AppendStrFromLocalField(d) => {
+                let parts = &d.parts;
+                let holes = parts
+                    .iter()
+                    .skip(1)
+                    .filter(|p| matches!(p, crate::ast::InterpPart::Expr(..)))
+                    .count();
+                let base = stack.len() - holes;
+                let at = frames[fi].base + d.slot as usize;
+                let (hl, hc) = match parts.first() {
+                    Some(crate::ast::InterpPart::Expr(e, _)) => e.position(),
+                    _ => (line, col),
+                };
+                // 1. The head, as `Op::Interp` would render it: a `Str` field is its own
+                //    text, measured in place; anything else is formatted now. Then the cap
+                //    after the head, exactly where `Op::Interp` checks it.
+                let field_str_len = match &locals[at] {
+                    Value::Record(r) => r.iter().find(|(k, _)| *k == d.field).and_then(|(_, v)| match v {
+                        Value::Str(s) => Some(s.len()),
+                        _ => None,
+                    }),
+                    _ => None,
+                };
+                let rendered_head = match field_str_len {
+                    Some(_) => None,
+                    None => {
+                        let v = crate::interp::eval_field(&locals[at], d.field, hl, hc)?;
+                        let mut h = String::new();
+                        crate::value::write_value(&mut h, &v, hl, hc)?;
+                        Some(h)
+                    }
+                };
+                let head_len = field_str_len.or(rendered_head.as_ref().map(String::len)).unwrap_or(0);
+                if head_len > crate::interp::MAX_STRING_LEN {
+                    return Err(interp_too_long(line, col));
+                }
+                // 2. The tail, part by part, with the cap after each — `Op::Interp`'s order of
+                //    errors, so a hole that fails after the crossing reports the crossing.
+                let mut tail = String::new();
+                let mut vi = base;
+                for part in parts.iter().skip(1) {
+                    match part {
+                        crate::ast::InterpPart::Lit(t) => tail.push_str(t),
+                        crate::ast::InterpPart::Expr(e, spec) => {
+                            let (el, ec) = e.position();
+                            match spec {
+                                Some(fs) => tail.push_str(
+                                    &fs.apply(&stack[vi]).map_err(|m| HelixError::new(m, el, ec))?,
+                                ),
+                                None => crate::value::write_value(&mut tail, &stack[vi], el, ec)?,
+                            }
+                            vi += 1;
+                        }
+                    }
+                    if head_len + tail.len() > crate::interp::MAX_STRING_LEN {
+                        return Err(interp_too_long(line, col));
+                    }
+                }
+                // 3. Everything fallible is done. Take the string out of a uniquely held
+                //    record and extend it in place; otherwise build fresh. The field left
+                //    behind is `Unit`, which nothing can read: this was its last read.
+                let built = if let Some(h) = rendered_head {
+                    let mut s = h;
+                    s.push_str(&tail);
+                    s
+                } else {
+                    let taken = match &mut locals[at] {
+                        Value::Record(rc) => std::rc::Rc::get_mut(rc).and_then(|fields| {
+                            fields.iter_mut().find(|(k, _)| *k == d.field).map(|(_, v)| {
+                                std::mem::replace(v, Value::Unit)
+                            })
+                        }),
+                        _ => None,
+                    };
+                    match taken {
+                        Some(Value::Str(cur)) => match std::rc::Rc::try_unwrap(cur) {
+                            Ok(mut s) => {
+                                if s.try_reserve(tail.len()).is_err() {
+                                    let bytes = s.len() + tail.len();
+                                    return Err(materialize_refused(
+                                        crate::value::MaterializeLimit::Alloc(bytes),
+                                        line,
+                                        col,
+                                    ));
+                                }
+                                s.push_str(&tail);
+                                s
+                            }
+                            Err(shared) => {
+                                let mut s = String::with_capacity(shared.len() + tail.len());
+                                s.push_str(&shared);
+                                s.push_str(&tail);
+                                s
+                            }
+                        },
+                        _ => {
+                            // A shared record: read the field the way `GetField` does.
+                            let v = crate::interp::eval_field(&locals[at], d.field, hl, hc)?;
+                            let mut s = String::with_capacity(head_len + tail.len());
+                            crate::value::write_value(&mut s, &v, hl, hc)?;
+                            s.push_str(&tail);
+                            s
+                        }
+                    }
+                };
+                stack.truncate(base);
+                stack.push(Value::Str(std::rc::Rc::new(built)));
+            }
             Op::StoreLocal(slot) => {
                 let base = frames[fi].base;
                 locals[base + *slot as usize] = stack.pop().unwrap();

@@ -1,0 +1,15 @@
+exit: 0
+--- stdout ---
+kept init: a axxx
+read twice: axxx axx
+bare use: axx {s: "ax", w: {s: "a", w: 0}}
+in lambda: axx ["ax1", "ax2"]
+captured: axxx
+error order: record has no field `nope`
+non-str: 0xxx
+missing acc: {error: missing, help: missing, ok: true, value: {s: "missingxx"}}
+recursion: 6 base=ab
+match: q q!
+spec: [   a]
+lambda chunk: yyy
+--- stderr ---

@@ -9,6 +9,13 @@ use crate::ast::{Expr, InterpPart, Stmt};
 /// Call `f` on `e` and every expression beneath it, preorder.
 pub fn walk_expr(e: &Expr, f: &mut impl FnMut(&Expr)) {
     f(e);
+    for_each_child(e, &mut |c| walk_expr(c, f));
+}
+
+/// Call `f` on each DIRECT child of `e`, in evaluation order — the one exhaustive match
+/// every walk goes through. A pass that has to treat a node's children differently (a
+/// branch counted as "either", not "both") recurses through this instead of `walk_expr`.
+pub fn for_each_child(e: &Expr, f: &mut impl FnMut(&Expr)) {
     match e {
         Expr::Int(_)
         | Expr::Float(_)
@@ -20,59 +27,59 @@ pub fn walk_expr(e: &Expr, f: &mut impl FnMut(&Expr)) {
         Expr::Interp(parts) => {
             for p in parts {
                 if let InterpPart::Expr(inner, _) = p {
-                    walk_expr(inner, f);
+                    f(inner);
                 }
             }
         }
         Expr::Array(xs) | Expr::Tuple(xs) => {
             for x in xs {
-                walk_expr(x, f);
+                f(x);
             }
         }
         Expr::Record(fields) => {
             for (_, v) in fields {
-                walk_expr(v, f);
+                f(v);
             }
         }
         Expr::RecordUpdate { parts, .. } => {
             for p in parts {
-                walk_expr(p.expr(), f);
+                f(p.expr());
             }
         }
-        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } | Expr::Part { recv, .. } => walk_expr(recv, f),
-        Expr::Unary { expr, .. } | Expr::Try { expr, .. } => walk_expr(expr, f),
+        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } | Expr::Part { recv, .. } => f(recv),
+        Expr::Unary { expr, .. } | Expr::Try { expr, .. } => f(expr),
         Expr::Binary { left, right, .. } => {
-            walk_expr(left, f);
-            walk_expr(right, f);
+            f(left);
+            f(right);
         }
         Expr::Call { args, .. } => {
             for a in args {
-                walk_expr(a, f);
+                f(a);
             }
         }
         Expr::Method { recv, args, named, .. } => {
-            walk_expr(recv, f);
+            f(recv);
             for a in args {
-                walk_expr(a, f);
+                f(a);
             }
             for (_, v) in named {
-                walk_expr(v, f);
+                f(v);
             }
         }
         Expr::CallValue { callee, args, .. } => {
-            walk_expr(callee, f);
+            f(callee);
             for a in args {
-                walk_expr(a, f);
+                f(a);
             }
         }
         Expr::Index { recv, index, .. } => {
-            walk_expr(recv, f);
-            walk_expr(index, f);
+            f(recv);
+            f(index);
         }
         Expr::Slice { recv, start, stop, step, .. } => {
-            walk_expr(recv, f);
+            f(recv);
             for o in [start, stop, step].into_iter().flatten() {
-                walk_expr(o, f);
+                f(o);
             }
         }
         Expr::Lambda { defaults, bound, body, .. } => {
@@ -81,31 +88,31 @@ pub fn walk_expr(e: &Expr, f: &mut impl FnMut(&Expr)) {
             // (`column_arg_captures`) are collected through this walk, and `df.where(flag)`
             // inside a closure names `flag` only through the origin.
             for d in defaults {
-                walk_expr(d, f);
+                f(d);
             }
             if let Some(origin) = bound {
-                walk_expr(origin, f);
+                f(origin);
             }
-            walk_expr(body, f);
+            f(body);
         }
         Expr::Let { bindings, body, .. } => {
             for (_, v) in bindings {
-                walk_expr(v, f);
+                f(v);
             }
-            walk_expr(body, f);
+            f(body);
         }
         Expr::If { cond, then_branch, else_branch, .. } => {
-            walk_expr(cond, f);
-            walk_expr(then_branch, f);
-            walk_expr(else_branch, f);
+            f(cond);
+            f(then_branch);
+            f(else_branch);
         }
         Expr::Match { scrutinee, arms, .. } => {
-            walk_expr(scrutinee, f);
+            f(scrutinee);
             for a in arms {
                 if let Some(g) = &a.guard {
-                    walk_expr(g, f);
+                    f(g);
                 }
-                walk_expr(&a.body, f);
+                f(&a.body);
             }
         }
     }

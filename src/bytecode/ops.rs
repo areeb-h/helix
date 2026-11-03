@@ -245,6 +245,20 @@ pub enum Op {
     /// never aborts — ADR 0024); a shared one pays one content copy, which keeps every
     /// aliased case bit-identical to the ordinary lowering.
     AppendStrIntoLocal(u32, std::rc::Rc<Vec<crate::ast::InterpPart>>),
+    /// `p.f` CHECKED in place, nothing pushed: `GetField`'s error at the field's position,
+    /// or nothing. Emitted before the tail holes of an [`Op::AppendStrFromLocalField`], so
+    /// a missing field or a non-record `p` is reported before any tail hole runs — the
+    /// order the ordinary lowering, which reads `p.f` first, reports in.
+    CheckLocalField(u32, crate::symbol::Symbol),
+    /// `"{p.f}…tail…"` where this is the last read of `p.f` (`take_heads_for`): pops the
+    /// tail's holes, pushes the string. The same order of operations as
+    /// [`Op::AppendStrIntoLocal`] — the head's length and the tail rendered first, with
+    /// `Op::Interp`'s per-part cap and errors, everything fallible before anything moves —
+    /// and then, if the record in the slot is uniquely held and `f` is a `Str`, the string
+    /// is TAKEN out of it (the field is left `Unit`; nothing can read it again) and
+    /// extended in place. Otherwise the head is read as `GetField` reads it and the string
+    /// is built fresh, bit-identical to the ordinary lowering (ADR 0029, record fields).
+    AppendStrFromLocalField(std::rc::Rc<AppendFieldData>),
     /// `any`/`all` per-element test. Pops a boolean: short-circuits to the target
     /// on a determining result (`true` for `any`, `false` for `all`); a `missing`
     /// sets the seen-missing slot; a non-boolean errors. Fields: (is_all, sm_slot,
@@ -510,6 +524,14 @@ pub struct GroupByAggData {
     pub upvals: std::rc::Rc<Vec<(String, u32)>>,
 }
 
+/// Payload of [`Op::AppendStrFromLocalField`], boxed to keep `Op` within 16 bytes.
+#[derive(Debug, Clone)]
+pub struct AppendFieldData {
+    pub slot: u32,
+    pub field: crate::symbol::Symbol,
+    pub parts: std::rc::Rc<Vec<crate::ast::InterpPart>>,
+}
+
 /// Payload of [`Op::Raise`] — a deferred error's message and hint, boxed to keep
 /// `Op` small (this is a cold error-raising op, never in a hot loop).
 #[derive(Debug, Clone)]
@@ -522,6 +544,18 @@ impl Op {
     /// Construct a boxed [`Op::Raise`]; keeps the seven emit sites a plain call.
     pub fn raise(msg: std::rc::Rc<String>, hint: std::rc::Rc<String>) -> Op {
         Op::Raise(std::rc::Rc::new(RaiseData { msg, hint }))
+    }
+    /// Construct a boxed [`Op::AppendStrFromLocalField`].
+    pub fn append_str_from_local_field(
+        slot: u32,
+        field: crate::symbol::Symbol,
+        parts: Vec<crate::ast::InterpPart>,
+    ) -> Op {
+        Op::AppendStrFromLocalField(std::rc::Rc::new(AppendFieldData {
+            slot,
+            field,
+            parts: std::rc::Rc::new(parts),
+        }))
     }
 }
 

@@ -53,8 +53,8 @@ carries one has to be cut as `minor` by hand. This cycle is one.
 
 **This cycle is a MINOR, not a patch** — positional destructuring is new syntax, and
 `begin`, `commit`, `rollback` and `cursor` are new methods (so the
-release guard would refuse a patch anyway). Gate green at **1,037 tests**
-(608 lib + 394 CLI + 3 other + 32 dual-engine), **156** dfdiff programs with 0 undeclared
+release guard would refuse a patch anyway). Gate green at **1,038 tests**
+(608 lib + 395 CLI + 3 other + 32 dual-engine), **157** dfdiff programs with 0 undeclared
 divergence, 99 files type-checked. The full list is `CHANGELOG.md`'s `Unreleased`; the shape
 of it:
 
@@ -418,11 +418,14 @@ it, and a `with`/`agg` key can now say `{@name: e}` — and `helix check --lint`
 top-level String used as a bare `with`/`agg` key, the one place the binding winning is a
 silent surprise (`name = "Ada"` then `P.with({name: e})` defines a column called `Ada`).
 
-### 3. String accumulation in a record field
+### 3. ~~String accumulation in a record field~~ — fixed on the bytecode engines
 
-10.1× per 4×, 243 ms at n=128,000. Same shape as the dict case and milder. Node rendering IS
-string building, so it matters for the UI library specifically. No lint names it yet — it has
-no `dict()`-like literal to key on, so detecting it needs its own rule.
+`{s: "{a.s}x", k: a.k + 1}` in a fold, and `go({s: "{st.s}x", …}, i + 1, n)` in a recursion,
+were quadratic (6.8 s and 7.5 s at n=512,000) and are linear on the VM and JIT (0.14 s and
+0.60 s): when the interpolation's head is the LAST read of the field on every path, the
+compiler emits a take that moves the string out of a uniquely held record and extends it in
+place (ADR 0029, 2026-11-03 amendment). Open: the tree-walker still copies, and other spellings
+(the field read twice on one path, a non-interpolation append) still do.
 
 ### 4. ~~Tighten two guards that let something through~~ — done
 
