@@ -56,11 +56,16 @@ After: 0.14 s and 0.60 s at n=512,000 (the recursion carries a constant load-tim
 init, a second read, a bare use, a lambda, a closure, error order, a non-String field, a
 missing record, a caller keeping its argument, exclusive arms, a format spec, a lambda chunk —
 byte-identical to the previous binary on all three engines; `a_string_built_in_a_record_field_is_linear`
-pins the class on the bytecode engines.
+pins the class on all three.
 
-**Still open:** the tree-walker does not take, so `HELIX_NOVM=1` stays quadratic on this shape
-(same answers, slower). And the take is a recognizer: `{s: a.s + …}`-style spellings that
-are not an interpolation head, or a field read twice on one path, still copy.
+**The tree-walker takes too** (`Interp::interp_take`, the same order of operations as the two
+ops, one method). Its take set is per frame — computed once per function body by the same
+`take_heads_for`, cached with the body's `Rc` held so a freed address cannot be reused by a
+different body — and per fold, saved and restored at the same boundaries as `env`. Walker,
+n=512,000: 7.66 s → 0.21 s and 8.41 s → 0.35 s.
+
+**Still open:** the take is a recognizer. Spellings that are not an interpolation head, or a
+field read twice on one path, still copy.
 
 ## Amendment (2026-08-29) — the ARRAY half is fixed; the dict half is not
 

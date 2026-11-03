@@ -457,6 +457,20 @@ impl super::Interp {
                     None
                 };
                 let mut err: Option<HelixError> = None;
+                // THE RECORD FOLD's take set, for the accumulator binder — the compiler's
+                // `emit_reduce_body_and_store` twin (ADR 0029, record-field amendment).
+                // Restored after the loop on every exit, with the binders.
+                let fold_heads: Rc<Vec<(String, String)>> = if pa != pb {
+                    Rc::new(
+                        crate::bytecode::take_heads_for(body, pa)
+                            .into_iter()
+                            .map(|f| (pa.to_string(), f))
+                            .collect(),
+                    )
+                } else {
+                    Rc::new(Vec::new())
+                };
+                let saved_heads = std::mem::replace(&mut self.take_heads, fold_heads);
                 // `iter_values()`, not `to_values()`: the latter boxes a packed
                 // receiver into a `Vec<Value>` up front purely to iterate it — the
                 // same ADR-0024 hazard `eval_pattern_loop` already fixed.
@@ -495,6 +509,7 @@ impl super::Interp {
                         }
                     }
                 }
+                self.take_heads = saved_heads;
                 // Restore the shadowed bindings (or clear ours) — always, even on error.
                 self.env.remove(pa);
                 if let Some(b) = saved_a {
