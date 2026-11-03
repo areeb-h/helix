@@ -1,16 +1,20 @@
 # Helix
 
-**A scientific programming language that reads like a notebook and runs its numeric kernels at C speed.**
+**A scientific programming language that reads like a notebook and compiles its numeric kernels to native code.**
 
 Helix is a from-scratch language and runtime, written in Rust, for data science, machine
 learning, computational biology, and high-performance scientific computing. It pairs a clean,
 high-level surface syntax with a **Cranelift JIT** that compiles hot numeric loops to native
 machine code — so a dot product or an N-body inner loop, written as a one-line `reduce`, runs
-*at or beyond single-threaded C*, while the rest of your program stays as readable as a notebook.
+within a small factor of single-threaded C ([measured below](#performance)), while the rest of
+your program stays as readable as a notebook.
 
-What makes that trustworthy: every JIT-compiled kernel is proven **bit-identical** to two
-independent reference engines (a bytecode VM and a tree-walker) by a differential oracle over
-tens of thousands of random programs. **Speed is never traded for a silently wrong answer.**
+What makes that trustworthy: the JIT is **differentially tested for bit-identical results**
+against two independent reference engines (a bytecode VM and a tree-walker) — tens of thousands
+of generated programs per test run, plus every example and a pinned corpus on all three engines,
+exit status included. That is strong evidence rather than a proof: it covers the shapes the
+generators and the corpus exercise. The rule it enforces is that **any divergence is a bug**, and
+speed is never knowingly traded for a different answer.
 
 [Performance](#performance) · [Install](#install) · [A tour](#a-tour) · [What's inside](#whats-inside) · [Architecture](#architecture)
 
@@ -23,23 +27,29 @@ arrays — including **array-indexed reductions** (`a[j]`) and **nested reductio
 `reduce`) — to native code, and auto-parallelizes across cores above a size threshold.
 
 **Against single-threaded C, Helix loses more often than it wins — and that is the honest
-headline.** From [`bench/kernels/RESULTS.md`](bench/kernels/RESULTS.md), ten kernels where
-every language must print byte-identical output before a timing counts, on a
-page-size-equalized machine:
+headline.** These rows are copied from [`bench/kernels/RESULTS.md`](bench/kernels/RESULTS.md),
+which is the only source to quote: one run on **2026-08-13 at `3f91177`** (Ryzen 7 7700X, WSL2,
+release build), with every language required to print byte-identical output before a timing
+counts, on a page-size-equalized machine. It has not been re-measured since, and the file's own
+rule is to rebuild and re-run before quoting newer numbers.
 
 | # | kernel | Helix | C | vs C |
 |---|---|---|---|---|
-| k1 | dot, 50M i64 | **0.08 s** (379% CPU) | 0.11 s | faster on wall clock, for **2.8× the CPU** |
-| k2 | mandelbrot 1200² | 0.08 s (97%) | 0.08 s | **tie**, single-threaded |
-| k3 | basel 1e8 | 0.09 s (96%) | 0.06 s | 1.5× slower |
-| k5 | montecarlo 1e8 | 0.68 s (99%) | 0.28 s | 2.4× slower |
-| k6 | sieve π(10⁷) | 0.02 s (89%) | 0.01 s | ~tie (delegated; 3.5× over NumPy) |
-| k7 | wordcount 5M | 0.68 s (99%) | 0.23 s | 3.0× slower — but **2.4× faster than CPython** |
-| k8 | matmul build + GEMM | **0.05 s** (155%) | — | **1.6× faster than NumPy** |
+| k1 | dot, 50M i64 | **0.25 s** (417% CPU) | 0.30 s | 1.2× faster on wall clock, for **4× the CPU** |
+| k2 | mandelbrot 1200² | 0.08 s (101%) | 0.08 s | **tie**, single-threaded |
+| k3 | basel 1e8 | 0.09 s (105%) | 0.05 s | 1.8× slower |
+| k4 | allpairs 15k | 0.01 s (305%) | 0.00 s | at timer grain — not a measurement |
+| k5 | montecarlo 1e8 | 0.63 s (105%) | 0.26 s | 2.4× slower |
+| k6 | sieve π(10⁷) | 0.02 s (100%) | 0.01 s | ~tie (delegated; 3× over NumPy) |
+| k7 | wordcount 5M | 0.67 s (105%) | 0.20 s | 3.4× slower — but **2.1× faster than CPython** |
+| k8 | matmul 1024³ (build + GEMM) | **0.03 s** (177%) | — | **2.3× faster than NumPy** |
+| k9 | matmul 512³ (naive) | 0.49 s (105%) | 0.33 s | 1.5× slower |
+| k9m | matmul 512³ (map-temp) | 0.51 s (105%) | 0.33 s | 1.5× slower |
 
-**Helix loses to C on seven of nine comparable kernels**, ties on k2, and leads k1 only by
-spending 2.8× the cores. Where it does win — k8 against NumPy, k6 against NumPy, k7 against
-CPython — those are the comparisons that reflect who actually uses this.
+**Of the eight kernels with a C time above timer grain, Helix is slower on five** (k3, k5, k7, k9,
+k9m), ties on two (k2, k6), and leads k1 only by spending 4× the CPU. Where it does win — k8 and
+k6 against NumPy, k7 against CPython — those are the comparisons that reflect who actually uses
+this.
 
 > **Two older benchmark documents overstate this.** `docs/jit-benchmarks.md` published C
 > baselines that were **wrong by ~4.4×** — the C reference was not getting transparent huge
@@ -306,10 +316,11 @@ and **Ed25519** (deterministic, strict verification). Enough to sign a JWT or se
 end-to-end in pure Helix.
 
 ### Safety & correctness
-- **The differential oracle** — the JIT, the bytecode VM, and the tree-walker are asserted
-  **bit-identical** on tens of thousands of randomly generated programs. A JIT miscompilation
-  cannot ship silently; an out-of-bounds native read falls back to the exact checked interpreter
-  error. This is the project's cardinal rule.
+- **The differential oracle** — the JIT, the bytecode VM, and the tree-walker are checked for
+  **bit-identical** results on tens of thousands of randomly generated programs per run, and on
+  every runnable example and corpus program (output and exit status). A miscompilation in a
+  shape those cover fails CI rather than shipping; an out-of-bounds native read falls back to
+  the exact checked interpreter error. Engine agreement is the project's cardinal rule.
 - **Memory-safe** (inherited from the Rust host) **and authority-confined** — a **capability
   sandbox** (ADR 0021) enforced at one registry chokepoint and carried per-evaluation, so
   self-generated code gets a *narrower* grant. It is off unless asked for, and asking is a
@@ -350,7 +361,7 @@ tests of the same one. Details in [docs/execution-engine.md](docs/execution-engi
 | Read like a notebook, run like a compiler | high-level syntax; numeric kernels JIT to native |
 | One obvious way | dot-chains (no `\|>`), methods always `()`, one assignment operator, `@column` |
 | Immutable by default | `mut` is required to mutate; values share via `Rc` (zero-copy clones) |
-| Correctness is not negotiable | three engines held bit-identical by a differential oracle |
+| Correctness is not negotiable | three engines differentially tested for bit-identical results |
 | Honest about limits | measured benchmarks with caveats; permissive types never over-reject |
 | Safe by default | memory-safe host + a denied-by-default capability model |
 

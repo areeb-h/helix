@@ -131,7 +131,14 @@ Five pieces worth knowing about:
   into a checkable list of every user-visible behavior change. See
   [`tests/compat/README.md`](../tests/compat/README.md).
 - **Cross-engine example byte-diffs** (`scripts/vmparity.sh`): every runnable example
-  must produce byte-identical output on the default engine and under `HELIX_NOVM=1`.
+  must SUCCEED, and produce byte-identical output and the same exit status, on the JIT (the
+  default), the VM (`HELIX_NOJIT=1`) and the tree-walker (`HELIX_NOVM=1`).
+
+  Until 2026-11-03 it compared only the default engine's combined output against the
+  tree-walker's: exit status was never read, so an example that exited 0 on one engine and
+  42 on another with the same output passed (an outside review reproduced it with a stub
+  binary), as did one that failed identically everywhere, and the VM was never run at all.
+  Sabotaged both ways after the change: each stub now fails all 46 examples.
 
   Until 2026-08-27 this one **could not fail**. It ended with `echo "RESULT=$fail"` and
   no `exit`; nothing in the repo parsed `RESULT=` (that echo was its only occurrence);

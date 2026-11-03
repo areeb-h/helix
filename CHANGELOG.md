@@ -253,6 +253,21 @@
   where the interior mutability is and what keeps it acyclic. Pinned by
   `a_value_holding_its_own_buffer_is_freed` and `tests/corpus/no_rc_cycles`.
 
+- **The example-parity gate checks exit status and all three engines.** `scripts/vmparity.sh`
+  compared the default engine's combined output with the tree-walker's and nothing else: an
+  example that exited 0 on one engine and 42 on another passed, as did one that failed the
+  same way everywhere, and the VM never ran (found by an outside review, which reproduced it
+  with a stub binary). Every runnable example must now succeed, and the JIT, the VM and the
+  tree-walker must agree on output and exit status; both stubs now fail all 46 examples.
+
+- **The README's claims match the evidence.** Its benchmark table had drifted from the
+  results file it cites (k1 quoted at 0.08 s against C's 0.11 s where the file says 0.25 s
+  against 0.30 s, and four other rows); it now copies `bench/kernels/RESULTS.md`'s single run
+  (2026-08-13, `3f91177`) with all ten kernels, its date and commit, and a count taken from
+  those rows. "Proven bit-identical" is "differentially tested", with what that evidence
+  covers; and "runs at C speed" / "at or beyond single-threaded C" is "within a small factor
+  of single-threaded C", which is what the table shows.
+
 - **Dependencies with published vulnerabilities are updated, and `cargo audit` is green
   again.** `rustls` 0.23.40 → 0.23.46, `rustls-webpki` 0.103.13 → 0.103.16 and
   `webpki-roots` 1.0.8 → 1.0.11 — the TLS under every `http_get` and `postgres_open`, which
