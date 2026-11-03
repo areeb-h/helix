@@ -85,10 +85,10 @@ jobs:
         run: cargo build --profile gate --features postgres --bin helix
       - name: Test suite
         run: cargo test --profile gate --features postgres
-      # JIT vs tree-walker over every example. Full THREE-engine agreement is covered
-      # inside `cargo test` above (the pinned corpus and the doc-example gate both run
-      # all three); this script is the end-to-end diff across real programs.
-      - name: Example parity (JIT vs tree-walker)
+      # Every example on all three engines — output AND exit status, and every one must
+      # succeed. The pinned corpus and the doc-example gate inside `cargo test` also run
+      # all three; this script is the end-to-end diff across real programs.
+      - name: Example parity (JIT, VM, tree-walker)
         run: bash scripts/vmparity.sh
         env:
           BIN: ./target/gate/helix
