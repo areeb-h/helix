@@ -4448,6 +4448,54 @@ fn unbounded_mutual_recursion_raises_instead_of_crashing() {
     }
 }
 
+/// Recursion just under `MAX_CALL_DEPTH` answers on every engine, whatever the function's
+/// shape and however small the thread stack. The tree-walker recurses on the native stack,
+/// and one Helix call costs it 3.8 KB (`g(1, 2, f(n - 1))`) to 13 KB (a few nested
+/// parentheses) in the gate build, ~25x that in debug — so with the fixed 128 MiB stack a
+/// record literal, an array, a `map` callback or a nested expression around the recursive
+/// call died of SIGABRT short of 20,000 while the VM, whose frames are on the heap,
+/// answered. `examples/language/recursion.helix` aborted the debug walker. The walker now
+/// grows its stack on demand (`STACK_RED_ZONE` in `src/interp.rs`), so a 2 MiB stack is
+/// enough: the old binary aborted every shape here at that size.
+#[test]
+fn recursion_to_the_depth_limit_answers_on_every_engine_and_stack() {
+    let shapes = [
+        ("plus", "if n == 0 then 0 else n + f(n - 1)"),
+        ("record", "if n == 0 then 0 else {v: f(n - 1) + 1}.v"),
+        ("array", "if n == 0 then 0 else [f(n - 1), 1].sum()"),
+        ("map", "if n == 0 then 0 else [n].map((x) => f(x - 1) + 1)[0]"),
+        ("sort_by", "if n == 0 then 0 else [n].sort_by((x) => f(x - 1))[0] + 1"),
+        ("nested", "if n == 0 then 0 else (((((n + 1) * 2) - 1) + (if n > 0 then f(n - 1) else 0)) - n * 2 - 1 + n)"),
+    ];
+    // A debug build's frames are ~25x larger, so the walker TOUCHES 1.2-2.9 GB of stack
+    // reaching the limit, per run. Two shapes there, all six in the gate build.
+    let shapes = if cfg!(debug_assertions) { &shapes[..2] } else { &shapes[..] };
+    for &(tag, body) in shapes {
+        // `f(19999)` is 20,000 calls of `f`, exactly the limit; `f(20000)` is one past it.
+        let src = format!("fn f(n) = {body}\nprint(f(19999))\nr = try f(20000)\nprint(r.ok, r.error)\n");
+        let mut first: Option<String> = None;
+        for stack in [None, Some("2")] {
+            for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+                let mut env = env.to_vec();
+                if let Some(mb) = stack {
+                    env.push(("HELIX_STACK_MB", mb));
+                }
+                let (out, err, code) = run_source(&src, &env, &format!("deeplimit_{tag}"));
+                // Some(0): it answered. None would be death by signal.
+                assert_eq!(code, Some(0), "{tag} {env:?} stderr: {err}");
+                assert!(
+                    out.ends_with("false maximum recursion depth (20000) exceeded\n"),
+                    "{tag} {env:?}: {out}"
+                );
+                match &first {
+                    None => first = Some(out),
+                    Some(f) => assert_eq!(&out, f, "{tag} {env:?} disagrees"),
+                }
+            }
+        }
+    }
+}
+
 /// Passing an imported module's function to `map`/`any`/`all` APPLIES it. Only a bare
 /// `Ident` used to be wrapped into `it => f(it)`, so a dotted path fell through to the
 /// implicit-`it` body rule and mapped every element to the function VALUE:

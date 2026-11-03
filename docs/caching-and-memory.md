@@ -164,9 +164,11 @@ whether it is needed now that the VM exists:
 - **The tree-walker (fallback) is guarded and does not crash.** Programs routed to
   the recursive tree-walker (REPL, `HELIX_NOVM`, the rare fallback) run on an
   on-demand big-stack thread — 128 MiB in release, 1 GiB in debug,
-  `HELIX_STACK_MB` to override — with the same 20 000-call depth guard; deep
-  recursion works, and anything deeper produces a graceful *"maximum recursion
-  depth"* error rather than a stack-overflow abort.
+  `HELIX_STACK_MB` to override — with the same 20 000-call depth guard, and every
+  call checks the stack it has left and continues on a fresh segment when it runs
+  short. Recursion to the guard works whatever the function's shape, and anything
+  deeper produces a graceful *"maximum recursion depth"* error rather than a
+  stack-overflow abort.
 
 The core is therefore **already robust**: no input crashes it; deep tail recursion
 runs in constant space on every engine, and non-tail recursion beyond the shared

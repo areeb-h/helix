@@ -137,8 +137,8 @@ pub static ENV: &[EnvDoc] = &[
         name: "HELIX_STACK_MB",
         values: "a positive integer, in MiB",
         default: "128 MiB in a release build, 1 GiB in a debug build",
-        doc: "The stack given to the evaluation thread.",
-        notes: "For the rare program that recurses deep with large frames. A value that does not parse, or is zero, leaves the default rather than refusing — the parse is a filter, not a validator. Keywords: stack, recursion, overflow, depth, memory.",
+        doc: "The stack the evaluation thread starts with.",
+        notes: "The tree-walker grows its stack on demand past this, so recursion reaches the 20,000-call limit at any size; a smaller value saves reserved memory on a constrained machine. A value that does not parse, or is zero, leaves the default rather than refusing — the parse is a filter, not a validator. Keywords: stack, recursion, overflow, depth, memory.",
     },
     EnvDoc {
         name: "HELIX_CACHE",

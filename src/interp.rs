@@ -27,6 +27,19 @@ struct Binding {
 /// (the walker's trampoline in `call_function`, the VM's `TailCallFn`).
 pub(crate) const MAX_CALL_DEPTH: usize = 20_000;
 
+/// The tree-walker recurses on the NATIVE stack, and what one Helix call costs there
+/// depends on the function's shape: measured in the gate build at 3.8 KB for
+/// `g(1, 2, f(n - 1))`, 5.7 KB for `n + f(n - 1)`, 9.3 KB through a record literal,
+/// 11 KB through `map`'s callback, 13 KB under a few nested parentheses — and ~25x that
+/// in a debug build. A fixed thread stack therefore either aborted below
+/// `MAX_CALL_DEPTH` (a SIGABRT where the VM, whose frames are on the heap, answers) or had
+/// to be sized for the worst shape anyone writes. So every call checks the stack it has
+/// left, and below this red zone continues on a fresh segment of `STACK_SEGMENT` bytes
+/// (`stacker::maybe_grow`). The red zone is what ONE call may use before the next check:
+/// a body's own expression nesting, between two calls.
+const STACK_RED_ZONE: usize = if cfg!(debug_assertions) { 16 << 20 } else { 1 << 20 };
+const STACK_SEGMENT: usize = if cfg!(debug_assertions) { 256 << 20 } else { 32 << 20 };
+
 /// Ceiling on a single interpolated string's byte length. Interpolation nests, so
 /// a doubling loop could otherwise grow a string until the allocator aborts; 1 GiB
 /// is far past any legitimate message and leaves headroom under typical limits.
@@ -1351,7 +1364,38 @@ impl Interp {
         Ok(Value::Str(Rc::new(built)))
     }
 
+    /// Every Helix call the walker makes enters here, so this is where the native stack
+    /// is checked and, when it runs short, extended (see `STACK_RED_ZONE`).
     fn call_function(
+        &mut self,
+        name: &str,
+        f: &Rc<crate::value::FuncVal>,
+        args: Vec<Value>,
+        line: usize,
+        col: usize,
+    ) -> Result<Value, HelixError> {
+        if stacker::remaining_stack().is_some_and(|left| left >= STACK_RED_ZONE) {
+            return self.call_function_here(name, f, args, line, col);
+        }
+        self.call_function_on_new_segment(name, f, args, line, col)
+    }
+
+    /// Out of line so the growing path's frame never widens the common call's: deep
+    /// recursion touches every frame, and a wider one measured ~25% slower.
+    #[cold]
+    #[inline(never)]
+    fn call_function_on_new_segment(
+        &mut self,
+        name: &str,
+        f: &Rc<crate::value::FuncVal>,
+        args: Vec<Value>,
+        line: usize,
+        col: usize,
+    ) -> Result<Value, HelixError> {
+        stacker::grow(STACK_SEGMENT, || self.call_function_here(name, f, args, line, col))
+    }
+
+    fn call_function_here(
         &mut self,
         name: &str,
         f: &Rc<crate::value::FuncVal>,

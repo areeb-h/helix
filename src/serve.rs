@@ -197,10 +197,13 @@ const SSE_GLOBAL_PENDING: usize = 64 << 20; // 64 MiB per shard
 const INBUF_GLOBAL: usize = 64 << 20; // 64 MiB per shard
 
 /// Stack size for every eval thread — the main interpreter thread and each shard
-/// worker share this, so primary and shards can never diverge on recursion depth.
-/// Measured in the gate build: a Helix call frame costs ~1 KiB of native stack, so
-/// the full `MAX_CALL_DEPTH` (20k) touches ~19 MiB — 128 MiB is ~6x headroom even
-/// for fat frames. The size matters on small machines because a thread-stack
+/// worker share this. It is where the tree-walker STARTS, not what bounds it: a walker
+/// call costs 3.8-13 KB of native stack by the function's shape (gate build, measured
+/// 2026-11-03 — an earlier note here said ~1 KiB and "~6x headroom"; `n + f(n - 1)`
+/// needed 108 MiB at the 20k `MAX_CALL_DEPTH` and a record literal around the call 177
+/// MiB), so the walker grows its stack on demand past this (`STACK_RED_ZONE` in
+/// `interp.rs`) and no size here is the difference between an answer and an abort.
+/// The size matters on small machines because a thread-stack
 /// reservation is *committed* memory under strict overcommit
 /// (`vm.overcommit_memory=2`, common on small VPSes): the old 1 GiB per shard meant
 /// 4 shards could not even spawn on a 2 GB box. Debug frames are ~25x larger, so

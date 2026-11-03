@@ -240,6 +240,17 @@
 
 ### Fixed
 
+- **Recursion to the depth limit answers on the tree-walker whatever the function's
+  shape.** The walker recurses on the native stack, and one Helix call costs it 3.8 KB to
+  13 KB there depending on the function's shape — not the ~1 KiB the stack sizing assumed.
+  So with the fixed 128 MiB stack, a recursive call inside a record literal, an array, a
+  `map` callback or a few nested parentheses died of SIGABRT short of the 20,000-call limit
+  (they need 143 to 247 MiB), where the VM and JIT answered; a debug build aborted
+  `examples/language/recursion.helix`. Every walker call now checks the stack it has left
+  and continues on a fresh segment below a red zone (`stacker`, already in the tree through
+  polars), so recursion reaches the same limit with the same error on every engine, even at
+  `HELIX_STACK_MB=2`. Pinned by `recursion_to_the_depth_limit_answers_on_every_engine_and_stack`.
+
 - **A value that holds its own buffer no longer leaks.** A dict's log and a shared array's
   buffer keep values behind a shared, mutable cell, so `d.insert("self", d)` — or the same
   through a record, a closure, or two dicts holding each other's older views, or

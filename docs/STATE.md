@@ -53,8 +53,8 @@ carries one has to be cut as `minor` by hand. This cycle is one.
 
 **This cycle is a MINOR, not a patch** — positional destructuring is new syntax, and
 `begin`, `commit`, `rollback` and `cursor` are new methods (so the
-release guard would refuse a patch anyway). Gate green at **1,039 tests**
-(608 lib + 396 CLI + 3 other + 32 dual-engine), **158** dfdiff programs with 0 undeclared
+release guard would refuse a patch anyway). Gate green at **1,040 tests**
+(608 lib + 397 CLI + 3 other + 32 dual-engine), **158** dfdiff programs with 0 undeclared
 divergence, 99 files type-checked. The full list is `CHANGELOG.md`'s `Unreleased`; the shape
 of it:
 
@@ -82,6 +82,10 @@ of it:
 - **A reference-cycle leak, found by an outside review** — `d.insert("self", d)` and four
   related shapes leaked 0.4 to 1.8 KB a call through a dict's log or a shared array's buffer.
   Refused at the append now; `docs/memory-safety.md` corrected.
+- **Recursion to the depth limit no longer aborts the tree-walker** — one walker call costs
+  3.8-13 KB of native stack by the function's shape, so a recursive call inside a record, an
+  array, a `map` callback or nested parentheses SIGABRTed short of 20,000 calls (the VM
+  answered); the walker now grows its stack on demand.
 - **Fixes**: a Bool column holds `missing` (and a nullable PostgreSQL `boolean` is a Bool
   column); `**` on floats follows one rule on every engine; `postgres_open` tries every
   address a name resolves to; `helix fmt` no longer writes `{...a,...b}`.
@@ -452,11 +456,12 @@ borrows too.
 
 ## Things to know before touching this
 
-- **Gate with `bash scripts/gate.sh < /dev/null`**, never `cargo test`. Debug builds have
-  three tests that overflow the stack (the tree-walker reaching its 20,000-frame cap needs
-  ~2.8 GB of debug frames, against the 1 GiB a debug build gives evaluation) and pass in
-  release. A debug run passes with `HELIX_STACK_MB=8192`, which is how CI runs its
-  dev-profile `cargo test --features dataframes`.
+- **Gate with `bash scripts/gate.sh < /dev/null`**, never `cargo test`. A debug build's
+  frames are ~25x a release build's, so a test driving the tree-walker to its 20,000-call
+  limit touches 1-3 GB of stack there. Since 2026-11-03 the walker grows its stack on
+  demand (`STACK_RED_ZONE`), so those tests no longer overflow in debug and CI's
+  dev-profile run no longer needs `HELIX_STACK_MB=8192` — but they are still slow and
+  memory-hungry there.
 - **Never edit `src/` while a cargo build is running** — the result is a snapshot you cannot
   attribute. It cost one wasted 20-minute build this session.
 - **`gh run view --json` reports `conclusion` as `""`, not `null`**, while a job runs. jq's

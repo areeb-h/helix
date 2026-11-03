@@ -61,6 +61,11 @@ unicode-normalization = "0.1"
 # the list revision, so its staleness is visible rather than silent.
 psl = "2"
 num-bigint = "0.4"
+# Grows the tree-walker's native stack on demand. A Helix call costs that engine 4-13 KB of
+# native stack depending on the function's shape, so a fixed thread stack either aborted
+# below `MAX_CALL_DEPTH` (a SIGABRT where the VM answers) or had to be sized for the worst
+# shape on every thread. Already in the tree via polars-utils; the same version.
+stacker = "0.1.24"
 needletail = { version = "0.7.3", optional = true }
 # Spec-compliant genomics parsers (the bio flagship stands on the Rust bio
 # ecosystem the way it stands on Polars). VCF gives header-typed INFO fields and

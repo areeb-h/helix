@@ -2029,10 +2029,9 @@ fn run_emit_hbc(args: &[String]) -> ExitCode {
 /// this stack could overflow (the totality guarantee). Scoped, so `f` can borrow
 /// caller-local data (the source text and loaded program) without cloning.
 fn run_on_big_stack<F: FnOnce() -> ExitCode + Send>(f: F) -> ExitCode {
-    // The stack size is shared with shard workers (`serve::eval_stack_size`) so the
-    // primary and its shards can never diverge on recursion depth: 128 MiB in release
-    // (~6x headroom over MAX_CALL_DEPTH at the measured ~1 KiB/frame), 1 GiB in debug
-    // (~25x fatter frames), `HELIX_STACK_MB` to override. Small sizes matter beyond
+    // The stack size is shared with shard workers (`serve::eval_stack_size`): 128 MiB
+    // in release, 1 GiB in debug, `HELIX_STACK_MB` to override. It is a starting size:
+    // the tree-walker grows past it on demand (`STACK_RED_ZONE` in `interp.rs`). Small sizes matter beyond
     // ulimits: a thread-stack reservation is committed memory under strict overcommit.
     // If the OS refuses the thread, fail with a clean error rather than aborting the
     // process (the previous `.expect` turned constrained memory into a crash for
