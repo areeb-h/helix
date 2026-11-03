@@ -1,0 +1,11 @@
+exit: 0
+--- stdout ---
+self: 2 1 1 true
+in record: 1 2
+closure: 11 2
+cross: 2 1 2 2
+after: 7 16 1
+array self: 4 ["p", "q", "r"] 3
+array record: {inner: ["p", "q", "r"]} 4
+array after: 8 t3
+--- stderr ---

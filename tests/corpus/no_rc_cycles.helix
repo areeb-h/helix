@@ -1,0 +1,38 @@
+# A dict's log and a shared array's buffer are the two places a value is stored behind a
+# shared, mutable cell — and so the only way a Helix program could build a reference
+# cycle, which no drop ever frees. Appending a value that can reach the buffer it is
+# being appended to now takes the copying path instead (`value::reaches`): same answer,
+# no cycle. Every line below used to leak (0.4 to 1.8 KB a call); each must still print
+# exactly what it printed, on all three engines.
+
+# A dict holding itself, directly and through a record.
+d = dict().insert("a", 1)
+ds = d.insert("self", d)
+print("self: {ds.count()} {ds.get("self").count()} {ds.get("self").get("a")} {ds.has("self")}")
+r = d.insert("rec", {inner: d})
+print("in record: {r.get("rec").inner.get("a")} {r.count()}")
+
+# A closure capturing the dict it is stored in.
+f = d.insert("f", (q) => d.count() + q)
+print("closure: {(f.get("f"))(10)} {f.count()}")
+
+# Two chains each holding the other's older view.
+c = dict().insert("x", 1)
+k = dict().insert("y", 2)
+c2 = c.insert("k", k)
+k2 = k.insert("c", c)
+print("cross: {c2.get("k").get("y")} {k2.get("c").get("x")} {c2.count()} {k2.count()}")
+
+# The tip keeps growing afterwards — the copy did not break the chain.
+g = range(0, 5).reduce(ds, (acc, i) => acc.insert(i, i * i))
+print("after: {g.count()} {g.get(4)} {g.get("self").count()}")
+
+# An array appended to itself, and inside a record.
+a = ["p", "q"].concat(["r"])
+b = a.concat([a])
+print("array self: {b.count()} {b[3]} {a.count()}")
+w = a.concat([{inner: a}])
+print("array record: {w[3]} {w.count()}")
+# And the buffer keeps appending linearly after a refused append.
+z = range(0, 4).reduce(b, (acc, i) => acc.concat(["t{i}"]))
+print("array after: {z.count()} {z[7]}")

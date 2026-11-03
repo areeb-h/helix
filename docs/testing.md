@@ -91,7 +91,7 @@ Pass a single file (`helix test math_test.helix`) to run just that one.
 The toolchain's own suite runs through `scripts/gate.sh` (clippy with `-D warnings`,
 the full test suite on the `gate` profile, the dual-engine DataFrame campaign, and the
 example parity diff). Its current shape as of 0.10.1-dev (2026-11-02): **608 lib tests +
-395 CLI tests + 3 other integration tests**, plus **32 dual-engine tests**, and **157
+396 CLI tests + 3 other integration tests**, plus **32 dual-engine tests**, and **158
 programs** run under both DataFrame backends by `scripts/dfdiff.sh` — which needs the `dataframes`
 feature, since polars is the oracle rather than the default now.
 Five pieces worth knowing about:
