@@ -143,15 +143,16 @@
 
 ### Performance
 
-- **A string built in a record field is linear on the VM and JIT.** A fold that carries a
+- **A string built in a record field is linear, on every engine.** A fold that carries a
   string beside other state — `reduce({s: "", k: 0}, (a, i) => {s: "{a.s}x", k: a.k + 1})`,
   the shape a fold of two values must take since `mut` is top-level only — copied the whole
   string every step: 6.8 s at n=512,000. So did the same record threaded through recursion
   (7.5 s). When the interpolation's head is the last read of that field on every path, the
   string is now taken out of the record (if nothing else holds it) and extended in place:
-  0.14 s and 0.60 s. Twelve ways the take could be observable — a kept init, a second read, a
+  0.14 s and 0.60 s (the tree-walker, which takes the same way: 7.7 s → 0.21 s and 8.4 s →
+  0.35 s). Twelve ways the take could be observable — a kept init, a second read, a
   lambda, error order and more — print exactly what they printed before, on all three engines
-  (`tests/corpus/str_field_take`). The tree-walker still copies (ADR 0029 amendment).
+  (`tests/corpus/str_field_take`; ADR 0029 amendment).
 
 - **Draining a dict in a fold is linear, and a dict that is only overwritten no longer grows
   with its writes.** `remove` copied the whole map per call — 9.3 s to remove 32,000 keys one
@@ -238,6 +239,19 @@
   server that now knows statement names, `Close` and how to forget.
 
 ### Fixed
+
+- **A value that holds its own buffer no longer leaks.** A dict's log and a shared array's
+  buffer keep values behind a shared, mutable cell, so `d.insert("self", d)` — or the same
+  through a record, a closure, or two dicts holding each other's older views, or
+  `a.concat([a])` for an array of strings — stored an `Rc` to the buffer inside it: a
+  reference cycle no drop frees. 0.4 to 1.8 KB leaked per call on all three engines (a dict
+  holding itself, 100k → 400k calls: 103 → 375 MB peak). Such an append now takes the copying
+  path (`value::reaches`, a budgeted scan with a per-buffer "may hold a view" flag so plain
+  shapes are skipped in O(1)): every answer identical, memory flat at 19 MB, and the dict and
+  array benchmarks within noise. `docs/memory-safety.md`, which called such cycles
+  "structurally impossible" because it found no interior mutability in `src/`, now says
+  where the interior mutability is and what keeps it acyclic. Pinned by
+  `a_value_holding_its_own_buffer_is_freed` and `tests/corpus/no_rc_cycles`.
 
 - **The example-parity gate checks exit status and all three engines.** `scripts/vmparity.sh`
   compared the default engine's combined output with the tree-walker's and nothing else: an

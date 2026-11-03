@@ -223,6 +223,11 @@ pub struct Dict {
     /// overall — what a plain `BTreeMap` always cost — while pure accumulation keeps
     /// its single merge at the end.
     cache: DictCache,
+    /// Whether the LOG may hold a view (a dict or a shared array), shared along the chain
+    /// and set on append — what lets [`reaches`] skip a log of plain values in O(1).
+    log_views: Rc<std::cell::Cell<bool>>,
+    /// The same question for `base`, answered once when the chain starts.
+    base_views: bool,
 }
 
 impl Dict {
@@ -232,11 +237,15 @@ impl Dict {
 
     /// A fresh chain over an already-shared map — no copy. What a compaction rebases on.
     fn from_rc(m: Rc<DictMap>) -> Dict {
+        let mut budget = CYCLE_SCAN_BUDGET;
+        let base_views = m.values().any(|v| holds_view(v, &mut budget));
         Dict {
             base: m,
             adds: Rc::new(std::cell::RefCell::new(Vec::new())),
             len: 0,
             cache: Rc::new(std::cell::RefCell::new(None)),
+            log_views: Rc::new(std::cell::Cell::new(false)),
+            base_views,
         }
     }
 
@@ -335,6 +344,101 @@ fn apply_entry(m: &mut DictMap, k: &DictKey, v: &Option<Value>) {
 /// so a write stays O(1) amortized and memory stays within a constant factor of the
 /// live map.
 const COMPACT_MIN: usize = 64;
+
+/// How many values one cycle check may visit. Running out answers "may cycle", which only
+/// sends the append down the copying path — slower for a huge value, never wrong. It also
+/// bounds the scans' recursion depth, so a deeply nested value cannot exhaust the stack.
+const CYCLE_SCAN_BUDGET: usize = 1024;
+
+/// Whether `v` holds — anywhere inside it — a dict or a shared-buffer array: the two kinds of
+/// value whose buffer is shared and mutable, and so the only way into a reference cycle.
+/// Conservative: `true` when the budget runs out.
+pub(crate) fn holds_view(v: &Value, budget: &mut usize) -> bool {
+    if *budget == 0 {
+        return true;
+    }
+    *budget -= 1;
+    match v {
+        Value::Dict(_) => true,
+        Value::Array(a) => array_holds_view(a, budget),
+        Value::Tuple(vs) => vs.iter().any(|x| holds_view(x, budget)),
+        Value::Record(fs) => fs.iter().any(|(_, x)| holds_view(x, budget)),
+        Value::Function(f) => f.captured.iter().any(|(_, x)| holds_view(x, budget)),
+        Value::Closure(c) => c.upvalues.iter().any(|x| holds_view(x, budget)),
+        _ => false,
+    }
+}
+
+fn array_holds_view(a: &ArrayData, budget: &mut usize) -> bool {
+    match a {
+        ArrayData::Shared { .. } => true,
+        ArrayData::Values(vs) => vs.iter().any(|x| holds_view(x, budget)),
+        ArrayData::Enumerate { inner } => array_holds_view(inner, budget),
+        ArrayData::Zip { a, b, .. } => array_holds_view(a, budget) || array_holds_view(b, budget),
+        _ => false,
+    }
+}
+
+/// Whether `v` can reach the shared buffer at `target` — a dict chain's log or a shared
+/// array's buffer — through anything it holds. This is the cycle check: appending such a
+/// value to that buffer would store an `Rc` to the buffer inside it, and the program's
+/// values stop being the DAG `docs/memory-safety.md` relies on. A buffer whose flag says it
+/// holds no views is skipped in O(1); conservative (`true`) when the budget runs out.
+///
+/// Called with no `borrow_mut` held anywhere: it takes shared borrows of other buffers
+/// while it reads them, and the target itself is recognized by address, never borrowed.
+///
+/// NEITHER `.borrow()` BELOW CAN PANIC. A shared borrow fails only while a `borrow_mut` of
+/// the same cell is live, and the only `borrow_mut`s of a log or a buffer are in
+/// `dict_append` and `concat_shared` — which call this BEFORE taking theirs, and run no
+/// Helix code while they hold one. (`Dict::map` mutably borrows the CACHE, a different cell.)
+pub(crate) fn reaches(v: &Value, target: *const (), budget: &mut usize) -> bool {
+    if *budget == 0 {
+        return true;
+    }
+    *budget -= 1;
+    match v {
+        Value::Dict(d) => {
+            if Rc::as_ptr(&d.adds) as *const () == target {
+                return true;
+            }
+            if d.base_views && d.base.values().any(|x| reaches(x, target, budget)) {
+                return true;
+            }
+            // The WHOLE log, not this view's prefix: the `Rc` keeps every entry alive, so
+            // an entry past `len` — written through a newer view — closes a cycle just
+            // as well (`c2 = c.insert("d", d)` then `d.insert("c", c)`: `c`'s prefix
+            // does not hold `d`, its log does).
+            d.log_views.get()
+                && d.adds
+                    .borrow()
+                    .iter()
+                    .any(|(_, x)| x.as_ref().is_some_and(|x| reaches(x, target, budget)))
+        }
+        Value::Array(a) => array_reaches(a, target, budget),
+        Value::Tuple(vs) => vs.iter().any(|x| reaches(x, target, budget)),
+        Value::Record(fs) => fs.iter().any(|(_, x)| reaches(x, target, budget)),
+        Value::Function(f) => f.captured.iter().any(|(_, x)| reaches(x, target, budget)),
+        Value::Closure(c) => c.upvalues.iter().any(|x| reaches(x, target, budget)),
+        _ => false,
+    }
+}
+
+fn array_reaches(a: &ArrayData, target: *const (), budget: &mut usize) -> bool {
+    match a {
+        // The whole buffer, for the reason given on the dict arm.
+        ArrayData::Shared { buf, views, .. } => {
+            if Rc::as_ptr(buf) as *const () == target {
+                return true;
+            }
+            views.get() && buf.borrow().iter().any(|x| reaches(x, target, budget))
+        }
+        ArrayData::Values(vs) => vs.iter().any(|x| reaches(x, target, budget)),
+        ArrayData::Enumerate { inner } => array_reaches(inner, target, budget),
+        ArrayData::Zip { a, b, .. } => array_reaches(a, target, budget) || array_reaches(b, target, budget),
+        _ => false,
+    }
+}
 
 /// A [`Value::Dict`] key: a hashable, totally-orderable scalar. Floats are excluded
 /// (NaN has no total order and float-equality keys are a footgun), as are arrays,
@@ -461,7 +565,15 @@ pub enum ArrayData {
     /// general path can answer `Float`, which is a wrong ANSWER and not a slow one. So
     /// this variant is materialized THROUGH `array_sniff` by [`ArrayData::densified`], and
     /// nothing but `concat` is allowed to observe it (see `call_method`).
-    Shared { buf: std::rc::Rc<std::cell::RefCell<Vec<Value>>>, len: usize },
+    ///
+    /// `views` says whether anything in the buffer may hold a view — a dict or another
+    /// shared array — kept on every append, so the cycle check on the NEXT append
+    /// (`reaches`) can skip a buffer of plain rows in O(1). See [`reaches`].
+    Shared {
+        buf: std::rc::Rc<std::cell::RefCell<Vec<Value>>>,
+        len: usize,
+        views: std::rc::Rc<std::cell::Cell<bool>>,
+    },
 }
 
 /// Lowercase hex — how `Bytes` prints, and what `Bytes.to_hex()` returns. ONE
@@ -568,7 +680,7 @@ impl ArrayData {
             // The range and the borrow are unreachable panics for the same two reasons
             // given on `get`: `len <= buf.len()` by construction, and nothing holds the
             // cell across code that could re-enter.
-            ArrayData::Shared { buf, len } => Cow::Owned(buf.borrow()[..*len].to_vec()),
+            ArrayData::Shared { buf, len, .. } => Cow::Owned(buf.borrow()[..*len].to_vec()),
         }
     }
 
@@ -609,7 +721,7 @@ impl ArrayData {
     pub fn concat_shared(cur: &std::rc::Rc<ArrayData>, add: &ArrayData) -> Option<Value> {
         use std::rc::Rc;
         match &**cur {
-            ArrayData::Shared { buf, len } => {
+            ArrayData::Shared { buf, len, views } => {
                 // THE ADDITION IS READ BEFORE THE BUFFER IS BORROWED, and that ordering is
                 // load-bearing rather than stylistic. `xs.concat(xs)` is legal, and when
                 // `add` is a view of THIS buffer, reading it while a `borrow_mut` is live
@@ -617,7 +729,18 @@ impl ArrayData {
                 // ADR 0024 forbids outright. Collecting first costs O(|add|), which is the
                 // payload's own cost and the same guard `concat_in_place` already pays.
                 let addition: Vec<Value> = add.iter_values().collect();
-                // UNREACHABLE PANIC, and the line above is the proof: every read of `add`
+                // A CYCLE IS REFUSED BEFORE THE CELL IS TAKEN. Appending a value that holds
+                // a view of THIS buffer (`a.concat([a])`, `a.concat([{inner: a}])`) would
+                // store, inside the buffer, an `Rc` to the buffer: a cycle no drop ever
+                // frees. Such an addition takes the fresh-buffer path below instead, which
+                // stores the old buffer's view in a NEW buffer — no cycle. Checked here, with
+                // no borrow held, because the scan reads other cells.
+                let mut budget = CYCLE_SCAN_BUDGET;
+                let target = Rc::as_ptr(buf) as *const ();
+                let cyclic = addition.iter().any(|x| reaches(x, target, &mut budget));
+                let mut vb = CYCLE_SCAN_BUDGET;
+                let adds_view = addition.iter().any(|x| holds_view(x, &mut vb));
+                // UNREACHABLE PANIC, and the lines above are the proof: every read of `add`
                 // is finished before the cell is taken. Between here and each `drop(b)`
                 // the only operations are `Vec::len`, a slice `to_vec` (which clones
                 // `Value`s — `Rc` bumps, no cell access) and `extend` over an owned `Vec`.
@@ -625,8 +748,9 @@ impl ArrayData {
                 let mut b = buf.borrow_mut();
                 // NOT the newest view: someone kept this shorter array and is extending it
                 // again. Copy its prefix into a fresh buffer rather than appending, or the
-                // two branches would see each other's elements.
-                if b.len() != *len {
+                // two branches would see each other's elements. A cyclic addition goes the
+                // same way, for the reason above.
+                if b.len() != *len || cyclic {
                     let mut fresh: Vec<Value> = b[..*len].to_vec();
                     drop(b);
                     fresh.extend(addition);
@@ -634,22 +758,34 @@ impl ArrayData {
                     return Some(Value::Array(Rc::new(ArrayData::Shared {
                         buf: Rc::new(std::cell::RefCell::new(fresh)),
                         len,
+                        views: Rc::new(std::cell::Cell::new(views.get() || adds_view)),
                     })));
                 }
                 b.extend(addition);
                 let len = b.len();
                 drop(b);
-                Some(Value::Array(Rc::new(ArrayData::Shared { buf: Rc::clone(buf), len })))
+                if adds_view {
+                    views.set(true);
+                }
+                Some(Value::Array(Rc::new(ArrayData::Shared {
+                    buf: Rc::clone(buf),
+                    len,
+                    views: Rc::clone(views),
+                })))
             }
             // Seed. Every other variant becomes a buffer on its first append; the copy here
-            // is the one the eager path would have made anyway.
+            // is the one the eager path would have made anyway. A brand-new buffer cannot be
+            // reached by anything yet, so the only question is what it holds.
             _ => {
                 let mut fresh: Vec<Value> = cur.to_values().into_owned();
                 fresh.extend(add.iter_values());
                 let len = fresh.len();
+                let mut vb = CYCLE_SCAN_BUDGET;
+                let any_view = fresh.iter().any(|x| holds_view(x, &mut vb));
                 Some(Value::Array(Rc::new(ArrayData::Shared {
                     buf: Rc::new(std::cell::RefCell::new(fresh)),
                     len,
+                    views: Rc::new(std::cell::Cell::new(any_view)),
                 })))
             }
         }
@@ -1066,7 +1202,18 @@ impl Value {
     }
 
     fn dict_append(cur: Rc<Dict>, k: DictKey, v: Option<Value>) -> Value {
-        {
+        // A CYCLE IS REFUSED BEFORE THE LOG IS TAKEN. `d.insert("self", d)` — or a record or
+        // closure holding `d` — would store, inside the log, an `Rc` to the log: a cycle no
+        // drop ever frees (measured: 0.9 KB leaked per call, on all three engines). Such a
+        // value takes the branch path below, which settles a NEW chain: the old chain's
+        // view then lives in a map the old chain cannot reach. Checked with no borrow held,
+        // because the scan reads other cells.
+        let mut budget = CYCLE_SCAN_BUDGET;
+        let target = Rc::as_ptr(&cur.adds) as *const ();
+        let cyclic = v.as_ref().is_some_and(|x| reaches(x, target, &mut budget));
+        let mut vb = CYCLE_SCAN_BUDGET;
+        let adds_view = v.as_ref().is_some_and(|x| holds_view(x, &mut vb));
+        if !cyclic {
             // Held only across a `push` and a length read — no Helix code runs under
             // it, and both paths below drop it before `map()` could take the same
             // cell. That ordering is what makes this borrow provably exclusive.
@@ -1078,9 +1225,14 @@ impl Value {
                 adds.push((k, v));
                 let len = adds.len();
                 drop(adds);
+                if adds_view {
+                    cur.log_views.set(true);
+                }
                 let tip = Dict {
                     base: cur.base.clone(),
                     adds: cur.adds.clone(),
+                    log_views: cur.log_views.clone(),
+                    base_views: cur.base_views,
                     len,
                     // The SAME cache cell, not a fresh one. Handing the new tip an
                     // empty cache is precisely the bug this replaced: the next read

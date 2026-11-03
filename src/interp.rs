@@ -32,6 +32,9 @@ pub(crate) const MAX_CALL_DEPTH: usize = 20_000;
 /// is far past any legitimate message and leaves headroom under typical limits.
 pub(crate) const MAX_STRING_LEN: usize = 1 << 30;
 
+/// A body's `(local, field)` pairs whose read may take the field (`bytecode::take_heads_for`).
+type TakeHeads = Rc<Vec<(String, String)>>;
+
 pub struct Interp {
     /// The current frame's LOCALS: parameters, captured upvalues, `let`/binder/
     /// match bindings. Swapped out wholesale at every function-call boundary
@@ -60,6 +63,15 @@ pub struct Interp {
     /// running. Read on the call, builtin and comprehension paths only — one predictable
     /// branch, false for every engine run.
     fold_mode: bool,
+    /// The current body's `(local, field)` pairs whose read may TAKE the field — the
+    /// tree-walker's twin of the compiler's `take_heads` (ADR 0029, record-field
+    /// amendment). Set per frame by `call_function` and per fold by `reduce`; saved and
+    /// restored at the same boundaries as `env`, so a callee never sees its caller's.
+    take_heads: TakeHeads,
+    /// `take_heads_for` per function body, computed once. The entry holds the body's `Rc`,
+    /// which keeps its address from being reused by a different body (a REPL frees old
+    /// statements) — a stale entry would license a take the analysis never proved.
+    take_cache: FxHashMap<usize, (Rc<Expr>, TakeHeads)>,
     fold_mut_names: std::collections::HashSet<String>,
     /// Every top-level name the program binds — what a frame verb's resolver must tell from
     /// a column's name when the sandbox does not hold it (`fold_unknown_name`).
@@ -298,6 +310,8 @@ impl Interp {
             hoisted: std::collections::HashSet::new(),
             depth: 0,
             fold_mode: false,
+            take_heads: Rc::new(Vec::new()),
+            take_cache: FxHashMap::default(),
             fold_mut_names: std::collections::HashSet::new(),
             fold_top_names: std::collections::HashSet::new(),
         }
@@ -549,6 +563,15 @@ impl Interp {
             )
             .hint("a column expression is a value everywhere else — `p = @age > 30` — so bind it and pass the name here; the argument of a frame verb is read as the frame's own expression (ADR 0052).")),
             Expr::Interp(parts) => {
+                // The last read of `p.f` as the head (`take_heads_for`): take, don't copy.
+                if let Some(crate::ast::InterpPart::Expr(h, None)) = parts.first()
+                    && let Expr::Field { recv, name: f, line: fl, col: fc } = &**h
+                    && let Expr::Ident { name: p, .. } = &**recv
+                    && self.take_heads.iter().any(|(tp, tf)| tp == p && tf == f)
+                    && self.env.contains_key(p.as_str())
+                {
+                    return self.interp_take(e, parts, h, p, f, *fl, *fc);
+                }
                 // Same reservation as the VM's `Op::Interp` (literals exactly, four per
                 // hole), so the two engines allocate alike. The walker EVALUATES holes
                 // inside this loop, so `s` cannot be a reused scratch buffer: a hole
@@ -1200,6 +1223,134 @@ impl Interp {
         }
     }
 
+    /// `take_heads_for` over a function body's parameters, cached per body.
+    fn take_heads_of(&mut self, body: &Rc<Expr>, params: &[String]) -> TakeHeads {
+        let key = Rc::as_ptr(body) as usize;
+        if let Some((_, heads)) = self.take_cache.get(&key) {
+            return heads.clone();
+        }
+        let heads: TakeHeads = Rc::new(
+            params
+                .iter()
+                .flat_map(|p| {
+                    crate::bytecode::take_heads_for(body, p).into_iter().map(move |f| (p.clone(), f))
+                })
+                .collect(),
+        );
+        self.take_cache.insert(key, (body.clone(), heads.clone()));
+        heads
+    }
+
+    /// `"{p.f}…"` where this is the last read of `p.f` — the tree-walker's twin of the VM's
+    /// `CheckLocalField` + `AppendStrFromLocalField`, in the same order: the field read
+    /// first (its error before any tail hole runs), the cap after the head, the tail
+    /// holes with the cap after each part, and only then — if the record bound to `p` is
+    /// uniquely held — the take and the in-place append. Otherwise the string is built
+    /// fresh, exactly as the ordinary arm builds it.
+    #[allow(clippy::too_many_arguments)] // the head's parts are all distinct
+    fn interp_take(
+        &mut self,
+        whole: &Expr,
+        parts: &[crate::ast::InterpPart],
+        head: &Expr,
+        p: &str,
+        f: &str,
+        fl: usize,
+        fc: usize,
+    ) -> Result<Value, HelixError> {
+        use crate::ast::InterpPart;
+        let sym = Symbol::intern(f);
+        let (hl, hc) = head.position();
+        let (wl, wc) = whole.position();
+        let too_long = || {
+            HelixError::new(format!("interpolated string exceeds {MAX_STRING_LEN} bytes"), wl, wc)
+                .hint("build large text incrementally or write it to a file instead.")
+        };
+        // 1. The head, read as `Expr::Field` reads it; a String is measured, anything else
+        //    is formatted now, as the ordinary arm would format it.
+        let (head_len, rendered_head) = {
+            let v = match self.env.get(p) {
+                Some(b) => eval_field(&b.value, sym, fl, fc)?,
+                None => self.eval(head)?,
+            };
+            match &v {
+                Value::Str(s) => (s.len(), None),
+                other => {
+                    let mut h = String::new();
+                    crate::value::write_value(&mut h, other, hl, hc)?;
+                    (h.len(), Some(h))
+                }
+            }
+        };
+        if head_len > MAX_STRING_LEN {
+            return Err(too_long());
+        }
+        // 2. The tail, part by part.
+        let mut tail = String::new();
+        for part in &parts[1..] {
+            match part {
+                InterpPart::Lit(t) => tail.push_str(t),
+                InterpPart::Expr(e, spec) => {
+                    let v = self.eval(e)?;
+                    let (l, c) = e.position();
+                    match spec {
+                        Some(fs) => tail.push_str(&fs.apply(&v).map_err(|m| HelixError::new(m, l, c))?),
+                        None => crate::value::write_value(&mut tail, &v, l, c)?,
+                    }
+                }
+            }
+            if head_len + tail.len() > MAX_STRING_LEN {
+                return Err(too_long());
+            }
+        }
+        // 3. Everything fallible is done: take from a uniquely held record, or build fresh.
+        if let Some(mut s) = rendered_head {
+            s.push_str(&tail);
+            return Ok(Value::Str(Rc::new(s)));
+        }
+        let taken = match self.env.get_mut(p).map(|b| &mut b.value) {
+            Some(Value::Record(rc)) => Rc::get_mut(rc).and_then(|fields| {
+                fields
+                    .iter_mut()
+                    .find(|(k, _)| *k == sym)
+                    .map(|(_, v)| std::mem::replace(v, Value::Unit))
+            }),
+            _ => None,
+        };
+        let built = match taken {
+            Some(Value::Str(cur)) => match Rc::try_unwrap(cur) {
+                Ok(mut s) => {
+                    if s.try_reserve(tail.len()).is_err() {
+                        return Err(crate::vm::materialize_refused(
+                            crate::value::MaterializeLimit::Alloc(s.len() + tail.len()),
+                            wl,
+                            wc,
+                        ));
+                    }
+                    s.push_str(&tail);
+                    s
+                }
+                Err(shared) => {
+                    let mut s = String::with_capacity(shared.len() + tail.len());
+                    s.push_str(&shared);
+                    s.push_str(&tail);
+                    s
+                }
+            },
+            _ => {
+                let v = match self.env.get(p) {
+                    Some(b) => eval_field(&b.value, sym, fl, fc)?,
+                    None => self.eval(head)?,
+                };
+                let mut s = String::with_capacity(head_len + tail.len());
+                crate::value::write_value(&mut s, &v, hl, hc)?;
+                s.push_str(&tail);
+                s
+            }
+        };
+        Ok(Value::Str(Rc::new(built)))
+    }
+
     fn call_function(
         &mut self,
         name: &str,
@@ -1229,6 +1380,7 @@ impl Interp {
         // never the caller's locals (a flat shared map used to give callees
         // dynamic scoping, a verified walker/VM divergence).
         let caller_locals = std::mem::take(&mut self.env);
+        let caller_heads = std::mem::take(&mut self.take_heads);
         let mut cur_f: Rc<crate::value::FuncVal> = f.clone();
         let mut cur_args = args;
         // Set only by a tail transfer (an Rc clone of the callee's declared
@@ -1261,6 +1413,7 @@ impl Interp {
                 self.env.insert(p.clone(), Binding { value: a, mutable: false });
             }
             let body = cur_f.body.clone();
+            self.take_heads = self.take_heads_of(&body, &cur_f.params);
             match self.eval_tail(&body) {
                 Ok(TailFlow::Value(v)) => break Ok(v),
                 Ok(TailFlow::Call { name: n, func, args: a, line: l, col: c }) => {
@@ -1278,6 +1431,7 @@ impl Interp {
         };
         // Frame over — the caller's locals come back exactly as they were.
         self.env = caller_locals;
+        self.take_heads = caller_heads;
         self.depth -= 1;
         result
     }

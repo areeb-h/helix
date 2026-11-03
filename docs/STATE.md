@@ -53,8 +53,8 @@ carries one has to be cut as `minor` by hand. This cycle is one.
 
 **This cycle is a MINOR, not a patch** — positional destructuring is new syntax, and
 `begin`, `commit`, `rollback` and `cursor` are new methods (so the
-release guard would refuse a patch anyway). Gate green at **1,038 tests**
-(608 lib + 395 CLI + 3 other + 32 dual-engine), **157** dfdiff programs with 0 undeclared
+release guard would refuse a patch anyway). Gate green at **1,039 tests**
+(608 lib + 396 CLI + 3 other + 32 dual-engine), **158** dfdiff programs with 0 undeclared
 divergence, 99 files type-checked. The full list is `CHANGELOG.md`'s `Unreleased`; the shape
 of it:
 
@@ -79,6 +79,9 @@ of it:
   `--features python` build compiles, a CSV the reader refuses carries a `help:` line (the
   stranger baseline 303 → 265), and the first dev-profile test run in weeks found a parser
   abort on `- -9223372036854775808`, now fixed.
+- **A reference-cycle leak, found by an outside review** — `d.insert("self", d)` and four
+  related shapes leaked 0.4 to 1.8 KB a call through a dict's log or a shared array's buffer.
+  Refused at the append now; `docs/memory-safety.md` corrected.
 - **Fixes**: a Bool column holds `missing` (and a nullable PostgreSQL `boolean` is a Bool
   column); `**` on floats follows one rule on every engine; `postgres_open` tries every
   address a name resolves to; `helix fmt` no longer writes `{...a,...b}`.
@@ -418,14 +421,14 @@ it, and a `with`/`agg` key can now say `{@name: e}` — and `helix check --lint`
 top-level String used as a bare `with`/`agg` key, the one place the binding winning is a
 silent surprise (`name = "Ada"` then `P.with({name: e})` defines a column called `Ada`).
 
-### 3. ~~String accumulation in a record field~~ — fixed on the bytecode engines
+### 3. ~~String accumulation in a record field~~ — fixed on all three engines
 
 `{s: "{a.s}x", k: a.k + 1}` in a fold, and `go({s: "{st.s}x", …}, i + 1, n)` in a recursion,
-were quadratic (6.8 s and 7.5 s at n=512,000) and are linear on the VM and JIT (0.14 s and
-0.60 s): when the interpolation's head is the LAST read of the field on every path, the
-compiler emits a take that moves the string out of a uniquely held record and extends it in
-place (ADR 0029, 2026-11-03 amendment). Open: the tree-walker still copies, and other spellings
-(the field read twice on one path, a non-interpolation append) still do.
+were quadratic (6.8 s and 7.5 s at n=512,000 on the VM; 7.7 s and 8.4 s on the tree-walker)
+and are linear on every engine (0.14 s and 0.60 s; 0.21 s and 0.35 s): when the interpolation's head is the LAST read of the field on every path, the
+compiler (and the walker's interpolation) takes that moves the string out of a uniquely held record and extends it in
+place (ADR 0029, 2026-11-03 amendment). Open: other spellings (the field read twice on one
+path, a non-interpolation append) still copy.
 
 ### 4. ~~Tighten two guards that let something through~~ — done
 
