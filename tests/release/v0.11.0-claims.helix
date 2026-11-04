@@ -1,0 +1,94 @@
+# The v0.11.0 release notes, as a program.
+#
+# Every line below is a claim the changelog makes, quoted or taken from its examples. The
+# expectations in `v0.11.0-claims.expected` are authored BY HAND from the notes — capturing
+# them from a binary would prove only that the binary agrees with itself, which every other
+# gate already covers. This is the one check that can notice the notes promising something
+# the binary does not do.
+#
+# Most of this release is PostgreSQL (cursors, flights, transactions, channel binding,
+# `timeout=`, Array parameters), which a default binary does not carry: those cells are in
+# `v0.11.0-errors.tsv`, which pins what a default binary says instead. Speed, the formatter,
+# `--lint` notes and CI are not program claims and are not here.
+
+# --- ADR 0054: "with `name = "Ada"` in scope, `P.with({name: "z"})` defines a column called
+# --- `Ada` ... `{@name: "z"}` is that spelling" — and "`column`, `unique` and `rename` ...
+# --- take it now".
+name = "Ada"
+P = dataframe({name: ["x", "y", "y"], n: [1, 2, 3]})
+print(P.with({name: "z"}).columns())
+print(P.with({@name: "z"}).column(@name))
+print(P.column(@name))
+print(P.unique(@name).count())
+print(P.rename(@name, "who").columns())
+
+# --- ADR 0053: "`let [a, b] = p in …`, `do { [h, ...t] = xs … }`, `… where [x, y] = v`
+# --- ... as a statement ... a trailing `...rest` that takes what is left (an array's rest is
+# --- an array, a tuple's a tuple)" — and "`a, b = pair` ... is now the same form".
+fn lt(p) = let [a, b] = p in a + b
+print(lt([3, 4]))
+fn hd(xs) = do {
+  [h, ...t] = xs
+  "{h} {t}"
+}
+print(hd([1, 2, 3]))
+fn wh(v) = x * y where [x, y] = v
+print(wh((5, 6)))
+[q, r] = [7, 8]
+print(q, r)
+[first, ...others] = (1, "two", 3.0)
+print(first, others)
+u, v = (9, 10)
+print(u + v)
+
+# --- Performance: "A fold that carries a string beside other state — `reduce({s: "", k: 0},
+# --- (a, i) => {s: "{a.s}x", k: a.k + 1})` ... is now ... extended in place" — the same
+# --- answer, sooner.
+acc = range(0, 100000).reduce({s: "", k: 0}, (a, i) => {s: "{a.s}x", k: a.k + 1})
+print(acc.s.length(), acc.k)
+
+# --- Performance: "Draining a dict in a fold is linear ... a ten-key counter ... no longer
+# --- grows with its writes". The answers are what they were.
+full = range(0, 20000).reduce(dict(), (dd, i) => dd.insert(i, i))
+drained = range(0, 20000).reduce(full, (dd, i) => dd.remove(i))
+print(full.count(), drained.count())
+counter = range(0, 100000).reduce(dict(), (dd, i) => dd.insert(i % 10, i))
+print(counter.count(), counter.get(3))
+
+# --- Fixed: "`helix check` no longer refuses a runnable `concat` of mixed element types ...
+# --- `[5].concat(["s"])[1].upper()`".
+print([5].concat(["s"])[1].upper())
+la = ["p", "q"].concat(["r"])
+print(la.concat([{inner: la}])[3].inner.count())
+
+# --- Fixed: "Recursion to the depth limit answers ... whatever the function's shape" — "a
+# --- recursive call inside a record literal ... reaches the same limit with the same error".
+fn deep(n) = if n == 0 then 0 else {v: deep(n - 1) + 1}.v
+print(deep(19999))
+over = try deep(20000)
+print(over.ok, over.error)
+
+# --- Fixed: "A value that holds its own buffer no longer leaks ... `d.insert("self", d)` —
+# --- or ... `a.concat([a])`" — "every answer identical".
+sd = dict().insert("a", 1)
+self_d = sd.insert("self", sd)
+print(self_d.count(), self_d.get("self").count())
+sa = ["p", "q"].concat(["r"])
+print(sa.concat([sa]).count(), sa.count())
+
+# --- Fixed: "`- -9223372036854775808` is i64::MIN".
+print(--9223372036854775808)
+
+# --- Fixed: "`dataframe({flag: [true, missing]})` was refused ... `where` (three-valued: a
+# --- missing flag is kept by neither `flag` nor `not flag`)".
+fl = dataframe({flag: [true, missing, false]})
+print(fl.count())
+print(fl.where(@flag).count(), fl.where(not @flag).count())
+
+# --- Fixed: "`P = People.on(db)` ... the record `P` is never rewritten, because `People.sql
+# --- == P.sql` is `true` in Helix and an optimization may not change that".
+People = {sql: (spec) => "select {spec}"}
+fn bind(model, db) = {...model, db: db}
+Bound = bind(People, 42)
+print(People.sql == Bound.sql)
+print((Bound.sql)("*"), Bound.db)
