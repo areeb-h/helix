@@ -31,6 +31,24 @@
         ok("[1, \"a\", true].count()"); // mixed array -> Array(Unknown), fine
     }
 
+    /// `concat` takes its elements from EVERY argument, so the result's element type is
+    /// the join of them all. It was typed as the receiver's alone, which refused runnable
+    /// programs before they ran: `["p"].concat([{inner: 1}])[1].inner` was "a value of type
+    /// String has no field `inner`". The precision for a same-typed concat stays.
+    #[test]
+    fn concat_joins_every_arguments_element_type() {
+        ok("a = [\"p\", \"q\"].concat([\"r\"])\nw = a.concat([{inner: a}])\nw[3].inner.count()");
+        ok("[5].concat([\"s\"])[1].upper()");
+        ok("[5].concat([[1, 2]])[1].sum()");
+        ok("[1].concat([\"a\"]).concat([2])[1].upper()");
+        ok("[1].concat([2], [\"x\"])[2].upper()");
+        ok("[1].concat([\"a\"]).last().upper()");
+        ok("[{a: 1}].concat([{b: \"s\"}])[1].b.upper()");
+        // Still provable: every element is a String.
+        assert!(emsg("[\"a\"].concat([\"b\"])[0] + 1").contains("needs numbers"));
+        assert!(emsg("[\"a\"].concat([\"b\"], [\"c\"])[0] + 1").contains("needs numbers"));
+    }
+
     #[test]
     fn annotations_check() {
         ok("fn area(w: Int, h: Int) -> Int = w * h\narea(3, 4)");
