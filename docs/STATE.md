@@ -53,8 +53,8 @@ carries one has to be cut as `minor` by hand. This cycle is one.
 
 **This cycle is a MINOR, not a patch** — positional destructuring is new syntax, and
 `begin`, `commit`, `rollback` and `cursor` are new methods (so the
-release guard would refuse a patch anyway). Gate green at **1,040 tests**
-(608 lib + 397 CLI + 3 other + 32 dual-engine), **158** dfdiff programs with 0 undeclared
+release guard would refuse a patch anyway). Gate green at **1,041 tests**
+(609 lib + 397 CLI + 3 other + 32 dual-engine), **159** dfdiff programs with 0 undeclared
 divergence, 99 files type-checked. The full list is `CHANGELOG.md`'s `Unreleased`; the shape
 of it:
 
@@ -86,6 +86,9 @@ of it:
   3.8-13 KB of native stack by the function's shape, so a recursive call inside a record, an
   array, a `map` callback or nested parentheses SIGABRTed short of 20,000 calls (the VM
   answered); the walker now grows its stack on demand.
+- **`helix check` stops refusing a runnable mixed `concat`** — the result was typed as the
+  receiver's element type, so `[5].concat(["s"])[1].upper()` never ran on any engine; it is
+  now the join of every argument's.
 - **Fixes**: a Bool column holds `missing` (and a nullable PostgreSQL `boolean` is a Bool
   column); `**` on floats follows one rule on every engine; `postgres_open` tries every
   address a name resolves to; `helix fmt` no longer writes `{...a,...b}`.

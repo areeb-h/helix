@@ -32,7 +32,7 @@ a = ["p", "q"].concat(["r"])
 b = a.concat([a])
 print("array self: {b.count()} {b[3]} {a.count()}")
 w = a.concat([{inner: a}])
-print("array record: {w[3]} {w.count()}")
+print("array record: {w[3].inner.count()} {w.count()}")
 # And the buffer keeps appending linearly after a refused append.
 z = range(0, 4).reduce(b, (acc, i) => acc.concat(["t{i}"]))
 print("array after: {z.count()} {z[7]}")

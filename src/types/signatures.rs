@@ -1141,7 +1141,9 @@ pub(super) fn array_method_type(name: &str, el: &Type, line: usize, col: usize) 
         // `(value, count)` tuples — `top` for the n most frequent, `frequencies` for all.
         "top" | "frequencies" => Type::Array(Box::new(Type::Tuple(vec![el.clone(), Type::Int]))),
         "join" => Type::String,
-        // `concat` keeps the element type; `flatten` removes one level of nesting.
+        // `concat` is typed in `synth_array_method`, which sees its arguments (each one
+        // contributes elements); this entry only answers that an Array has it.
+        // `flatten` removes one level of nesting.
         "concat" => Type::Array(Box::new(el.clone())),
         // `windows` slides and overlaps, `chunks` partitions — both group the same
         // elements, so both are an array of arrays of the element type.

@@ -1,0 +1,13 @@
+# `concat` takes elements from every argument, so the checker types its result as the
+# join of all of them. It used the receiver's element type alone, so each line below was
+# refused BEFORE it ran — on every engine, since `run` checks first — with "a value of
+# type String has no field `inner`" or "an Int has no method `upper`".
+a = ["p", "q"].concat(["r"])
+w = a.concat([{inner: a}])
+print(w[3].inner.count(), w.count())
+print([5].concat(["s"])[1].upper())
+print([5].concat([[1, 2]])[1].sum())
+print([1].concat(["a"]).concat([2])[1].upper())
+print([1].concat([2], ["x"])[2].upper())
+print([1].concat(["a"]).reverse()[0].upper())
+print([{a: 1}].concat([{b: "s"}])[1].b.upper())

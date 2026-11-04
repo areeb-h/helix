@@ -240,6 +240,18 @@
 
 ### Fixed
 
+- **`helix check` no longer refuses a runnable `concat` of mixed element types.** The
+  checker typed `xs.concat(ys)` as an array of `xs`'s element type, ignoring what the
+  arguments add, so `a.concat([{inner: a}])[3].inner` on an Array of Strings was "a value
+  of type String has no field `inner`", and `[5].concat(["s"])[1].upper()` was "an Int has
+  no method `upper`". Because `helix run` checks first, those programs never ran on any
+  engine. The element type is now the join of the receiver's and every argument's (a real
+  mix is `Unknown`), and a same-typed concat keeps its precision:
+  `["a"].concat(["b"])[0] + 1` is still refused. A sweep of the other constructs that merge
+  values (`if`, `match`, array and record literals, tuples, `reduce`, `scan`, `map`, dicts)
+  found no other false positive. Pinned by `tests/corpus/concat_mixed_types` and
+  `concat_joins_every_arguments_element_type`.
+
 - **Recursion to the depth limit answers on the tree-walker whatever the function's
   shape.** The walker recurses on the native stack, and one Helix call costs it 3.8 KB to
   13 KB there depending on the function's shape — not the ~1 KiB the stack sizing assumed.

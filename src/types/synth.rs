@@ -714,6 +714,22 @@ impl super::Checker {
                     }
                 Ok(Type::Unknown)
             }
+            // EVERY ARGUMENT CONTRIBUTES ELEMENTS, so the result's element type is the join of
+            // all of them, not the receiver's. Typed as the receiver's, `a.concat([{inner:
+            // a}])[3].inner` on an Array<String> was refused before it ran ("a value of type
+            // String has no field `inner`") — on every engine, since `run` checks first.
+            // `join` widens a real mix to `Unknown`; an argument that is not statically an
+            // array leaves the element `Unknown` (the runtime owns that refusal).
+            "concat" => {
+                let mut acc = el.clone();
+                for a in args {
+                    acc = match self.synth(a)? {
+                        Type::Array(e) => join(&acc, &e),
+                        _ => Type::Unknown,
+                    };
+                }
+                Ok(Type::Array(Box::new(acc)))
+            }
             // THE RECEIVER ANSWERS FIRST, as it does for a String or a Tensor: whether an
             // Array has the method is decided before the arguments are read, so
             // `[1].nonexistent(it * 2)` says an Array has no `nonexistent` rather than that

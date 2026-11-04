@@ -1,0 +1,10 @@
+exit: 0
+--- stdout ---
+3 4
+S
+3
+A
+X
+A
+S
+--- stderr ---
