@@ -4,12 +4,26 @@ A running note so the thread is not lost between sessions. **Newest first.** Eve
 is measured or gated unless it says otherwise — a claim without a number in this file is a
 claim nobody checked.
 
-Last updated: 2026-11-02.
+Last updated: 2026-11-04.
 
 ---
 
 ## Released
 
+- **v0.11.0** — tag `v0.11.0`, published 2026-11-04. PostgreSQL grew up (ADR 0044/0047
+  addenda): a transaction is a value that rolls back when dropped uncommitted, a result larger
+  than memory is read a page at a time (`c.cursor`), several statements share one round trip
+  (`c.query([q1, q2, q3])`, five lookups 998 → 281 µs live), an Array or Bytes is a parameter,
+  the URL says how long a statement may take, and a login is bound to the TLS session it runs
+  over. Positional destructuring in every position (ADR 0053), and `@name` pins a column in
+  every column-name position, a `with` key included (ADR 0054). A string built in a record
+  field and a dict drained in a fold are linear on every engine. Found by an outside review
+  and fixed at the root: a reference-cycle leak through a dict's log or an array's buffer, an
+  example-parity gate that never read exit status, and README claims that had drifted from
+  the results file. Also: the tree-walker grows its stack on demand, so recursion to the
+  20,000-call limit no longer aborts it short of the VM, and `helix check` stopped refusing a
+  runnable mixed `concat`. Release notes run as a program before the tag: 25 value claims and
+  10 refusals.
 - **v0.10.0** — tag `v0.10.0`, published 2026-09-14. A program pays less for what it already
   knows: pure calls with literal arguments are evaluated when the program loads (ADR 0050), and
   a call site's record shapes, held names and array literals reach the callee as a clone reduced
@@ -49,12 +63,12 @@ change `to_html`'s bytes). It now also compares the builtin and method names in
 one thing: a SYNTAX addition — `[a, b] = xs` this cycle — adds no name, so the release that
 carries one has to be cut as `minor` by hand. This cycle is one.
 
-## In flight for the next release
+## What landed in v0.11.0
 
-**This cycle is a MINOR, not a patch** — positional destructuring is new syntax, and
+**A MINOR, not a patch** — positional destructuring is new syntax, and
 `begin`, `commit`, `rollback` and `cursor` are new methods (so the
 release guard would refuse a patch anyway). Gate green at **1,041 tests**
-(609 lib + 397 CLI + 3 other + 32 dual-engine), **159** dfdiff programs with 0 undeclared
+(609 lib + 397 CLI + 3 other + 32 dual-engine), **160** dfdiff programs with 0 undeclared
 divergence, 99 files type-checked. The full list is `CHANGELOG.md`'s `Unreleased`; the shape
 of it:
 

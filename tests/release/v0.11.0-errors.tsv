@@ -1,0 +1,34 @@
+# The v0.11.0 release notes' ERROR claims: the cells whose answer is a refusal. One per line:
+#
+#   <substring the diagnostic must contain>	<program>
+#
+# Tab-separated, `#` comments ignored. Each program must exit NON-ZERO and its stderr must
+# contain the substring. Both halves matter: an exit code without the message is a program
+# that failed for some other reason. Each program is ONE line.
+
+# --- ADR 0054: "an `@` key anywhere else is a parse error, and one that reaches a `with`
+# --- whose receiver is not a frame is refused at run time rather than becoming a field called
+# --- `"@name"`".
+only means something	print({@name: 1})
+only means something to a DataFrame's `with` or `agg`	print({with: (spec) => spec}.with({@a: 1}))
+
+# --- ADR 0053: "the wrong length is an error, as it always was for `a, b = …` and as `xs[5]`
+# --- is — and the same sentence on every engine" (an array, a tuple, and inside a `let`).
+destructure	[a, b] = [1, 2, 3]
+destructure	[a, b] = (1, 2, 3)
+destructure	print(let [a, b] = [1] in a)
+# --- "`p[2]` on a pair is refused at check time".
+out of bounds	print((1, 2)[2])
+# --- "`(a, b) = t` is refused with a hint naming the brackets".
+written in brackets	(a, b) = (1, 2)
+
+# --- "A CSV the reader refuses says what to do about it. An empty file ... each stopped with
+# --- an error and no `help:` line ... Each now carries one".
+help:	print(read_csv("/dev/null"))
+
+# --- The PostgreSQL entries — cursors, flights of statements, transactions, `timeout=` and
+# --- `connect_timeout=`, channel binding, Array and Bytes parameters — live behind
+# --- `--features postgres` (ADR 0032: the verb exists and type-checks everywhere, only the
+# --- body is gated), so a default binary saying so IS the claim it can make.
+no PostgreSQL support	print(postgres_open("postgres://u:p@h/d?timeout=2&channel_binding=require"))
+no PostgreSQL support	print(postgres_query("postgres://u:p@h/d", "select * from t where id = any($1)", [[3, 1, 2]]))
