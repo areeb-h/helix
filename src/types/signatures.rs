@@ -386,6 +386,13 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         // `Bytes` is RUNTIME-TYPED, like `Dict` and `Net`: the checker sees `Unknown`, so
         // its methods are resolved when they run. Arity and argument types are still
         // checked here, which is where most mistakes actually are.
+        "view_html" | "view_diff" => {
+            let want = if name == "view_html" { 1 } else { 2 };
+            if args.len() != want {
+                return Err(arity_err(name, want, want, args.len(), line, col));
+            }
+            Ok(if name == "view_html" { Type::String } else { Type::Array(Box::new(Type::Unknown)) })
+        }
         "html_escape" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, 1, args.len(), line, col));

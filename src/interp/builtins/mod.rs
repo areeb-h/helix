@@ -148,6 +148,7 @@ impl super::Interp {
             "sha256" => return encoding::a_sha256(name, args, line, col),
             "hmac_sha256" => return encoding::a_hmac_sha256(name, args, line, col),
             "html_escape" => return encoding::a_html_escape(name, args, line, col),
+            "view_html" | "view_diff" => return a_view(name, args, line, col),
             "url_encode" => return encoding::a_url_encode(args, line, col),
             "url_decode" => return encoding::a_url_decode(name, args, line, col),
             "url_decode_lenient" => return encoding::a_url_decode_lenient(name, args, line, col),
@@ -842,3 +843,14 @@ fn float_predicate(
     }
 }
 
+
+/// `view_html(tree)` and `view_diff(old, new)` — an app's view, rendered and diffed in Rust
+/// (ADR 0055 Phase 1; see `crate::view`).
+fn a_view(name: &str, args: Vec<Value>, line: usize, col: usize) -> Result<Value, HelixError> {
+    match (name, args.as_slice()) {
+        ("view_html", [tree]) => crate::view::view_html(tree, line, col),
+        ("view_diff", [old, new]) => crate::view::view_diff(old, new, line, col),
+        ("view_html", _) => Err(HelixError::new(format!("`view_html` takes 1 argument, got {}", args.len()), line, col)),
+        _ => Err(HelixError::new(format!("`view_diff` takes 2 arguments, got {}", args.len()), line, col)),
+    }
+}

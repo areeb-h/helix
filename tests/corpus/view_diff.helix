@@ -1,0 +1,36 @@
+# ADR 0055 Phase 1: an app's view tree rendered (`view_html`) and diffed (`view_diff`) in Rust.
+# Every operation kind, the keyed and positional child paths, quoted-name attributes (a
+# Dict, not a Record), escaping, void tags, and a node that is not one.
+fn t(s) = {tag: "#text", text: s}
+fn el(tag, props, kids) = {tag: tag, props: props, children: kids}
+fn item(k) = el("li", {key: k}, [t(k)])
+
+page = el("div", {class: "a", style: {border_radius: "8px"}, transition: "opacity 1s"}, [
+  t("x < y & 'z'"),
+  el("input", {input: "q", attrs: {type: "range", value: 3.5}}, []),
+  el("svg", {attrs: {viewBox: "0 0 10 10"}}, [el("g", {attrs: {"clip-path": "url(#c)"}}, [])]),
+])
+print(view_html(page))
+
+# A first frame is one replace of the root, in wire form.
+print(view_diff(missing, el("p", {}, [t("hi")])))
+
+# Text and attributes, set and removed; nothing for an unchanged node.
+a = el("p", {class: "x", click: "go"}, [t("one"), el("b", {}, [t("two")])])
+b = el("p", {class: "y"}, [t("one"), el("b", {}, [t("2")])])
+print(view_diff(a, b))
+print(view_diff(a, a))
+
+# Keyed children: remove what is gone, move what moved, insert what is new — then diff in place.
+print(view_diff(el("ul", {}, [item("a"), item("b"), item("c")]), el("ul", {}, [item("c"), item("a"), item("d")])))
+
+# Positional children: diff the common prefix, insert or remove the tail.
+print(view_diff(el("ul", {}, [t("1")]), el("ul", {}, [t("1"), t("2"), t("3")])))
+print(view_diff(el("ul", {}, [t("1"), t("2"), t("3")]), el("ul", {}, [t("one")])))
+
+# A changed tag is a replace.
+print(view_diff(el("ul", {}, [el("li", {}, [])]), el("ul", {}, [el("dd", {}, [])])))
+
+# A node that is not an element or text is refused, by name.
+r = try view_html(el("p", {}, [42]))
+print(r.ok, r.error)

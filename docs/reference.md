@@ -1567,6 +1567,30 @@ Pause the program for ms milliseconds (wall clock; fractional ms honoured).
 >>> sleep(250)
 ```
 
+## ui
+
+### `view_diff(old, new)`
+
+The patch operations that turn the rendered view `old` into `new`; `old` missing is a first frame.
+
+**Note:** WHAT AN APP SENDS INSTEAD OF A PAGE (ADR 0055). A full-page morph of a 2,000-node view took 11.6 ms in Chromium — most of a frame — while a diff touches only what changed, so a running transition is patched rather than restarted. Operations, applied in order: `text` (a text node's new text), `attrs` (`set` pairs and `remove` names on one element), `replace` (a node rebuilt), `insert` / `remove` (a child at an index under `path`) and `move` (`from` → `to`). A `path` is child indices from the root. Children diff BY KEY when every child on both sides has a unique `key`, so a reordered list moves its nodes; otherwise by position. A node in an operation is in wire form: a string for text, `[tag, [[name, value], ...], [children]]` for an element. Keywords: ui, app, view, diff, patch, virtual dom, reconcile, keyed, update.
+
+```
+>>> view_diff({tag: "p", props: {}, children: []}, {tag: "p", props: {class: "on"}, children: []})
+[{op: "attrs", path: [], remove: [], set: [["class", "on"]]}]
+```
+
+### `view_html(tree)`
+
+An app's view tree — element records {tag, props, children} — rendered as HTML.
+
+**Note:** THE RENDERER OF ADR 0055's APP RUNTIME, in Rust because the same renderer in Helix took 5.4 ms for a 2,000-node view. A node is `{tag, props, children}` or `{tag: "#text", text}`. Props it reads: `class`, `key` (written `data-key`), `click` and `input` (the event messages, `data-click`/`data-input`), `style` (a record; `border_radius` becomes `border-radius`), `transition` (appended to the style) and `attrs` (raw attributes, e.g. SVG geometry). Text and attribute values are escaped as `html_escape` escapes them. `input`, `br`, `img`, `hr` and `meta` have no closing tag. Build trees with `examples/apps/ui.helix`. Keywords: ui, app, view, render, html, element, component, dom.
+
+```
+>>> view_html({tag: "p", props: {class: "note"}, children: [{tag: "#text", text: "a < b"}]})
+<p class="note">a &lt; b</p>
+```
+
 ## Environment
 
 ### `HELIX_CAP`

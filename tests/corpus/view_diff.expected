@@ -1,0 +1,12 @@
+exit: 0
+--- stdout ---
+<div class="a" style="border-radius: 8px; transition: opacity 1s">x &lt; y &amp; &#39;z&#39;<input data-input="q" type="range" value="3.5"><svg viewBox="0 0 10 10"><g clip-path="url(#c)"></g></svg></div>
+[{node: ["p", [], ["hi"]], op: "replace", path: []}]
+[{op: "attrs", path: [], remove: ["data-click"], set: [["class", "y"]]}, {op: "text", path: [1, 0], text: "2"}]
+[]
+[{at: 1, op: "remove", path: []}, {from: 1, op: "move", path: [], to: 0}, {at: 2, node: ["li", [["data-key", "d"]], ["d"]], op: "insert", path: []}]
+[{at: 1, node: "2", op: "insert", path: []}, {at: 2, node: "3", op: "insert", path: []}]
+[{op: "text", path: [0], text: "one"}, {at: 2, op: "remove", path: []}, {at: 1, op: "remove", path: []}]
+[{node: ["dd", [], []], op: "replace", path: [0]}]
+false a view node must be an element record {tag, props, children} or text; found an Int
+--- stderr ---

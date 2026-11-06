@@ -4472,6 +4472,113 @@ fn an_app_replays_identically_on_every_engine() {
     assert!(screens[0].contains("transition: d ") && screens[0].contains("linear(0.0000"));
 }
 
+/// Time is an event: the stopwatch's ticks are `{msg: "tick", value: <clock>}` like any click,
+/// so a recorded session — ticks included — replays to the same screens on every engine.
+#[test]
+fn a_subscribed_app_replays_identically_on_every_engine() {
+    let mut seen: Vec<String> = Vec::new();
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run(&["run", "examples/apps/stopwatch.helix", "--replay"], env, "");
+        assert_eq!(code, Some(0), "{env:?} stderr: {err}");
+        seen.push(out);
+    }
+    assert!(seen.windows(2).all(|w| w[0] == w[1]), "engines disagree on the replayed UI");
+    let screens: Vec<&str> = seen[0].lines().collect();
+    assert_eq!(screens.len(), 7, "one screen per event");
+    // The first tick after a start sets the clock; the second is 1.25 s later.
+    assert!(screens[1].contains(">00:00.00<") && screens[2].contains(">00:01.25<"), "{}", screens[2]);
+    assert!(screens[4].contains(">01:02.50<"));
+    // Newest lap first, each keyed by its number.
+    assert!(screens[6].contains("data-key=\"lap2\"><span>Lap 2</span><span class=\"t\">01:02.50"));
+}
+
+/// An app answers only the person who started it (ADR 0055 Phase 1). A localhost port is
+/// reachable by every local process, and by any web page through DNS rebinding — so before
+/// the session, `curl 127.0.0.1:PORT/event` could drive the app. Now: no token is 403, a
+/// foreign `Host` is 421, the printed link trades its token for an HttpOnly SameSite=Strict
+/// cookie, and with that cookie a subscription's timer streams frames until it is stopped.
+#[test]
+fn an_app_answers_only_its_session() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpStream;
+    use std::time::{Duration, Instant};
+
+    const PORT: u16 = 18471;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_helix"))
+        .args(["run", "examples/apps/stopwatch.helix", "--port", &PORT.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn the app");
+    let mut banner = String::new();
+    BufReader::new(child.stderr.take().unwrap()).read_line(&mut banner).unwrap();
+    let token = banner.split("token=").nth(1).map(|t| t.trim().to_string()).unwrap_or_default();
+    assert_eq!(token.len(), 64, "the app should print its link: {banner}");
+
+    let ask = |raw: String| -> String {
+        let mut s = TcpStream::connect(("127.0.0.1", PORT)).expect("app is not listening");
+        s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        s.write_all(raw.as_bytes()).unwrap();
+        let mut out = String::new();
+        let _ = s.read_to_string(&mut out);
+        out
+    };
+    let host = format!("127.0.0.1:{PORT}");
+    let get = |path: &str, host: &str, cookie: &str| {
+        ask(format!("GET {path} HTTP/1.0\r\nHost: {host}\r\n{cookie}\r\n"))
+    };
+    let post = |msg: &str, cookie: &str| {
+        let body = format!("{{\"msg\":\"{msg}\",\"value\":null}}");
+        ask(format!(
+            "POST /event HTTP/1.0\r\nHost: {host}\r\n{cookie}Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        ))
+    };
+    let cookie = format!("Cookie: helix_app_{PORT}={token}\r\n");
+
+    assert!(get("/", &host, "").starts_with("HTTP/1.1 403"), "no token must be refused");
+    assert!(post("start", "").starts_with("HTTP/1.1 403"), "an event without the session must be refused");
+    let wrong = format!("Cookie: helix_app_{PORT}=0{}\r\n", &token[1..]);
+    assert!(get("/", &host, &wrong).starts_with("HTTP/1.1 403"), "a wrong token must be refused");
+    let rebound = get(&format!("/?token={token}"), &format!("evil.example:{PORT}"), "");
+    assert!(rebound.starts_with("HTTP/1.1 421"), "a foreign Host must be refused: {rebound}");
+
+    let traded = get(&format!("/?token={token}"), &host, "");
+    assert!(traded.starts_with("HTTP/1.1 303"), "{traded}");
+    let set = format!("Set-Cookie: helix_app_{PORT}={token}; HttpOnly; SameSite=Strict; Path=/");
+    assert!(traded.contains(&set) && traded.contains("Location: /"), "{traded}");
+    let page = get("/", &host, &cookie);
+    assert!(page.starts_with("HTTP/1.1 200") && page.contains("Stopwatch"), "{}", &page[..200.min(page.len())]);
+
+    // Subscribe, start the stopwatch, and count the frames the 50 ms timer produces.
+    let mut events = TcpStream::connect(("127.0.0.1", PORT)).unwrap();
+    events.set_read_timeout(Some(Duration::from_millis(200))).ok();
+    events.write_all(format!("GET /events HTTP/1.1\r\nHost: {host}\r\n{cookie}\r\n").as_bytes()).unwrap();
+    let read_for = |s: &mut TcpStream, ms: u64| -> String {
+        let end = Instant::now() + Duration::from_millis(ms);
+        let mut got = Vec::new();
+        let mut buf = [0u8; 8192];
+        while Instant::now() < end {
+            if let Ok(n) = s.read(&mut buf) {
+                got.extend_from_slice(&buf[..n]);
+            }
+        }
+        String::from_utf8_lossy(&got).into_owned()
+    };
+    let first = read_for(&mut events, 600);
+    assert_eq!(first.matches("data: ").count(), 1, "a new subscriber gets the whole tree once: {first}");
+    assert!(post("start", &cookie).starts_with("HTTP/1.1 204"));
+    let running = read_for(&mut events, 1000);
+    let ticks = running.matches("data: ").count();
+    assert!(ticks >= 5, "a 50 ms timer should stream frames while running, got {ticks}");
+    assert!(post("stop", &cookie).starts_with("HTTP/1.1 204"));
+    let _ = read_for(&mut events, 300);
+    let after = read_for(&mut events, 600);
+    assert_eq!(after.matches("data: ").count(), 0, "a stopped stopwatch asks for no timer: {after}");
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// Recursion just under `MAX_CALL_DEPTH` answers on every engine, whatever the function's
 /// shape and however small the thread stack. The tree-walker recurses on the native stack,
 /// and one Helix call costs it 3.8 KB (`g(1, 2, f(n - 1))`) to 13 KB (a few nested

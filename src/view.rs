@@ -1,0 +1,413 @@
+//! `view_html(tree)` and `view_diff(old, new)` — the app runtime's hot path (ADR 0055, Phase 1).
+//!
+//! An app's view is DATA: element records `{tag, props, children}` and text records `{tag:
+//! "#text", text}`, built in Helix by `examples/apps/ui.helix`. Rendering that tree to HTML
+//! and diffing two of them were Helix code in the prototype, and measured too slow for the
+//! ADR's budget: a 2,001-node view rendered in 5.4 ms on the JIT (9.0 on the tree-walker),
+//! and the client's full-page morph of the result took 11.6 ms p50 / 16.9 ms p95 in
+//! Chromium — the whole of a 60 fps frame. So both move here:
+//!
+//! - `view_html` renders the tree to the SAME bytes `ui.helix`'s Helix renderer produced
+//!   (the replay test pins that), for the first paint and for tests.
+//! - `view_diff` compares two trees and returns the patch operations that turn the first
+//!   into the second, keyed where the children carry keys. The client builds its DOM from
+//!   tree data rather than from HTML, so a path of child indices names exactly one node:
+//!   an HTML parser's fix-ups (a `<tbody>` it inserts into a `<table>`) would otherwise
+//!   make the server's paths and the browser's nodes disagree.
+//!
+//! Both are pure functions of their arguments, called through the shared builtin table, so
+//! the three engines produce the same bytes by construction.
+
+use std::rc::Rc;
+
+use crate::error::HelixError;
+use crate::symbol::Symbol;
+use crate::value::{Value, write_value};
+
+/// One node of a view, read out of its record.
+enum Node {
+    Text(String),
+    El { tag: String, key: Option<String>, attrs: Vec<(String, String)>, kids: Vec<Node> },
+}
+
+const VOID_TAGS: [&str; 5] = ["input", "br", "img", "hr", "meta"];
+
+/// A record's fields, or a dict's entries, as (name, value) in the order Helix's own `keys()`
+/// gives them: a record's written order, a dict's sorted keys. A props, style or attrs value
+/// is a Dict whenever it has a quoted key (`{"clip-path": …}`), so both have to be read.
+fn pairs(v: &Value) -> Option<Vec<(String, Value)>> {
+    match v {
+        Value::Record(r) => Some(r.iter().map(|(k, v)| (k.as_str().to_string(), v.clone())).collect()),
+        Value::Dict(d) => Some(
+            d.map()
+                .iter()
+                .map(|(k, v)| {
+                    let name = match k {
+                        crate::value::DictKey::Str(s) | crate::value::DictKey::Dna(s) => s.to_string(),
+                        crate::value::DictKey::Int(i) => i.to_string(),
+                        crate::value::DictKey::Bool(b) => b.to_string(),
+                    };
+                    (name, v.clone())
+                })
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+/// One field of a record or dict — the hot path of reading a node. A record is scanned in
+/// place with no allocation; the clone is a reference-count bump.
+fn get(v: &Value, name: &str) -> Option<Value> {
+    let found = match v {
+        Value::Record(r) => r.iter().find(|(k, _)| k.as_str() == name).map(|(_, v)| v.clone()),
+        Value::Dict(d) => d.map().get(&crate::value::DictKey::Str(Rc::new(name.to_string()))).cloned(),
+        _ => None,
+    };
+    found.filter(|v| !matches!(v, Value::Missing))
+}
+
+/// A value as text: a string as it is, anything else as interpolation writes it.
+fn text_of(v: &Value, line: usize, col: usize) -> Result<String, HelixError> {
+    match v {
+        Value::Str(s) => Ok(s.as_str().to_string()),
+        other => shown(other, line, col),
+    }
+}
+
+/// A value as interpolation writes it (`"{v}"`), so an attribute holding `3.5` or `900.0`
+/// reads exactly as it did when the Helix renderer wrote it.
+fn shown(v: &Value, line: usize, col: usize) -> Result<String, HelixError> {
+    let mut s = String::new();
+    write_value(&mut s, v, line, col)?;
+    Ok(s)
+}
+
+fn shape_err(what: &str, line: usize, col: usize) -> HelixError {
+    HelixError::new(format!("a view node must be an element record {{tag, props, children}} or text; {what}"), line, col)
+        .hint("build views with `ui.el(tag, props, children)` and `ui.text(s)`.")
+}
+
+fn parse(v: &Value, line: usize, col: usize) -> Result<Node, HelixError> {
+    if !matches!(v, Value::Record(_) | Value::Dict(_)) {
+        return Err(shape_err(&format!("found {}", crate::value::with_article(v.type_name())), line, col));
+    }
+    let tag = match get(v, "tag") {
+        Some(Value::Str(s)) => s,
+        _ => return Err(shape_err("this one has no string `tag`", line, col)),
+    };
+    if tag.as_str() == "#text" {
+        let text = match get(v, "text") {
+            Some(t) => text_of(&t, line, col)?,
+            None => String::new(),
+        };
+        return Ok(Node::Text(text));
+    }
+    let props = get(v, "props").unwrap_or(Value::Missing);
+    let key = get(&props, "key").map(|k| text_of(&k, line, col)).transpose()?;
+    let mut attrs: Vec<(String, String)> = Vec::new();
+    for (prop, out) in [("class", "class"), ("key", "data-key"), ("click", "data-click"), ("input", "data-input")] {
+        if let Some(v) = get(&props, prop) {
+            attrs.push((out.to_string(), text_of(&v, line, col)?));
+        }
+    }
+    // `style` is a record of CSS properties (`border_radius` is `border-radius`), and
+    // `transition` is appended to it — the same text the Helix renderer built.
+    let base = match get(&props, "style").as_ref().and_then(pairs) {
+        Some(st) => st
+            .iter()
+            .map(|(k, v)| Ok(format!("{}: {}", k.replace('_', "-"), text_of(v, line, col)?)))
+            .collect::<Result<Vec<_>, HelixError>>()?
+            .join("; "),
+        None => String::new(),
+    };
+    let styled = match get(&props, "transition") {
+        Some(t) => format!("{base}; transition: {}", text_of(&t, line, col)?),
+        None => base,
+    };
+    if !styled.is_empty() {
+        attrs.push(("style".to_string(), styled));
+    }
+    if let Some(raw) = get(&props, "attrs").as_ref().and_then(pairs) {
+        for (k, v) in raw {
+            attrs.push((k, text_of(&v, line, col)?));
+        }
+    }
+    let kids = match get(v, "children") {
+        Some(Value::Array(a)) => a.to_values().iter().map(|c| parse(c, line, col)).collect::<Result<Vec<_>, _>>()?,
+        _ => Vec::new(),
+    };
+    Ok(Node::El { tag: tag.as_str().to_string(), key, attrs, kids })
+}
+
+fn escape(s: &str) -> std::borrow::Cow<'_, str> {
+    crate::interp::builtins::encoding::html_escape(s)
+}
+
+fn write_html(n: &Node, out: &mut String) {
+    match n {
+        Node::Text(t) => out.push_str(&escape(t)),
+        Node::El { tag, attrs, kids, .. } => {
+            out.push('<');
+            out.push_str(tag);
+            for (k, v) in attrs {
+                out.push(' ');
+                out.push_str(k);
+                out.push_str("=\"");
+                out.push_str(&escape(v));
+                out.push('"');
+            }
+            out.push('>');
+            if VOID_TAGS.contains(&tag.as_str()) {
+                return;
+            }
+            for k in kids {
+                write_html(k, out);
+            }
+            out.push_str("</");
+            out.push_str(tag);
+            out.push('>');
+        }
+    }
+}
+
+/// `view_html(tree)` — the tree as HTML.
+pub fn view_html(tree: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
+    let node = parse(tree, line, col)?;
+    let mut out = String::new();
+    write_html(&node, &mut out);
+    Ok(Value::Str(Rc::new(out)))
+}
+
+// --- The diff. ------------------------------------------------------------------------------
+
+fn s(text: &str) -> Value {
+    Value::Str(Rc::new(text.to_string()))
+}
+fn int(i: usize) -> Value {
+    Value::Int(i as i64)
+}
+fn path_value(path: &[usize]) -> Value {
+    Value::int_array(path.iter().map(|&i| i as i64).collect())
+}
+fn op(fields: Vec<(&str, Value)>) -> Value {
+    Value::Record(Rc::new(fields.into_iter().map(|(k, v)| (Symbol::intern(k), v)).collect()))
+}
+
+/// The compact form the client builds a DOM from: a string for text, `[tag, [[name,
+/// value], ...], [children]]` for an element.
+fn wire(n: &Node) -> Value {
+    match n {
+        Node::Text(t) => s(t),
+        Node::El { tag, attrs, kids, .. } => Value::array(vec![
+            s(tag),
+            Value::array(attrs.iter().map(|(k, v)| Value::array(vec![s(k), s(v)])).collect()),
+            Value::array(kids.iter().map(wire).collect()),
+        ]),
+    }
+}
+
+fn diff_node(old: &Node, new: &Node, path: &mut Vec<usize>, ops: &mut Vec<Value>) {
+    match (old, new) {
+        (Node::Text(a), Node::Text(b)) => {
+            if a != b {
+                ops.push(op(vec![("op", s("text")), ("path", path_value(path)), ("text", s(b))]));
+            }
+        }
+        (
+            Node::El { tag: ta, key: ka, attrs: aa, kids: ca },
+            Node::El { tag: tb, key: kb, attrs: ab, kids: cb },
+        ) if ta == tb && ka == kb => {
+            let set: Vec<Value> = ab
+                .iter()
+                .filter(|(k, v)| aa.iter().find(|(ok, _)| ok == k).map(|(_, ov)| ov) != Some(v))
+                .map(|(k, v)| Value::array(vec![s(k), s(v)]))
+                .collect();
+            let remove: Vec<Value> =
+                aa.iter().filter(|(k, _)| !ab.iter().any(|(nk, _)| nk == k)).map(|(k, _)| s(k)).collect();
+            if !set.is_empty() || !remove.is_empty() {
+                ops.push(op(vec![
+                    ("op", s("attrs")),
+                    ("path", path_value(path)),
+                    ("set", Value::array(set)),
+                    ("remove", Value::array(remove)),
+                ]));
+            }
+            diff_kids(ca, cb, path, ops);
+        }
+        _ => ops.push(op(vec![("op", s("replace")), ("path", path_value(path)), ("node", wire(new))])),
+    }
+}
+
+fn key_of(n: &Node) -> Option<&str> {
+    match n {
+        Node::El { key: Some(k), .. } => Some(k.as_str()),
+        _ => None,
+    }
+}
+
+/// Children: by key when every child on both sides has one and the keys are unique — so a
+/// reordered list moves its nodes, and their running transitions, rather than rewriting
+/// each one in place — and by position otherwise.
+fn diff_kids(old: &[Node], new: &[Node], path: &mut Vec<usize>, ops: &mut Vec<Value>) {
+    let keys = |kids: &[Node]| -> Option<Vec<String>> {
+        let ks: Vec<String> = kids.iter().map(|k| key_of(k).map(str::to_string)).collect::<Option<_>>()?;
+        let mut sorted = ks.clone();
+        sorted.sort();
+        sorted.dedup();
+        (sorted.len() == ks.len()).then_some(ks)
+    };
+    let here = |ops: &mut Vec<Value>, path: &[usize], fields: Vec<(&str, Value)>| {
+        let mut f = vec![("path", path_value(path))];
+        f.extend(fields);
+        ops.push(op(f));
+    };
+    if let (Some(ok), Some(nk)) = (keys(old), keys(new))
+        && !old.is_empty()
+        && !new.is_empty()
+    {
+        // Remove what is gone, back to front so the indices stay true.
+        let mut cur: Vec<String> = ok.clone();
+        for i in (0..ok.len()).rev() {
+            if !nk.contains(&ok[i]) {
+                here(ops, path, vec![("op", s("remove")), ("at", int(i))]);
+                cur.remove(i);
+            }
+        }
+        // Then build the new order left to right: keep, move into place, or insert.
+        for (t, k) in nk.iter().enumerate() {
+            if cur.get(t) == Some(k) {
+                continue;
+            }
+            if let Some(j) = cur.iter().position(|c| c == k) {
+                here(ops, path, vec![("op", s("move")), ("from", int(j)), ("to", int(t))]);
+                let moved = cur.remove(j);
+                cur.insert(t, moved);
+            } else {
+                here(ops, path, vec![("op", s("insert")), ("at", int(t)), ("node", wire(&new[t]))]);
+                cur.insert(t, k.clone());
+            }
+        }
+        // Now the order matches: diff each survivor where it now stands.
+        for (t, k) in nk.iter().enumerate() {
+            if let Some(o) = ok.iter().position(|c| c == k) {
+                path.push(t);
+                diff_node(&old[o], &new[t], path, ops);
+                path.pop();
+            }
+        }
+        return;
+    }
+    let common = old.len().min(new.len());
+    for i in 0..common {
+        path.push(i);
+        diff_node(&old[i], &new[i], path, ops);
+        path.pop();
+    }
+    for (i, n) in new.iter().enumerate().skip(common) {
+        here(ops, path, vec![("op", s("insert")), ("at", int(i)), ("node", wire(n))]);
+    }
+    for i in (common..old.len()).rev() {
+        here(ops, path, vec![("op", s("remove")), ("at", int(i))]);
+    }
+}
+
+/// `view_diff(old, new)` — the patch operations that turn the rendered `old` into `new`. With
+/// `missing` for `old` it is one `replace` of the root: the first frame a client receives.
+pub fn view_diff(old: &Value, new: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
+    let n = parse(new, line, col)?;
+    let mut ops = Vec::new();
+    match old {
+        Value::Missing => ops.push(op(vec![("op", s("replace")), ("path", Value::int_array(vec![])), ("node", wire(&n))])),
+        _ => {
+            let o = parse(old, line, col)?;
+            diff_node(&o, &n, &mut Vec::new(), &mut ops);
+        }
+    }
+    Ok(Value::array(ops))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rec(fields: Vec<(&str, Value)>) -> Value {
+        op(fields)
+    }
+    fn text(t: &str) -> Value {
+        rec(vec![("tag", s("#text")), ("props", rec(vec![])), ("children", Value::array(vec![])), ("text", s(t))])
+    }
+    fn el(tag: &str, props: Vec<(&str, Value)>, kids: Vec<Value>) -> Value {
+        rec(vec![("tag", s(tag)), ("props", rec(props)), ("children", Value::array(kids))])
+    }
+    fn ops_of(old: &Value, new: &Value) -> Vec<String> {
+        match view_diff(old, new, 0, 0).expect("diff") {
+            Value::Array(a) => a.to_values().iter().map(|o| format!("{o}")).collect(),
+            other => panic!("not an array: {other}"),
+        }
+    }
+
+    #[test]
+    fn html_escapes_text_and_attributes_and_closes_only_non_void_tags() {
+        let t = el(
+            "div",
+            vec![("class", s("a\"b")), ("style", rec(vec![("border_radius", s("8px"))])), ("transition", s("x 1s"))],
+            vec![text("<hi> & 'you'"), el("input", vec![("attrs", rec(vec![("value", Value::Float(3.5))]))], vec![])],
+        );
+        let Value::Str(h) = view_html(&t, 0, 0).expect("render") else { panic!() };
+        assert_eq!(
+            h.as_str(),
+            "<div class=\"a&quot;b\" style=\"border-radius: 8px; transition: x 1s\">&lt;hi&gt; &amp; &#39;you&#39;<input value=\"3.5\"></div>"
+        );
+    }
+
+    /// A props, style or attrs value with a quoted key (`{"clip-path": …}`) is a Dict, not a
+    /// Record. The first Rust renderer read records only and dropped the explorer's clip-path;
+    /// the replay test caught the changed bytes.
+    #[test]
+    fn attributes_with_quoted_names_come_from_a_dict() {
+        let mut m = std::collections::BTreeMap::new();
+        m.insert(crate::value::DictKey::Str(Rc::new("clip-path".to_string())), s("url(#p)"));
+        let dict = Value::Dict(Rc::new(crate::value::Dict::from_map(m)));
+        let t = el("g", vec![("attrs", dict)], vec![]);
+        let Value::Str(h) = view_html(&t, 0, 0).expect("render") else { panic!() };
+        assert_eq!(h.as_str(), "<g clip-path=\"url(#p)\"></g>");
+    }
+
+    #[test]
+    fn an_unchanged_tree_needs_no_operations_and_a_change_touches_only_what_changed() {
+        let a = el("ul", vec![], vec![el("li", vec![], vec![text("one")]), el("li", vec![("class", s("x"))], vec![text("two")])]);
+        assert!(ops_of(&a, &a).is_empty());
+        let b = el("ul", vec![], vec![el("li", vec![], vec![text("one")]), el("li", vec![("class", s("y"))], vec![text("2")])]);
+        assert_eq!(
+            ops_of(&a, &b),
+            vec![
+                "{op: \"attrs\", path: [1], remove: [], set: [[\"class\", \"y\"]]}".to_string(),
+                "{op: \"text\", path: [1, 0], text: \"2\"}".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn keyed_children_move_instead_of_being_rewritten() {
+        let item = |k: &str| el("li", vec![("key", s(k))], vec![text(k)]);
+        let a = el("ul", vec![], vec![item("a"), item("b"), item("c")]);
+        let b = el("ul", vec![], vec![item("c"), item("a"), item("d")]);
+        assert_eq!(
+            ops_of(&a, &b),
+            vec![
+                "{at: 1, op: \"remove\", path: []}".to_string(),
+                "{from: 1, op: \"move\", path: [], to: 0}".to_string(),
+                "{at: 2, node: [\"li\", [[\"data-key\", \"d\"]], [\"d\"]], op: \"insert\", path: []}".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_first_frame_replaces_the_root_and_a_changed_tag_replaces_the_node() {
+        let a = el("p", vec![], vec![text("x")]);
+        // (A record prints its fields sorted; it stores them in written order.)
+        assert_eq!(ops_of(&Value::Missing, &a), vec!["{node: [\"p\", [], [\"x\"]], op: \"replace\", path: []}".to_string()]);
+        let b = el("div", vec![], vec![text("x")]);
+        assert_eq!(ops_of(&a, &b), vec!["{node: [\"div\", [], [\"x\"]], op: \"replace\", path: []}".to_string()]);
+    }
+}

@@ -57,6 +57,8 @@ pub fn category_of(name: &str) -> &'static str {
         // Scalar conversions / accessors.
         "chr" | "ord" | "to_float" | "to_int" | "numerator" | "denominator"
         | "from_hex" | "from_base64" | "html_escape" => "conversion",
+        // An app's view tree, rendered and diffed (ADR 0055).
+        "view_html" | "view_diff" => "ui",
         // Math — elementwise, broadcasting, missing-propagating.
         "sqrt" | "cbrt" | "abs" | "exp" | "ln" | "log10" | "log2" | "log" | "sin" | "cos"
         | "tan" | "asin" | "acos" | "atan" | "atan2" | "sinh" | "cosh" | "tanh" | "floor"
@@ -180,6 +182,8 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "truncate", pure: false },
     BuiltinDef { path: "remove_dir", pure: false },
     BuiltinDef { path: "html_escape", pure: true },
+    BuiltinDef { path: "view_html", pure: true },
+    BuiltinDef { path: "view_diff", pure: true },
     BuiltinDef { path: "read_bytes", pure: false },
     BuiltinDef { path: "read_bytes_at", pure: false },
     BuiltinDef { path: "from_hex", pure: true },
@@ -655,13 +659,15 @@ mod tests {
         //
         // Adding a builtin? Decide whether it needs a feature, put it in `feature_of` if so,
         // and bump this. The bump is the point.
+        // 165 as of `view_html` and `view_diff` (ADR 0055), which need NO feature: they are
+        // pure Rust over values, and an app's view must render in every build.
         // 163 as of `postgres_execute`; 162 as of `has_feature`, which needs NO feature and must not have one: a build
             // without regex is exactly where a program needs to ask, so gating the question
             // on the thing being asked about would make it unanswerable precisely when it
             // matters. That is the decision this count exists to force.
             assert_eq!(
             BUILTINS.len(),
-            163,
+            165,
             "a builtin was added or removed — decide whether it needs a Cargo feature, add it \
              to `feature_of` if it does, and update this count in the same change"
         );

@@ -1,0 +1,12 @@
+exit: 0
+--- stdout ---
+first paint: 1 op, replace at []
+add: [{"op":"text","path":[0,0],"text":"1 left"},{"at":0,"node":["li",[["class","todo"],["data-key","t1"],["data-click","toggle-1"]],["write the ADR"]],"op":"insert","path":[1]}]
+add: [{"op":"text","path":[0,0],"text":"2 left"},{"at":1,"node":["li",[["class","todo"],["data-key","t2"],["data-click","toggle-2"]],["build the <app>"]],"op":"insert","path":[1]}]
+add: [{"op":"text","path":[0,0],"text":"3 left"},{"at":2,"node":["li",[["class","todo"],["data-key","t3"],["data-click","toggle-3"]],["ship it"]],"op":"insert","path":[1]}]
+toggle: [{"op":"text","path":[0,0],"text":"2 left"},{"op":"attrs","path":[1,0],"remove":[],"set":[["class","done"]]}]
+top: [{"from":2,"op":"move","path":[1],"to":0}]
+remove: [{"op":"text","path":[0,0],"text":"1 left"},{"at":2,"op":"remove","path":[1]}]
+unknown: []
+<main><h1>1 left</h1><ul><li class="todo" data-key="t3" data-click="toggle-3">ship it</li><li class="done" data-key="t1" data-click="toggle-1">write the ADR</li></ul></main>
+--- stderr ---
