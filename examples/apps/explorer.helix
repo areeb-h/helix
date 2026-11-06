@@ -1,0 +1,147 @@
+# A regression explorer — the first app built on `ui` (ADR 0055's prototype).
+#
+#   helix run examples/apps/explorer.helix              # then open http://127.0.0.1:8080
+#   helix run examples/apps/explorer.helix --port 9000
+#   helix run examples/apps/explorer.helix --replay        # every screen of a scripted session, as HTML
+#
+# Drag the slider and the polynomial refits — Householder QR, scored against NIST's certified
+# answers (examples/statistics/nist.helix) — and the curve springs to its new shape. Click a
+# bar to pick a degree by its information criterion; resample the noise and the points glide.
+# None of that motion is Helix code running per frame: the view DECLARES each transition and
+# the browser's compositor runs it. The whole app is the three functions at the bottom.
+
+import ui
+
+N = 60
+W = 900.0
+H = 380.0
+PAD = 24.0
+
+# --- The data and the fit. ----------------------------------------------------------------
+
+fn data(seed) = do {
+  x = linspace(-3.0, 3.0, N)
+  noise = randn(N, seed)
+  y = range(0, N).map((i) => 0.5 * x[i] ** 3 - x[i] ** 2 - 2.0 * x[i] + 1.0 + 1.5 * noise[i])
+  {x: x, y: y}
+}
+fn powers(x, degree) = range(1, degree + 1).map((p) => x.map((v) => v ** p))
+fn fit(d, degree) = do {
+  f = multiple_regression(powers(d.x, degree), d.y)
+  k = degree + 1
+  {
+    degree: degree,
+    coefficients: f.coefficients,
+    r2: f.r_squared,
+    adj: f.adj_r_squared,
+    rss: f.rss,
+    aic: aic(f.rss, N, k),
+    bic: bic(f.rss, N, k),
+  }
+}
+fn poly(coef, v) = range(0, coef.count()).map((p) => coef[p] * v ** p).sum()
+
+# --- Drawing. -----------------------------------------------------------------------------
+
+fn bounds(d) = do {
+  lo = d.y.min()
+  hi = d.y.max()
+  m = (hi - lo) * 0.12
+  {y0: lo - m, y1: hi + m}
+}
+fn sx(v) = PAD + (v + 3.2) / 6.4 * (W - 2.0 * PAD)
+fn sy(b, v) = H - PAD - (v - b.y0) / (b.y1 - b.y0) * (H - 2.0 * PAD)
+
+# The fitted curve as ONE path of a fixed 121 points, whatever the degree: the same command
+# list every time is what lets the browser interpolate `d` from the old shape to the new.
+fn curve_path(f, b) = do {
+  xs = linspace(-3.0, 3.0, 121)
+  pts = xs.map((v) => "{sx(v):.2f},{sy(b, poly(f.coefficients, v)):.2f}")
+  "M{pts.join(" L")}"
+}
+
+fn chart(d, f) = do {
+  b = bounds(d)
+  path = curve_path(f, b)
+  dots = range(0, N).map((i) => ui.el("circle", {key: "p{i}", class: "dot", style: {cx: "{sx(d.x[i]):.2f}px", cy: "{sy(b, d.y[i]):.2f}px"}, transition: ui.spring("cy", 170.0, 20.0), attrs: {r: "3.5"}}, []))
+  axis = ui.el("line", {class: "axis", attrs: {x1: "{PAD}", x2: "{W - PAD}", y1: "{sy(b, 0.0):.2f}", y2: "{sy(b, 0.0):.2f}"}}, [])
+  line = ui.el("path", {key: "fit", class: "fit", style: {d: "path(\"{path}\")"}, transition: ui.spring("d", 120.0, 14.0), attrs: {d: path}}, [])
+  # A curve that leaves the plot is clipped at its edge, not flattened onto it.
+  clip = ui.el("clipPath", {attrs: {id: "plot"}}, [ui.el("rect", {attrs: {x: "0", y: "0", width: "{W}", height: "{H}"}}, [])])
+  ui.el("svg", {class: "chart", attrs: {viewBox: "0 0 {W} {H}", role: "img", "aria-label": "data and fitted polynomial"}}, [clip, axis].concat(dots).concat([ui.el("g", {attrs: {"clip-path": "url(#plot)"}}, [line])]))
+}
+
+# One bar per degree, its height the information criterion (lower is better) — the bars are
+# scaled with `transform`, which the compositor animates without a layout.
+fn criteria(d, current) = do {
+  fits = range(1, 10).map((k) => fit(d, k))
+  lo = fits.map((f) => f.bic).min()
+  hi = fits.map((f) => f.bic).max()
+  best = fits.filter((f) => f.bic == lo)[0].degree
+  bars = fits.map((f) => do {
+    h = 0.12 + 0.88 * (f.bic - lo) / max(hi - lo, 0.000001)
+    cls = if f.degree == current then "bar on" else if f.degree == best then "bar best" else "bar"
+    ui.el("button", {key: "b{f.degree}", class: cls, click: "pick-{f.degree}", attrs: {title: "degree {f.degree}: BIC {f.bic:.1f}"}}, [
+      ui.el("span", {class: "fill", style: {transform: "scaleY({h:.4f})"}, transition: ui.spring("transform", 260.0, 22.0)}, []),
+      ui.el("span", {class: "tick"}, [ui.text("{f.degree}")]),
+    ])
+  })
+  ui.card("BIC by degree — lower is better, ★ {best}", [ui.el("div", {class: "bars"}, bars)])
+}
+
+SUPERSCRIPTS = ["⁰", "¹", "²", "³", "⁴", "⁵", "⁶", "⁷", "⁸", "⁹"]
+fn term(p) = match p { 0 => "1", 1 => "x", _ => "x{SUPERSCRIPTS[p]}" }
+
+# --- The app: init, update, view. ---------------------------------------------------------
+
+init = {degree: 3, seed: 7, dark: false}
+
+fn update(m, e) = match e.msg {
+  "degree" => {...m, degree: e.value},
+  "resample" => {...m, seed: m.seed + 1},
+  "theme" => {...m, dark: not m.dark},
+  _ => if e.msg.starts_with("pick-") then {...m, degree: e.msg.drop(5).to_int()} else m,
+}
+
+fn view(m) = do {
+  d = data(m.seed)
+  f = fit(d, m.degree)
+  coef = range(0, f.coefficients.count()).map((p) => ui.stat(term(p), "{f.coefficients[p]:.4f}"))
+  ui.column([
+    ui.row([
+      ui.el("div", {}, [ui.heading("Polynomial regression explorer"), ui.label("{N} noisy points from 0.5x³ − x² − 2x + 1 · seed {m.seed}")]),
+      ui.el("div", {class: "actions"}, [ui.button("Resample noise", "resample"), ui.button(if m.dark then "Light" else "Dark", "theme")]),
+    ]),
+    ui.card("Degree {m.degree}", [ui.slider("degree", 1, 9, m.degree), chart(d, f)]),
+    ui.row([
+      ui.card("Fit", [ui.stat("R²", "{f.r2:.5f}"), ui.stat("adjusted R²", "{f.adj:.5f}"), ui.stat("RSS", "{f.rss:.3f}"), ui.stat("AIC", "{f.aic:.2f}"), ui.stat("BIC", "{f.bic:.2f}")]),
+      ui.card("Coefficients", coef),
+      criteria(d, m.degree),
+    ]),
+  ])
+}
+
+STYLE = """
+.actions { display: flex; gap: 10px; justify-content: flex-end; align-items: center; }
+.chart { width: 100%; height: auto; margin-top: 12px; }
+.dot { fill: var(--muted); opacity: .55; }
+.fit { fill: none; stroke: var(--accent); stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+.axis { stroke: var(--line); stroke-width: 1; }
+.bars { display: grid; grid-template-columns: repeat(9, 1fr); gap: 8px; height: 150px; align-items: end; }
+.bar { appearance: none; border: 0; background: none; padding: 0; height: 100%; display: flex; flex-direction: column;
+  justify-content: flex-end; align-items: stretch; gap: 6px; cursor: pointer; font: inherit; color: var(--muted); }
+.fill { display: block; height: 120px; border-radius: 6px 6px 3px 3px; background: var(--accent-soft);
+  transform-origin: bottom; transition: background-color 250ms ease; }
+.bar.best .fill { background: color-mix(in srgb, var(--accent) 35%, var(--accent-soft)); }
+.bar.on .fill { background: var(--accent); }
+.bar.on .tick { color: var(--fg); font-weight: 700; }
+.bar:hover .fill { filter: brightness(1.08); }
+.tick { text-align: center; font-size: 12px; font-variant-numeric: tabular-nums; }
+"""
+
+spec = {title: "Regression explorer", init: init, update: update, view: view, style: STYLE, theme: (m) => if m.dark then "dark" else "light"}
+
+fn main(port: Int = 8080, replay: Bool = false) = if replay then do {
+  events = [{msg: "degree", value: 5}, {msg: "pick-2", value: missing}, {msg: "resample", value: missing}, {msg: "theme", value: missing}]
+  ui.replay(spec, events).map((html) => print(html))
+} else ui.app({...spec, port: port})

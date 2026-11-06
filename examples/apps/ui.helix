@@ -1,0 +1,241 @@
+# ui — a model–update–view app runtime, written in Helix on the primitives that exist today.
+#
+# A PROTOTYPE for ADR 0055 (docs/adr/0055-apps.md), kept small on purpose: it is here to
+# find out what the language and runtime already carry and what they are missing, by
+# building a real app on them. The decisions it tests:
+#
+#   - The program is three values: `init` (the model), `update(model, event) -> model` and
+#     `view(model) -> tree`. No mutable state, no callbacks, no async: events are folded
+#     through `update` the way the HTTP server folds requests through a handler.
+#   - A view is DATA — element records — so it can be diffed, replayed in a test, and handed
+#     to a different renderer later. Here it is rendered to HTML.
+#   - Helix decides WHAT the screen is; the GPU decides how to get there. Animation is
+#     declared in the view (`transition`, `spring(...)`) and run by the browser's compositor,
+#     never by Helix code per frame. The client patches the page IN PLACE — attributes, not
+#     nodes — which is what lets a changed style transition instead of jump.
+#
+#   import ui
+#   ui.app({port: 8080, title: "…", init: {…}, update: (m, e) => …, view: (m) => …})
+
+# --- The tree. ---------------------------------------------------------------------------
+
+# One element: a tag, its properties and its children. Properties the renderer knows:
+#   class, style (a record; `border_radius` becomes `border-radius`), key (keeps an element's
+#   identity across renders), click / input (the message the event sends), transition, and
+#   attrs (a record of raw attributes, e.g. SVG geometry).
+export fn el(tag, props, children) = {tag: tag, props: props, children: children}
+export fn text(s) = {tag: "#text", props: {}, children: [], text: "{s}"}
+
+export fn column(children) = el("div", {class: "col"}, children)
+export fn row(children) = el("div", {class: "row"}, children)
+export fn card(title, children) = el("section", {class: "card"}, [el("h2", {}, [text(title)])].concat(children))
+export fn heading(s) = el("h1", {}, [text(s)])
+export fn label(s) = el("span", {class: "label"}, [text(s)])
+export fn stat(name, value) = el("div", {class: "stat"}, [el("span", {class: "stat-name"}, [text(name)]), el("span", {class: "stat-value"}, [text(value)])])
+export fn button(caption, msg) = el("button", {class: "btn", click: msg}, [text(caption)])
+export fn slider(msg, lo, hi, value) = el("input", {class: "slider", input: msg, attrs: {type: "range", min: "{lo}", max: "{hi}", step: "1", value: "{value}"}}, [])
+
+# --- Motion. -----------------------------------------------------------------------------
+
+# A damped spring, solved HERE and handed to the compositor as a CSS `linear()` easing curve:
+# Helix does the physics once per declaration, the GPU does every frame. Unit mass,
+# stiffness k, damping c; the response of x'' + c·x' + k·x = k from rest is sampled until
+# it settles within 0.1%. Returns the `transition` timing for one property.
+export fn spring(prop, stiffness, damping) = do {
+  w0 = sqrt(stiffness)
+  zeta = damping / (2.0 * w0)
+  settle = log(1000.0) / max(zeta * w0, 0.001)
+  wd = w0 * sqrt(max(1.0 - zeta * zeta, 0.000001))
+  x = (t) => 1.0 - exp(-zeta * w0 * t) * (cos(wd * t) + (zeta * w0 / wd) * sin(wd * t))
+  # The last sample is exactly 1: the curve ends where the property does, with no snap.
+  pts = range(0, 41).map((i) => if i == 40 then "1" else "{x(settle * i / 40.0):.4f}")
+  "{prop} {round(settle * 1000.0)}ms linear({pts.join(", ")})"
+}
+
+# --- Rendering a tree to HTML. ------------------------------------------------------------
+
+fn css_name(k) = k.replace("_", "-")
+fn style_of(rec) = rec.keys().map((k) => "{css_name(k)}: {rec.get(k)}").join("; ")
+fn attr(name, v) = " {name}=\"{html_escape("{v}")}\""
+fn opt(props, name, out) = if props.get(name).is_missing() then "" else attr(out, props.get(name))
+fn attrs_of(props) = do {
+  style = props.get("style")
+  trans = props.get("transition")
+  base = if style.is_missing() then "" else style_of(style)
+  styled = if trans.is_missing() then base else "{base}; transition: {trans}"
+  raw = props.get("attrs")
+  rest = if raw.is_missing() then "" else raw.keys().map((k) => attr(k, raw.get(k))).join("")
+  plain = [opt(props, "class", "class"), opt(props, "key", "data-key"), opt(props, "click", "data-click"), opt(props, "input", "data-input")].join("")
+  sty = if styled == "" then "" else attr("style", styled)
+  "{plain}{sty}{rest}"
+}
+fn void_tag(tag) = ["input", "br", "img", "hr", "meta"].contains(tag)
+export fn render(node) = if node.tag == "#text" then html_escape(node.text)
+  else if void_tag(node.tag) then "<{node.tag}{attrs_of(node.props)}>"
+  else "<{node.tag}{attrs_of(node.props)}>{node.children.map(render).join("")}</{node.tag}>"
+
+# --- The page: theme and client. ----------------------------------------------------------
+
+THEME = """
+:root { --bg: #f6f7f9; --fg: #14161a; --muted: #687080; --card: #ffffff; --line: #e3e6ec;
+  --accent: #4f46e5; --accent-soft: #e0e7ff; --shadow: 0 1px 2px rgba(16,24,40,.06), 0 8px 24px rgba(16,24,40,.06);
+  color-scheme: light; }
+:root[data-theme="dark"] { --bg: #0d0f14; --fg: #e8eaf0; --muted: #8b93a7; --card: #161a22; --line: #262c38;
+  --accent: #8b87ff; --accent-soft: #23264a; --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
+  color-scheme: dark; }
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--fg);
+  font: 15px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  transition: background-color 400ms ease, color 400ms ease; }
+#root { max-width: 1080px; margin: 0 auto; padding: 28px 20px 48px; }
+h1 { font-size: 26px; letter-spacing: -0.02em; margin: 0 0 4px; }
+h2 { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 12px; }
+.col { display: flex; flex-direction: column; gap: 16px; }
+.row { display: flex; gap: 16px; flex-wrap: wrap; align-items: stretch; }
+.row > * { flex: 1 1 280px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px;
+  box-shadow: var(--shadow); transition: background-color 400ms ease, border-color 400ms ease; }
+.label { color: var(--muted); }
+.stat { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+.stat:last-child { border-bottom: 0; }
+.stat-name { color: var(--muted); }
+.stat-value { font-weight: 600; }
+.btn { appearance: none; border: 1px solid var(--line); background: var(--card); color: var(--fg); font: inherit;
+  padding: 8px 14px; border-radius: 10px; cursor: pointer; box-shadow: var(--shadow);
+  transition: transform 160ms cubic-bezier(.2,.8,.2,1), background-color 200ms ease; }
+.btn:hover { transform: translateY(-1px); }
+.btn:active { transform: translateY(0) scale(.97); }
+.slider { width: 100%; accent-color: var(--accent); }
+"""
+
+CLIENT = """
+(() => {
+  const root = document.getElementById('root');
+  // Patch the page IN PLACE: attributes change, nodes stay, so a changed style transitions
+  // instead of jumping. Elements with data-key keep their identity when their order changes.
+  function morph(a, b) {
+    if (a.nodeType !== b.nodeType || a.nodeName !== b.nodeName) { a.replaceWith(b.cloneNode(true)); return; }
+    if (a.nodeType === 3) { if (a.nodeValue !== b.nodeValue) a.nodeValue = b.nodeValue; return; }
+    if (a.nodeType !== 1) return;
+    for (const at of [...a.attributes]) if (!b.hasAttribute(at.name)) a.removeAttribute(at.name);
+    for (const at of [...b.attributes]) if (a.getAttribute(at.name) !== at.value) a.setAttribute(at.name, at.value);
+    if (a.tagName === 'INPUT' && document.activeElement !== a && b.hasAttribute('value')) a.value = b.getAttribute('value');
+    children(a, b);
+  }
+  function children(a, b) {
+    const keyed = new Map();
+    for (const c of a.children) if (c.dataset && c.dataset.key) keyed.set(c.dataset.key, c);
+    const next = [...b.childNodes];
+    next.forEach((n, i) => {
+      const k = n.nodeType === 1 && n.dataset ? n.dataset.key : undefined;
+      let cur = a.childNodes[i];
+      if (k !== undefined && keyed.has(k) && keyed.get(k) !== cur) { a.insertBefore(keyed.get(k), cur || null); cur = keyed.get(k); }
+      if (!cur) a.appendChild(n.cloneNode(true)); else morph(cur, n);
+    });
+    while (a.childNodes.length > next.length) a.removeChild(a.lastChild);
+  }
+  let version = 0;
+  const es = new EventSource('/events');
+  es.onmessage = (e) => {
+    const d = JSON.parse(e.data);
+    const tpl = document.createElement('div');
+    tpl.innerHTML = d.html;
+    children(root, tpl);
+    document.documentElement.dataset.theme = d.theme || 'light';
+    version += 1;
+    document.documentElement.dataset.version = version;
+  };
+  // Events: one request in flight, and only the LATEST value per message waiting behind it,
+  // so dragging a slider sends what the user is pointing at, not every pixel on the way.
+  const pending = new Map();
+  let inflight = false;
+  function flush() {
+    if (inflight || pending.size === 0) return;
+    const [msg, ev] = pending.entries().next().value;
+    pending.delete(msg);
+    inflight = true;
+    fetch('/event', {method: 'POST', body: JSON.stringify(ev)}).finally(() => { inflight = false; flush(); });
+  }
+  function post(ev) { pending.set(ev.msg, ev); flush(); }
+  document.addEventListener('click', (e) => {
+    const t = e.target.closest('[data-click]');
+    if (t) post({msg: t.dataset.click, value: null});
+  });
+  document.addEventListener('input', (e) => {
+    const t = e.target.closest('[data-input]');
+    if (t) post({msg: t.dataset.input, value: t.type === 'range' || t.type === 'number' ? Number(t.value) : t.value});
+  });
+})();
+"""
+
+fn page(spec, model) = do {
+  title = html_escape("{spec.title}")
+  body = render((spec.view)(model))
+  theme = theme_of(spec, model)
+  extra = if spec.get("style").is_missing() then "" else spec.style
+  "<!doctype html><html lang=\"en\" data-theme=\"{theme}\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{title}</title><style>{THEME}{extra}</style></head><body><div id=\"root\">{body}</div><script>{CLIENT}</script></body></html>"
+}
+fn theme_of(spec, model) = if spec.get("theme").is_missing() then "light" else (spec.theme)(model)
+
+# --- The loop. ----------------------------------------------------------------------------
+
+# One step of the fold for one connection: the model, the connections still open, and the
+# SSE streams to push to. A request is a page load, a subscription, or an event.
+fn handle(spec, st, c) = do {
+  req = c.poll_request()
+  if req.is_missing() then (if c.is_open() then {...st, keep: st.keep.concat([c])} else st) else route(spec, st, c, req)
+}
+
+fn route(spec, st, c, req) = match "{req.method} {req.path}" {
+  "GET /" => do {
+    sent = c.respond({status: 200, html: page(spec, st.model)})
+    {...st, keep: st.keep.concat([c])}
+  },
+  "GET /events" => do {
+    opened = c.sse()
+    {...st, streams: st.streams.concat([c])}
+  },
+  "POST /event" => do {
+    ev = req.body.parse_json()
+    next = try (spec.update)(st.model, ev)
+    sent = c.respond({status: 204, text: ""})
+    if next.ok then {...st, model: next.value, keep: st.keep.concat([c]), changed: true} else do {
+      logged = elog("update failed on {ev.to_json()}: {next.error}")
+      {...st, keep: st.keep.concat([c])}
+    }
+  },
+  _ => do {
+    sent = c.respond({status: 404, text: "not found"})
+    {...st, keep: st.keep.concat([c])}
+  },
+}
+
+# The frame every subscriber receives: the rendered view and the theme. JSON, because an
+# SSE `data:` line cannot carry the newlines HTML has.
+fn frame(spec, model) = {html: render((spec.view)(model)), theme: theme_of(spec, model)}.to_json()
+
+fn serve(l, spec, model, conns, streams) = do {
+  ready = l.wait(conns, 1000)
+  fresh = l.accept_poll()
+  live = if fresh.is_missing() then conns else conns.concat([fresh])
+  st = live.reduce({model: model, keep: [], streams: streams, fresh: [], changed: false}, (s, c) => handle(spec, s, c))
+  # A new subscriber needs the current screen; everyone needs it after a change.
+  joined = st.streams.count() > streams.count()
+  pushed = if st.changed or joined then do {
+    f = frame(spec, st.model)
+    st.streams.filter((s) => s.send(f))
+  } else st.streams
+  serve(l, spec, st.model, st.keep, pushed)
+}
+
+export fn app(spec) = do {
+  port = if spec.get("port").is_missing() then 8080 else spec.port
+  l = listen(port)
+  logged = elog("{spec.title} on http://127.0.0.1:{port}")
+  serve(l, spec, spec.init, [], [])
+}
+
+# Replay a list of events through `update` and return every screen as HTML — the property a
+# model–update–view app buys: its UI is a pure function of its event log, testable without a
+# browser, and the same on every engine.
+export fn replay(spec, events) = events.scan(spec.init, (m, e) => (spec.update)(m, e)).map((m) => render((spec.view)(m)))

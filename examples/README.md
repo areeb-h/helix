@@ -88,6 +88,13 @@ golden output on all three engines.
 [`shapes.helix`](modules/shapes.helix) imports [`geometry.helix`](modules/geometry.helix).
 Run `helix examples/modules/shapes.helix`.
 
+## apps/ — interactive apps (ADR 0055, a prototype)
+- [`apps/explorer.helix`](apps/explorer.helix) — a polynomial regression explorer: drag the
+  degree, the fit springs to its new shape, the BIC bars rescale. `helix examples/apps/explorer.helix`
+  and open `http://127.0.0.1:8080`; `--replay` prints every screen of a scripted session instead.
+- [`apps/ui.helix`](apps/ui.helix) — the runtime it is built on: `init`, `update`, `view`, with
+  motion declared in the view and run by the browser's compositor.
+
 ## interop/ — outside the runtime (network or optional features)
 - [`python/`](python/) — CPython interop (`--features python`): DataFrames, tensors, calling Python.
 - [`api/fetch.helix`](api/fetch.helix) — HTTP requests (needs network).

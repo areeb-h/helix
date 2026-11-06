@@ -59,9 +59,9 @@ fi
 
 # Same exclusions as scripts/capture-compat.sh, for the same reasons: bench/
 # fixtures are generated rather than tracked, examples/api blocks or needs the
-# network, examples/python is feature-gated.
+# network, examples/apps serves until stopped, examples/python is feature-gated.
 mapfile -t files < <(git ls-files '*.helix' \
-  | grep -vE '^bench/' | grep -vE '^examples/(api|python)/')
+  | grep -vE '^bench/' | grep -vE '^examples/(api|python|apps)/')
 
 if [ "$LIST_ONLY" = 1 ]; then printf '%s\n' "${files[@]}"; exit 0; fi
 

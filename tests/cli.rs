@@ -4448,6 +4448,30 @@ fn unbounded_mutual_recursion_raises_instead_of_crashing() {
     }
 }
 
+/// An app's UI is a pure function of its event log (ADR 0055, D2): the regression explorer's
+/// scripted session renders every screen byte-identically on all three engines, and each
+/// screen shows what its event did. The apps serve until stopped, so `vmparity.sh` and the
+/// compat capture skip `examples/apps/`; this is what keeps `ui.helix` from rotting unseen.
+#[test]
+fn an_app_replays_identically_on_every_engine() {
+    let mut seen: Vec<String> = Vec::new();
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run(&["run", "examples/apps/explorer.helix", "--replay"], env, "");
+        assert_eq!(code, Some(0), "{env:?} stderr: {err}");
+        seen.push(out);
+    }
+    assert!(seen.windows(2).all(|w| w[0] == w[1]), "engines disagree on the replayed UI");
+    let screens: Vec<&str> = seen[0].lines().collect();
+    assert_eq!(screens.len(), 4, "one screen per event");
+    // degree 5, then a click on bar 2, then a resample, then the theme toggle.
+    assert!(screens[0].contains("<h2>Degree 5</h2>"), "{}", &screens[0][..300]);
+    assert!(screens[1].contains("<h2>Degree 2</h2>") && screens[1].contains("seed 7"));
+    assert!(screens[2].contains("seed 8"));
+    assert!(screens[3].contains("data-click=\"theme\">Light</button>"));
+    // Motion is declared, not driven: the fitted curve carries its spring as a CSS transition.
+    assert!(screens[0].contains("transition: d ") && screens[0].contains("linear(0.0000"));
+}
+
 /// Recursion just under `MAX_CALL_DEPTH` answers on every engine, whatever the function's
 /// shape and however small the thread stack. The tree-walker recurses on the native stack,
 /// and one Helix call costs it 3.8 KB (`g(1, 2, f(n - 1))`) to 13 KB (a few nested
