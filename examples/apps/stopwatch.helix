@@ -1,0 +1,82 @@
+# A stopwatch — the smallest app with a subscription (ADR 0055 Phase 1).
+#
+#   helix run examples/apps/stopwatch.helix           # then open the link it prints
+#   helix run examples/apps/stopwatch.helix --open    # …or let it open the browser
+#   helix run examples/apps/stopwatch.helix --replay  # a scripted session, as HTML
+#
+# Time arrives as an EVENT: while it runs, the model asks for `ui.every(50, "tick")` and each
+# tick carries the wall clock. Stopped, it asks for nothing, so a stopped stopwatch costs no
+# work at all. Because time is just another event, a recorded session replays exactly, ticks
+# and all, on every engine — which is what `--replay` prints.
+
+import ui
+
+init = {running: false, elapsed: 0.0, last: missing, laps: []}
+
+fn update(m, e) = match e.msg {
+  "start" => {...m, running: true, last: missing},
+  "stop" => {...m, running: false},
+  "reset" => init,
+  "lap" => {...m, laps: [m.elapsed].concat(m.laps)},
+  # The first tick after a start only sets the clock; elapsed time is the sum of the gaps.
+  "tick" => if m.last.is_missing() then {...m, last: e.value} else {...m, elapsed: m.elapsed + e.value - m.last, last: e.value},
+  _ => m,
+}
+
+fn clock(t) = do {
+  minutes = floor(t / 60.0).to_int()
+  seconds = t - minutes * 60.0
+  "{minutes:02}:{seconds:05.2f}"
+}
+
+fn view(m) = do {
+  # Newest first, keyed by lap number: a new lap is ONE insert at the top, never a re-render
+  # of the whole list.
+  n = m.laps.count()
+  laps = range(0, n).map((i) => ui.el("li", {key: "lap{n - i}", class: "lap"}, [ui.el("span", {}, [ui.text("Lap {n - i}")]), ui.el("span", {class: "t"}, [ui.text(clock(m.laps[i]))])]))
+  ui.column([
+    ui.heading("Stopwatch"),
+    ui.card(if m.running then "Running" else "Stopped", [
+      ui.el("div", {class: if m.running then "face on" else "face"}, [ui.text(clock(m.elapsed))]),
+      ui.el("div", {class: "actions"}, [
+        if m.running then ui.button("Stop", "stop") else ui.button("Start", "start"),
+        ui.button("Lap", "lap"),
+        ui.button("Reset", "reset"),
+      ]),
+    ]),
+    ui.card("Laps", [ui.el("ol", {class: "laps"}, laps)]),
+  ])
+}
+
+STYLE = """
+.face { font: 600 64px/1 ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em; padding: 12px 0 18px; color: var(--muted); transition: color 300ms ease; }
+.face.on { color: var(--fg); }
+.actions { display: flex; gap: 10px; }
+.laps { list-style: none; margin: 0; padding: 0; }
+.lap { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.lap .t { font-variant-numeric: tabular-nums; font-weight: 600; }
+"""
+
+spec = {
+  title: "Stopwatch",
+  init: init,
+  update: update,
+  view: view,
+  style: STYLE,
+  subscriptions: (m) => if m.running then [ui.every(50, "tick")] else [],
+}
+
+fn main(port: Int = 8080, open: Bool = false, replay: Bool = false) = if replay then do {
+  t0 = 1000.0
+  events = [
+    {msg: "start", value: missing},
+    {msg: "tick", value: t0},
+    {msg: "tick", value: t0 + 1.25},
+    {msg: "lap", value: missing},
+    {msg: "tick", value: t0 + 62.5},
+    {msg: "stop", value: missing},
+    {msg: "lap", value: missing},
+  ]
+  ui.replay(spec, events).map((html) => print(html))
+} else ui.app({...spec, port: port, open: open})

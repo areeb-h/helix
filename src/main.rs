@@ -113,6 +113,7 @@ mod sam {
 mod serve;
 mod simd;
 mod stats;
+mod view;
 mod strfmt;
 mod suggest;
 mod symbol;

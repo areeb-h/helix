@@ -1,6 +1,7 @@
 # A regression explorer — the first app built on `ui` (ADR 0055's prototype).
 #
-#   helix run examples/apps/explorer.helix              # then open http://127.0.0.1:8080
+#   helix run examples/apps/explorer.helix              # then open the link it prints
+#   helix run examples/apps/explorer.helix --open       # …or let it open your browser
 #   helix run examples/apps/explorer.helix --port 9000
 #   helix run examples/apps/explorer.helix --replay        # every screen of a scripted session, as HTML
 #
@@ -141,7 +142,7 @@ STYLE = """
 
 spec = {title: "Regression explorer", init: init, update: update, view: view, style: STYLE, theme: (m) => if m.dark then "dark" else "light"}
 
-fn main(port: Int = 8080, replay: Bool = false) = if replay then do {
+fn main(port: Int = 8080, open: Bool = false, replay: Bool = false) = if replay then do {
   events = [{msg: "degree", value: 5}, {msg: "pick-2", value: missing}, {msg: "resample", value: missing}, {msg: "theme", value: missing}]
   ui.replay(spec, events).map((html) => print(html))
-} else ui.app({...spec, port: port})
+} else ui.app({...spec, port: port, open: open})

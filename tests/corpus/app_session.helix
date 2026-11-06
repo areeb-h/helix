@@ -1,0 +1,43 @@
+# A model–update–view session, pinned (ADR 0055 Phase 1: "`replay` byte-identical on three
+# engines, run in CI as a corpus program"). A keyed to-do list is folded through `update`;
+# each step prints the patch operations `view_diff` sends a client, and the last the page
+# `view_html` would serve. Adding, completing, reordering and removing items must each be the
+# smallest patch — one insert, one attribute, one move, one remove — never a re-render.
+
+fn el(tag, props, kids) = {tag: tag, props: props, children: kids}
+fn text(s) = {tag: "#text", props: {}, children: [], text: s}
+
+fn item(t) = el("li", {key: "t{t.id}", class: if t.done then "done" else "todo", click: "toggle-{t.id}"}, [text(t.title)])
+fn view(m) = el("main", {}, [
+  el("h1", {}, [text("{m.items.filter((t) => not t.done).count()} left")]),
+  el("ul", {}, m.items.map(item)),
+])
+
+fn update(m, e) = match e.msg {
+  "add" => {...m, items: m.items.concat([{id: m.next, title: e.value, done: false}]), next: m.next + 1},
+  "toggle" => {...m, items: m.items.map((t) => if t.id == e.value then {...t, done: not t.done} else t)},
+  "top" => {...m, items: m.items.filter((t) => t.id == e.value).concat(m.items.filter((t) => t.id != e.value))},
+  "remove" => {...m, items: m.items.filter((t) => t.id != e.value)},
+  _ => m,
+}
+
+init = {items: [], next: 1}
+events = [
+  {msg: "add", value: "write the ADR"},
+  {msg: "add", value: "build the <app>"},
+  {msg: "add", value: "ship it"},
+  {msg: "toggle", value: 1},
+  {msg: "top", value: 3},
+  {msg: "remove", value: 2},
+  {msg: "unknown", value: missing},
+]
+
+models = events.scan(init, (m, e) => update(m, e))
+views = [view(init)].concat(models.map(view))
+first = view_diff(missing, views[0])
+print("first paint: {first.count()} op, {first[0].op} at {first[0].path}")
+steps = range(0, events.count()).map((i) => do {
+  ops = view_diff(views[i], views[i + 1])
+  print("{events[i].msg}: {ops.to_json()}")
+})
+print(view_html(views.last()))

@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+### Added
+
+- **`view_html(tree)` and `view_diff(old, new)`: an app's view rendered and diffed in Rust
+  (ADR 0055 Phase 1).** A view is data — `{tag, props, children}` records and text nodes —
+  and these are the two things the app runtime does with it every frame. `view_html` is the
+  first paint, byte-for-byte what the Helix renderer it replaces produced, 6.5× faster (a
+  2,000-node view: 5.37 ms → 0.83 ms). `view_diff` answers the patch operations that bring a
+  client from one view to the next — `text`, `attrs`, `replace`, `insert`, `remove`, `move` —
+  matched by `key` when every child has a unique one, so a new list item is one insert and a
+  reordered one is one move. Applying the worst case in Chromium (all 200 rows of a table
+  changed) dropped from a 11.6 ms morph to 5.1 ms, inside a 60 fps frame.
+- **The app runtime (`examples/apps/ui.helix`) answers only its session.** Each run prints a
+  link carrying a fresh 256-bit token, which the browser trades for an `HttpOnly;
+  SameSite=Strict` cookie; any request without it is refused (403), and so is one whose `Host`
+  is not this machine (421), which stops DNS rebinding. Before this, any local process or web
+  page that could reach the port could drive the app.
+- **Subscriptions: `ui.every(ms, msg)`.** An app lists its timers as a function of its model,
+  and each tick reaches `update` as an ordinary event carrying the clock — so a recorded
+  session replays exactly, ticks included. `examples/apps/stopwatch.helix` shows it.
+- **`ui.open_url(url)`** opens the system browser without a shell; both example apps take
+  `--open`.
+
+### Fixed
+
+- **A patch that replaced the focused input's subtree dropped focus and the text being
+  typed.** The client now restores focus, caret, a focused field's text and keyed scroll
+  positions across such a frame.
+
 ## v0.12.0 — 2026-11-06
 
 ### Added

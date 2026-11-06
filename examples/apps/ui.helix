@@ -14,8 +14,15 @@
 #     never by Helix code per frame. The client patches the page IN PLACE — attributes, not
 #     nodes — which is what lets a changed style transition instead of jump.
 #
+#   - Only the person who started the app can drive it. A localhost port is reachable by
+#     every local process and, through DNS rebinding, by any web page the browser visits, so
+#     every request must carry a session token (see "The session" below).
+#
 #   import ui
 #   ui.app({port: 8080, title: "…", init: {…}, update: (m, e) => …, view: (m) => …})
+#
+# Optional spec fields: `style` (CSS added to the theme), `theme` (model -> "light"/"dark"),
+# `subscriptions` (model -> a list of `every(ms, msg)`), and `open` (true opens a browser).
 
 # --- The tree. ---------------------------------------------------------------------------
 
@@ -35,6 +42,35 @@ export fn stat(name, value) = el("div", {class: "stat"}, [el("span", {class: "st
 export fn button(caption, msg) = el("button", {class: "btn", click: msg}, [text(caption)])
 export fn slider(msg, lo, hi, value) = el("input", {class: "slider", input: msg, attrs: {type: "range", min: "{lo}", max: "{hi}", step: "1", value: "{value}"}}, [])
 
+# --- Subscriptions. -----------------------------------------------------------------------
+
+# A timer: every `ms` milliseconds the app receives `{msg, value}`, the value being the wall
+# clock (`now()`). An app lists its timers as a function of the model, so a timer exists only
+# while the model asks for it — a stopwatch that is stopped has none, and nothing polls.
+export fn every(ms, msg) = {every: ms, msg: msg}
+
+fn subs_of(spec, model) = if spec.get("subscriptions").is_missing() then [] else (spec.subscriptions)(model)
+
+# Bring the running timers in line with what the model asks for now. A timer that is still
+# wanted keeps its next due time (so re-rendering does not reset it); a new one is due one
+# period from `t`; one the model no longer lists is dropped.
+fn schedule(timers, subs, t) = subs.map((s) => do {
+  old = timers.filter((x) => x.msg == s.msg and x.every == s.every)
+  if old.count() == 0 then {every: s.every, msg: s.msg, due: t + s.every / 1000.0} else old[0]
+})
+
+# The next due time after a timer fires. A timer that fell behind — the machine slept, or an
+# `update` took longer than the period — fires ONCE and is rescheduled from now: catching up
+# on every missed tick would replay a burst of stale events into `update`.
+fn advance(x, t) = do {
+  next = x.due + x.every / 1000.0
+  {...x, due: if next <= t then t + x.every / 1000.0 else next}
+}
+
+# How long the loop may sleep: until the next timer, at most a second (so a closed client is
+# still noticed), never negative.
+fn sleep_ms(timers, t) = if timers.count() == 0 then 1000 else clamp(round((timers.map((x) => x.due).min() - t) * 1000.0), 0, 1000)
+
 # --- Motion. -----------------------------------------------------------------------------
 
 # A damped spring, solved HERE and handed to the compositor as a CSS `linear()` easing curve:
@@ -52,27 +88,57 @@ export fn spring(prop, stiffness, damping) = do {
   "{prop} {round(settle * 1000.0)}ms linear({pts.join(", ")})"
 }
 
-# --- Rendering a tree to HTML. ------------------------------------------------------------
+# --- Rendering. -----------------------------------------------------------------------------
 
-fn css_name(k) = k.replace("_", "-")
-fn style_of(rec) = rec.keys().map((k) => "{css_name(k)}: {rec.get(k)}").join("; ")
-fn attr(name, v) = " {name}=\"{html_escape("{v}")}\""
-fn opt(props, name, out) = if props.get(name).is_missing() then "" else attr(out, props.get(name))
-fn attrs_of(props) = do {
-  style = props.get("style")
-  trans = props.get("transition")
-  base = if style.is_missing() then "" else style_of(style)
-  styled = if trans.is_missing() then base else "{base}; transition: {trans}"
-  raw = props.get("attrs")
-  rest = if raw.is_missing() then "" else raw.keys().map((k) => attr(k, raw.get(k))).join("")
-  plain = [opt(props, "class", "class"), opt(props, "key", "data-key"), opt(props, "click", "data-click"), opt(props, "input", "data-input")].join("")
-  sty = if styled == "" then "" else attr("style", styled)
-  "{plain}{sty}{rest}"
+# A tree to HTML, for the first paint and for `replay`. In Rust (`view_html`, ADR 0055 Phase
+# 1): the same renderer written here in Helix took 5.4 ms for a 2,000-node view, and the
+# builtin is byte-for-byte what it produced.
+export fn render(node) = view_html(node)
+
+# --- Opening a browser. --------------------------------------------------------------------
+
+# Open a URL in the system's browser: `xdg-open` (Linux, the BSDs), `open` (macOS), then
+# Windows' URL handler. Each is a program run with an argv — no shell, so nothing in the URL
+# can become a command (which is why Windows does not go through `cmd /c start`, a shell that
+# reads `&` as a separator). Answers whether one of them worked; an app carries on either way.
+export fn open_url(url) = do {
+  tries = [["xdg-open", [url]], ["open", [url]], ["rundll32", ["url.dll,FileProtocolHandler", url]]]
+  tries.reduce(false, (done, t) => if done then true else (try run(t[0], t[1])).ok)
 }
-fn void_tag(tag) = ["input", "br", "img", "hr", "meta"].contains(tag)
-export fn render(node) = if node.tag == "#text" then html_escape(node.text)
-  else if void_tag(node.tag) then "<{node.tag}{attrs_of(node.props)}>"
-  else "<{node.tag}{attrs_of(node.props)}>{node.children.map(render).join("")}</{node.tag}>"
+
+# --- The session. --------------------------------------------------------------------------
+
+# A fresh 256-bit secret per run. The app prints `http://127.0.0.1:PORT/?token=…`; opening it
+# trades the token for an HttpOnly, SameSite=Strict cookie and redirects to `/`, so the token
+# leaves the address bar. Every request after that must carry the cookie:
+#
+#   - another local process does not have it — the port alone is no longer enough;
+#   - a web page elsewhere cannot send it — SameSite=Strict keeps a cross-site POST cookieless,
+#     and a page that rebinds its DNS to 127.0.0.1 is a different origin with no cookie at all;
+#   - the `Host` header must also name this machine, which refuses a rebound request outright.
+#
+# A cookie is scoped by host, not port, so its name carries the port: two apps side by side do
+# not overwrite each other's sessions. Tokens are compared by their HMAC under a second secret,
+# which keeps the comparison from leaking, through its timing, how much of a guess was right.
+fn session(port) = do {
+  key = aes_keygen()
+  token = aes_keygen()
+  {port: port, token: token, key: key, mac: hmac_sha256(key, token), cookie: "helix_app_{port}"}
+}
+fn same_token(rt, s) = if s.is_missing() then false else hmac_sha256(rt.key, s) == rt.mac
+fn query_token(q) = do {
+  hits = "{q}".split("&").filter((p) => p.starts_with("token="))
+  if hits.count() == 0 then missing else url_decode_lenient(hits[0].drop(6))
+}
+fn cookie_token(rt, req) = do {
+  h = req.headers.get("cookie")
+  if h.is_missing() then missing else parse_cookies(h).get(rt.cookie)
+}
+fn local_host(rt, req) = do {
+  h = req.headers.get("host")
+  if h.is_missing() then false else ["127.0.0.1:{rt.port}", "localhost:{rt.port}", "[::1]:{rt.port}"].contains(h)
+}
+fn set_cookie(rt) = "{rt.cookie}={rt.token}; HttpOnly; SameSite=Strict; Path=/"
 
 # --- The page: theme and client. ----------------------------------------------------------
 
@@ -111,36 +177,96 @@ h2 { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacin
 CLIENT = """
 (() => {
   const root = document.getElementById('root');
-  // Patch the page IN PLACE: attributes change, nodes stay, so a changed style transitions
-  // instead of jumping. Elements with data-key keep their identity when their order changes.
-  function morph(a, b) {
-    if (a.nodeType !== b.nodeType || a.nodeName !== b.nodeName) { a.replaceWith(b.cloneNode(true)); return; }
-    if (a.nodeType === 3) { if (a.nodeValue !== b.nodeValue) a.nodeValue = b.nodeValue; return; }
-    if (a.nodeType !== 1) return;
-    for (const at of [...a.attributes]) if (!b.hasAttribute(at.name)) a.removeAttribute(at.name);
-    for (const at of [...b.attributes]) if (a.getAttribute(at.name) !== at.value) a.setAttribute(at.name, at.value);
-    if (a.tagName === 'INPUT' && document.activeElement !== a && b.hasAttribute('value')) a.value = b.getAttribute('value');
-    children(a, b);
+  // The page is BUILT FROM TREE DATA, not parsed from HTML, so a path of child indices
+  // names exactly one node: a parser's fix-ups (the <tbody> it adds to a <table>) would
+  // otherwise make the server's paths and the browser's nodes disagree. Each frame is a
+  // list of patch operations from `view_diff`, applied in order: only what changed is
+  // touched, so a node that is moving keeps its running transition.
+  const SVG = 'http://www.w3.org/2000/svg';
+  function build(n, ns) {
+    if (typeof n === 'string') return document.createTextNode(n);
+    const [tag, attrs, kids] = n;
+    const here = tag === 'svg' ? SVG : ns;
+    const el = here ? document.createElementNS(here, tag) : document.createElement(tag);
+    for (const [k, v] of attrs) el.setAttribute(k, v);
+    if (tag === 'input' && el.hasAttribute('value')) el.value = el.getAttribute('value');
+    const inner = tag === 'foreignObject' ? null : here;
+    for (const c of kids) el.appendChild(build(c, inner));
+    return el;
   }
-  function children(a, b) {
-    const keyed = new Map();
-    for (const c of a.children) if (c.dataset && c.dataset.key) keyed.set(c.dataset.key, c);
-    const next = [...b.childNodes];
-    next.forEach((n, i) => {
-      const k = n.nodeType === 1 && n.dataset ? n.dataset.key : undefined;
-      let cur = a.childNodes[i];
-      if (k !== undefined && keyed.has(k) && keyed.get(k) !== cur) { a.insertBefore(keyed.get(k), cur || null); cur = keyed.get(k); }
-      if (!cur) a.appendChild(n.cloneNode(true)); else morph(cur, n);
-    });
-    while (a.childNodes.length > next.length) a.removeChild(a.lastChild);
+  const nsOf = (p) => (p && p.namespaceURI === SVG && p.localName !== 'foreignObject' ? SVG : null);
+  function at(path) { let n = root.firstChild; for (const i of path) n = n.childNodes[i]; return n; }
+  // Focus, the caret and scroll positions belong to the person, not the frame. A patch that
+  // only changes attributes leaves them alone by construction; one that REPLACES the focused
+  // node (or the root, after a reconnect) would drop them, so they are noted first and given
+  // back to the node that now carries the same key or id.
+  const ident = (n) => n && n.getAttribute && (n.getAttribute('data-key') || n.id || null);
+  function byIdent(k) {
+    return root.querySelector('[data-key="' + CSS.escape(k) + '"]') || document.getElementById(k);
+  }
+  function note() {
+    const a = document.activeElement;
+    const k = a && a !== document.body && root.contains(a) ? ident(a) : null;
+    let sel = null;
+    try { if (k && a.selectionStart != null) sel = [a.selectionStart, a.selectionEnd, a.selectionDirection]; } catch (_) {}
+    const scrolls = [];
+    for (const n of root.querySelectorAll('[data-key]')) if (n.scrollTop || n.scrollLeft) scrolls.push([n.getAttribute('data-key'), n.scrollTop, n.scrollLeft]);
+    return {a, k, sel, scrolls, x: window.scrollX, y: window.scrollY};
+  }
+  function restore(s) {
+    if (s.k && !root.contains(s.a)) {
+      const n = byIdent(s.k);
+      if (n) {
+        // A focused field owns its text, as a dragged slider owns its value: what the person
+        // typed may be ahead of the model the new node was built from.
+        if (n.tagName === s.a.tagName && 'value' in n && 'value' in s.a) n.value = s.a.value;
+        n.focus({preventScroll: true});
+        try { if (s.sel && n.setSelectionRange) n.setSelectionRange(s.sel[0], s.sel[1], s.sel[2]); } catch (_) {}
+      }
+    }
+    for (const [k, top, left] of s.scrolls) {
+      const n = root.querySelector('[data-key="' + CSS.escape(k) + '"]');
+      if (n) { n.scrollTop = top; n.scrollLeft = left; }
+    }
+    if (window.scrollX !== s.x || window.scrollY !== s.y) window.scrollTo(s.x, s.y);
+  }
+  function apply(ops) {
+    // Only a frame that replaces nodes can lose anything; the common frame skips the bookkeeping.
+    const saved = ops.some((o) => o.op === 'replace' || o.op === 'remove') ? note() : null;
+    for (const o of ops) {
+      if (o.op === 'replace') {
+        if (o.path.length === 0) root.replaceChildren(build(o.node, null));
+        else { const n = at(o.path); n.replaceWith(build(o.node, nsOf(n.parentNode))); }
+      } else if (o.op === 'text') {
+        at(o.path).nodeValue = o.text;
+      } else if (o.op === 'attrs') {
+        const n = at(o.path);
+        for (const k of o.remove) n.removeAttribute(k);
+        for (const [k, v] of o.set) {
+          n.setAttribute(k, v);
+          // A slider being dragged owns its value; Helix's frame confirms it, never fights it.
+          if (k === 'value' && n.tagName === 'INPUT' && document.activeElement !== n) n.value = v;
+        }
+      } else if (o.op === 'insert') {
+        const p = at(o.path);
+        p.insertBefore(build(o.node, nsOf(p)), p.childNodes[o.at] || null);
+      } else if (o.op === 'remove') {
+        const p = at(o.path);
+        p.removeChild(p.childNodes[o.at]);
+      } else if (o.op === 'move') {
+        const p = at(o.path);
+        const n = p.childNodes[o.from];
+        p.removeChild(n);
+        p.insertBefore(n, p.childNodes[o.to] || null);
+      }
+    }
+    if (saved) restore(saved);
   }
   let version = 0;
   const es = new EventSource('/events');
   es.onmessage = (e) => {
     const d = JSON.parse(e.data);
-    const tpl = document.createElement('div');
-    tpl.innerHTML = d.html;
-    children(root, tpl);
+    apply(d.ops);
     document.documentElement.dataset.theme = d.theme || 'light';
     version += 1;
     document.documentElement.dataset.version = version;
@@ -181,9 +307,21 @@ fn theme_of(spec, model) = if spec.get("theme").is_missing() then "light" else (
 
 # One step of the fold for one connection: the model, the connections still open, and the
 # SSE streams to push to. A request is a page load, a subscription, or an event.
-fn handle(spec, st, c) = do {
+fn handle(spec, rt, st, c) = do {
   req = c.poll_request()
-  if req.is_missing() then (if c.is_open() then {...st, keep: st.keep.concat([c])} else st) else route(spec, st, c, req)
+  if req.is_missing() then (if c.is_open() then {...st, keep: st.keep.concat([c])} else st) else guard(spec, rt, st, c, req)
+}
+
+# Every route is behind the session (see "The session"): the Host must be this machine, and
+# the request must carry the cookie — or, on the one link the app printed, the token itself.
+fn guard(spec, rt, st, c, req) = if not local_host(rt, req) then refuse(st, c, 421, "this app answers only on 127.0.0.1") else if same_token(rt, cookie_token(rt, req)) then route(spec, st, c, req) else if req.method == "GET" and same_token(rt, query_token(req.query)) then do {
+  sent = c.respond({status: 303, headers: {"Set-Cookie": set_cookie(rt), "Location": "/", "Cache-Control": "no-store"}})
+  {...st, keep: st.keep.concat([c])}
+} else refuse(st, c, 403, "open the link this app printed when it started; it carries the session")
+
+fn refuse(st, c, status, why) = do {
+  sent = c.respond({status: status, text: why})
+  {...st, keep: st.keep.concat([c])}
 }
 
 fn route(spec, st, c, req) = match "{req.method} {req.path}" {
@@ -197,12 +335,8 @@ fn route(spec, st, c, req) = match "{req.method} {req.path}" {
   },
   "POST /event" => do {
     ev = req.body.parse_json()
-    next = try (spec.update)(st.model, ev)
     sent = c.respond({status: 204, text: ""})
-    if next.ok then {...st, model: next.value, keep: st.keep.concat([c]), changed: true} else do {
-      logged = elog("update failed on {ev.to_json()}: {next.error}")
-      {...st, keep: st.keep.concat([c])}
-    }
+    {...st, model: step(spec, st.model, ev), keep: st.keep.concat([c]), changed: true}
   },
   _ => do {
     sent = c.respond({status: 404, text: "not found"})
@@ -210,29 +344,55 @@ fn route(spec, st, c, req) = match "{req.method} {req.path}" {
   },
 }
 
-# The frame every subscriber receives: the rendered view and the theme. JSON, because an
-# SSE `data:` line cannot carry the newlines HTML has.
-fn frame(spec, model) = {html: render((spec.view)(model)), theme: theme_of(spec, model)}.to_json()
+# One event through `update`. An update that raises is logged and the model kept: one bad
+# event must not take the app down with it.
+fn step(spec, model, ev) = do {
+  next = try (spec.update)(model, ev)
+  if next.ok then next.value else do {
+    logged = elog("update failed on {ev.to_json()}: {next.error}")
+    model
+  }
+}
 
-fn serve(l, spec, model, conns, streams) = do {
-  ready = l.wait(conns, 1000)
+# A frame is the patch operations that bring a client's page up to date, and the theme.
+# JSON, because an SSE `data:` line cannot carry raw newlines.
+fn frame(ops, theme) = {ops: ops, theme: theme}.to_json()
+
+# `tree` is the view every current subscriber is showing. A change sends them its diff — and
+# nothing at all when the diff is empty, as a timer whose `update` changed nothing leaves it; a
+# client that has just subscribed gets the whole tree instead (`view_diff(missing, tree)`).
+fn serve(l, spec, rt, model, tree, conns, streams, timers) = do {
+  ready = l.wait(conns, sleep_ms(timers, clock_monotonic()))
   fresh = l.accept_poll()
   live = if fresh.is_missing() then conns else conns.concat([fresh])
-  st = live.reduce({model: model, keep: [], streams: streams, fresh: [], changed: false}, (s, c) => handle(spec, s, c))
-  # A new subscriber needs the current screen; everyone needs it after a change.
-  joined = st.streams.count() > streams.count()
-  pushed = if st.changed or joined then do {
-    f = frame(spec, st.model)
+  st = live.reduce({model: model, keep: [], streams: [], changed: false}, (s, c) => handle(spec, rt, s, c))
+  t = clock_monotonic()
+  due = timers.filter((x) => x.due <= t)
+  ticked = due.reduce(st.model, (m, x) => step(spec, m, {msg: x.msg, value: now()}))
+  changed = st.changed or due.count() > 0
+  next = if changed then (spec.view)(ticked) else tree
+  theme = theme_of(spec, ticked)
+  ops = if changed then view_diff(tree, next) else []
+  kept = if ops.count() == 0 then streams else do {
+    f = frame(ops, theme)
+    streams.filter((s) => s.send(f))
+  }
+  first = if st.streams.count() == 0 then [] else do {
+    f = frame(view_diff(missing, next), theme)
     st.streams.filter((s) => s.send(f))
-  } else st.streams
-  serve(l, spec, st.model, st.keep, pushed)
+  }
+  later = schedule(timers.map((x) => if x.due <= t then advance(x, t) else x), subs_of(spec, ticked), t)
+  serve(l, spec, rt, ticked, next, st.keep, kept.concat(first), later)
 }
 
 export fn app(spec) = do {
   port = if spec.get("port").is_missing() then 8080 else spec.port
   l = listen(port)
-  logged = elog("{spec.title} on http://127.0.0.1:{port}")
-  serve(l, spec, spec.init, [], [])
+  rt = session(port)
+  url = "http://127.0.0.1:{port}/?token={rt.token}"
+  logged = elog("{spec.title} on {url}")
+  opened = if spec.get("open").is_missing() then false else if spec.open then open_url(url) else false
+  serve(l, spec, rt, spec.init, (spec.view)(spec.init), [], [], schedule([], subs_of(spec, spec.init), clock_monotonic()))
 }
 
 # Replay a list of events through `update` and return every screen as HTML — the property a

@@ -1144,6 +1144,22 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         notes: "ESCAPES FIVE CHARACTERS, INCLUDING THE APOSTROPHE. Inside a single-quoted attribute (`<a title='...'>`) an unescaped `'` closes the attribute and everything after it is markup, so an escaper handling four of the five is one you cannot rely on — which is worse than none, because it is trusted. Uses `&#39;` rather than `&apos;`: the named form is XML and HTML5 only and is undefined in HTML4. ALLOCATES ONLY WHEN SOMETHING NEEDS ESCAPING — text with none is returned unchanged, sharing the original, which is the overwhelmingly common case in a page. `missing` propagates rather than rendering the word \"missing\" into a page. Keywords: html, escape, entity, xss, sanitize, render, attribute, markup, server rendering.",
     },
     DocEntry {
+        name: "view_html",
+        sig: "view_html(tree)",
+        doc: "An app's view tree — element records {tag, props, children} — rendered as HTML.",
+        example: "view_html({tag: \"p\", props: {class: \"note\"}, children: [{tag: \"#text\", text: \"a < b\"}]})",
+        example_out: "<p class=\"note\">a &lt; b</p>",
+        notes: "THE RENDERER OF ADR 0055's APP RUNTIME, in Rust because the same renderer in Helix took 5.4 ms for a 2,000-node view. A node is `{tag, props, children}` or `{tag: \"#text\", text}`. Props it reads: `class`, `key` (written `data-key`), `click` and `input` (the event messages, `data-click`/`data-input`), `style` (a record; `border_radius` becomes `border-radius`), `transition` (appended to the style) and `attrs` (raw attributes, e.g. SVG geometry). Text and attribute values are escaped as `html_escape` escapes them. `input`, `br`, `img`, `hr` and `meta` have no closing tag. Build trees with `examples/apps/ui.helix`. Keywords: ui, app, view, render, html, element, component, dom.",
+    },
+    DocEntry {
+        name: "view_diff",
+        sig: "view_diff(old, new)",
+        doc: "The patch operations that turn the rendered view `old` into `new`; `old` missing is a first frame.",
+        example: "view_diff({tag: \"p\", props: {}, children: []}, {tag: \"p\", props: {class: \"on\"}, children: []})",
+        example_out: "[{op: \"attrs\", path: [], remove: [], set: [[\"class\", \"on\"]]}]",
+        notes: "WHAT AN APP SENDS INSTEAD OF A PAGE (ADR 0055). A full-page morph of a 2,000-node view took 11.6 ms in Chromium — most of a frame — while a diff touches only what changed, so a running transition is patched rather than restarted. Operations, applied in order: `text` (a text node's new text), `attrs` (`set` pairs and `remove` names on one element), `replace` (a node rebuilt), `insert` / `remove` (a child at an index under `path`) and `move` (`from` → `to`). A `path` is child indices from the root. Children diff BY KEY when every child on both sides has a unique `key`, so a reordered list moves its nodes; otherwise by position. A node in an operation is in wire form: a string for text, `[tag, [[name, value], ...], [children]]` for an element. Keywords: ui, app, view, diff, patch, virtual dom, reconcile, keyed, update.",
+    },
+    DocEntry {
         name: "read_bytes",
         sig: "read_bytes(path)",
         doc: "The whole file as Bytes, with no UTF-8 requirement.",
