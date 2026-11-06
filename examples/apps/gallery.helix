@@ -1,0 +1,229 @@
+# The component gallery — every component of `ui` in one app (ADR 0055 Phase 2).
+#
+#   helix run examples/apps/gallery.helix             # then open the link it prints
+#   helix run examples/apps/gallery.helix --open      # …or let it open your browser
+#   helix run examples/apps/gallery.helix --replay    # a scripted session, as HTML
+#
+# It is also the design system's test bench: `tests/ui/gallery.mjs` drives it in Chromium,
+# checks every state with axe-core in light and dark, and screenshots it.
+
+import ui
+
+ROWS = 10000
+GROUPS = ["alpha", "beta", "gamma", "delta", "epsilon"]
+
+# --- Data. --------------------------------------------------------------------------------
+
+# Ten thousand rows for the virtualised table: the browser only ever holds a screenful.
+fn table_data() = do {
+  noise = randn(ROWS, 11)
+  dataframe({
+    id: range(1, ROWS + 1),
+    sample: range(0, ROWS).map((i) => "S-{100000 + i * 7919 % 900000}"),
+    group: range(0, ROWS).map((i) => GROUPS[i * 31 % 5]),
+    value: range(0, ROWS).map((i) => 50.0 + 12.0 * noise[i]),
+    passed: range(0, ROWS).map((i) => noise[i] > -1.0),
+  })
+}
+TABLE = table_data()
+
+fn series(seed) = do {
+  x = linspace(0.0, 12.0, 49)
+  phase = seed * 0.7
+  [
+    {name: "signal", xs: x, ys: x.map((t) => 2.0 * sin(t * 0.8 + phase) + 0.25 * t)},
+    {name: "trend", xs: x, ys: x.map((t) => 0.25 * t + cos(t * 0.4 + phase))},
+  ]
+}
+fn cloud(seed) = do {
+  a = randn(80, seed)
+  b = randn(80, seed + 100)
+  {xs: a, ys: range(0, 80).map((i) => 0.6 * a[i] + 0.8 * b[i])}
+}
+fn counts(seed) = do {
+  r = random(5, seed)
+  range(0, 5).map((i) => round(20.0 + 80.0 * r[i]))
+}
+
+# --- The model. ---------------------------------------------------------------------------
+
+init = {
+  dark: false,
+  tab: "account",
+  name: "", email: "", bio: "", plan: "pro", agree: false, notify: true, volume: 40,
+  submitted: false,
+  menu: false, dialog: false,
+  toasts: [], next: 1,
+  offset: 0,
+  seed: 1,
+  last: "nothing yet",
+}
+
+fn toast(m, text, tone) = {...m, toasts: m.toasts.concat([{id: m.next, text: text, tone: tone, born: missing}]), next: m.next + 1}
+
+fn errors(m) = {
+  name: ui.check(m.name, [ui.required("Enter your name."), ui.min_length(2, "A name has at least two letters.")]),
+  email: ui.check(m.email, [ui.required("Enter an email address."), ui.pattern("""^[^@\s]+@[^@\s]+\.[^@\s]+$""", "That doesn't look like an email address.")]),
+  agree: if m.agree then missing else "Accept the terms to continue.",
+}
+fn valid(m) = do {
+  e = errors(m)
+  e.name.is_missing() and e.email.is_missing() and e.agree.is_missing()
+}
+
+fn update(m, e) = match e.msg {
+  "theme" => {...m, dark: not m.dark},
+  "tab" => {...m, tab: e.value},
+  "name" => {...m, name: e.value},
+  "email" => {...m, email: e.value},
+  "bio" => {...m, bio: e.value},
+  "plan" => {...m, plan: e.value},
+  "agree" => {...m, agree: e.value},
+  "notify" => {...m, notify: e.value},
+  "volume" => {...m, volume: e.value},
+  "submit" => if valid(m) then toast({...m, submitted: true}, "Saved — welcome, {m.name}.", "success") else {...m, submitted: true},
+  "reset" => {...init, dark: m.dark, toasts: m.toasts, next: m.next},
+  "menu" => {...m, menu: not m.menu},
+  "pick" => toast({...m, menu: false, last: e.value}, "Chose “{e.value}”.", "accent"),
+  "open-dialog" => {...m, dialog: true},
+  "close-dialog" => {...m, dialog: false},
+  "confirm" => toast({...m, dialog: false}, "Deleted 3 drafts.", "danger"),
+  "toast" => toast(m, "A toast, number {m.next}.", "neutral"),
+  "dismiss" => {...m, toasts: m.toasts.filter((t) => "{t.id}" != e.value)},
+  "scroll" => {...m, offset: e.value},
+  "reshuffle" => {...m, seed: m.seed + 1},
+  # Toasts expire five seconds after the first tick that sees them.
+  "tick" => {...m, toasts: m.toasts.map((t) => if t.born.is_missing() then {...t, born: e.value} else t).filter((t) => e.value - t.born < 5.0)},
+  _ => m,
+}
+
+# --- The view. ----------------------------------------------------------------------------
+
+fn header(m) = ui.el("header", {class: "top"}, [
+  ui.el("div", {}, [ui.heading("Components"), ui.label("Every component of ui.helix — built in Helix, rendered and diffed in Rust, animated on the compositor.")]),
+  ui.el("div", {class: "actions"}, [
+    ui.menu("actions", "Actions", m.menu, "menu", [
+      {label: "Duplicate", msg: "pick", value: "Duplicate"},
+      {label: "Rename", msg: "pick", value: "Rename"},
+      {label: "Archive", msg: "pick", value: "Archive"},
+    ]),
+    ui.toggle("dark", "Dark", m.dark, "theme"),
+  ]),
+])
+
+fn buttons(m) = ui.card("Buttons", [
+  ui.cluster([ui.button("Default", "toast"), ui.button("Primary", "toast", variant: "primary"), ui.button("Ghost", "toast", variant: "ghost"), ui.button("Delete…", "open-dialog", variant: "danger")], gap: 2),
+  ui.cluster([
+    ui.button("Disabled", "toast", disabled: true),
+    ui.tooltip("tip-copy", "Copy the link", ui.icon_button("⧉", "Copy link", "toast")),
+    ui.tooltip("tip-more", "More options", ui.icon_button("⋯", "More options", "toast")),
+    ], gap: 2),
+  ui.cluster([ui.badge("Neutral"), ui.badge("Accent", tone: "accent"), ui.badge("Passed", tone: "success"), ui.badge("Pending", tone: "warning"), ui.badge("Failed", tone: "danger")], gap: 2),
+])
+
+fn account(m) = do {
+  e = errors(m)
+  show = (field) => if m.submitted then field else missing
+  ui.form("submit", [
+    ui.text_input("name", "Name", m.name, "name", error: show(e.name)),
+    ui.text_input("email", "Email", m.email, "email", kind: "email", hint: "We only use it to sign you in.", error: show(e.email), placeholder: "ada@example.com"),
+    ui.select("plan", "Plan", m.plan, [["free", "Free"], ["pro", "Pro — $8/month"], ["team", "Team — $20/seat"]], "plan"),
+    ui.textarea("bio", "About you", m.bio, "bio", rows: 3, hint: "{m.bio.count()} / 160 characters", error: if m.bio.count() > 160 then "Keep it under 160 characters." else missing),
+    ui.checkbox("agree", "I accept the terms", m.agree, "agree"),
+    ui.el("p", {class: "error-line"}, [ui.text(if m.submitted and not e.agree.is_missing() then e.agree else "")]),
+    ui.cluster([ui.submit_button("Save"), ui.button("Reset", "reset", variant: "ghost")], gap: 2),
+  ])
+}
+
+fn preferences(m) = ui.column([
+  ui.toggle("notify", "Email me about new releases", m.notify, "notify"),
+  ui.el("div", {class: "field"}, [ui.el("span", {class: "field-label"}, [ui.text("Volume — {m.volume}%")]), ui.slider("volume", 0, 100, m.volume, label: "Volume")]),
+  ui.progress("Volume", m.volume, max: 100.0),
+  ], gap: 3)
+
+fn about(m) = ui.column([
+  ui.paragraph("Tabs are a tablist: arrow keys, Home and End move between them, and only the selected tab is in the Tab order. Every panel is rendered; the others are hidden."),
+  ui.paragraph("Last menu choice: {m.last}."),
+  ], gap: 3)
+
+fn forms(m) = ui.card("Forms, tabs and validation", [
+  ui.tabs("settings", m.tab, [
+    {id: "account", label: "Account", content: account(m)},
+    {id: "preferences", label: "Preferences", content: preferences(m)},
+    {id: "about", label: "About", content: about(m)},
+    ], "tab", label: "Settings"),
+])
+
+fn feedback(m) = ui.card("Feedback and overlays", [
+  ui.paragraph("Toasts arrive in a polite live region and leave after five seconds; the rest glide into place. The dialog is the platform's modal <dialog>: it traps focus and gives it back."),
+  ui.cluster([ui.button("Show a toast", "toast", variant: "primary"), ui.button("Open dialog", "open-dialog")], gap: 2),
+  ui.stat("Toasts showing", "{m.toasts.count()}"),
+  ui.stat("Menu", if m.menu then "open" else "closed"),
+])
+
+fn data(m) = ui.card("Data — {ROWS} rows, virtualised", [
+  ui.paragraph("Only the rows in view (and a few either side) exist in the page; scrolling reports an offset and Helix sends the new window."),
+  ui.data_table("samples", TABLE, m.offset, "scroll", "Samples", height: 320),
+])
+
+fn charts(m) = do {
+  c = cloud(m.seed)
+  ui.card("Charts", [
+    ui.cluster([ui.button("Reshuffle data", "reshuffle"), ui.label("seed {m.seed}")], gap: 3),
+    ui.grid([
+      ui.line_chart("Signal and trend over time", series(m.seed)),
+      ui.scatter_chart("Eighty correlated points", c.xs, c.ys),
+      ui.bar_chart("Samples per group", GROUPS, counts(m.seed)),
+      ], min: 460),
+  ])
+}
+
+fn view(m) = ui.column([
+  header(m),
+  ui.grid([buttons(m), feedback(m)], min: 380),
+  forms(m),
+  charts(m),
+  data(m),
+  ui.dialog("confirm-delete", m.dialog, "Delete drafts?", [ui.paragraph("Three drafts will be deleted. This cannot be undone.")], "close-dialog", actions: [ui.button("Cancel", "close-dialog", variant: "ghost"), ui.button("Delete", "confirm", variant: "danger")]),
+  ui.toasts(m.toasts, "dismiss"),
+  ], gap: 5)
+
+STYLE = """
+.top { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--s-4); flex-wrap: wrap; }
+.actions { display: flex; gap: var(--s-4); align-items: center; }
+.error-line { margin: 0; min-height: 0; color: var(--danger); font-size: var(--t-sm); font-weight: 500; }
+.error-line:empty { display: none; }
+"""
+
+spec = {
+  title: "Component gallery",
+  init: init,
+  update: update,
+  view: view,
+  style: STYLE,
+  theme: (m) => if m.dark then "dark" else "light",
+  subscriptions: (m) => if m.toasts.count() == 0 then [] else [ui.every(1000, "tick")],
+}
+
+# A scripted session: a failed submit, a fix, a successful one, the menu, the dialog, a toast
+# expiring, a scroll through the table and the theme. One screen per event.
+SESSION = [
+  {msg: "submit", value: missing},
+  {msg: "name", value: "Ada"},
+  {msg: "email", value: "ada@example.com"},
+  {msg: "agree", value: true},
+  {msg: "submit", value: missing},
+  {msg: "menu", value: missing},
+  {msg: "pick", value: "Archive"},
+  {msg: "open-dialog", value: missing},
+  {msg: "confirm", value: missing},
+  {msg: "tick", value: 100.0},
+  {msg: "tick", value: 106.0},
+  {msg: "tab", value: "preferences"},
+  {msg: "volume", value: 75},
+  {msg: "scroll", value: 36000},
+  {msg: "reshuffle", value: missing},
+  {msg: "theme", value: missing},
+]
+
+fn main(port: Int = 8080, open: Bool = false, replay: Bool = false) = if replay then ui.replay(spec, SESSION).map((html) => print(html)) else ui.app({...spec, port: port, open: open})

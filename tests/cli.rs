@@ -4467,7 +4467,7 @@ fn an_app_replays_identically_on_every_engine() {
     assert!(screens[0].contains("<h2>Degree 5</h2>"), "{}", &screens[0][..300]);
     assert!(screens[1].contains("<h2>Degree 2</h2>") && screens[1].contains("seed 7"));
     assert!(screens[2].contains("seed 8"));
-    assert!(screens[3].contains("data-click=\"theme\">Light</button>"));
+    assert!(screens[3].contains("data-click=\"theme\" type=\"button\">Light</button>"));
     // Motion is declared, not driven: the fitted curve carries its spring as a CSS transition.
     assert!(screens[0].contains("transition: d ") && screens[0].contains("linear(0.0000"));
 }
@@ -4490,6 +4490,48 @@ fn a_subscribed_app_replays_identically_on_every_engine() {
     assert!(screens[4].contains(">01:02.50<"));
     // Newest lap first, each keyed by its number.
     assert!(screens[6].contains("data-key=\"lap2\"><span>Lap 2</span><span class=\"t\">01:02.50"));
+}
+
+/// The component gallery's scripted session (ADR 0055 Phase 2), on every engine. Each step is
+/// a promise a component makes in its markup — the part of accessibility a replay CAN pin
+/// (the rest, focus and keyboard, is `tests/ui/gallery.cjs` in Chromium): an invalid field is
+/// described by its error, an open menu says so and takes focus to its first item, the modal's
+/// state is the model's, the selected tab is the one announced, a progress bar reports its
+/// value, and a scrolled table renders only the window it shows.
+#[test]
+fn the_component_gallery_replays_identically_on_every_engine() {
+    let mut seen: Vec<String> = Vec::new();
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run(&["run", "examples/apps/gallery.helix", "--replay"], env, "");
+        assert_eq!(code, Some(0), "{env:?} stderr: {err}");
+        seen.push(out);
+    }
+    assert!(seen.windows(2).all(|w| w[0] == w[1]), "engines disagree on the replayed UI");
+    let s: Vec<&str> = seen[0].lines().collect();
+    assert_eq!(s.len(), 16, "one screen per event");
+    let has = |i: usize, what: &str| assert!(s[i].contains(what), "screen {i} lacks {what}");
+    // An empty submit: every error shows, tied to its field.
+    has(0, "aria-describedby=\"name-error\" aria-invalid=\"true\"");
+    has(0, "<p class=\"error\" id=\"name-error\" data-key=\"error\" data-enter=\"rise\" data-exit=\"fade\">Enter your name.</p>");
+    // Fixed and resubmitted: no error, and a toast in the live region.
+    assert!(!s[4].contains("aria-invalid"), "a valid form has no invalid field");
+    has(4, "role=\"status\" aria-live=\"polite\"");
+    has(4, "Saved — welcome, Ada.");
+    has(5, "aria-haspopup=\"menu\" aria-expanded=\"true\" aria-controls=\"actions-menu\"");
+    has(5, "role=\"menuitem\" data-click=\"pick\" data-value=\"Duplicate\" type=\"button\" tabindex=\"-1\" autofocus=\"\"");
+    has(6, "aria-expanded=\"false\"");
+    has(7, "data-modal=\"true\" data-open=\"true\"");
+    has(8, "data-open=\"false\"");
+    // Toasts expire five seconds after a tick first sees them.
+    assert_eq!(s[9].matches("data-key=\"toast-").count(), 3);
+    assert_eq!(s[10].matches("data-key=\"toast-").count(), 0);
+    has(11, "id=\"settings-tab-preferences\" role=\"tab\" data-click=\"tab\" data-value=\"preferences\" aria-selected=\"true\"");
+    has(12, "aria-valuenow=\"75\"");
+    // 36,000 px down a table of 36 px rows is row 1,000: rendered from 994 (six rows of
+    // overscan), and nothing like 10,000 rows in the page.
+    has(13, "<tr data-key=\"r994\" aria-rowindex=\"996\">");
+    assert!(s[13].matches("<tr data-key=\"r").count() < 40);
+    has(15, "<input id=\"dark\" role=\"switch\" data-change=\"theme\" type=\"checkbox\" name=\"dark\" checked=\"\">");
 }
 
 /// An app answers only the person who started it (ADR 0055 Phase 1). A localhost port is

@@ -10,11 +10,11 @@ name: ci
 # the two ever disagree, the local gate is the one people actually run, so this file
 # follows it.
 #
-# ALL SIX JOBS BLOCK. Three of them shipped advisory — clippy on 9 warnings, MSRV
-# unverified, `cargo audit` on 6 advisories — each with a written condition for promotion,
-# because asserting an unchecked claim as a gate is how a badge starts lying. Those
-# conditions have been met: the clippy warnings are fixed, MSRV was observed green on run
-# 31456823902, and audit is green with four unfixable advisories documented in
+# ALL SEVEN JOBS BLOCK (the seventh, `ui`, drives the app gallery in Chromium). Three
+# shipped advisory — clippy on 9 warnings, MSRV unverified, `cargo audit` on 6 advisories
+# — each with a written condition for promotion, because asserting an unchecked claim as
+# a gate is how a badge starts lying. Those conditions have been met: the clippy warnings
+# are fixed, MSRV was observed green on run 31456823902, and audit is green with four unfixable advisories documented in
 # `.cargo/audit.toml`. Only `cargo fmt` still reports without blocking, and that one is
 # deliberate rather than pending — see the `lint` job.
 
@@ -71,6 +71,41 @@ jobs:
   # and perf-sensitive tests run at full speed, but a rebuild does not pay the ~20-minute
   # fat-LTO link that `--release` would. Optimization level does not change any test's
   # pass/fail, so this is a faithful gate — see scripts/gate.sh for the reasoning.
+  # The app runtime's component gallery in a real browser (ADR 0055 Phase 2). Every state of
+  # every component — at rest, form errors, menu open, dialog open, toasts — is checked with
+  # axe-core in light AND dark, with motion and with `prefers-reduced-motion`, along with the
+  # behaviour the components promise: keyboard paths, focus return, the virtualised table.
+  # Zero violations is the gate. The screenshots are uploaded for review; they are not
+  # compared pixel-for-pixel, because a baseline is only stable against pinned fonts.
+  ui:
+    name: ui gallery (axe, light + dark)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: helix-ci
+      - name: Build the binary
+        run: cargo build --profile gate --features postgres --bin helix
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Playwright, Chromium and axe-core
+        run: |
+          npm install --no-save --no-package-lock playwright@1.49.1 axe-core@4.10.2
+          npx playwright install --with-deps chromium
+      - name: Drive the gallery
+        run: node tests/ui/gallery.cjs --helix target/gate/helix --out target/ui
+      - name: Upload the screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-gallery-screenshots
+          path: target/ui/*.png
+          if-no-files-found: ignore
+
   test:
     name: tests + example parity
     runs-on: ubuntu-latest
