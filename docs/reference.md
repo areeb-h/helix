@@ -1428,7 +1428,7 @@ Harmonic mean of precision and recall against the positive class (default 1).
 
 OLS without inference (no std_errors/p_values) — the fast fit for model loops.
 
-**Note:** With the intercept flag on (the default), coefficients[0] is the intercept.
+**Note:** With the intercept flag on (the default), coefficients[0] is the intercept. The coefficients are exactly `multiple_regression`'s — the same QR fit — and without an intercept `r_squared` is the uncentered one.
 
 ```
 >>> least_squares([[1.0, 2.0, 3.0]], [2.0, 4.0, 6.0]).coefficients
@@ -1438,6 +1438,8 @@ OLS without inference (no std_errors/p_values) — the fast fit for model loops.
 ### `linear_regression(xs, ys)`
 
 OLS fit of y ~ x → a {slope, intercept, r_squared, slope_p_value, ...} record.
+
+**Note:** The same fit `multiple_regression([xs], ys)` makes, so the two agree. Fitted by Householder QR with iterative refinement, not the normal equations: on NIST's certified Statistical Reference Datasets every coefficient, standard error and R² is within one digit of the best any double-precision program can do (`examples/statistics/nist.helix`).
 
 ```
 >>> linear_regression([1.0, 2.0, 3.0], [2.0, 4.0, 6.0]).slope
@@ -1466,7 +1468,7 @@ Mean squared error between two equal-length numeric arrays.
 
 OLS on predictor columns → {coefficients, std_errors, p_values, ...} record.
 
-**Note:** With the intercept flag on (the default), coefficients[0] is the intercept.
+**Note:** With the intercept flag on (the default), coefficients[0] is the intercept. Without it the fit is through the origin and `r_squared` is measured against the zero model (the uncentered total sum of squares), as R, SAS, Stata and NIST define it. Fitted by Householder QR with iterative refinement, not the normal equations: on NIST's certified Statistical Reference Datasets every coefficient, standard error and R² is within one digit of the best any double-precision program can do (`examples/statistics/nist.helix`). Collinearity is judged relative to the data, so the units of a predictor do not matter.
 
 ```
 >>> multiple_regression([[1.0, 2.0, 3.0]], [3.0, 6.0, 9.0], false).coefficients

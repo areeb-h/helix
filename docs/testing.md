@@ -90,8 +90,8 @@ Pass a single file (`helix test math_test.helix`) to run just that one.
 
 The toolchain's own suite runs through `scripts/gate.sh` (clippy with `-D warnings`,
 the full test suite on the `gate` profile, the dual-engine DataFrame campaign, and the
-example parity diff). Its current shape as of 0.10.1-dev (2026-11-02): **609 lib tests +
-397 CLI tests + 3 other integration tests**, plus **32 dual-engine tests**, and **160
+example parity diff). Its current shape as of 0.10.1-dev (2026-11-02): **612 lib tests +
+397 CLI tests + 3 other integration tests**, plus **32 dual-engine tests**, and **161
 programs** run under both DataFrame backends by `scripts/dfdiff.sh` — which needs the `dataframes`
 feature, since polars is the oracle rather than the default now.
 Five pieces worth knowing about:
@@ -152,6 +152,18 @@ Five pieces worth knowing about:
   times is a pattern, so it is written down as a rule: **a gate has to be sabotaged once
   to prove it can fail.** Add the check, then break the thing it watches and confirm the
   build goes red. An untested gate is a claim, not a check.
+- **Certified answers** (`examples/statistics/nist.helix`): every other gate here compares
+  Helix against itself — engine against engine, backend against backend, a release against
+  an earlier one — and so can only prove consistency. This one compares it against answers
+  it did not compute: NIST's Statistical Reference Datasets, certified in 500-digit
+  arithmetic. Each statistic's correct digits (LRE) must be within one of the most any
+  double-precision program can get on the same inputs, which
+  `examples/data/nist/ceiling.py` computes in exact rational arithmetic. It runs as an
+  example, so `vmparity.sh` runs it on all three engines and fails if it raises.
+
+  Sabotaged before it was trusted: the binary it was written against failed it on 24
+  statistics, which is how the regression solver's accuracy bug was found (0 digits on
+  Filip, 6 on Wampler, 7 on Longley; see the CHANGELOG).
 - **Whole-tree type-check** (`scripts/checkall.sh`): `helix check` plus `helix fmt
   --check` over every tracked `.helix` outside `tests/corpus/`, covering programs the
   running gates cannot start (they need generated fixtures).

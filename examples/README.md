@@ -68,6 +68,7 @@ golden output on all three engines.
 | [statistics.helix](statistics/statistics.helix) | Descriptive stats, t-test, correlation, regression |
 | [simulation.helix](statistics/simulation.helix) | Monte Carlo: seeded RNG, a bit-exact hand-written xorshift64, bootstrap CIs, random walks |
 | [regression.helix](statistics/regression.helix) | Polynomial model selection with AIC/BIC |
+| [nist.helix](statistics/nist.helix) | Helix against NIST's certified answers: regression and summary statistics scored digit by digit, failing if any falls a digit short of the best possible |
 | [mdl-induction.helix](statistics/mdl-induction.helix) | Few-shot learning as MDL induction — shortest rule generalizes, flexible fit overfits |
 | [metrics.helix](statistics/metrics.helix) | Regression + classification metrics (RMSE, F1, confusion matrix) |
 | [experiment.helix](statistics/experiment.helix) | An end-to-end experiment loop |

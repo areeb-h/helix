@@ -1,0 +1,152 @@
+# Helix against NIST's certified answers.
+#
+# The Statistical Reference Datasets (StRD) of the US National Institute of Standards and
+# Technology are how statistical software is audited: each file carries data and the
+# answers NIST computed for it in 500-digit arithmetic, "certified" to 15 significant
+# digits. The files are read here exactly as NIST publishes them (examples/data/nist/, with
+# their SHA-256 sums), parsed by this program, and every statistic is scored by its LRE —
+# the log relative error, the number of significant digits that agree with the certified
+# value (McCullough, 1998, "Assessing the Reliability of Statistical Software", The
+# American Statistician 52(4)). 15 is every digit a double can carry; a statistic below the
+# floor this program asserts fails it, and with it CI, on every engine.
+#
+#   helix examples/statistics/nist.helix
+
+# --- LRE: -log10(|est - cert| / |cert|), or the absolute error when the certified value is
+# --- 0; capped at 15 and floored at 0, the convention McCullough's tables use. An estimate
+# --- that is not a number at all (a NaN standard error) agrees in no digit.
+fn lre(est, cert) = do {
+  err = if cert == 0.0 then abs(est) else abs(est - cert) / abs(cert)
+  if is_nan(err) then 0.0 else if err == 0.0 then 15.0 else max(0.0, min(15.0, -log10(err)))
+}
+
+# --- A NIST file: CRLF lines, a header naming where the certified values and the data are.
+fn lines_of(path) = read_text(path).replace("\r", "").split("\n")
+fn fields(line) = line.re_find_all("""\S+""")
+fn span(lines, label) = do {
+  hit = lines.filter(it.re_match(label)).first()
+  caps = hit.re_captures("""lines\s+(\d+)\s+to\s+(\d+)""")
+  (caps[1].to_int(), caps[2].to_int())
+}
+fn block(lines, label) = do {
+  [lo, hi] = span(lines, label)
+  lines.drop(lo - 1).take(hi - lo + 1)
+}
+fn number_after(lines, pattern) = lines.filter(it.re_match(pattern)).first().re_captures(pattern)[1].to_float()
+
+# --- Linear least squares. Every model is a polynomial in one x, or (Longley) a column per
+# --- predictor; a certified B0 means the model has an intercept.
+fn lls(name) = do {
+  lines = lines_of("examples/data/nist/lls/{name}.dat")
+  cert = block(lines, "Certified Values")
+  params = cert.filter(it.re_match("""^\s*B\d+\s""")).map((l) => fields(l))
+  b = params.map((f) => f[1].to_float())
+  se = params.map((f) => f[2].to_float())
+  intercept = params[0][0] == "B0"
+  rows = block(lines, """^\s*Data\s""").map((l) => fields(l)).filter(it.count() > 0)
+  y = rows.map((r) => r[0].to_float())
+  cols = rows[0].count() - 1
+  x = rows.map((r) => r[1].to_float())
+  degree = if intercept then b.count() - 1 else b.count()
+  predictors = if cols > 1 then range(1, cols + 1).map((j) => rows.map((r) => r[j].to_float()))
+    else range(1, degree + 1).map((p) => x.map((v) => v ** p))
+  fit = multiple_regression(predictors, y, intercept)
+  n = y.count()
+  k = b.count()
+  rsd = sqrt(fit.rss / (n - k))
+  {
+    name: name,
+    coef: range(0, k).map((i) => lre(fit.coefficients[i], b[i])).min(),
+    se: range(0, k).map((i) => lre(fit.std_errors[i], se[i])).min(),
+    rsd: lre(rsd, number_after(cert, """Standard Deviation\s+(\S+)""")),
+    r2: lre(fit.r_squared, number_after(cert, """R-Squared\s+(\S+)""")),
+  }
+}
+
+# --- The same file through the one-predictor `linear_regression`, which reports the slope's
+# --- standard error only.
+fn simple(name) = do {
+  lines = lines_of("examples/data/nist/lls/{name}.dat")
+  cert = block(lines, "Certified Values")
+  params = cert.filter(it.re_match("""^\s*B\d+\s""")).map((l) => fields(l))
+  rows = block(lines, """^\s*Data\s""").map((l) => fields(l)).filter(it.count() > 0)
+  y = rows.map((r) => r[0].to_float())
+  x = rows.map((r) => r[1].to_float())
+  fit = linear_regression(x, y)
+  {
+    name: "{name}*",
+    coef: min(lre(fit.intercept, params[0][1].to_float()), lre(fit.slope, params[1][1].to_float())),
+    se: lre(fit.slope_std_error, params[1][2].to_float()),
+    rsd: lre(sqrt(fit.rss / (y.count() - 2)), number_after(cert, """Standard Deviation\s+(\S+)""")),
+    r2: lre(fit.r_squared, number_after(cert, """R-Squared\s+(\S+)""")),
+  }
+}
+
+# --- Univariate summary statistics: the mean, the sample standard deviation (n - 1) and the
+# --- lag-1 autocorrelation r(1) = sum (y_i - ybar)(y_{i-1} - ybar) / sum (y_i - ybar)^2.
+fn univ(name) = do {
+  lines = lines_of("examples/data/nist/univ/{name}.dat")
+  cert = block(lines, "Certified Values")
+  y = block(lines, """^\s*Data\s""").map((l) => fields(l)).filter(it.count() > 0).map((f) => f[0].to_float())
+  ybar = y.mean()
+  d = y.map((v) => v - ybar)
+  r1 = range(1, d.count()).map((i) => d[i] * d[i - 1]).sum() / d.map((v) => v * v).sum()
+  {
+    name: name,
+    mean: lre(ybar, number_after(cert, """ybar:\s+(\S+)""")),
+    sd: lre(y.std(), number_after(cert, """\bs:\s+(\S+)""")),
+    r1: lre(r1, number_after(cert, """r\(1\):\s+(\S+)""")),
+  }
+}
+
+# --- THE BEST ANY DOUBLE-PRECISION PROGRAM CAN DO on these inputs: every statistic computed
+# --- in exact rational arithmetic on the same doubles, rounded once (examples/data/nist/
+# --- ceiling.py, standard-library Python sharing no code with Helix). Helix must be within
+# --- one digit of it on every statistic, or this program fails.
+best = {
+  Norris: [14.1, 13.9, 14.0, 15.0], "Norris*": [14.1, 13.9, 14.0, 15.0], Pontius: [13.5, 13.8, 13.8, 15.0],
+  NoInt1: [14.7, 15.0, 15.0, 15.0], NoInt2: [15.0, 14.9, 15.0, 15.0],
+  Filip: [7.6, 7.6, 9.6, 11.8], Longley: [14.6, 14.9, 15.0, 15.0],
+  Wampler1: [15.0, 15.0, 15.0, 15.0], Wampler2: [13.2, 15.0, 15.0, 15.0],
+  Wampler3: [15.0, 14.5, 14.8, 15.0], Wampler4: [15.0, 14.5, 14.8, 15.0],
+  Wampler5: [15.0, 14.5, 14.8, 15.0],
+  PiDigits: [15.0, 15.0, 15.0], Lottery: [15.0, 15.0, 14.9], Lew: [15.0, 15.0, 14.8],
+  Mavro: [15.0, 13.1, 13.9], Michelso: [15.0, 13.8, 13.4], NumAcc1: [15.0, 15.0, 15.0],
+  NumAcc2: [15.0, 15.0, 15.0], NumAcc3: [15.0, 9.5, 12.2], NumAcc4: [15.0, 8.3, 11.0],
+}
+
+fn f1(v) = "{v:4.1f}"
+fn cell(got, ceiling) = "{f1(got)} ({f1(ceiling)})"
+# A statistic more than one digit short of the ceiling, named.
+fn shortfalls(name, labels, got) = do {
+  ceil = best.get(name)
+  range(0, labels.count()).filter((i) => got[i] < ceil[i] - 1.0).map((i) => "{name} {labels[i]}: {f1(got[i])} digits, best possible {f1(ceil[i])}")
+}
+
+print("NIST StRD — linear regression. Digits that agree with NIST's certified value (LRE, max 15),")
+print("and in brackets the most any double-precision program can get on the same inputs.")
+print("{"dataset":<10}  {"coefficients":>12}  {"std errors":>12}  {"resid. SD":>12}  {"R²":>12}")
+lls_names = ["Norris", "Pontius", "NoInt1", "NoInt2", "Filip", "Longley", "Wampler1", "Wampler2", "Wampler3", "Wampler4", "Wampler5"]
+regs = lls_names.map(lls).concat([simple("Norris")])
+shown = regs.map((r) => do {
+  b = best.get(r.name)
+  print("{r.name:<10}  {cell(r.coef, b[0]):>12}  {cell(r.se, b[1]):>12}  {cell(r.rsd, b[2]):>12}  {cell(r.r2, b[3]):>12}")
+})
+print("* the same data through `linear_regression`, the one-predictor fit (its slope's std error).")
+lls_short = regs.flat_map((r) => shortfalls(r.name, ["coefficients", "std errors", "resid. SD", "R²"], [r.coef, r.se, r.rsd, r.r2]))
+
+print()
+print("NIST StRD — univariate summary statistics.")
+print("{"dataset":<10}  {"mean":>12}  {"std dev":>12}  {"r(1)":>12}")
+univ_names = ["PiDigits", "Lottery", "Lew", "Mavro", "Michelso", "NumAcc1", "NumAcc2", "NumAcc3", "NumAcc4"]
+unis = univ_names.map(univ)
+shown2 = unis.map((u) => do {
+  b = best.get(u.name)
+  print("{u.name:<10}  {cell(u.mean, b[0]):>12}  {cell(u.sd, b[1]):>12}  {cell(u.r1, b[2]):>12}")
+})
+univ_short = unis.flat_map((u) => shortfalls(u.name, ["mean", "std dev", "r(1)"], [u.mean, u.sd, u.r1]))
+
+short = lls_short.concat(univ_short)
+print()
+print(if short.count() == 0 then "Every certified statistic is within one digit of the best possible." else "")
+verdict = if short.count() == 0 then true else raise("{short.count()} statistics fell more than one digit short of the best possible: {short.join("; ")}", "this is an accuracy regression in Helix's statistics — compare `examples/data/nist/ceiling.py`.")

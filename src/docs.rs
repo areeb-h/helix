@@ -635,7 +635,7 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         doc: "OLS fit of y ~ x → a {slope, intercept, r_squared, slope_p_value, ...} record.",
         example: "linear_regression([1.0, 2.0, 3.0], [2.0, 4.0, 6.0]).slope",
         example_out: "2.0",
-        notes: "",
+        notes: "The same fit `multiple_regression([xs], ys)` makes, so the two agree. Fitted by Householder QR with iterative refinement, not the normal equations: on NIST's certified Statistical Reference Datasets every coefficient, standard error and R² is within one digit of the best any double-precision program can do (`examples/statistics/nist.helix`).",
     },
     DocEntry {
         name: "multiple_regression",
@@ -643,7 +643,7 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         doc: "OLS on predictor columns → {coefficients, std_errors, p_values, ...} record.",
         example: "multiple_regression([[1.0, 2.0, 3.0]], [3.0, 6.0, 9.0], false).coefficients",
         example_out: "[3.0]",
-        notes: "With the intercept flag on (the default), coefficients[0] is the intercept.",
+        notes: "With the intercept flag on (the default), coefficients[0] is the intercept. Without it the fit is through the origin and `r_squared` is measured against the zero model (the uncentered total sum of squares), as R, SAS, Stata and NIST define it. Fitted by Householder QR with iterative refinement, not the normal equations: on NIST's certified Statistical Reference Datasets every coefficient, standard error and R² is within one digit of the best any double-precision program can do (`examples/statistics/nist.helix`). Collinearity is judged relative to the data, so the units of a predictor do not matter.",
     },
     DocEntry {
         name: "least_squares",
@@ -651,7 +651,7 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         doc: "OLS without inference (no std_errors/p_values) — the fast fit for model loops.",
         example: "least_squares([[1.0, 2.0, 3.0]], [2.0, 4.0, 6.0]).coefficients",
         example_out: "[0.0, 2.0]",
-        notes: "With the intercept flag on (the default), coefficients[0] is the intercept.",
+        notes: "With the intercept flag on (the default), coefficients[0] is the intercept. The coefficients are exactly `multiple_regression`'s — the same QR fit — and without an intercept `r_squared` is the uncentered one.",
     },
     DocEntry {
         name: "variable",

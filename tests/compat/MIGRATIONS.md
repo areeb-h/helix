@@ -247,3 +247,16 @@ no entry. A source edit is not a behavior change.
   error ("a record update takes one `...spread`, not two"); it is a merge now, later parts
   winning. Additive: the sentence is gone, nothing that parsed reads differently, and a spread
   that is not the first element keeps its own refusal. No corpus program or golden moved.
+
+## v0.11.0 → 0.11.1-dev — regression by QR, checked against exact arithmetic
+
+- `examples__numerics__random` — `fit slope ~2:` changed in its last digit,
+  `1.8909032291807932` → `1.8909032291807935`, at both the **v0.5.1 and v0.6.0** baselines.
+  `linear_regression` is now the Householder-QR fit `multiple_regression` makes, with
+  iterative refinement, where it was `sxy / sxx`. The new digit is the RIGHT one: the
+  example's six points, read back as the exact doubles it prints and solved in rational
+  arithmetic (`fractions.Fraction`), give a slope that rounds to `1.8909032291807935`; the
+  old value was 0.88 ulp from it and the new one is 0.12 ulp. The change that made this
+  happen is the accuracy fix NIST's certified datasets exposed (`examples/statistics/
+  nist.helix`, 0 correct digits on Filip before it); this program is the one released
+  baseline that prints a fitted coefficient to every digit.
