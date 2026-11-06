@@ -2,6 +2,63 @@
 
 ## Unreleased
 
+### Added
+
+- **Helix scored against NIST's certified answers: `examples/statistics/nist.helix`.** The
+  Statistical Reference Datasets are how statistical software is audited — data plus results
+  NIST certified in 500-digit arithmetic. Twenty of them (eleven linear regressions, nine
+  summary-statistics files) are committed as published (`examples/data/nist/`, with their
+  SHA-256 sums), parsed by the program itself, and every statistic is scored by its LRE, the
+  number of significant digits that agree with the certified value (McCullough, 1998). Beside
+  each score is the most any double-precision program can get on the same inputs, computed in
+  exact rational arithmetic by `examples/data/nist/ceiling.py` (standard-library Python, no
+  shared code). Every certified statistic is within one digit of that ceiling, on all three
+  engines, and the program fails — and the example-parity gate with it — if one is not. It is
+  the README's new Accuracy section.
+
+### Changed
+
+- **A regression without an intercept reports the uncentered R².** With `intercept = false`,
+  `multiple_regression` and `least_squares` measured R² against the mean — a model a fit
+  through the origin cannot express, which can make R² negative — so NIST's certified R² for
+  NoInt1 and NoInt2 agreed in 0 digits. It is now measured against the zero model (`1 −
+  rss/Σy²`), as R, SAS, Stata and NIST define it, and `adj_r_squared` uses `n` rather than
+  `n − 1` for the baseline (R's `summary.lm`). With an intercept nothing changes. A program
+  that compared a no-intercept R² with an intercepted one should compare residual sums of
+  squares instead.
+
+### Fixed
+
+- **Regression is accurate to the last digit a double can hold, where it was 0 on NIST's
+  hardest file.** `multiple_regression`, `least_squares` and `linear_regression` solved the
+  normal equations — `XᵀX` inverted by Gauss-Jordan — which squares the condition number of
+  the problem. Against NIST's certified values that was 0 correct digits on Filip (a NaN
+  standard error), 6.1 on the Wampler polynomials, 7.3 on Longley and 10.8 on Pontius. They
+  now factor `X` itself by Householder QR and refine the solution with Björck's
+  augmented-system iteration, residuals accumulated in compensated (FMA) arithmetic: 7.6,
+  15.0, 14.6 and 13.5 — each the exact-arithmetic ceiling — and every other certified
+  coefficient, standard error and R² within a digit of it. R² is taken from whichever of the
+  residual and explained sums is smaller, so neither a fit that explains little (Wampler5,
+  R² ≈ 0.002) nor one that explains nearly everything (Filip) loses digits to cancellation.
+  `linear_regression` is now the same fit as `multiple_regression([xs], ys)`, so the two
+  agree; its intercept went from 12.8 to 14.1 digits on Norris. RSS is summed from the
+  residuals' double-length values and R² formed as `(tss − rss)/tss` in one rounding, so
+  an exact R² of 0.6 prints as `0.6`. The one released baseline that prints a fitted slope
+  to every digit (`examples/numerics/random.helix`) moved in its last digit, to the
+  correctly rounded exact answer (0.12 ulp from it, where it was 0.88 — recorded in
+  `tests/compat/MIGRATIONS.md`).
+- **A fit no longer depends on the units of its predictors.** The normal equations refused
+  any pivot below an absolute `1e-12`, so `multiple_regression([[1e-7, 2e-7, 3e-7, 4.5e-7]],
+  y)` was "undefined … collinear predictors" while the same data in plain units fitted. The
+  rank test is now relative to the largest diagonal of `R`.
+
+### Performance
+
+- **A regression costs about three and a half times what it did** — 12 → 42 µs for 200
+  points and five parameters, of which the refinement is about half. That is the price of the digits above,
+  paid deliberately; the repository's model-selection examples run in the same time as
+  before, being dominated by everything else they do.
+
 ## v0.11.0 — 2026-11-04
 
 ### Added

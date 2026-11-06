@@ -311,28 +311,19 @@ pub fn linear_regression(xs: &[f64], ys: &[f64]) -> Option<LinFit> {
     if n < 3 {
         return None; // need n - 2 >= 1 residual degrees of freedom for inference
     }
-    let mx = mean(xs);
-    let my = mean(ys);
-    let mut sxy = 0.0;
-    let mut sxx = 0.0;
-    let mut syy = 0.0;
-    for (&x, &y) in xs.iter().zip(ys) {
-        let dx = x - mx;
-        let dy = y - my;
-        sxy += dx * dy;
-        sxx += dx * dx;
-        syy += dy * dy;
-    }
-    if sxx == 0.0 || syy == 0.0 {
+    let constant = |v: &[f64]| v.iter().all(|&a| a == v[0]);
+    if constant(xs) || constant(ys) {
         return None; // a constant predictor or response has no relationship to fit
     }
-    let slope = sxy / sxx;
-    let intercept = my - slope * mx;
-    let r_squared = (sxy * sxy) / (sxx * syy);
-    // Residual sum of squares and the slope's standard error.
-    let rss = syy - slope * sxy; // == syy * (1 - r_squared)
+    // The fit itself is the one `multiple_regression` makes (Householder QR with refinement,
+    // see `ols_core`), so the two never disagree on the same data. The textbook
+    // `slope = sxy / sxx`, `intercept = ȳ − slope·x̄` it replaced lost a digit or two: 12.8
+    // digits of NIST Norris's certified intercept, where 14.1 are there to be had.
+    let c = ols_core(&[xs.to_vec()], ys, true)?;
+    let r_squared = c.r_squared();
+    let (intercept, slope, rss) = (c.beta[0], c.beta[1], c.rss);
     let resid_var = rss / (n as f64 - 2.0);
-    let slope_std_error = (resid_var / sxx).sqrt();
+    let slope_std_error = (resid_var * c.inv_diag[1]).sqrt();
     // Two-sided p-value for H0: slope = 0, via the t survival function.
     let slope_p_value = if slope_std_error == 0.0 {
         0.0 // a perfect fit: the slope is infinitely well determined
@@ -341,8 +332,7 @@ pub fn linear_regression(xs: &[f64], ys: &[f64]) -> Option<LinFit> {
         let df = n as f64 - 2.0;
         betai(df / 2.0, 0.5, df / (df + t * t))
     };
-    let predictions: Vec<f64> = xs.iter().map(|&x| intercept + slope * x).collect();
-    let residuals: Vec<f64> = ys.iter().zip(&predictions).map(|(&y, &p)| y - p).collect();
+    let (predictions, residuals) = (c.predictions, c.residuals);
     Some(LinFit {
         slope,
         intercept,
@@ -372,74 +362,98 @@ pub struct MultiFit {
     pub residuals: Vec<f64>,
 }
 
-/// Invert a square matrix by Gauss-Jordan elimination with partial pivoting. Returns
-/// `None` if the matrix is singular (to within a small pivot tolerance).
-fn invert(m: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
-    let n = m.len();
-    // Augment with the identity: [m | I].
-    let mut a: Vec<Vec<f64>> = m
-        .iter()
-        .enumerate()
-        .map(|(i, row)| {
-            let mut r = row.clone();
-            r.extend((0..n).map(|j| if i == j { 1.0 } else { 0.0 }));
-            r
-        })
-        .collect();
-    for col in 0..n {
-        // Partial pivot: move the largest-magnitude entry in this column to the diagonal.
-        let mut piv = col;
-        for r in (col + 1)..n {
-            if a[r][col].abs() > a[piv][col].abs() {
-                piv = r;
-            }
-        }
-        if a[piv][col].abs() < 1e-12 {
-            return None; // singular (e.g. collinear predictors)
-        }
-        a.swap(col, piv);
-        let d = a[col][col];
-        a[col].iter_mut().for_each(|x| *x /= d);
-        let pivot_row = a[col].clone();
-        for (r, row) in a.iter_mut().enumerate() {
-            if r != col {
-                let f = row[col];
-                for (x, p) in row.iter_mut().zip(&pivot_row) {
-                    *x -= f * p;
-                }
-            }
-        }
-    }
-    Some(a.iter().map(|row| row[n..].to_vec()).collect())
-}
-
 /// Ordinary least-squares multiple regression of `y` on the given predictor columns
-/// (each of length `n`), fitting `y = b0 + b1*x1 + ... + bp*xp` via the normal
-/// equations `(XᵀX) b = Xᵀy`. Returns the coefficients (intercept first), their
+/// (each of length `n`), fitting `y = b0 + b1*x1 + ... + bp*xp` by least squares (see
+/// [`ols_core`] for how). Returns the coefficients (intercept first), their
 /// standard errors and two-sided p-values (t on `n - k` degrees of freedom, `k` the
 /// parameter count), and the R² / adjusted-R². Returns `None` when there is no
 /// predictor, fewer observations than parameters plus one, a length mismatch, a
-/// constant response, or collinear predictors (a singular `XᵀX`).
+/// constant response, or collinear predictors.
 /// `intercept` controls whether a constant term is auto-added. With
 /// `intercept = false` the fit passes through the origin and the coefficients map
 /// one-to-one to the supplied predictors (so a user-supplied constant column won't
 /// collide with an auto-intercept).
-/// The shared core of every OLS fit: validate, build and solve the normal
-/// equations `(XᵀX)β = Xᵀy`, and compute fitted values / residuals / RSS / TSS.
-/// Returns `None` on no predictors, a length mismatch, fewer rows than parameters,
-/// or a singular `XᵀX` (collinear predictors). `intercept` prepends an all-ones
-/// column. Both [`least_squares`] and [`multiple_regression`] build on this.
+/// What [`ols_core`] hands both fits.
 struct OlsCore {
     beta: Vec<f64>,
-    inv: Vec<Vec<f64>>,
+    /// The diagonal of `(XᵀX)⁻¹`, which is all a standard error needs.
+    inv_diag: Vec<f64>,
     predictions: Vec<f64>,
     residuals: Vec<f64>,
     rss: f64,
+    /// What rounding `rss` to a double dropped, so `tss − rss` can be formed exactly.
+    rss_lo: f64,
     tss: f64,
+    ess: f64,
     k: usize,
     n: usize,
+    intercept: bool,
 }
 
+/// A compensated (error-free-transformation) accumulator: each product's rounding error is
+/// recovered with a fused multiply-add and each sum's with TwoSum (Ogita, Rump & Oishi's
+/// Dot2), so the result carries close to twice a double's precision before its last
+/// rounding. `mul_add` is a correctly rounded fused operation on every platform, so the
+/// value is the same wherever it runs.
+#[derive(Clone, Copy)]
+struct Acc {
+    s: f64,
+    c: f64,
+}
+
+impl Acc {
+    fn new(init: f64) -> Self {
+        Acc { s: init, c: 0.0 }
+    }
+    #[inline]
+    fn add_prod(&mut self, x: f64, b: f64) {
+        let prod = x * b;
+        let prod_err = x.mul_add(b, -prod);
+        let t = self.s + prod;
+        let bv = t - self.s;
+        self.c += prod_err + ((self.s - (t - bv)) + (prod - bv));
+        self.s = t;
+    }
+    fn value(self) -> f64 {
+        self.s + self.c
+    }
+    /// The sum as a double-length pair `(hi, lo)`, `hi = fl(hi + lo)` (Fast2Sum).
+    fn pair(self) -> (f64, f64) {
+        let hi = self.s + self.c;
+        (hi, self.c - (hi - self.s))
+    }
+}
+
+impl OlsCore {
+    fn r_squared(&self) -> f64 {
+        // (tss − rss)/tss rather than 1 − rss/tss: one rounding instead of two, and rss's
+        // low part included, so an exact R² of 0.6 prints as 0.6 and not 0.6000000000000001.
+        if self.rss <= self.ess {
+            ((self.tss - self.rss) - self.rss_lo) / self.tss
+        } else {
+            self.ess / self.tss
+        }
+    }
+}
+
+/// The shared core of every OLS fit: validate, factor `X = QR` by Householder reflections,
+/// solve `Rβ = Qᵀy`, and compute fitted values / residuals / RSS / TSS. Returns `None` on no
+/// predictors, a length mismatch, fewer rows than parameters, or a rank-deficient `X`
+/// (collinear predictors). `intercept` prepends an all-ones column. Both [`least_squares`]
+/// and [`multiple_regression`] build on this.
+///
+/// WHY QR AND NOT THE NORMAL EQUATIONS. This used to form `XᵀX` and invert it by
+/// Gauss-Jordan elimination, which squares the condition number of the problem: an `X`
+/// with condition 10⁸ becomes a 10¹⁶ system, past what a double can hold. Measured against
+/// NIST's certified Statistical Reference Datasets (`examples/statistics/nist.helix`), that
+/// gave 0 correct digits on Filip (a NaN standard error), 6 on the Wampler polynomials and
+/// 7 on Longley, where exact arithmetic on the same doubles shows 14–15 are there to be
+/// had. Householder QR works on `X` itself, so it loses digits in proportion to the
+/// condition of `X`, not its square.
+///
+/// The rank test is RELATIVE: a column is collinear when its `R` diagonal is negligible
+/// against the largest. The normal equations refused any pivot below an absolute `1e-12`,
+/// so the same well-posed fit was "collinear" when `x` was measured in units of 10⁻⁷.
 fn ols_core(predictors: &[Vec<f64>], y: &[f64], intercept: bool) -> Option<OlsCore> {
     let n = y.len();
     let p = predictors.len();
@@ -447,32 +461,189 @@ fn ols_core(predictors: &[Vec<f64>], y: &[f64], intercept: bool) -> Option<OlsCo
     if p == 0 || k == 0 || n < k || predictors.iter().any(|c| c.len() != n) {
         return None;
     }
-    // X[i][j]: with an intercept, column 0 is all-ones and 1..=p are predictors;
+    // X's columns: with an intercept, column 0 is all-ones and 1..=p are the predictors;
     // without, columns 0..p are the predictors directly.
-    let xij = |i: usize, j: usize| {
-        if intercept {
-            if j == 0 { 1.0 } else { predictors[j - 1][i] }
-        } else {
-            predictors[j][i]
+    let xcols: Vec<Vec<f64>> = if intercept {
+        std::iter::once(vec![1.0; n]).chain(predictors.iter().cloned()).collect()
+    } else {
+        predictors.to_vec()
+    };
+    if xcols.iter().flatten().chain(y).any(|v| !v.is_finite()) {
+        return None;
+    }
+    // Column-major working copy; the reflectors overwrite it and `qty` becomes Qᵀy.
+    let mut a: Vec<Vec<f64>> = xcols.clone();
+    let mut qty = y.to_vec();
+    let mut rdiag = vec![0.0; k];
+    for j in 0..k {
+        // ‖a[j][j..]‖, scaled so a column of huge or tiny values neither overflows nor
+        // underflows on the way to the square root.
+        let scale = a[j][j..].iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        if scale == 0.0 {
+            return None;
+        }
+        let norm = scale * a[j][j..].iter().map(|v| (v / scale).powi(2)).sum::<f64>().sqrt();
+        // Reflect onto -sign(x₀)‖x‖ so v₀ = x₀ - α never cancels.
+        let alpha = if a[j][j] > 0.0 { -norm } else { norm };
+        a[j][j] -= alpha;
+        let vtv: f64 = a[j][j..].iter().map(|v| v * v).sum();
+        let (head, tail) = a.split_at_mut(j + 1);
+        let v = &head[j][j..];
+        for col in tail.iter_mut() {
+            let s = 2.0 * v.iter().zip(&col[j..]).map(|(a, b)| a * b).sum::<f64>() / vtv;
+            col[j..].iter_mut().zip(v).for_each(|(c, vi)| *c -= s * vi);
+        }
+        let s = 2.0 * v.iter().zip(&qty[j..]).map(|(a, b)| a * b).sum::<f64>() / vtv;
+        qty[j..].iter_mut().zip(v).for_each(|(c, vi)| *c -= s * vi);
+        rdiag[j] = alpha;
+    }
+    // R is rdiag on the diagonal and a[c][j] (j < c) above it.
+    let r = |row: usize, col: usize| if row == col { rdiag[row] } else { a[col][row] };
+    let rmax = rdiag.iter().fold(0.0_f64, |m, d| m.max(d.abs()));
+    let tol = rmax * f64::EPSILON * (n.max(k) as f64);
+    if rdiag.iter().any(|d| d.abs() <= tol) {
+        return None;
+    }
+    // Qᵀv for any v, from the stored reflectors (column j's `a[j][j..]` is reflector j).
+    let apply_qt = |v: &mut [f64]| {
+        for (j, refl) in a.iter().enumerate() {
+            let refl = &refl[j..];
+            let vtv: f64 = refl.iter().map(|x| x * x).sum();
+            let s = 2.0 * refl.iter().zip(&v[j..]).map(|(a, b)| a * b).sum::<f64>() / vtv;
+            v[j..].iter_mut().zip(refl).for_each(|(c, vi)| *c -= s * vi);
         }
     };
-    let mut xtx = vec![vec![0.0; k]; k];
-    let mut xty = vec![0.0; k];
-    for a in 0..k {
-        for (b, slot) in xtx[a].iter_mut().enumerate() {
-            *slot = (0..n).map(|i| xij(i, a) * xij(i, b)).sum();
+    // Back-substitute R·x = rhs[..k].
+    let back = |rhs: &[f64]| -> Vec<f64> {
+        let mut x = vec![0.0; k];
+        for row in (0..k).rev() {
+            let s: f64 = ((row + 1)..k).map(|c| r(row, c) * x[c]).sum();
+            x[row] = (rhs[row] - s) / r(row, row);
         }
-        xty[a] = (0..n).map(|i| xij(i, a) * y[i]).sum();
+        x
+    };
+    // Qv: the reflectors applied in reverse order.
+    let apply_q = |v: &mut [f64]| {
+        for (j, refl) in a.iter().enumerate().rev() {
+            let refl = &refl[j..];
+            let vtv: f64 = refl.iter().map(|x| x * x).sum();
+            let s = 2.0 * refl.iter().zip(&v[j..]).map(|(a, b)| a * b).sum::<f64>() / vtv;
+            v[j..].iter_mut().zip(refl).for_each(|(c, vi)| *c -= s * vi);
+        }
+    };
+    // Solve Rᵀ·x = rhs (forward substitution).
+    let forward_t = |rhs: &[f64]| -> Vec<f64> {
+        let mut x = vec![0.0; k];
+        for row in 0..k {
+            let s: f64 = (0..row).map(|c| r(c, row) * x[c]).sum();
+            x[row] = (rhs[row] - s) / r(row, row);
+        }
+        x
+    };
+    // y − Xβ (minus `less` when given), one compensated accumulator per row; X is walked a
+    // column at a time so every access is contiguous.
+    let residual = |beta: &[f64], less: Option<&[f64]>| -> Vec<f64> {
+        let mut acc: Vec<Acc> = y.iter().map(|&v| Acc::new(v)).collect();
+        for (col, bj) in xcols.iter().zip(beta) {
+            acc.iter_mut().zip(col).for_each(|(a, x)| a.add_prod(-x, *bj));
+        }
+        if let Some(less) = less {
+            acc.iter_mut().zip(less).for_each(|(a, r)| a.add_prod(-1.0, *r));
+        }
+        acc.into_iter().map(Acc::value).collect()
+    };
+    let mut beta = back(&qty);
+    // ITERATIVE REFINEMENT of the augmented system [I X; Xᵀ 0]·[r; β] = [y; 0] (Björck,
+    // 1967): the residual r is refined alongside β, which is what removes the error term
+    // that grows with the SIZE of the residual — plain refinement of β alone leaves it, and
+    // NIST's large-residual Wampler 3–5 stayed at 5.8–9.8 digits under it. Both equations'
+    // residuals are formed in compensated arithmetic; the corrections reuse the QR factors:
+    // h = R⁻ᵀg, d = Qᵀf, δβ = R⁻¹(d₁ − h), δr = Q·[h; d₂]. Stopped once δβ stops mattering.
+    let mut res = residual(&beta, None);
+    for _ in 0..5 {
+        // f = y − r − Xβ and g = −Xᵀr.
+        // −rᵢ joins the SAME compensated sum: rounding yᵢ − Σxᵢⱼβⱼ to a double first and
+        // subtracting rᵢ after would reintroduce an error of one ulp of the residual itself,
+        // the very term this refinement exists to remove.
+        let mut f = residual(&beta, Some(&res));
+        let g: Vec<f64> = xcols
+            .iter()
+            .map(|col| {
+                let mut a = Acc::new(0.0);
+                col.iter().zip(&res).for_each(|(x, r)| a.add_prod(-x, *r));
+                a.value()
+            })
+            .collect();
+        let h = forward_t(&g);
+        apply_qt(&mut f);
+        let d1: Vec<f64> = (0..k).map(|j| f[j] - h[j]).collect();
+        let dbeta = back(&d1);
+        let mut dres = f;
+        dres[..k].copy_from_slice(&h);
+        apply_q(&mut dres);
+        let small = dbeta.iter().zip(&beta).all(|(d, b)| d.abs() <= f64::EPSILON * b.abs());
+        beta.iter_mut().zip(&dbeta).for_each(|(b, d)| *b += d);
+        res.iter_mut().zip(&dres).for_each(|(r, d)| *r += d);
+        if small {
+            break;
+        }
     }
-    let inv = invert(&xtx)?;
-    let beta: Vec<f64> = (0..k).map(|a| (0..k).map(|b| inv[a][b] * xty[b]).sum()).collect();
-    let predictions: Vec<f64> =
-        (0..n).map(|i| (0..k).map(|j| beta[j] * xij(i, j)).sum()).collect();
-    let residuals: Vec<f64> = (0..n).map(|i| y[i] - predictions[i]).collect();
-    let rss: f64 = residuals.iter().map(|r| r * r).sum();
-    let ybar = mean(y);
-    let tss: f64 = y.iter().map(|v| (v - ybar).powi(2)).sum();
-    Some(OlsCore { beta, inv, predictions, residuals, rss, tss, k, n })
+    // diag((XᵀX)⁻¹) = diag(R⁻¹R⁻ᵀ): the squared row norms of R⁻¹. Each column of R⁻¹ is
+    // R⁻¹eₖ by back-substitution, and its squares add into the rows it touches.
+    let mut inv_diag = vec![0.0; k];
+    for col in 0..k {
+        let mut column = vec![0.0; col + 1];
+        column[col] = 1.0 / r(col, col);
+        for row in (0..col).rev() {
+            let s: f64 = ((row + 1)..=col).map(|m| r(row, m) * column[m]).sum();
+            column[row] = -s / r(row, row);
+        }
+        inv_diag.iter_mut().zip(&column).for_each(|(d, c)| *d += c * c);
+    }
+    // The final residuals as double-length pairs, so RSS is summed from what the residuals
+    // ARE rather than from their roundings: on `y = [2, 4, 5, 4, 5]` against x = 1..5 the
+    // rounded residuals' squares summed to one ulp under 2.4 and printed R² as
+    // 0.6000000000000001 where the exact answer is 0.6.
+    let pairs: Vec<(f64, f64)> = {
+        let mut acc: Vec<Acc> = y.iter().map(|&v| Acc::new(v)).collect();
+        for (col, bj) in xcols.iter().zip(&beta) {
+            acc.iter_mut().zip(col).for_each(|(a, x)| a.add_prod(-x, *bj));
+        }
+        acc.into_iter().map(Acc::pair).collect()
+    };
+    let residuals: Vec<f64> = pairs.iter().map(|p| p.0).collect();
+    let predictions: Vec<f64> = y.iter().zip(&residuals).map(|(v, r)| v - r).collect();
+    let (rss, rss_lo) = {
+        let mut a = Acc::new(0.0);
+        pairs.iter().for_each(|&(hi, lo)| {
+            a.add_prod(hi, hi);
+            a.add_prod(2.0 * hi, lo);
+        });
+        a.pair()
+    };
+    // R²'s baseline is the model with no predictors: the mean when the fit has an
+    // intercept, and ZERO when it is forced through the origin — the uncentered total,
+    // as R, SAS, Stata and NIST's certified values define it. Centering a no-intercept
+    // fit measured it against a model it cannot express, which can make R² negative.
+    let tss: f64 = if intercept {
+        let ybar = mean(y);
+        y.iter().map(|v| (v - ybar).powi(2)).sum()
+    } else {
+        y.iter().map(|v| v * v).sum()
+    };
+    // The explained sum of squares, measured from the same baseline as `tss`. R² is computed
+    // from whichever of rss and ess is SMALLER, the one the other's rounding cannot swamp:
+    // when the fit explains little (NIST's Wampler5, R² ≈ 0.002), 1 − rss/tss subtracts two
+    // nearly equal numbers (13.7 digits; ess/tss gives 14.8), and when it explains nearly
+    // everything (Filip, R² ≈ 0.997), ess carries the residuals' error (8.1; 1 − rss/tss
+    // gives 11.1). See `OlsCore::r_squared`.
+    let ess: f64 = if intercept {
+        let ybar = mean(y);
+        (0..n).map(|i| ((y[i] - ybar) - residuals[i]).powi(2)).sum()
+    } else {
+        predictions.iter().map(|v| v * v).sum()
+    };
+    Some(OlsCore { beta, inv_diag, predictions, residuals, rss, rss_lo, tss, ess, k, n, intercept })
 }
 
 pub fn multiple_regression(
@@ -485,15 +656,18 @@ pub fn multiple_regression(
     if c.n <= c.k || c.tss == 0.0 {
         return None;
     }
-    let (beta, inv, rss, n, k) = (c.beta, c.inv, c.rss, c.n, c.k);
-    let r_squared = 1.0 - rss / c.tss;
+    let r_squared = c.r_squared();
+    let (beta, inv_diag, rss, n, k) = (c.beta, c.inv_diag, c.rss, c.n, c.k);
     let df = (n - k) as f64;
-    let adj_r_squared = 1.0 - (1.0 - r_squared) * (n - 1) as f64 / df;
+    // The baseline model has one parameter with an intercept and none without (R's
+    // `summary.lm` convention, matching the uncentered R² above).
+    let base = if c.intercept { n - 1 } else { n };
+    let adj_r_squared = 1.0 - (1.0 - r_squared) * base as f64 / df;
     let resid_var = rss / df;
     let mut std_errors = Vec::with_capacity(k);
     let mut p_values = Vec::with_capacity(k);
     for j in 0..k {
-        let se = (resid_var * inv[j][j]).sqrt();
+        let se = (resid_var * inv_diag[j]).sqrt();
         let pv = if se == 0.0 {
             0.0 // a perfect fit determines every coefficient exactly
         } else {
@@ -533,7 +707,7 @@ pub struct LsqFit {
 
 pub fn least_squares(predictors: &[Vec<f64>], y: &[f64], intercept: bool) -> Option<LsqFit> {
     let c = ols_core(predictors, y, intercept)?;
-    let r_squared = if c.tss == 0.0 { 0.0 } else { 1.0 - c.rss / c.tss };
+    let r_squared = if c.tss == 0.0 { 0.0 } else { c.r_squared() };
     Some(LsqFit {
         coefficients: c.beta,
         rss: c.rss,
@@ -678,6 +852,49 @@ mod tests {
         assert!(close(m.coefficients[0], s.intercept, 1e-9));
         assert!(close(m.coefficients[1], s.slope, 1e-9));
         assert!(close(m.r_squared, s.r_squared, 1e-9));
+    }
+
+    /// NIST StRD Wampler1: y = 1 + x + x² + x³ + x⁴ + x⁵ exactly, for x = 0..=20, so every
+    /// certified coefficient is exactly 1 and every input is an exact double. Solving the
+    /// normal equations got 6 digits of it (the squared condition number); Householder QR
+    /// with augmented-system refinement gets all of them.
+    #[test]
+    fn the_nist_wampler1_polynomial_is_fitted_to_every_digit() {
+        let x: Vec<f64> = (0..=20).map(f64::from).collect();
+        let y: Vec<f64> = x.iter().map(|v| (0..=5).map(|p| v.powi(p)).sum()).collect();
+        let cols: Vec<Vec<f64>> = (1..=5).map(|p| x.iter().map(|v| v.powi(p)).collect()).collect();
+        let f = least_squares(&cols, &y, true).expect("a full-rank fit");
+        for (j, b) in f.coefficients.iter().enumerate() {
+            assert!((b - 1.0).abs() <= 4.0 * f64::EPSILON, "B{j} = {b:e}, certified 1");
+        }
+    }
+
+    /// The rank test is relative to the data, not an absolute pivot: the same well-posed fit
+    /// with x measured in units of 10⁻⁷ was refused as "collinear" by the normal equations'
+    /// `1e-12` cutoff on XᵀX.
+    #[test]
+    fn a_fit_does_not_depend_on_the_units_of_x() {
+        let x = [1.0, 2.0, 3.0, 4.5];
+        let y = [1.0, 2.1, 2.9, 4.2];
+        let tiny: Vec<f64> = x.iter().map(|v| v * 1e-7).collect();
+        let a = multiple_regression(&[x.to_vec()], &y, true).expect("fit in plain units");
+        let b = multiple_regression(&[tiny], &y, true).expect("the same fit in units of 1e-7");
+        assert!(close(a.coefficients[0], b.coefficients[0], 1e-12));
+        assert!(close(a.coefficients[1], b.coefficients[1] * 1e-7, 1e-12));
+        assert!(close(a.r_squared, b.r_squared, 1e-12));
+    }
+
+    /// Through the origin, R² is measured against the zero model — the uncentered total
+    /// sum of squares, as R, SAS, Stata and NIST define it. NIST StRD NoInt1's certified
+    /// R² is 0.999365492298663; centering gave a different statistic (0 digits of it).
+    #[test]
+    fn a_fit_through_the_origin_reports_the_uncentered_r_squared() {
+        let x: Vec<f64> = (60..=70).map(f64::from).collect();
+        let y: Vec<f64> = (130..=140).map(f64::from).collect();
+        let f = multiple_regression(&[x], &y, false).expect("a full-rank fit");
+        assert!(close(f.coefficients[0], 2.07438016528926, 1e-13), "{}", f.coefficients[0]);
+        assert!(close(f.std_errors[0], 0.165289256198347e-01, 1e-13), "{}", f.std_errors[0]);
+        assert!(close(f.r_squared, 0.999365492298663, 1e-13), "{}", f.r_squared);
     }
 
     #[test]

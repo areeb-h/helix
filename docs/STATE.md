@@ -63,6 +63,17 @@ change `to_html`'s bytes). It now also compares the builtin and method names in
 one thing: a SYNTAX addition — `[a, b] = xs` this cycle — adds no name, so the release that
 carries one has to be cut as `minor` by hand. This cycle is one.
 
+## In flight for the next release
+
+- **Helix against NIST's certified answers** (`examples/statistics/nist.helix`, the README's
+  Accuracy section): twenty Statistical Reference Datasets, every statistic scored in
+  correct digits and required to be within one of the exact-arithmetic ceiling. Writing it
+  found the regression solver squaring its condition number (0 digits on Filip, 6 on
+  Wampler, 7 on Longley); it is Householder QR with augmented-system refinement now, every
+  coefficient at the ceiling, at about 3x the cost of a fit. A no-intercept R² is the
+  uncentered one (a `### Changed` entry, so the next release is a minor). Gate green at
+  **1,044 tests** (612 lib + 397 CLI + 3 other + 32 dual-engine), **161** dfdiff programs.
+
 ## What landed in v0.11.0
 
 **A MINOR, not a patch** — positional destructuring is new syntax, and

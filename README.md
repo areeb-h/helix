@@ -16,7 +16,7 @@ exit status included. That is strong evidence rather than a proof: it covers the
 generators and the corpus exercise. The rule it enforces is that **any divergence is a bug**, and
 speed is never knowingly traded for a different answer.
 
-[Performance](#performance) · [Install](#install) · [A tour](#a-tour) · [What's inside](#whats-inside) · [Architecture](#architecture)
+[Performance](#performance) · [Accuracy](#accuracy) · [Install](#install) · [A tour](#a-tour) · [What's inside](#whats-inside) · [Architecture](#architecture)
 
 ---
 
@@ -60,6 +60,39 @@ this.
 
 DataFrame throughput (a 50M-row filter→group→sort→head in ~0.2 s from Parquet) is measured
 separately in [docs/benchmarks.md](docs/benchmarks.md).
+
+## Accuracy
+
+Agreeing with itself on three engines does not make an answer right. For that, Helix is
+scored against answers it did not compute: NIST's [Statistical Reference
+Datasets](https://www.itl.nist.gov/div898/strd/), the files statistical software is audited
+with, whose results NIST certified in 500-digit arithmetic.
+[`examples/statistics/nist.helix`](examples/statistics/nist.helix) reads the files exactly as
+NIST publishes them, fits and summarizes them, and counts the significant digits that agree
+with each certified value (the LRE of McCullough, 1998). In brackets is the most **any**
+double-precision program can get on the same inputs, computed in exact rational arithmetic by
+[`ceiling.py`](examples/data/nist/ceiling.py), which shares no code with Helix:
+
+| dataset | difficulty | coefficients | std errors | R² |
+|---|---|---|---|---|
+| Norris | lower | 14.1 (14.1) | 13.9 (13.9) | 15.0 (15.0) |
+| Pontius | lower | 13.5 (13.5) | 13.8 (13.8) | 15.0 (15.0) |
+| Longley | higher | 14.6 (14.6) | 14.5 (14.9) | 15.0 (15.0) |
+| Filip | higher | 7.6 (7.6) | 7.4 (7.6) | 11.1 (11.8) |
+| Wampler1 | higher | 15.0 (15.0) | 15.0 (15.0) | 15.0 (15.0) |
+| Wampler5 | higher | 15.0 (15.0) | 13.7 (14.5) | 14.8 (15.0) |
+
+Twenty datasets in all (eleven regressions, nine summary-statistics files) — every certified
+statistic within one digit of the ceiling, on all three engines; the program fails, and CI
+with it, if one falls short. Filip's 7.6 is the ceiling, not a shortfall: its degree-10
+polynomial is so ill-conditioned that rounding `x ** 10` to a double already costs the rest.
+
+Running it the first time is what made this table true. Regression solved the normal
+equations, which square the problem's condition number: **0** correct digits on Filip (a NaN
+standard error), 6 on Wampler, 7 on Longley, and a "collinear" refusal for a well-posed fit
+whose `x` was in units of 10⁻⁷. It is now Householder QR with Björck's iterative refinement,
+and a no-intercept R² is the uncentered one NIST, R and SAS report — see the
+[changelog](CHANGELOG.md).
 
 ## Install
 
@@ -367,8 +400,8 @@ tests of the same one. Details in [docs/execution-engine.md](docs/execution-engi
 
 ## Status & roadmap
 
-A mature implementation, **not a prototype**: **1,041 tests** (609 library + 397 CLI + 3
-native-df + 32 dual-engine differential), plus 160 programs run under both DataFrame backends
+A mature implementation, **not a prototype**: **1,044 tests** (612 library + 397 CLI + 3
+native-df + 32 dual-engine differential), plus 161 programs run under both DataFrame backends
 and a whole-tree type-check over 99 files — zero compiler warnings, with a differential oracle and a VM/tree-walker
 parity gate on every change. Phase status (full plan in
 [docs/ROADMAP.md](docs/ROADMAP.md)):
