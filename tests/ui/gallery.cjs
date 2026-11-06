@@ -62,9 +62,18 @@ async function session(browser, url, motion) {
   p.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
   let frames = 0;
   const frame = async () => { frames += 1; await p.waitForFunction((n) => Number(document.documentElement.dataset.version) >= n, frames); };
-  const settle = () => p.waitForTimeout(motion === 'reduce' ? 60 : 450);
+  // At rest means NO animation running — not "after a fixed wait". A state is only judged once
+  // it has arrived: mid-transition, text can already be light while its card is still white,
+  // and axe rightly calls that unreadable. A fixed 60 ms passed locally and failed on CI's
+  // slower runner, where even reduced motion's 0.01 ms transitions finish a frame or two later.
+  const settle = async () => {
+    await p.waitForTimeout(30);
+    await p.waitForFunction(() => document.getAnimations().every((a) => a.playState !== 'running'), null, { timeout: 5000 });
+    await p.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+  };
   const shot = (name) => motion === 'reduce' ? null : p.screenshot({ path: path.join(OUT, name + '.png'), fullPage: name.endsWith('page') });
   async function axe(state) {
+    await settle();
     await p.addScriptTag({ content: AXE });
     const r = await p.evaluate(async () => (await window.axe.run(document, { resultTypes: ['violations'] })).violations
       .map((v) => `${v.id} (${v.impact}): ${v.nodes.slice(0, 3).map((n) => n.target.join(' ')).join(' | ')}`));
