@@ -1,0 +1,10 @@
+# The v0.12.0 release notes' ERROR claims: the cells whose answer is a refusal. One per line:
+#
+#   <substring the diagnostic must contain>	<program>
+#
+# Tab-separated, `#` comments ignored. Each program must exit NON-ZERO and its stderr must
+# contain the substring. Each program is ONE line.
+
+# --- "The rank test is now relative to the largest diagonal of `R`": a scale-free test still
+# --- refuses predictors that ARE collinear (x2 = 2·x1), in the words it always used.
+collinear	print(multiple_regression([[1.0, 2.0, 3.0, 4.0], [2.0, 4.0, 6.0, 8.0]], [1.0, 3.0, 2.0, 5.0]))

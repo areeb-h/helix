@@ -1,0 +1,49 @@
+# The v0.12.0 release notes, as a program.
+#
+# Every line below is a claim the changelog makes, quoted or taken from its examples. The
+# expectations in `v0.12.0-claims.expected` are authored BY HAND from the notes — capturing
+# them from a binary would prove only that the binary agrees with itself, which every other
+# gate already covers. The release's headline claim — every NIST certified statistic within
+# one digit of the exact-arithmetic ceiling — is `examples/statistics/nist.helix`, which the
+# example-parity gate runs on all three engines; the cells here are the notes' smaller claims.
+
+# --- Changed: "With `intercept = false` ... R² ... is now measured against the zero model
+# --- (`1 − rss/Σy²`) ... NIST's certified R² for NoInt1" is 0.999365492298663, "and
+# --- `adj_r_squared` uses `n` rather than `n − 1` for the baseline": 1 − (1 − R²)·11/10.
+x1 = range(60, 71).map((v) => v * 1.0)
+y1 = range(130, 141).map((v) => v * 1.0)
+no_int = multiple_regression([x1], y1, false)
+print("{no_int.r_squared:.12f}")
+print("{no_int.adj_r_squared:.12f}")
+
+# --- Fixed: "`multiple_regression([[1e-7, 2e-7, 3e-7, 4.5e-7]], y)` was 'undefined …
+# --- collinear predictors' while the same data in plain units fitted" — it fits now, to the
+# --- same line.
+yu = [1.0, 2.1, 2.9, 4.2]
+plain = multiple_regression([[1.0, 2.0, 3.0, 4.5]], yu)
+tiny = multiple_regression([[0.0000001, 0.0000002, 0.0000003, 0.00000045]], yu)
+print("{tiny.coefficients[1] * 0.0000001:.10f} {plain.coefficients[1]:.10f}")
+print("{tiny.r_squared:.12f} {plain.r_squared:.12f}")
+
+# --- Fixed: "an exact R² of 0.6 prints as `0.6`", and "`linear_regression` is now the same
+# --- fit as `multiple_regression([xs], ys)`, so the two agree".
+xs = [1.0, 2.0, 3.0, 4.0, 5.0]
+ys = [2.0, 4.0, 5.0, 4.0, 5.0]
+lr = linear_regression(xs, ys)
+mr = multiple_regression([xs], ys)
+print(lr.r_squared)
+print(lr.slope == mr.coefficients[1], lr.intercept == mr.coefficients[0])
+
+# --- Fixed: Wampler1 — "15.0" digits of coefficients certified as exactly 1 (y = 1 + x + x²
+# --- + x³ + x⁴ + x⁵ for x = 0..20), where the normal equations gave 6.1.
+wx = range(0, 21).map((v) => v * 1.0)
+wy = wx.map((v) => 1.0 + v + v ** 2 + v ** 3 + v ** 4 + v ** 5)
+wfit = least_squares(range(1, 6).map((p) => wx.map((v) => v ** p)), wy)
+print(wfit.coefficients.map((b) => "{b:.12f}").join(" "))
+
+# --- Fixed: "`examples/numerics/random.helix` moved in its last digit, to the correctly
+# --- rounded exact answer" — `1.8909032291807935`.
+rx = random(6, 100)
+noise = randn(6, 200)
+ry = rx.enumerate().map((i, v) => 2.0 * v + 0.1 * noise[i])
+print(linear_regression(rx, ry).slope)
