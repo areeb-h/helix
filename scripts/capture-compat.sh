@@ -43,11 +43,13 @@ fi
 #                    so the output depends on whether gen_data.py has been run;
 #                    bench/kernels are timing programs that take >6s by design.
 #   examples/api/  — two are servers that block forever, one does live network I/O.
+#   examples/apps/ — apps serve until stopped (ADR 0055); their `--replay` is tested in cli.rs.
 #   examples/python/ — feature-gated; output depends on how the binary was built.
 mapfile -t files < <(git ls-files '*.helix' \
   | grep -E '^(tests/corpus|examples)/' \
   | grep -v '^examples/python/' \
-  | grep -v '^examples/api/')
+  | grep -v '^examples/api/' \
+  | grep -v '^examples/apps/')
 
 [ "${#files[@]}" -gt 100 ] || { echo "only ${#files[@]} programs — wrong directory?" >&2; exit 1; }
 

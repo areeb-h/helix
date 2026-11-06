@@ -72,6 +72,18 @@ change `to_html`'s bytes). It now also compares the builtin and method names in
 one thing: a SYNTAX addition — `[a, b] = xs` this cycle — adds no name, so the release that
 carries one has to be cut as `minor` by hand. This cycle is one.
 
+## In flight for the next release
+
+- **Apps: ADR 0055, proposed with a working prototype.** Model–update–view over the existing
+  event loop (`examples/apps/ui.helix`, ~240 lines of Helix, no `src/` change), and a regression
+  explorer built on it (`examples/apps/explorer.helix`), driven in Chromium: input to patched
+  DOM in 11–22 ms, springs run by the compositor, no console errors, and the replayed UI
+  byte-identical on all three engines (`an_app_replays_identically_on_every_engine`). The ADR
+  measures what the foundation lacks for desktop and mobile — a main-thread split, a native
+  window, and a WebAssembly build that today stops at `faer`/`getrandom` before reaching
+  Helix's own 48 `libc` sites — and lays out six phases with exit criteria. Gate green at
+  **1,045 tests** (612 lib + 398 CLI + 3 other + 32 dual-engine), **162** dfdiff programs.
+
 ## What landed in v0.12.0
 
 - **Helix against NIST's certified answers** (`examples/statistics/nist.helix`, the README's
