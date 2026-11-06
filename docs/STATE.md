@@ -4,12 +4,21 @@ A running note so the thread is not lost between sessions. **Newest first.** Eve
 is measured or gated unless it says otherwise — a claim without a number in this file is a
 claim nobody checked.
 
-Last updated: 2026-11-04.
+Last updated: 2026-11-06.
 
 ---
 
 ## Released
 
+- **v0.12.0** — tag `v0.12.0`, published 2026-11-06. Helix against answers it did not compute:
+  twenty of NIST's Statistical Reference Datasets, every statistic scored in correct digits
+  beside the exact-arithmetic ceiling, and failing CI if one falls a digit short
+  (`examples/statistics/nist.helix`, the README's Accuracy section). Writing it found the
+  regression solver squaring its condition number — 0 digits on Filip, 6 on Wampler, 7 on
+  Longley — and regression is Householder QR with Björck's refinement now, every coefficient
+  at the ceiling, at about 3.4x the cost of a fit. A no-intercept R² is the uncentered one
+  (the release's one `### Changed`), and a fit no longer depends on its predictors' units.
+  Release notes run as a program before the tag: 8 value claims and 1 refusal.
 - **v0.11.0** — tag `v0.11.0`, published 2026-11-04. PostgreSQL grew up (ADR 0044/0047
   addenda): a transaction is a value that rolls back when dropped uncommitted, a result larger
   than memory is read a page at a time (`c.cursor`), several statements share one round trip
@@ -63,7 +72,7 @@ change `to_html`'s bytes). It now also compares the builtin and method names in
 one thing: a SYNTAX addition — `[a, b] = xs` this cycle — adds no name, so the release that
 carries one has to be cut as `minor` by hand. This cycle is one.
 
-## In flight for the next release
+## What landed in v0.12.0
 
 - **Helix against NIST's certified answers** (`examples/statistics/nist.helix`, the README's
   Accuracy section): twenty Statistical Reference Datasets, every statistic scored in
@@ -72,7 +81,7 @@ carries one has to be cut as `minor` by hand. This cycle is one.
   Wampler, 7 on Longley); it is Householder QR with augmented-system refinement now, every
   coefficient at the ceiling, at about 3x the cost of a fit. A no-intercept R² is the
   uncentered one (a `### Changed` entry, so the next release is a minor). Gate green at
-  **1,044 tests** (612 lib + 397 CLI + 3 other + 32 dual-engine), **161** dfdiff programs.
+  **1,044 tests** (612 lib + 397 CLI + 3 other + 32 dual-engine), **162** dfdiff programs.
 
 ## What landed in v0.11.0
 

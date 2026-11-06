@@ -124,7 +124,7 @@ $ curl -LsSf https://raw.githubusercontent.com/areeb-h/helix/main/install.sh | s
 helix-install: downloading https://github.com/areeb-h/helix/releases/latest/download/helix-x86_64-unknown-linux-gnu.tar.gz
 helix-install: checksum ok (helix-x86_64-unknown-linux-gnu.tar.gz)
 helix-install: installed helix -> /home/areeb/.local/bin/helix
-helix 0.11.0
+helix 0.12.0
 helix-install: done. try:  helix eval "print(1 + 2)"   or   helix repl
 ```
 
@@ -156,7 +156,7 @@ warning — the installer will not install what it cannot verify.
 > pipeline uploaded four of six platforms and no `SHA256SUMS`, so the installers correctly
 > refuse even the platforms that did upload. All three causes are fixed rather than worked
 > around — see [CHANGELOG.md](CHANGELOG.md). `releases/latest` resolves to the current release
-> (`v0.11.0`), so the commands above pick it up without you doing anything.
+> (`v0.12.0`), so the commands above pick it up without you doing anything.
 
 ## A tour
 
@@ -401,7 +401,7 @@ tests of the same one. Details in [docs/execution-engine.md](docs/execution-engi
 ## Status & roadmap
 
 A mature implementation, **not a prototype**: **1,044 tests** (612 library + 397 CLI + 3
-native-df + 32 dual-engine differential), plus 161 programs run under both DataFrame backends
+native-df + 32 dual-engine differential), plus 162 programs run under both DataFrame backends
 and a whole-tree type-check over 99 files — zero compiler warnings, with a differential oracle and a VM/tree-walker
 parity gate on every change. Phase status (full plan in
 [docs/ROADMAP.md](docs/ROADMAP.md)):
