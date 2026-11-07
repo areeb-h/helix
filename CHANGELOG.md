@@ -4,6 +4,34 @@
 
 ### Added
 
+- **A file manager, `examples/apps/files.helix`, built on `std.ui`.** Run it with
+  `helix run examples/apps/files.helix --root ~/Documents --window`.
+  - **Browsing:** a sidebar, a toolbar with back, forward and up, search, and list or icon views.
+  - **Previews:** text, CSV tables, images, and what a folder holds.
+  - **Gestures:** the keyboard (arrows, Enter, Backspace, `/`, Ctrl+K, F2, Delete), double
+    click, a right-click context menu and a command palette.
+  - **It stays inside its root.** A name with a path in it is refused, and every folder on the
+    path is re-checked each time.
+  - **It never follows a symbolic link.** A link is shown as a link, and is never opened,
+    previewed or entered.
+  - **It only reads unless started with `--write`.** With it, it can make folders, rename, and
+    move things to a Trash inside the root, with Undo. It never deletes, and a rename or move
+    never replaces anything.
+  - **Tested.** A CLI test attacks it on all three engines and checks the disk afterwards. A
+    browser test drives it in Chromium with axe in light and dark.
+- **`file_info(path)`** answers `{name, kind, size, modified}` without following links (lstat),
+  so a program confined to a folder can see that a name leads elsewhere before it follows it.
+  It needs `fs-read`.
+- **Desktop gestures in views:**
+  - `dblclick` and `contextmenu` (which sends the pointer's position);
+  - `keydown` with `shortcuts`, given as chords such as "Ctrl+K"; in a text field only the
+    chords that don't edit text get through;
+  - `reveal`, which scrolls a node into view when it becomes the revealed one;
+  - `copy`, which puts text on the clipboard when clicked;
+  - click events now say which modifier keys were held.
+- **`ui.context_menu`** (kept on screen at any edge), **`ui.command_palette`** with
+  `ui.palette_matches` (prefix, then word start, then letters in order), and more icons.
+
 - **A design engine for apps** ([ADR 0056](docs/adr/0056-design-engine.md)).
   - **Colour from one seed.** `ui.design({seed: "#4f46e5", material, shape, density})` computes
     every colour of a light and a dark palette from the seed, in OKLCH. Each text colour is

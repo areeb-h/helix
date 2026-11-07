@@ -81,7 +81,7 @@ pub fn effect_of(name: &str) -> Effect {
         | "write_at" | "truncate" | "remove_dir"
         // A lock is taken to WRITE; a reader has nothing to exclude anyone from.
         | "lock_file" | "try_lock_file" => Effect::FsWrite,
-        "file_size" | "read_at" | "read_bytes" | "read_bytes_at" => Effect::FsRead,
+        "file_size" | "file_info" | "read_at" | "read_bytes" | "read_bytes_at" => Effect::FsRead,
         "listen" | "http_get" | "http_post" | "http_request" | "http_stream"
         // A database query is a network verb. It only reads, but Helix has ONE
         // network authority, so `net` is what it costs and what it declares.
@@ -526,7 +526,7 @@ mod tests {
         for n in [
             "read_text", "read_csv", "read_json", "read_dir", "read_vcf", "read_bam",
             "file_exists", "remove_file", "mkdir", "listen", "http_get",
-            "rename", "fsync", "sync_dir", "create_new", "file_size", "read_at",
+            "rename", "fsync", "sync_dir", "create_new", "file_size", "file_info", "read_at",
             "write_at", "truncate", "remove_dir", "lock_file", "try_lock_file",
             "read_bytes", "read_bytes_at",
         ] {

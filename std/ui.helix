@@ -122,6 +122,18 @@ ICONS = {
   warning: ["M12 4 2.8 19.5h18.4z", "M12 10v4.5", "M12 17.2h.01"],
   sun: ["M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z", "M12 2.5v2", "M12 19.5v2", "M2.5 12h2", "M19.5 12h2", "M5.3 5.3l1.4 1.4", "M17.3 17.3l1.4 1.4", "M5.3 18.7l1.4-1.4", "M17.3 6.7l1.4-1.4"],
   moon: ["M19.5 14.5A7.5 7.5 0 0 1 9.5 4.5a7.5 7.5 0 1 0 10 10z"],
+  code: ["M8.5 7.5 4 12l4.5 4.5", "M15.5 7.5 20 12l-4.5 4.5", "M13.5 5l-3 14"],
+  archive: ["M4 5h16v4H4z", "M5.5 9v10h13V9", "M10 13h4"],
+  link: ["M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1", "M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"],
+  arrow_left: ["M19 12H5", "M11 6l-6 6 6 6"],
+  arrow_right: ["M5 12h14", "M13 6l6 6-6 6"],
+  arrow_up: ["M12 19V5", "M6 11l6-6 6 6"],
+  sort: ["M7 4v16", "M3.5 16.5 7 20l3.5-3.5", "M17 20V4", "M13.5 7.5 17 4l3.5 3.5"],
+  eye: ["M2.5 12s3.5-6.5 9.5-6.5 9.5 6.5 9.5 6.5-3.5 6.5-9.5 6.5S2.5 12 2.5 12z", "M12 9.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z"],
+  film: ["M5 4.5h14A1.5 1.5 0 0 1 20.5 6v12a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 18V6A1.5 1.5 0 0 1 5 4.5z", "M8 4.5v15", "M16 4.5v15", "M3.5 9.5H8", "M16 9.5h4.5", "M3.5 14.5H8", "M16 14.5h4.5"],
+  music: ["M9 18V6l11-2v12", "M6.5 15.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z", "M17.5 13.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z"],
+  lock: ["M6 10.5h12v9.5H6z", "M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3"],
+  command: ["M9 6v12", "M15 6v12", "M6 9h12", "M6 15h12"],
 }
 
 export fn icon_names() = ICONS.keys()
@@ -369,6 +381,70 @@ export fn sheet(id, open, title, children, close, actions = []) = if not open th
     ].concat(if actions.count() == 0 then [] else [el("footer", {class: "sheet-actions"}, actions)])),
 ])
 
+# A context menu: the menu a right click opens, where the pointer was (`at` is `{x, y}`, or
+# missing when closed). It is a `menu` — arrows, Home, End, Escape — and it is kept on screen
+# by the client however close to an edge it opened. `items` are `menu`'s.
+export fn context_menu(id, at, items, close) = if at.is_missing() then el("div", {key: "{id}-ctx", class: "ctx-closed"}, []) else
+  el("div", {key: "{id}-ctx", id: id, role: "menu", class: "menu-list context-menu mat-overlay", enter: "pop", exit: "fade", dismiss: close, aria: {label: "Actions"},
+    style: {left: "{at.x}px", top: "{at.y}px"}}, range(0, items.count()).map((i) => do {
+      it = items[i]
+      if it.get("separator") ?? false then el("div", {class: "menu-sep", role: "separator"}, []) else
+        el("button", {role: "menuitem", class: if it.get("danger") ?? false then "menu-item danger" else "menu-item", click: it.msg, value: it.get("value"),
+          attrs: {type: "button", tabindex: "-1", autofocus: i == 0, disabled: it.get("disabled") ?? false}}, present([
+            if it.get("icon").is_missing() then missing else glyph(it.icon, "sm"), el("span", {class: "spacer-text"}, [text(it.label)]),
+            if it.get("shortcut").is_missing() then missing else el("span", {class: "menu-kbd"}, [text(it.shortcut)]),
+        ]))
+  }))
+
+# Which of `items` (`[{label, …}]`) a typed query matches, best first: an exact prefix, then a
+# word starting with it, then the letters in order anywhere ("nf" finds "New folder").
+export fn palette_matches(query, items) = do {
+  q = "{query}".trim().lower()
+  if q == "" then items else do {
+    score = (label) => do {
+      l = "{label}".lower()
+      if l.starts_with(q) then 0 else if l.contains(" {q}") or l.contains("/{q}") then 1 else if l.contains(q) then 2 else if in_order(q, l) then 3 else 9
+    }
+    items.map((it) => {it: it, s: score(it.label)}).filter((x) => x.s < 9).sort_by((x) => x.s).map((x) => x.it)
+  }
+}
+fn in_order(q, l) = q.chars().reduce(0, (from, c) => if from < 0 then -1 else do {
+  i = l.drop(from).index_of(c)
+  if i.is_missing() then -1 else from + i + 1
+}) >= 0
+
+# A command palette: a search box over everything an app can do or go to. `items` are
+# `[{label, value, icon?, hint?, group?}]`; it shows `palette_matches(query, items)` with
+# `selected` (an index into those) marked. Typing sends `query`; the arrows and Enter send
+# `nav` with the key ("ArrowDown", "Enter"); a click sends `pick` with the item's value; Escape
+# or a press outside sends `close`. The app keeps the query and the selection.
+export fn command_palette(id, open, query, items, selected, query_msg, nav, pick, close, placeholder = "Type a command or search") = if not open then el("div", {key: "{id}-palette", class: "palette-layer closed"}, []) else do {
+  shown = palette_matches(query, items).take(50)
+  sel = if shown.count() == 0 then -1 else clamp(selected, 0, shown.count() - 1)
+  el("div", {key: "{id}-palette", class: "palette-layer", exit: "fade"}, [
+    el("div", {class: "scrim palette-scrim", click: close, enter: "fade", aria: {hidden: true}}, []),
+    el("div", {id: id, class: "palette mat-overlay", role: "dialog", dismiss: close, enter: "pop", aria: {label: "Command palette", modal: true}}, [
+      el("div", {class: "palette-search", keydown: nav, shortcuts: "ArrowUp ArrowDown Enter Escape"}, [
+        icon("search", "sm"),
+        el("input", {id: "{id}-input", class: "palette-input", input: query_msg, role: "combobox",
+          aria: {label: placeholder, expanded: true, controls: "{id}-list", activedescendant: if sel < 0 then missing else "{id}-opt-{sel}", autocomplete: "list"},
+          attrs: {type: "text", value: "{query}", placeholder: placeholder, autocomplete: "off", spellcheck: "false", autofocus: true}}, []),
+        kbd("esc"),
+      ]),
+      if shown.count() == 0 then el("p", {class: "palette-empty meta"}, [text("Nothing matches “{query}”.")]) else
+        el("div", {id: "{id}-list", class: "palette-list", role: "listbox", aria: {label: "Results"}}, range(0, shown.count()).map((i) => do {
+          it = shown[i]
+          el("div", {id: "{id}-opt-{i}", key: "opt-{it.value}", role: "option", class: if i == sel then "palette-opt on" else "palette-opt", click: pick, value: "{it.value}", reveal: i == sel,
+            aria: {selected: i == sel}}, present([
+              el("span", {class: "palette-ic"}, [icon(it.get("icon") ?? "chevron_right", "sm")]),
+              el("span", {class: "spacer-text"}, [text(it.label)]),
+              if it.get("hint").is_missing() then missing else el("span", {class: "meta"}, [text(it.hint)]),
+          ]))
+        })),
+    ]),
+  ])
+}
+
 # --- People, lists and summaries. ---------------------------------------------------------
 
 AVATAR_TONES = 6
@@ -383,15 +459,16 @@ export fn avatars(names, max = 4) = el("div", {class: "avatars"}, names.take(max
 # trailing. A row with `click` is a button, `selected` marks the current one, and `share`
 # lets a row turn into what it opens (a detail view with the same `share`).
 export fn list(rows, label = missing) = el("div", {class: "list mat-card", role: "list", aria: {label: label}}, rows)
-export fn list_item(title, subtitle = missing, leading = missing, trailing = missing, selected = false, click = missing, value = missing, key = missing, share = missing) = do {
+# `extra` is more props for the row itself — `dblclick`, `contextmenu`, `reveal`.
+export fn list_item(title, subtitle = missing, leading = missing, trailing = missing, selected = false, click = missing, value = missing, key = missing, share = missing, extra = missing) = do {
   body = present([
     if leading.is_missing() then missing else el("span", {class: "li-lead"}, [leading]),
     el("span", {class: "two-line"}, present([el("span", {class: "li-title"}, [text(title)]), if subtitle.is_missing() then missing else el("span", {class: "meta"}, [text(subtitle)])])),
     if trailing.is_missing() then missing else el("span", {class: "li-trail"}, [if type_of(trailing) == "String" then text(trailing) else trailing]),
   ])
   el("div", {role: "listitem", class: "li-wrap", key: key, layout: true, exit: "fade"}, [
-    if click.is_missing() then el("div", {class: if selected then "li on" else "li", share: share}, body)
-      else el("button", {class: if selected then "li on" else "li", click: click, value: value, share: share, aria: {current: if selected then "true" else missing}, attrs: {type: "button"}}, body),
+    with_props(if click.is_missing() then el("div", {class: if selected then "li on" else "li", share: share}, body)
+        else el("button", {class: if selected then "li on" else "li", click: click, value: value, share: share, aria: {current: if selected then "true" else missing}, attrs: {type: "button"}}, body), extra ?? {}),
   ])
 }
 
@@ -445,7 +522,8 @@ export fn shell(rail_node, toolbar_node, content, label = "Content") = el("div",
   rail_node,
   el("div", {class: "shell-main"}, [
     toolbar_node,
-    el("main", {class: "shell-scroll", attrs: {tabindex: "-1"}, aria: {label: label}}, [content]),
+    # The page is already the document's one `main`, so the frame's content is a labelled region.
+    el("div", {class: "shell-scroll", role: "region", attrs: {tabindex: "-1"}, aria: {label: label}}, [content]),
   ]),
 ])
 # A toolbar's items float as separate glass capsules (macOS's toolbar), not one bar: a child
@@ -1453,6 +1531,26 @@ select.input { appearance: none; padding-right: 32px; background-image: linear-g
 .sheet-body { display: flex; flex-direction: column; gap: var(--s-3); }
 .sheet-actions { display: flex; justify-content: flex-end; gap: var(--s-2); }
 
+.ctx-closed, .palette-layer.closed { display: none; }
+.context-menu { position: fixed; z-index: 70; min-width: 220px; transform-origin: top left; }
+.menu-sep { height: 1px; margin: 4px 6px; background: var(--line); }
+.menu-kbd { font: var(--type-caption); color: var(--muted); margin-left: auto; padding-left: 16px; }
+.menu-item:hover .menu-kbd, .menu-item:focus-visible .menu-kbd { color: inherit; opacity: .8; }
+.menu-item[disabled] { opacity: var(--state-disabled); pointer-events: none; }
+.spacer-text { flex: 1; }
+.palette-layer { position: fixed; inset: 0; z-index: 80; display: flex; justify-content: center; align-items: flex-start; padding: 12vh var(--s-4) var(--s-4); }
+.palette-scrim { background: color-mix(in srgb, var(--scrim) 70%, transparent); }
+.palette { position: relative; width: min(620px, 100%); max-height: 70vh; display: flex; flex-direction: column; border-radius: var(--r-sheet); padding: var(--pad-overlay); overflow: hidden; }
+.palette-search { display: flex; align-items: center; gap: 10px; height: calc(var(--ctl-h) + 12px); padding: 0 10px 0 14px; color: var(--muted); border-bottom: 1px solid var(--line); margin-bottom: var(--pad-overlay); }
+.palette-input { flex: 1; min-width: 0; border: 0; outline: none; background: transparent; color: var(--fg); font: var(--type-title-3); letter-spacing: var(--track-title-3); }
+.palette-list { overflow: auto; display: flex; flex-direction: column; gap: 1px; }
+.palette-opt { display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 0 10px; border-radius: max(4px, calc(var(--r-sheet) - var(--pad-overlay))); cursor: pointer; transition: background-color var(--fx-fast); }
+.palette-opt:hover { background: var(--hover); }
+.palette-opt.on { background: var(--accent); color: var(--accent-fg); }
+.palette-opt.on .meta, .palette-opt.on .palette-ic { color: inherit; opacity: .85; }
+.palette-ic { color: var(--muted); display: grid; place-items: center; }
+.palette-empty { padding: var(--s-4); margin: 0; text-align: center; }
+
 /* Lists, people and summaries. */
 .list { display: flex; flex-direction: column; gap: 1px; padding: var(--pad-list); border-radius: var(--r-list); min-width: 0; }
 .li-wrap { display: block; min-width: 0; }
@@ -1831,12 +1929,35 @@ CLIENT = """
     if (saved) restore(saved);
     flipTo(moving);
     sharedTo(sharing);
+    reveal();
+    for (const n of arrived) if (n instanceof Element) place(n);
     // A newly shown menu (or anything marked `autofocus`) takes focus to its first item.
     for (const n of arrived) {
       const f = n instanceof Element && (n.matches('[autofocus]') ? n : n.querySelector('[autofocus]'));
       if (f) { f.focus({ preventScroll: true }); break; }
     }
     syncDialogs();
+  }
+
+  // The node marked `reveal` is scrolled into view when it becomes the revealed one — the
+  // selected row a key moved to — and left alone while it stays so, so the person's own
+  // scrolling is not undone by every frame.
+  let revealed = null;
+  function reveal() {
+    const n = root.querySelector('[data-reveal="true"]');
+    const id = n && (ident(n) || n);
+    if (n && id !== revealed) n.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    revealed = id;
+  }
+  // A menu placed where the pointer was stays on the screen: moved left or up by what would
+  // fall off the edge.
+  function place(n) {
+    for (const m of [n, ...n.querySelectorAll('.context-menu')]) {
+      if (!m.classList || !m.classList.contains('context-menu')) continue;
+      const r = m.getBoundingClientRect();
+      const dx = Math.max(0, r.right - innerWidth + 8), dy = Math.max(0, r.bottom - innerHeight + 8);
+      if (dx || dy) { m.style.left = Math.max(8, r.left - dx) + 'px'; m.style.top = Math.max(8, r.top - dy) + 'px'; }
+    }
   }
 
   // A modal dialog's state is the model's: `data-open` says whether it is showing.
@@ -1910,9 +2031,28 @@ CLIENT = """
   const num = (s) => { const n = Number(s); return s.trim() === '' || !Number.isFinite(n) ? null : n; };
   const valueOf = (t) => (t.type === 'checkbox' ? t.checked : t.type === 'range' || t.type === 'number' ? num(t.value) : t.value);
 
+  // Which modifier keys a click carried — "ctrl", "shift", "ctrl+shift" or "" — for the
+  // selection gestures of a desktop list. Command on a Mac counts as Ctrl.
+  const mods = (e) => [(e.ctrlKey || e.metaKey) && 'ctrl', e.altKey && 'alt', e.shiftKey && 'shift'].filter(Boolean).join('+');
   document.addEventListener('click', (e) => {
+    const cp = e.target.closest('[data-copy]');
+    if (cp && navigator.clipboard) navigator.clipboard.writeText(cp.dataset.copy).catch(() => {});
     const t = e.target.closest('[data-click]');
-    if (t && !t.disabled) post({ msg: t.dataset.click, value: t.dataset.value ?? null }, false);
+    if (t && !t.disabled) post({ msg: t.dataset.click, value: t.dataset.value ?? null, mods: mods(e) }, false);
+  });
+  document.addEventListener('dblclick', (e) => {
+    const t = e.target.closest('[data-dblclick]');
+    if (t) { e.preventDefault(); post({ msg: t.dataset.dblclick, value: t.dataset.value ?? null, mods: mods(e) }, false); }
+  });
+  // A right click (or the menu key) where the view asked for one: the node's value and where
+  // the pointer is, so the app can put its menu there.
+  document.addEventListener('contextmenu', (e) => {
+    const t = e.target.closest('[data-contextmenu]');
+    if (!t) return;
+    e.preventDefault();
+    let x = e.clientX, y = e.clientY;
+    if (!x && !y) { const r = t.getBoundingClientRect(); x = r.left + 24; y = r.bottom; }
+    post({ msg: t.dataset.contextmenu, value: { value: t.dataset.value ?? null, x: Math.round(x), y: Math.round(y) }, mods: mods(e) }, false);
   });
   document.addEventListener('input', (e) => {
     const t = e.target.closest('[data-input]');
@@ -1963,8 +2103,38 @@ CLIENT = """
 
   // Keyboard paths for the composite widgets: tabs and menus move with the arrow keys, Home
   // and End (WAI-ARIA Authoring Practices); a tab is selected as it is reached.
+  // A key as a chord: "Ctrl+K", "Shift+ArrowDown", "Enter", "/". A printed character carries
+  // Shift already ("?" rather than "Shift+/"), so Shift is named only on keys that print none.
+  function chord(e) {
+    const k = e.key === ' ' ? 'Space' : e.key.length === 1 ? e.key.toUpperCase() : e.key;
+    const m = [(e.ctrlKey || e.metaKey) && 'Ctrl', e.altKey && 'Alt', e.shiftKey && (e.key.length > 1 || e.key === ' ') && 'Shift'].filter(Boolean);
+    return [...m, k].join('+');
+  }
+  const editable = (t) => t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName);
+  // In a text field the keys that edit text are the field's own: only a chord with Ctrl or
+  // Alt, Escape, Enter and the vertical arrows reach a shortcut from there.
+  const fieldKey = (c) => /^(Ctrl|Alt)\+/.test(c) || ['Escape', 'Enter', 'ArrowUp', 'ArrowDown'].includes(c);
+  // Shortcuts: the nearest node with `keydown` whose `shortcuts` name this chord; with nothing
+  // focused, the app's own. A shortcut outside an open dialog never fires from inside it.
+  function shortcut(e) {
+    const t = e.target, c = chord(e);
+    if (editable(t) && !fieldKey(c)) return false;
+    let scope = t.closest && t.closest('[data-keydown]');
+    while (scope && !(scope.dataset.shortcuts || '').split(' ').includes(c)) scope = scope.parentElement && scope.parentElement.closest('[data-keydown]');
+    if (!scope && (t === document.body || !root.contains(t))) {
+      const top = root.querySelector('[data-keydown]');
+      if (top && (top.dataset.shortcuts || '').split(' ').includes(c)) scope = top;
+    }
+    if (!scope) return false;
+    const d = t.closest && t.closest('dialog');
+    if (d && !d.contains(scope)) return false;
+    e.preventDefault();
+    post({ msg: scope.dataset.keydown, value: c }, false);
+    return true;
+  }
   document.addEventListener('keydown', (e) => {
     const t = e.target;
+    if (!e.isComposing && shortcut(e)) return;
     if (e.key === 'Escape') {
       const d = t.closest && t.closest('[data-dismiss]');
       if (d && d.tagName !== 'DIALOG') { e.preventDefault(); post({ msg: d.dataset.dismiss, value: null }, false); }

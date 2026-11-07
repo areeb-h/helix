@@ -4547,6 +4547,97 @@ fn a_subscribed_app_replays_identically_on_every_engine() {
 /// described by its error, an open menu says so and takes focus to its first item, the modal's
 /// state is the model's, the selected tab is the one announced, a progress bar reports its
 /// value, and a scrolled table renders only the window it shows.
+/// The file manager (`examples/apps/files.helix`) is confined to its root. Its scripted session
+/// tries every way out — `..`, a path in a name, a symbolic link to a folder outside, a forged
+/// "recent" folder, a breadcrumb past the top, a forged Trash entry — and then, with `--write`,
+/// makes a folder, refuses a bad name and a rename onto an existing one, moves the folder to the
+/// Trash and brings it back. The screens must agree on every engine, and the DISK must show
+/// exactly that: the folder outside untouched, nothing made outside the root, the Trash empty
+/// again. Read-only, the same session changes nothing at all.
+#[test]
+fn the_file_manager_stays_in_its_root_and_changes_only_what_it_should() {
+    use std::fs;
+    use std::os::unix::fs::symlink;
+    let base = std::env::temp_dir().join(format!("helix_files_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    let make = |name: &str| -> (std::path::PathBuf, std::path::PathBuf) {
+        let t = base.join(name);
+        let (root, outside) = (t.join("root"), t.join("outside"));
+        fs::create_dir_all(root.join("Notes")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("keep.txt"), "keep").unwrap();
+        fs::write(root.join("Notes/a.md"), "hi").unwrap();
+        symlink("../outside", root.join("link-out")).unwrap();
+        // Fixed, old times, so the dates on screen are the same on every engine and every day.
+        let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_577_923_200);
+        for p in [root.join("Notes/a.md"), root.join("Notes")] {
+            fs::File::open(&p).unwrap().set_modified(old).unwrap();
+        }
+        (root, outside)
+    };
+    let mut seen: Vec<String> = Vec::new();
+    for (k, env) in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]].iter().enumerate() {
+        let (root, outside) = make(&format!("w{k}"));
+        let r = root.to_str().unwrap();
+        let (out, err, code) = run(&["run", "examples/apps/files.helix", "--root", r, "--write", "--replay"], env, "");
+        assert_eq!(code, Some(0), "{env:?} stderr: {err}");
+        assert_eq!(fs::read_to_string(outside.join("keep.txt")).unwrap(), "keep", "the folder outside was touched");
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 1, "something was made outside the root");
+        assert!(!root.join("escape").exists() && !root.parent().unwrap().join("escape").exists());
+        assert!(root.join("Drafts 2027").is_dir(), "the folder made and renamed is back from the Trash");
+        assert!(!root.join("Drafts").exists() && root.join("Notes/a.md").exists());
+        assert_eq!(fs::read_dir(root.join(".trash")).unwrap().count(), 0, "the Trash is empty again");
+        // A Trash entry is named for the moment it was made (`<ms>-<name>`), so runs differ there
+        // and only there.
+        let stamped = |s: String| {
+            let mut out = String::new();
+            let mut digits = String::new();
+            for c in s.chars() {
+                if c.is_ascii_digit() {
+                    digits.push(c);
+                } else {
+                    out.push_str(if digits.len() >= 12 { "<ms>" } else { &digits });
+                    digits.clear();
+                    out.push(c);
+                }
+            }
+            out + &digits
+        };
+        seen.push(stamped(out.replace(r, "<root>")));
+    }
+    assert!(seen.windows(2).all(|w| w[0] == w[1]), "engines disagree on the file manager");
+    let screens: Vec<&str> = seen[0].split("<div class=\"files\" ").skip(1).collect();
+    assert_eq!(screens.len(), 23, "one screen per event");
+    let title = |i: usize| screens[i].split("<h1 class=\"screen-title\">").nth(1).and_then(|t| t.split('<').next()).unwrap_or("");
+    assert_eq!(title(0), "Notes");
+    assert!(screens[0].contains("Jan 2, 2020"), "a file's date, from its modification time");
+    // Every way out leaves it at the top of its root, and nothing outside is ever listed.
+    for i in 1..=9 {
+        assert_eq!(title(i), "root", "screen {i} left the root");
+    }
+    assert!(seen[0].contains("Symbolic link") && !seen[0].contains("keep.txt"), "a link is shown as a link and never followed");
+    assert!(screens[11].contains("A name can&#39;t be empty"), "a name with a path in it is refused");
+    assert!(screens[15].contains("“Notes” already exists here."), "a rename never replaces something");
+    assert!(screens[18].contains("Moved “Drafts 2027” to the Trash") && screens[18].contains("data-click=\"restore\""), "the Trash offers Undo");
+    assert!(screens[19].contains("Put “Drafts 2027” back"));
+    assert_eq!(title(21), "root", "Enter on a link does not follow it");
+    assert!(screens[22].contains("data-value=\".trash\""), "Ctrl+H shows hidden files");
+
+    // Read-only, the same session changes nothing, and offers nothing that would.
+    let (root, outside) = make("ro");
+    let before: Vec<String> = fs::read_dir(&root).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+    let (out, err, code) = run(&["run", "examples/apps/files.helix", "--root", root.to_str().unwrap(), "--replay"], &[], "");
+    assert_eq!(code, Some(0), "stderr: {err}");
+    let mut after: Vec<String> = fs::read_dir(&root).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+    let mut b = before.clone();
+    b.sort();
+    after.sort();
+    assert_eq!(after, b, "a read-only session changed the folder");
+    assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+    assert!(out.contains("Read-only") && !out.contains("Move to the Trash") && !out.contains("Rename"), "read-only offers no changes");
+    let _ = fs::remove_dir_all(&base);
+}
+
 /// The design lab (ADR 0056): three designs of one app, computed in Helix — palettes, glass
 /// opacities, concentric radii — and replayed identically on every engine. The screens pin
 /// what the engine promises in markup: a design's tokens travel on its scope, a round shape
