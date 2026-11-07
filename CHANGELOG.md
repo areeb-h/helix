@@ -97,6 +97,36 @@
   With a variable that names no running server (an `ssh` session, a stopped X server, a
   container) the app now checks that the display really opens, answers `false`, and serves
   in the browser as it would with no display at all.
+- **The file manager asks the disk again before every read and change.** Between a listing
+  and an action, a listed name could be swapped for a symbolic link, and the app trusted what
+  it had seen. Through that gap it could preview a file outside its root, restore into or make
+  a folder in a folder that had become a link, or follow a `.trash` that is a link. A rename
+  onto a dangling link replaced it. Two same-named files trashed in one millisecond destroyed
+  one of them. Each is now checked with `lstat` just before acting. The palette's Recent opens
+  only folders it went to, and sizes no longer read "1024 KB".
+- **An app takes changes only from its own page.** Every port of 127.0.0.1 is one site, so a
+  page served from any other local port could POST `/event` with the session cookie attached.
+  A POST whose `Origin` or `Sec-Fetch-Site` names another origin is now refused.
+- **`std.ui` draws odd data instead of raising.** A NaN or infinite value in a table or a
+  chart, an empty sparkline, a ring or progress bar of 0 of 0, and a table offset past the end
+  all draw now. Before, each raised: the event was undone, or the app could not start (a CSV
+  with "NaN" in it would not open). A `missing` field value is empty, not the word "missing".
+  Tab ids with spaces no longer break `aria-controls`. Grey seeds get a graphite accent
+  instead of an olive one.
+- **A `design:` or `subscriptions` function that fails keeps the app running.** A design
+  that raises or returns something else keeps the last design and logs why. Malformed timers
+  are dropped, periods are at least 10 ms, and `ui.every` checks its arguments.
+- **The page script, driven in Chromium:**
+  - a focused field shows a value the app sends it (a search cleared by Escape);
+  - menus skip disabled items;
+  - context menus stay on screen, and overlays play their arrival and exit;
+  - frames no longer undo the browser's scroll anchoring;
+  - a retargeted layout animation keeps its direction, and a shared-element morph is not
+    restarted by unrelated frames;
+  - the command palette and sheets hold shortcuts and Tab as dialogs do;
+  - Ctrl+Shift+H is not Ctrl+H;
+  - closing an overlay returns focus to what opened it;
+  - a hidden tab no longer queues frames.
 
 ## v0.13.0 — 2026-11-07
 
