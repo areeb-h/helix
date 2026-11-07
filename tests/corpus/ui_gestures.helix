@@ -53,3 +53,12 @@ ts = ui.render(ui.toasts([{id: 7, text: "Saved"}], "dismiss"))
 print([ts.contains("data-drag=\"dismiss\" data-drag-axis=\"x\" data-drag-commit=\"80\""), ts.contains("data-value=\"7\"")])
 sh = ui.render(ui.sheet("s", true, "Share", [ui.text("x")], "close"))
 print([sh.contains("data-drag=\"close\" data-drag-axis=\"down\" data-drag-commit=\"96\""), sh.contains("class=\"grabber-zone\" data-drag-handle=\"true\" aria-hidden=\"true\"")])
+
+# A navigation stack: only the top two screens are drawn, the lower one inert and hidden from
+# screen readers; the top one is pushed in, swiped back from its edge, and names where back goes.
+screens = [{key: "a", title: "Inbox", content: ui.text("list")}, {key: "b", title: "Message", content: ui.text("one")}, {key: "c/d", title: "Reply", content: ui.text("two")}]
+sk = ui.render(ui.stack("nav", screens, "back"))
+print([sk.split("class=\"stack-screen").count() - 1, not sk.contains("Inbox</h2>"), sk.contains("aria-label=\"Back to Message\""), sk.contains("data-key=\"nav-c_47_d\""), sk.contains("inert=\"\""), sk.contains("data-enter=\"push\"")])
+one = ui.render(ui.stack("nav", screens.take(1), "back"))
+print([one.contains("stack-back"), one.contains("data-drag"), one.contains("data-enter")])
+print([ui.render(ui.large_title("Files")), ui.render(ui.toolbar_title("Files"))])

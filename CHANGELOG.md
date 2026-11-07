@@ -4,6 +4,16 @@
 
 ### Added
 
+- **Motion v3 (ADR 0058):**
+  - **Container transforms.** A tile opening into its card is revealed by a clip that grows
+    from the tile's box, so nothing stretches. The tile fades out as a ghost of itself moving
+    with it.
+  - **`ui.stack`, a navigation stack.** Screens are pushed and popped with spring slides. The
+    top screen can be swiped back from its left edge, and the screen beneath follows the
+    finger. Its back button names where it goes.
+  - **Cascades.** Things that arrive together arrive one after another, with no setting.
+  - **`ui.large_title` and `ui.toolbar_title`.** Apple's large title shrinks into the toolbar
+    as the page scrolls, driven by the scroll on the compositor. The file manager uses it.
 - **Gestures, as view props (ADR 0057).** The page does the dragging, with no round trip.
   When it is let go, the app gets one event, and the node springs to wherever the next frame
   puts it, at the speed it was thrown.

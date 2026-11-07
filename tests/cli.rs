@@ -4818,7 +4818,7 @@ fn the_component_gallery_replays_identically_on_every_engine() {
     }
     assert!(seen.windows(2).all(|w| w[0] == w[1]), "engines disagree on the replayed UI");
     let s: Vec<&str> = seen[0].lines().collect();
-    assert_eq!(s.len(), 23, "one screen per event");
+    assert_eq!(s.len(), 27, "one screen per event");
     let has = |i: usize, what: &str| assert!(s[i].contains(what), "screen {i} lacks {what}");
     // Gestures (ADR 0057): what the page sends when something is let go, and what the app makes
     // of it. A size is kept; a move that fits the list moves it, and a stale one is ignored.
@@ -4830,6 +4830,13 @@ fn the_component_gallery_replays_identically_on_every_engine() {
     has(20, "Selected: docs/guide.md");
     has(21, "aria-expanded=\"true\" aria-controls=\"gestures-body\"");
     has(22, "class=\"popover mat-overlay start\" id=\"view-options-pop\" role=\"dialog\"");
+    // Navigation: a pushed screen over the one it came from (inert), with a way back by button
+    // and by swipe; a tile and the card it opens share a name, so one morphs into the other.
+    has(23, "class=\"stack-screen stack-beneath\"");
+    has(23, "data-drag=\"mail-back\" data-drag-axis=\"right\" data-drag-commit=\"120\"");
+    has(23, "aria-label=\"Back to Inbox\"");
+    has(24, "class=\"album-open\" data-key=\"open-2\" data-share=\"album-2\"");
+    assert!(!s[25].contains("stack-beneath") && !s[26].contains("album-open"), "back, and closed");
     // An empty submit: every error shows, tied to its field.
     has(0, "aria-describedby=\"name-error\" aria-invalid=\"true\"");
     has(0, "<p class=\"error\" id=\"name-error\" data-key=\"error\" data-enter=\"rise\" data-exit=\"fade\">Enter your name.</p>");
