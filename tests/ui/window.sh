@@ -49,7 +49,12 @@ if [ -n "$wid" ]; then
   import -window root "$OUT/desktop-window.png" 2>/dev/null && ok "screenshot: $OUT/desktop-window.png"
   # The close button, as a window manager delivers it (WM_DELETE_WINDOW). The app may still be
   # busy loading its page on a slow machine, so it has up to 20 s to act on it.
-  if wmctrl -c 'Component gallery'; then ok "the close request was delivered"; else bad "wmctrl found no window to close"; fi
+  # By the window's own id, retried: on a slow machine the window manager can still be
+  # registering the window when the close is first asked for (wmctrl then finds nothing to close).
+  hex=$(printf '0x%08x' "$wid")
+  sent=""
+  for _ in $(seq 100); do wmctrl -i -c "$hex" 2>/dev/null && { sent=1; break; }; sleep 0.1; done
+  [ -n "$sent" ] && ok "the close request was delivered" || bad "the window manager never accepted a close for $hex"
   for _ in $(seq 200); do kill -0 $pid 2>/dev/null || break; sleep 0.1; done
   if kill -0 $pid 2>/dev/null; then
     bad "the app outlived its window's close button"
