@@ -203,6 +203,10 @@ fn parse(v: &Value, line: usize, col: usize) -> Result<Node, HelixError> {
         ("enter", "data-enter"),
         ("exit", "data-exit"),
         ("layout", "data-layout"),
+        // A shared element: two nodes with the same `share` name, in one frame and the next,
+        // are one thing moving — the client morphs the new one from where and how big the old
+        // one was (a row growing into its detail, a selection gliding between options).
+        ("share", "data-share"),
     ] {
         if let Some(v) = get(&props, prop) {
             attrs.push((out.to_string(), text_of(&v, line, col)?));
@@ -514,6 +518,13 @@ mod tests {
              data-enter=\"pop\" data-exit=\"fade\" data-layout=\"true\" aria-expanded=\"false\" \
              aria-has-popup=\"menu\" disabled=\"\" type=\"button\"></button>"
         );
+    }
+
+    #[test]
+    fn a_shared_element_names_itself_after_the_motion_props() {
+        let t = el("span", vec![("share", s("seg-thumb")), ("layout", Value::Bool(true)), ("class", s("seg-thumb"))], vec![]);
+        let Value::Str(h) = view_html(&t, 0, 0).expect("render") else { panic!() };
+        assert_eq!(h.as_str(), "<span class=\"seg-thumb\" data-layout=\"true\" data-share=\"seg-thumb\"></span>");
     }
 
     #[test]

@@ -1,0 +1,31 @@
+exit: 0
+--- stdout ---
+#4f46e5
+0.5106 0.2301 276.97
+21.00
+pairs checked: 1440, failing: 0
+extreme seeds failing: 0
+["rgba(255, 255, 255, 0.45)", "rgba(255, 255, 255, 0.62)", "rgba(16, 24, 20, 0.45)"]
+["#008053", "#ffffff", "#2fcf8d", "#001c0f"]
+sharp/comfortable: card 8.0 row 4.0 item 4.0 sheet 12.0 ctl 4.0 concentric true
+sharp/compact: card 8.0 row 4.0 item 4.0 sheet 12.0 ctl 4.0 concentric true
+soft/comfortable: card 24.0 row 18.0 item 8.0 sheet 28.0 ctl 8.0 concentric true
+soft/compact: card 20.0 row 16.0 item 10.0 sheet 24.0 ctl 8.0 concentric true
+round/comfortable: card 28.0 row 22.0 item 14.0 sheet 32.0 ctl 999.0 concentric true
+round/compact: card 28.0 row 24.0 item 16.0 sheet 32.0 ctl 999.0 concentric true
+soft cards derive from controls: true
+999px
+spatial spring settles in 290 ms
+opacity 112ms line
+transform 337ms line
+<div class="segmented md" id="v" role="radiogroup" aria-label="View"><button class="seg" role="radio" data-click="pick" data-value="a" aria-checked="false" type="button" tabindex="-1"><span class="seg-label">A</span></button><button class="seg on" role="radio" data-click="pick" data-value="b" aria-checked="true" type="button" tabindex="0"><span class="seg-thumb" data-share="v-thumb" aria-hidden="true"></span><span class="seg-label">B</span></button></div>
+true
+<div class="sheet-layer closed" data-key="s-layer"></div>
+true
+<span class="avatar md a2" role="img" aria-label="Ada Lovelace" title="Ada Lovelace">A</span>
+<svg class="ic md" role="img" aria-label="Done" viewBox="0 0
+<div class="hx-scope m-hybrid " data-effects="light" style="--l-accent: #c52012;
+refused an unknown material: a design's material is tonal, glass or hybrid; its shape sharp, soft or round; its density comfortable or compact; its effects auto, full or light
+refused a malformed seed: `#12345` is not a #rrggbb colour
+refused an unknown icon: `rocket` is not one of std.ui's icons
+--- stderr ---

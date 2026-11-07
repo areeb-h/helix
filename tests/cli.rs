@@ -4547,6 +4547,43 @@ fn a_subscribed_app_replays_identically_on_every_engine() {
 /// described by its error, an open menu says so and takes focus to its first item, the modal's
 /// state is the model's, the selected tab is the one announced, a progress bar reports its
 /// value, and a scrolled table renders only the window it shows.
+/// The design lab (ADR 0056): three designs of one app, computed in Helix — palettes, glass
+/// opacities, concentric radii — and replayed identically on every engine. The screens pin
+/// what the engine promises in markup: a design's tokens travel on its scope, a round shape
+/// makes controls capsules, a trashed file comes back with Undo, and a segmented control's
+/// selection is a shared element that moves to the chosen option.
+#[test]
+fn the_design_lab_replays_identically_on_every_engine() {
+    let mut seen: Vec<String> = Vec::new();
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run(&["run", "examples/apps/design-lab.helix", "--replay"], env, "");
+        assert_eq!(code, Some(0), "{env:?} stderr: {err}");
+        seen.push(out);
+    }
+    assert!(seen.windows(2).all(|w| w[0] == w[1]), "engines disagree on the replayed designs");
+    let s: Vec<&str> = seen[0].lines().collect();
+    assert_eq!(s.len(), 11, "one screen per event");
+    let has = |i: usize, what: &str| assert!(s[i].contains(what), "screen {i} lacks {what}");
+    // Three scopes, each carrying both modes' tokens.
+    assert_eq!(s[0].matches("class=\"hx-scope m-").count(), 3);
+    has(0, "--l-accent: #");
+    has(0, "--d-accent: #");
+    // Round: controls are capsules; the card's corner is computed, its rows' concentric with it.
+    has(1, "--l-r-btn: 999px;");
+    has(1, "--l-r-card: 28px;");
+    has(1, "--l-r-row: 22px;");
+    // Trashed: the row is gone and the toast offers Undo; undone, the row is back.
+    assert!(!s[3].contains("data-key=\"f2\""), "the trashed file is gone");
+    has(3, "data-click=\"undo\" data-value=\"2\"");
+    has(4, "data-key=\"f2\"");
+    // The chosen segment carries the shared thumb.
+    has(6, "data-value=\"board\" aria-checked=\"true\" type=\"button\" tabindex=\"0\"><span class=\"seg-thumb\" data-share=");
+    has(7, "role=\"dialog\" data-dismiss=\"close-sheet\" data-enter=\"sheet\"");
+    has(8, "sheet-layer closed");
+    // One pane alone.
+    assert_eq!(s[10].matches("class=\"hx-scope m-").count(), 1);
+}
+
 #[test]
 fn the_component_gallery_replays_identically_on_every_engine() {
     let mut seen: Vec<String> = Vec::new();
@@ -4649,16 +4686,36 @@ fn an_app_hot_reloads_with_its_state() {
         let l = log.lock().unwrap();
         l.split("token=").nth(1).unwrap().split_whitespace().next().unwrap().to_string()
     };
+    // A reply is complete when its headers and `Content-Length` bytes of body have arrived.
+    // The app keeps connections open, so reading to EOF would wait out the read timeout on
+    // every request — 5 s each, which made this test take 40 s and left the 10 s budget for a
+    // reload only two attempts.
     let ask = |raw: String| -> String {
         let end = Instant::now() + Duration::from_secs(10);
         loop {
             if let Ok(mut s) = TcpStream::connect(("127.0.0.1", PORT)) {
                 s.set_read_timeout(Some(Duration::from_secs(5))).ok();
                 s.write_all(raw.as_bytes()).unwrap();
-                let mut out = String::new();
-                let _ = s.read_to_string(&mut out);
-                if !out.is_empty() {
-                    return out;
+                let mut buf: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let text = String::from_utf8_lossy(&buf).to_string();
+                    if let Some(at) = text.find("\r\n\r\n") {
+                        let len = text[..at]
+                            .lines()
+                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                            .unwrap_or(0);
+                        if buf.len() >= at + 4 + len {
+                            break;
+                        }
+                    }
+                    match s.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                if !buf.is_empty() {
+                    return String::from_utf8_lossy(&buf).to_string();
                 }
             }
             assert!(Instant::now() < end, "the app never answered");

@@ -57,7 +57,9 @@ export fn column(children, gap = 4) = el("div", {class: "col gap-{gap}"}, childr
 export fn row(children, gap = 4) = el("div", {class: "row gap-{gap}"}, children)
 export fn cluster(children, gap = 2) = el("div", {class: "cluster gap-{gap}"}, children)
 # Children laid out in as many columns of at least `min` pixels as fit.
-export fn grid(children, min = 260, gap = 4) = el("div", {class: "grid gap-{gap}", style: {grid_template_columns: "repeat(auto-fill, minmax(min({min}px, 100%), 1fr))"}}, children)
+# (`auto-fit`: a row with fewer children than fit stretches them across the width, rather
+# than leaving empty columns beside them.)
+export fn grid(children, min = 260, gap = 4) = el("div", {class: "grid gap-{gap}", style: {grid_template_columns: "repeat(auto-fit, minmax(min({min}px, 100%), 1fr))"}}, children)
 export fn spacer() = el("div", {class: "spacer"}, [])
 export fn divider() = el("hr", {class: "divider"}, [])
 
@@ -73,18 +75,80 @@ export fn badge(s, tone = "neutral") = el("span", {class: "badge {tone}"}, [text
 
 # --- Containers. -------------------------------------------------------------------------
 
-export fn card(title, children) = el("section", {class: "card"}, [el("h2", {}, [text(title)])].concat(children))
+export fn card(title, children) = el("section", {class: "card mat-card"}, [el("h2", {}, [text(title)])].concat(children))
 export fn stat(name, value) = el("div", {class: "stat"}, [el("span", {class: "stat-name"}, [text(name)]), el("span", {class: "stat-value"}, [text(value)])])
+
+# --- Icons. ------------------------------------------------------------------------------
+#
+# A small built-in set, drawn as 24-unit strokes in the current text colour, so an icon takes
+# its colour from what it sits in. `icon(name)` is decorative (hidden from screen readers);
+# give `label` when the icon alone carries meaning. `icon_names()` lists them.
+
+ICONS = {
+  home: ["M4 10.5 12 4l8 6.5V19a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z"],
+  search: ["M10.5 4a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13z", "M20 20l-4.6-4.6"],
+  plus: ["M12 5v14", "M5 12h14"],
+  minus: ["M5 12h14"],
+  close: ["M6 6l12 12", "M18 6 6 18"],
+  check: ["M5 12.5l4.5 4.5L19 7.5"],
+  chevron_right: ["M9.5 6l6 6-6 6"],
+  chevron_left: ["M14.5 6l-6 6 6 6"],
+  chevron_down: ["M6 9.5l6 6 6-6"],
+  more: ["M12 6.5h.01", "M12 12h.01", "M12 17.5h.01"],
+  more_h: ["M6.5 12h.01", "M12 12h.01", "M17.5 12h.01"],
+  star: ["M12 3.5l2.6 5.3 5.9.9-4.25 4.15 1 5.85L12 16.9l-5.25 2.8 1-5.85L3.5 9.7l5.9-.9z"],
+  heart: ["M12 20s-7.5-4.6-7.5-10.2A4.3 4.3 0 0 1 12 7.3a4.3 4.3 0 0 1 7.5 2.5C19.5 15.4 12 20 12 20z"],
+  trash: ["M4 7h16", "M9.5 7V4.5h5V7", "M6.5 7l.9 12.5a1 1 0 0 0 1 .9h7.2a1 1 0 0 0 1-.9L17.5 7"],
+  pen: ["M15.5 4.5l4 4L9 19H5v-4z"],
+  copy: ["M9 9h10.5v10.5H9z", "M15 9V4.5H4.5V15H9"],
+  share: ["M12 15V4", "M8 7.5 12 3.5l4 4", "M5 12v6.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V12"],
+  download: ["M12 4v11", "M8 11l4 4 4-4", "M5 19.5h14"],
+  upload: ["M12 15V4", "M8 8l4-4 4 4", "M5 19.5h14"],
+  folder: ["M3.5 7a1.5 1.5 0 0 1 1.5-1.5h4.2l2 2H19a1.5 1.5 0 0 1 1.5 1.5v8.5A1.5 1.5 0 0 1 19 19H5a1.5 1.5 0 0 1-1.5-1.5z"],
+  doc: ["M7 3.5h7l4.5 4.5v11a1.5 1.5 0 0 1-1.5 1.5H7A1.5 1.5 0 0 1 5.5 19V5A1.5 1.5 0 0 1 7 3.5z", "M13.5 3.5V8.5h5", "M8.5 13h7", "M8.5 16.5h5"],
+  image: ["M5 4.5h14A1.5 1.5 0 0 1 20.5 6v12a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 18V6A1.5 1.5 0 0 1 5 4.5z", "M9 8.2a1.8 1.8 0 1 0 0 3.6 1.8 1.8 0 0 0 0-3.6z", "M20.5 15.5l-5-5-9.5 9"],
+  table: ["M5 4.5h14A1.5 1.5 0 0 1 20.5 6v12a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 18V6A1.5 1.5 0 0 1 5 4.5z", "M3.5 10h17", "M3.5 15h17", "M10 4.5v15"],
+  chart: ["M4 20V10", "M10 20V4", "M16 20v-7", "M21 20H3"],
+  bell: ["M6 16V11a6 6 0 1 1 12 0v5l1.5 2h-15z", "M10 20.5a2 2 0 0 0 4 0"],
+  settings: ["M12 8.8a3.2 3.2 0 1 0 0 6.4 3.2 3.2 0 0 0 0-6.4z", "M12 2.8v2.4", "M12 18.8v2.4", "M2.8 12h2.4", "M18.8 12h2.4", "M5.5 5.5l1.7 1.7", "M16.8 16.8l1.7 1.7", "M5.5 18.5l1.7-1.7", "M16.8 7.2l1.7-1.7"],
+  user: ["M12 4a4 4 0 1 0 0 8 4 4 0 0 0 0-8z", "M4.5 20a7.5 7.5 0 0 1 15 0"],
+  cloud: ["M7.5 18.5a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18.4 9.1 4.25 4.25 0 0 1 17.5 18.5z"],
+  sparkle: ["M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9L12 17.5l-1.9-5.1L5 10.5l5.1-1.9z", "M18.5 15.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"],
+  clock: ["M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z", "M12 7.5V12l3 2"],
+  filter: ["M4 5.5h16l-6.2 7.3V19l-3.6-1.6v-4.6z"],
+  grid: ["M4.5 4.5h6v6h-6z", "M13.5 4.5h6v6h-6z", "M4.5 13.5h6v6h-6z", "M13.5 13.5h6v6h-6z"],
+  list: ["M8.5 6h11", "M8.5 12h11", "M8.5 18h11", "M4.5 6h.01", "M4.5 12h.01", "M4.5 18h.01"],
+  info: ["M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z", "M12 11v5.5", "M12 7.8h.01"],
+  warning: ["M12 4 2.8 19.5h18.4z", "M12 10v4.5", "M12 17.2h.01"],
+  sun: ["M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z", "M12 2.5v2", "M12 19.5v2", "M2.5 12h2", "M19.5 12h2", "M5.3 5.3l1.4 1.4", "M17.3 17.3l1.4 1.4", "M5.3 18.7l1.4-1.4", "M17.3 6.7l1.4-1.4"],
+  moon: ["M19.5 14.5A7.5 7.5 0 0 1 9.5 4.5a7.5 7.5 0 1 0 10 10z"],
+}
+
+export fn icon_names() = ICONS.keys()
+export fn icon(name, size = "md", label = missing) = do {
+  paths = ICONS.get(name) ?? raise("`{name}` is not one of std.ui's icons", "`ui.icon_names()` lists them.")
+  el("svg", {class: "ic {size}", role: if label.is_missing() then missing else "img", aria: {hidden: if label.is_missing() then true else missing, label: label},
+    attrs: {viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round", focusable: "false"}},
+    paths.map((d) => el("path", {attrs: {d: d}}, [])))
+}
+# An icon by name, or — for what came before the icon set — a glyph shown as text.
+fn glyph(g, size = "md") = if ICONS.get(g).is_missing() then el("span", {class: "glyph", aria: {hidden: true}}, [text(g)]) else icon(g, size)
 
 # --- Buttons. ----------------------------------------------------------------------------
 #
-# Variants: default, primary, ghost, danger. A button with only an icon must say what it does
-# in `label` — that is what a screen reader announces.
+# Variants: default, primary, tonal, outline, ghost, danger. `icon` names a leading icon. A
+# button with only an icon must say what it does in `label` — that is what a screen reader
+# announces. Pressed, a button sinks a little on a fast spatial spring and its corners ease
+# in (a capsule stays a capsule); released, it springs back.
 
-export fn button(caption, msg, variant = "default", value = missing, disabled = false, label = missing) =
-  el("button", {class: "btn {variant}", click: msg, value: value, aria: {label: label}, attrs: {type: "button", disabled: disabled}}, [text(caption)])
-export fn icon_button(icon, label, msg, value = missing) =
-  el("button", {class: "btn ghost icon", click: msg, value: value, aria: {label: label}, attrs: {type: "button"}}, [el("span", {aria: {hidden: true}}, [text(icon)])])
+export fn button(caption, msg, variant = "default", value = missing, disabled = false, label = missing, icon = missing) =
+  el("button", {class: "btn {variant}", click: msg, value: value, aria: {label: label}, attrs: {type: "button", disabled: disabled}},
+    present([if icon.is_missing() then missing else glyph(icon, "sm"), text(caption)]))
+export fn icon_button(icon, label, msg, value = missing, variant = "ghost") =
+  el("button", {class: "btn {variant} icon", click: msg, value: value, aria: {label: label}, attrs: {type: "button", title: label}}, [glyph(icon)])
+# The one primary action of a screen, floating at its corner.
+export fn fab(icon, label, msg, value = missing) =
+  el("button", {class: "fab", click: msg, value: value, aria: {label: label}, attrs: {type: "button", title: label}}, [glyph(icon)])
 
 # --- Form controls. ----------------------------------------------------------------------
 #
@@ -131,17 +195,66 @@ export fn select(id, label, value, options, msg, hint = missing, error = missing
 # `role="switch"`, so Space toggles it and it is announced "on"/"off".
 export fn checkbox(id, label, checked, msg) = el("label", {class: "check"}, [
   el("input", {id: id, change: msg, attrs: {type: "checkbox", name: id, checked: checked}}, []),
+  el("span", {class: "box", aria: {hidden: true}}, [icon("check", "xs")]),
   el("span", {}, [text(label)]),
 ])
-export fn toggle(id, label, on, msg) = el("label", {class: "switch"}, [
+# A switch, optionally with a second line under its label (`hint`); then it is a settings row,
+# label at the start and switch at the end.
+export fn toggle(id, label, on, msg, hint = missing) = el("label", {class: if hint.is_missing() then "switch" else "switch row-switch"}, [
   el("input", {id: id, role: "switch", change: msg, attrs: {type: "checkbox", name: id, checked: on}}, []),
   el("span", {class: "track", aria: {hidden: true}}, [el("span", {class: "thumb"}, [])]),
-  el("span", {}, [text(label)]),
+  if hint.is_missing() then el("span", {}, [text(label)]) else el("span", {class: "two-line"}, [el("span", {class: "strong"}, [text(label)]), el("span", {class: "meta"}, [text(hint)])]),
 ])
 
-# A range input. It holds its own value while dragged (D6): Helix's frame confirms it.
-export fn slider(msg, lo, hi, value, label = missing, step = 1) =
-  el("input", {class: "slider", input: msg, aria: {label: label ?? msg}, attrs: {type: "range", min: "{lo}", max: "{hi}", step: "{step}", value: "{value}"}}, [])
+# A range input. It holds its own value while dragged (D6): Helix's frame confirms it. The
+# filled part of the track is drawn from the value.
+export fn slider(msg, lo, hi, value, label = missing, step = 1) = do {
+  pct = if hi == lo then 0.0 else clamp((value - lo) * 100.0 / (hi - lo), 0.0, 100.0)
+  el("input", {class: "slider", input: msg, aria: {label: label ?? msg}, style: {__fill: "{pct:.1f}%"}, attrs: {type: "range", min: "{lo}", max: "{hi}", step: "{step}", value: "{value}"}}, [])
+}
+
+# One choice of several, as radio buttons: arrow keys move and choose, Tab enters and leaves.
+# `options` is `[[value, caption], …]`.
+export fn radio_group(id, label, value, options, msg) = el("fieldset", {class: "radios", attrs: {id: id}}, [el("legend", {class: "field-label"}, [text(label)])].concat(options.map((o) =>
+  el("label", {class: "check"}, [
+    el("input", {change: msg, attrs: {type: "radio", name: id, value: "{o[0]}", checked: o[0] == value}}, []),
+    el("span", {class: "box round", aria: {hidden: true}}, []),
+    el("span", {}, [text(o[1])]),
+]))))
+
+# A segmented control: one of a few choices, side by side, the chosen one raised. A radio
+# group: arrow keys, Home and End move and choose; only the chosen one is in the Tab order.
+# The selection glides between options (`share`). Clicking sends `{msg, value: <value>}`.
+export fn segmented(id, label, value, options, msg, size = "md") = el("div", {id: id, class: "segmented {size}", role: "radiogroup", aria: {label: label}}, options.map((o) => do {
+  on = o[0] == value
+  el("button", {class: if on then "seg on" else "seg", role: "radio", click: msg, value: "{o[0]}", aria: {checked: on}, attrs: {type: "button", tabindex: if on then "0" else "-1"}}, present([
+    if on then el("span", {class: "seg-thumb", share: "{id}-thumb", aria: {hidden: true}}, []) else missing,
+    el("span", {class: "seg-label"}, [text(o[1])]),
+  ]))
+}))
+
+# Filter chips: one of a few, each a toggle button. `options` is `[[value, caption], …]`.
+export fn chips(id, label, value, options, msg) = el("div", {id: id, class: "chips", role: "group", aria: {label: label}}, options.map((o) => do {
+  on = o[0] == value
+  el("button", {class: if on then "chip on" else "chip", click: msg, value: "{o[0]}", aria: {pressed: on}, attrs: {type: "button"}}, present([if on then icon("check", "xs") else missing, text(o[1])]))
+}))
+
+# A number nudged up and down. The buttons send the NEW value (as text: `to_int(e.value)`),
+# and are disabled at the bounds.
+export fn stepper(id, label, value, msg, lo = 0, hi = 99, step = 1) = el("div", {id: id, class: "stepper", role: "group", aria: {label: label}}, [
+  el("button", {class: "btn ghost icon", click: msg, value: "{max(lo, value - step)}", aria: {label: "Decrease {label}"}, attrs: {type: "button", disabled: value <= lo}}, [icon("minus")]),
+  el("span", {class: "stepper-value", aria: {live: "polite"}}, [text("{value}")]),
+  el("button", {class: "btn ghost icon", click: msg, value: "{min(hi, value + step)}", aria: {label: "Increase {label}"}, attrs: {type: "button", disabled: value >= hi}}, [icon("plus")]),
+])
+
+# A search box with its icon, and the shortcut that reaches it shown at its end.
+export fn search_field(id, label, value, msg, placeholder = "Search", shortcut = missing) = el("label", {class: "search"}, present([
+  icon("search", "sm"),
+  el("input", {id: id, class: "search-input", input: msg, aria: {label: label}, attrs: {type: "search", name: id, value: "{value}", placeholder: placeholder, autocomplete: "off"}}, []),
+  if shortcut.is_missing() then missing else kbd(shortcut),
+]))
+
+export fn kbd(keys) = el("kbd", {class: "kbd"}, [text(keys)])
 
 # A form sends `{msg: submit, value: {field: text, …}}` on Enter or its submit button, and never
 # reloads the page. Fields are named by their ids.
@@ -162,14 +275,33 @@ export fn progress(label, value, max = 1.0) = el("div", {class: "progress", role
   el("span", {class: "progress-bar", style: {transform: "scaleX({clamp(value / max, 0.0, 1.0):.4f})"}}, []),
 ])
 
-# A live region of toasts, `[{id, text, tone?}]`. What arrives is announced politely; each
-# toast rises in, fades out, and the others glide into place. Dismissing sends `{msg, value:
-# "<id>"}`; the app removes it (a timer in `subscriptions` can expire them).
-export fn toasts(items, dismiss) = el("div", {class: "toasts", role: "status", aria: {live: "polite"}}, items.map((t) =>
-  el("div", {key: "toast-{t.id}", class: "toast {t.get("tone") ?? "neutral"}", enter: "rise", exit: "fade", layout: true}, [
+# A ring that fills to `value` of `max` — compact progress, read as a percentage.
+export fn ring(label, value, max = 100.0, size = 44) = do {
+  f = clamp(value / max, 0.0, 1.0)
+  c = 2.0 * pi * 15.0
+  el("svg", {class: "ring", role: "img", aria: {label: "{label}: {round(f * 100.0)}%"}, style: {width: "{size}px", height: "{size}px"}, attrs: {viewBox: "0 0 36 36"}}, [
+    el("circle", {class: "ring-track", attrs: {cx: "18", cy: "18", r: "15"}}, []),
+    el("circle", {class: "ring-fill", attrs: {cx: "18", cy: "18", r: "15", "stroke-dasharray": "{c:.2f}", "stroke-dashoffset": "{c * (1.0 - f):.2f}"}}, []),
+    el("text", {class: "ring-text", attrs: {x: "18", y: "18", "text-anchor": "middle", "dominant-baseline": "central"}}, [text("{round(f * 100.0)}")]),
+  ])
+}
+
+# Placeholder lines for content that is on its way. The shimmer is a transform, so it costs
+# the compositor and nothing else; under reduced motion it stands still.
+export fn skeleton(lines = 3) = el("div", {class: "skeleton", aria: {hidden: true}}, range(0, lines).map((i) => el("span", {class: if i == lines - 1 and lines > 1 then "short" else ""}, [])))
+
+# A live region of toasts, `[{id, text, tone?, action?}]`. What arrives is announced politely;
+# each toast rises in, fades out, and the others glide into place. `action` is `{label, msg,
+# value?}` — an Undo, say. Dismissing sends `{msg: dismiss, value: "<id>"}`; the app removes
+# it (a timer in `subscriptions` can expire them).
+export fn toasts(items, dismiss) = el("div", {class: "toasts", role: "status", aria: {live: "polite"}}, items.map((t) => do {
+  act = t.get("action")
+  el("div", {key: "toast-{t.id}", class: "toast mat-overlay {t.get("tone") ?? "neutral"}", enter: "rise", exit: "fade", layout: true}, present([
     el("span", {class: "toast-text"}, [text(t.text)]),
-    icon_button("✕", "Dismiss", dismiss, "{t.id}"),
-])))
+    if act.is_missing() then missing else el("button", {class: "btn ghost toast-action", click: act.msg, value: act.get("value"), attrs: {type: "button"}}, [text(act.label)]),
+    icon_button("close", "Dismiss", dismiss, "{t.id}"),
+  ]))
+}))
 
 # A tooltip: shown on hover and on keyboard focus, and tied to its control by
 # `aria-describedby`, so it is read, not only seen.
@@ -198,13 +330,19 @@ export fn tabs(id, selected, items, msg, label = missing) = el("div", {class: "t
 # A menu button. `items` is `[{label, msg, value?}]`. Open, it takes focus to its first item;
 # arrows, Home and End move; Escape or a press outside sends `toggle` (the app closes it); and
 # choosing an item sends the item's message — close the menu in `update` when it arrives.
-export fn menu(id, caption, open, toggle, items) = do {
-  trigger = el("button", {id: "{id}-button", class: "btn default", click: toggle,
+# With `icon`, the button is that icon alone (and `caption` is its accessible name); an item
+# may carry an `icon` too, and `danger: true` for a destructive one. `align: "end"` opens the
+# list from the button's right edge.
+export fn menu(id, caption, open, toggle, items, icon = missing, align = "start") = do {
+  trigger = if icon.is_missing() then el("button", {id: "{id}-button", class: "btn default", click: toggle,
     aria: {haspopup: "menu", expanded: open, controls: if open then "{id}-menu" else missing},
     attrs: {type: "button"}}, [text(caption), el("span", {class: "caret", aria: {hidden: true}}, [text("▾")])])
-  list = if not open then [] else [el("div", {key: "{id}-menu", id: "{id}-menu", role: "menu", class: "menu-list", enter: "pop", exit: "fade", aria: {labelledby: "{id}-button"}},
-    range(0, items.count()).map((i) => el("button", {role: "menuitem", class: "menu-item", click: items[i].msg, value: items[i].get("value"),
-      attrs: {type: "button", tabindex: "-1", autofocus: i == 0}}, [text(items[i].label)])))]
+    else el("button", {id: "{id}-button", class: "btn ghost icon", click: toggle,
+      aria: {label: caption, haspopup: "menu", expanded: open, controls: if open then "{id}-menu" else missing},
+      attrs: {type: "button", title: caption}}, [glyph(icon)])
+  list = if not open then [] else [el("div", {key: "{id}-menu", id: "{id}-menu", role: "menu", class: "menu-list mat-overlay {align}", enter: "pop", exit: "fade", aria: {labelledby: "{id}-button"}},
+    range(0, items.count()).map((i) => el("button", {role: "menuitem", class: if items[i].get("danger") ?? false then "menu-item danger" else "menu-item", click: items[i].msg, value: items[i].get("value"),
+      attrs: {type: "button", tabindex: "-1", autofocus: i == 0}}, present([if items[i].get("icon").is_missing() then missing else glyph(items[i].icon, "sm"), text(items[i].label)]))))]
   el("div", {class: "menu", dismiss: if open then toggle else missing}, [trigger].concat(list))
 }
 
@@ -212,12 +350,121 @@ export fn menu(id, caption, open, toggle, items) = do {
 # inert, and gives focus back to whatever opened it. Escape, a press on the backdrop or the
 # close button send `close`; the app sets `open` to false.
 export fn dialog(id, open, title, children, close, actions = []) = el("dialog", {
-  id: id, class: "dialog", dismiss: close, aria: {labelledby: "{id}-title"},
+  id: id, class: "dialog mat-overlay", dismiss: close, aria: {labelledby: "{id}-title"},
   attrs: {"data-modal": "true", "data-open": if open then "true" else "false"},
   }, [
     el("header", {class: "dialog-head"}, [el("h2", {id: "{id}-title"}, [text(title)]), icon_button("✕", "Close", close)]),
     el("div", {class: "dialog-body"}, children),
   ].concat(if actions.count() == 0 then [] else [el("footer", {class: "dialog-actions"}, actions)]))
+
+# A sheet: a panel that rises from the bottom over a dimmed scrim, for a task that belongs to
+# what is on screen (share, filter, details). Escape, the scrim or the close button send
+# `close`. Its corners are concentric with the window's, and its controls with it.
+export fn sheet(id, open, title, children, close, actions = []) = if not open then el("div", {key: "{id}-layer", class: "sheet-layer closed"}, []) else el("div", {key: "{id}-layer", class: "sheet-layer", exit: "fade"}, [
+  el("div", {class: "scrim", click: close, enter: "fade", aria: {hidden: true}}, []),
+  el("section", {id: id, class: "sheet mat-overlay", role: "dialog", dismiss: close, enter: "sheet", aria: {labelledby: "{id}-title", modal: true}}, [
+    el("div", {class: "grabber", aria: {hidden: true}}, []),
+    el("header", {class: "sheet-head"}, [el("h2", {id: "{id}-title", class: "sheet-title"}, [text(title)]), el("button", {class: "btn ghost icon", click: close, aria: {label: "Close"}, attrs: {type: "button", autofocus: true}}, [icon("close")])]),
+    el("div", {class: "sheet-body"}, children),
+    ].concat(if actions.count() == 0 then [] else [el("footer", {class: "sheet-actions"}, actions)])),
+])
+
+# --- People, lists and summaries. ---------------------------------------------------------
+
+AVATAR_TONES = 6
+fn tone_of(name) = "{name}".lower().chars().reduce(7, (h, c) => (h * 33 + ("abcdefghijklmnopqrstuvwxyz".index_of(c) ?? 26) * 7 + 3) % 10007) % AVATAR_TONES
+# A person's initial on a colour picked from their name, so the same person always looks
+# the same; `title` gives the full name on hover.
+export fn avatar(name, size = "md") = el("span", {class: "avatar {size} a{tone_of(name)}", role: "img", aria: {label: "{name}"}, attrs: {title: "{name}"}}, [text("{name}".take(1).upper())])
+# Overlapping avatars, the rest counted.
+export fn avatars(names, max = 4) = el("div", {class: "avatars"}, names.take(max).map((n) => avatar(n, "sm")).concat(if names.count() > max then [el("span", {class: "avatar sm more"}, [text("+{names.count() - max}")])] else []))
+
+# A list: rows with an optional leading icon or avatar, a title, a second line and something
+# trailing. A row with `click` is a button, `selected` marks the current one, and `share`
+# lets a row turn into what it opens (a detail view with the same `share`).
+export fn list(rows, label = missing) = el("div", {class: "list mat-card", role: "list", aria: {label: label}}, rows)
+export fn list_item(title, subtitle = missing, leading = missing, trailing = missing, selected = false, click = missing, value = missing, key = missing, share = missing) = do {
+  body = present([
+    if leading.is_missing() then missing else el("span", {class: "li-lead"}, [leading]),
+    el("span", {class: "two-line"}, present([el("span", {class: "li-title"}, [text(title)]), if subtitle.is_missing() then missing else el("span", {class: "meta"}, [text(subtitle)])])),
+    if trailing.is_missing() then missing else el("span", {class: "li-trail"}, [if type_of(trailing) == "String" then text(trailing) else trailing]),
+  ])
+  el("div", {role: "listitem", class: "li-wrap", key: key, layout: true, exit: "fade"}, [
+    if click.is_missing() then el("div", {class: if selected then "li on" else "li", share: share}, body)
+      else el("button", {class: if selected then "li on" else "li", click: click, value: value, share: share, aria: {current: if selected then "true" else missing}, attrs: {type: "button"}}, body),
+  ])
+}
+
+# Nothing to show, said kindly, with the way forward.
+export fn empty_state(icon_name, title, body = missing, action = missing) = el("div", {class: "empty"}, present([
+  el("span", {class: "empty-icon"}, [icon(icon_name, "lg")]),
+  el("p", {class: "empty-title"}, [text(title)]),
+  if body.is_missing() then missing else el("p", {class: "meta"}, [text(body)]),
+  action,
+]))
+
+# A number worth watching: its label, the value, how it moved, and (optionally) its recent
+# history as a sparkline.
+export fn stat_tile(label, value, delta = missing, trend = "up", series = missing) = el("div", {class: "stat-tile mat-card"}, present([
+  el("span", {class: "meta"}, [text(label)]),
+  el("span", {class: "stat-big"}, [text("{value}")]),
+  if delta.is_missing() then missing else el("span", {class: "delta {trend}"}, [text(delta)]),
+  if series.is_missing() then missing else sparkline(series, "{label} trend"),
+]))
+export fn sparkline(values, label) = do {
+  n = values.count()
+  lo = values.min()
+  hi = values.max()
+  span = if hi == lo then 1.0 else (hi - lo) * 1.0
+  pts = range(0, n).map((i) => "{i * 100.0 / max(n - 1, 1):.1f},{28.0 - (values[i] - lo) * 24.0 / span:.1f}").join(" ")
+  el("svg", {class: "spark", role: "img", aria: {label: label}, attrs: {viewBox: "0 0 100 30", preserveAspectRatio: "none"}}, [el("polyline", {attrs: {points: pts}}, [])])
+}
+
+# Where this screen sits: `items` is `[[value, caption], …]`, the last the current page. With
+# `msg`, the earlier ones are links that send `{msg, value}`.
+export fn breadcrumbs(items, msg = missing) = el("nav", {class: "crumbs", aria: {label: "Breadcrumb"}}, [el("ol", {}, range(0, items.count()).map((i) => do {
+  last = i == items.count() - 1
+  it = items[i]
+  el("li", {}, present([
+    if last then el("span", {class: "crumb current", aria: {current: "page"}}, [text(it[1])])
+      else if msg.is_missing() then el("span", {class: "crumb"}, [text(it[1])])
+      else el("button", {class: "crumb link", click: msg, value: "{it[0]}", attrs: {type: "button"}}, [text(it[1])]),
+    if last then missing else icon("chevron_right", "xs"),
+  ]))
+}))])
+
+# --- The app's frame. ----------------------------------------------------------------------
+#
+# `shell(rail, toolbar, content)` is a desktop app's frame: a navigation rail at the side, and
+# a toolbar that FLOATS over the content, which scrolls beneath it — the glass is over real
+# content, as Liquid Glass intends, and the content fades as it passes under the bar (the
+# scroll edge effect). Rail and toolbar are `mat-frame`, so they are glass in the glass and
+# hybrid materials and tonal surfaces in the tonal one.
+
+export fn shell(rail_node, toolbar_node, content, label = "Content") = el("div", {class: "shell"}, [
+  rail_node,
+  el("div", {class: "shell-main"}, [
+    toolbar_node,
+    el("main", {class: "shell-scroll", attrs: {tabindex: "-1"}, aria: {label: label}}, [content]),
+  ]),
+])
+# A toolbar's items float as separate glass capsules (macOS's toolbar), not one bar: a child
+# is one item, and a list of children is one group sharing a capsule (a cluster of buttons).
+export fn toolbar(children, label = "Toolbar") = el("header", {class: "toolbar", aria: {label: label}}, children.map((c) =>
+  if type_of(c) == "Array" then el("div", {class: "tb-item tb-group mat-frame"}, c) else el("div", {class: "tb-item mat-frame"}, [c])))
+# `items` is `[[value, caption, icon], …]`; the selected one is marked as the current page.
+export fn rail(label, items, selected, msg, top = missing, bottom = missing) = el("nav", {class: "rail mat-frame", aria: {label: label}}, present([
+  top,
+  el("div", {class: "rail-items"}, items.map((it) => do {
+    on = it[0] == selected
+    el("button", {class: if on then "rail-item on" else "rail-item", click: msg, value: "{it[0]}", aria: {current: if on then "page" else missing}, attrs: {type: "button"}}, [
+      el("span", {class: "rail-pill"}, present([if on then el("span", {class: "rail-glow", share: "rail-{label}", aria: {hidden: true}}, []) else missing, icon(it[2])])),
+      el("span", {class: "rail-label"}, [text(it[1])]),
+    ])
+  })),
+  el("div", {class: "spacer"}, []),
+  bottom,
+]))
 
 # --- Data. -------------------------------------------------------------------------------
 
@@ -242,7 +489,7 @@ export fn data_table(id, df, offset, scroll, label, height = 360, row_height = 3
   cell = (r, c) => el("td", {class: if numeric.contains(c) then "num" else "txt"}, [text(fmt_cell(r.get(c)))])
   body = range(0, rows.count()).map((i) => el("tr", {key: "r{first + i}", attrs: {"aria-rowindex": "{first + i + 2}"}}, cols.map((c) => cell(rows[i], c))))
   pad = (k, px) => el("tr", {key: k, class: "pad", aria: {hidden: true}, style: {height: "{px}px"}}, [el("td", {attrs: {colspan: "{cols.count()}"}}, [])])
-  el("div", {id: id, class: "table-wrap", role: "region", scroll: scroll, aria: {label: label}, style: {height: "{height}px", __row: "{row_height}px"}, attrs: {tabindex: "0"}}, [
+  el("div", {id: id, class: "table-wrap mat-card", role: "region", scroll: scroll, aria: {label: label}, style: {height: "{height}px", __row: "{row_height}px"}, attrs: {tabindex: "0"}}, [
     el("table", {class: "table", attrs: {"aria-rowcount": "{n + 1}"}}, [
       el("thead", {}, [el("tr", {attrs: {"aria-rowindex": "1"}}, cols.map((c) => el("th", {class: if numeric.contains(c) then "num" else "txt", attrs: {scope: "col"}}, [text(c)])))]),
       el("tbody", {}, [pad("top", first * row_height)].concat(body).concat([pad("bottom", (n - first - shown) * row_height)])),
@@ -319,24 +566,61 @@ export fn spring(prop, stiffness, damping) = do {
   "{prop} {c.ms}ms {c.easing}"
 }
 
-# The design system's three springs. `snappy` is critically damped at stiffness 420 — the
-# spring mobile-os's shell settles on (`shell/src/motion.rs`), so an app moves like the OS
-# around it; `gentle` is a soft settle for things arriving; `bouncy` overshoots once.
+# The design system's springs. `snappy` is critically damped at stiffness 420 — the spring
+# mobile-os's shell settles on (`shell/src/motion.rs`), so an app moves like the OS around it;
+# `gentle` is a soft settle for things arriving; `bouncy` overshoots once.
 MOTION = {snappy: [420.0, 41.0], gentle: [170.0, 26.0], bouncy: [260.0, 18.0]}
 
-# The `transition` for one property with a named preset: `motion("transform", "snappy")`.
-export fn motion(prop, preset) = do {
-  k = MOTION.get(preset) ?? MOTION.gentle
-  spring(prop, k[0], k[1])
+# The motion system proper, in two families (after Material 3's physics system):
+# SPATIAL springs move things — position, size, scale, shape — and are damped at 0.9 of
+# critical, so a moving thing settles with the faintest give; EFFECTS springs change what
+# a thing looks like — opacity, colour — and are critically damped, because a fade that
+# overshoots flickers. Each comes fast (small things: a switch, a button), default (things
+# that cover part of the screen: a menu, a sheet) and slow (things that cover all of it).
+# As `[stiffness, damping ratio]`.
+#
+# The stiffnesses are Material 3's (800 / 380 / 200, from its Compose motion tokens). The
+# damping sits between Material Expressive's (0.6 / 0.8 / 0.8, playful) and Apple's
+# critically damped "smooth": a small thing settles with a hint of give, a large one glides —
+# and none of them wobble, which is what reads as "buttery" rather than "bouncy".
+SPRINGS = {
+  "spatial-fast": [800.0, 0.75], "spatial": [380.0, 0.85], "spatial-slow": [200.0, 0.9],
+  "effects-fast": [3800.0, 1.0], "effects": [1600.0, 1.0], "effects-slow": [800.0, 1.0],
 }
 
-# The presets as CSS custom properties, for the stylesheet and for the client's `enter` /
-# `exit` / `layout` animations: `--spring-snappy` (the easing) and `--spring-snappy-ms`.
-fn motion_tokens() = ["snappy", "gentle", "bouncy"].map((name) => do {
-  k = MOTION.get(name)
-  c = spring_curve(k[0], k[1])
-  "--spring-{name}: {c.easing}; --spring-{name}-ms: {c.ms};"
-}).join(" ")
+# A spring given by its damping RATIO (1 is critical) rather than its damping coefficient.
+export fn spring_ratio_curve(stiffness, ratio) = spring_curve(stiffness, 2.0 * ratio * sqrt(stiffness))
+
+# The `transition` for one property with a named preset: `motion("transform", "snappy")`, or
+# one of the motion system's: `motion("opacity", "effects-fast")`.
+export fn motion(prop, preset) = do {
+  s = SPRINGS.get(preset)
+  if not s.is_missing() then do {
+    c = spring_ratio_curve(s[0], s[1])
+    "{prop} {c.ms}ms {c.easing}"
+  } else do {
+    k = MOTION.get(preset) ?? MOTION.gentle
+    spring(prop, k[0], k[1])
+  }
+}
+
+# Every preset as CSS custom properties, for the stylesheet and for the client's motion:
+# `--spring-snappy` (the easing) and `--spring-snappy-ms`, and likewise `--spring-spatial`,
+# `--spring-effects-fast` and the rest — plus each spring's stiffness and ratio, which the
+# client needs to carry a moving thing's velocity into its next animation.
+fn motion_tokens() = do {
+  old = ["snappy", "gentle", "bouncy"].map((name) => do {
+    k = MOTION.get(name)
+    c = spring_curve(k[0], k[1])
+    "--spring-{name}: {c.easing}; --spring-{name}-ms: {c.ms};"
+  })
+  system = SPRINGS.keys().map((name) => do {
+    k = SPRINGS.get(name)
+    c = spring_ratio_curve(k[0], k[1])
+    "--spring-{name}: {c.easing}; --spring-{name}-ms: {c.ms}; --spring-{name}-k: {k[0]}; --spring-{name}-z: {k[1]};"
+  })
+  old.concat(system).join(" ")
+}
 
 # --- Charts. -----------------------------------------------------------------------------
 #
@@ -491,6 +775,389 @@ fn local_host(rt, req) = do {
 }
 fn set_cookie(rt) = "{rt.cookie}={rt.token}; HttpOnly; SameSite=Strict; Path=/"
 
+# --- Colour. --------------------------------------------------------------------------------
+#
+# The design system's colours are COMPUTED, not chosen: one seed colour becomes every role of
+# a light and a dark palette, in OKLCH — the colour space where equal steps of lightness look
+# equal, so a palette built by lightness reads the same at any hue. Each colour is fitted to
+# what an sRGB screen can show by losing chroma only (lightness and hue are what the eye holds
+# on to), and each text colour is moved in lightness just far enough to reach its WCAG ratio
+# on every surface it can sit on. So contrast is a property the engine PROVES for any seed —
+# `ui.contrast_report(design)` lists every pair it checked — not one a designer hopes for.
+
+HEXD = "0123456789abcdef".chars()
+
+fn cube(x) = x * x * x
+
+fn lab_to_linear(lab) = do {
+  l = cube(lab[0] + 0.3963377774 * lab[1] + 0.2158037573 * lab[2])
+  m = cube(lab[0] - 0.1055613458 * lab[1] - 0.0638541728 * lab[2])
+  s = cube(lab[0] - 0.0894841775 * lab[1] - 1.291485548 * lab[2])
+  [4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s, -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s, -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s]
+}
+fn lch_to_linear(c) = lab_to_linear([c.l, c.c * cos(c.h * pi / 180.0), c.c * sin(c.h * pi / 180.0)])
+fn in_gamut(rgb) = rgb.filter((v) => v < -0.00001 or v > 1.00001).count() == 0
+
+# The most chroma this lightness and hue can show on an sRGB screen, up to the colour's own.
+fn fit(c) = if in_gamut(lch_to_linear(c)) then c else do {
+  lohi = range(0, 14).reduce([0.0, c.c], (lh, i) => do {
+    mid = (lh[0] + lh[1]) / 2.0
+    if in_gamut(lch_to_linear({...c, c: mid})) then [mid, lh[1]] else [lh[0], mid]
+  })
+  {...c, c: lohi[0]}
+}
+
+fn encode(v) = do {
+  x = clamp(v, 0.0, 1.0)
+  if x <= 0.0031308 then 12.92 * x else 1.055 * x ** (1.0 / 2.4) - 0.055
+}
+fn decode(v) = if v <= 0.04045 then v / 12.92 else ((v + 0.055) / 1.055) ** 2.4
+
+# A colour as the 8-bit channels a screen shows, and as CSS.
+fn bytes_of(c) = lch_to_linear(fit(c)).map((v) => clamp(round(encode(v) * 255.0), 0, 255))
+fn hex2(n) = "{HEXD[floor(n / 16)]}{HEXD[n % 16]}"
+export fn hex_of(c) = do {
+  b = bytes_of(c)
+  "#{hex2(b[0])}{hex2(b[1])}{hex2(b[2])}"
+}
+fn rgba_of(c, a) = do {
+  b = bytes_of(c)
+  "rgba({b[0]}, {b[1]}, {b[2]}, {a})"
+}
+
+# `#rrggbb` as OKLCH: `{l, c, h}`.
+export fn parse_hex(s) = do {
+  t = "{s}".trim().lower()
+  h = if t.starts_with("#") then t.drop(1) else t
+  ok = if h.count() == 6 and h.re_match("^[0-9a-f]+$") then true else raise("`{s}` is not a #rrggbb colour", "a seed is six hex digits, like \"#4f46e5\"; or give `hue:` (0 to 359) instead.")
+  rgb = [0, 2, 4].map((i) => decode(to_int(h.drop(i).take(2), 16) / 255.0))
+  l = cbrt(0.4122214708 * rgb[0] + 0.5363325363 * rgb[1] + 0.0514459929 * rgb[2])
+  m = cbrt(0.2119034982 * rgb[0] + 0.6806995451 * rgb[1] + 0.1073969566 * rgb[2])
+  q = cbrt(0.0883024619 * rgb[0] + 0.2817188376 * rgb[1] + 0.6299787005 * rgb[2])
+  lab = [0.2104542553 * l + 0.793617785 * m - 0.0040720468 * q, 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * q, 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * q]
+  hue = atan2(lab[2], lab[1]) * 180.0 / pi
+  {l: lab[0], c: sqrt(lab[1] * lab[1] + lab[2] * lab[2]), h: if hue < 0.0 then hue + 360.0 else hue}
+}
+
+# WCAG 2 contrast between two colours as the screen shows them (8-bit, after gamut fitting).
+fn luminance_of(b) = do {
+  v = b.map((x) => decode(x / 255.0))
+  0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2]
+}
+fn ratio_of(a, b) = do {
+  x = luminance_of(a)
+  y = luminance_of(b)
+  (max(x, y) + 0.05) / (min(x, y) + 0.05)
+}
+export fn contrast(fg, bg) = ratio_of(bytes_of(fg), bytes_of(bg))
+
+# `fg` moved in lightness, away from `bg`, just far enough to read on it at `need`:1 — a
+# bisection between where it is and black (or white), so at most twelve contrast checks.
+fn legible(fg, bg, need) = if contrast(fg, bg) >= need then fg else do {
+  far = if fg.l >= bg.l then 1.0 else 0.0
+  lohi = range(0, 12).reduce([fg.l, far], (lh, i) => do {
+    mid = (lh[0] + lh[1]) / 2.0
+    if contrast({...fg, l: mid}, bg) >= need then [lh[0], mid] else [mid, lh[1]]
+  })
+  {...fg, l: lohi[1]}
+}
+
+fn lch(l, c, h) = {l: l, c: c, h: h}
+WHITE = lch(1.0, 0.0, 0.0)
+
+# A translucent tint (8-bit channels) over what is under it, as the compositor blends it.
+fn over(t, a, u) = [0, 1, 2].map((i) => round(a * t[i] + (1.0 - a) * u[i]))
+
+# --- Designs. -------------------------------------------------------------------------------
+#
+# `ui.design({seed: "#4f46e5", material: "hybrid", shape: "soft", density: "comfortable"})` —
+# or `hue:` (0 to 359) instead of `seed:` — is a whole look: both palettes, the material, the
+# corner shapes and the spacing. Give it to an app as `design:`; `ui.scoped(design, node)`
+# gives one part of a view its own (a dark sidebar, a branded card, a live preview).
+#
+# MATERIALS. `tonal` is solid, colour-layered surfaces. `glass` is translucent, blurred
+# surfaces over a colourful backdrop the design generates from the seed. `hybrid` keeps the
+# content solid and readable and makes only the frame glass: toolbars and sidebars
+# (`.mat-frame`), menus, dialogs and toasts. Glass is opaque enough to keep text at 4.5:1 over
+# the brightest and darkest part of its own backdrop — the alpha is solved, not guessed.
+#
+# EFFECTS. Blur is the one costly thing here, so it is used only where it shows, and turned
+# off where it would stutter: without GPU compositing (the client checks), under the
+# platform's "reduce transparency", or when an app says `effects: "light"`. Then glass is
+# drawn as a solid surface of the same role, which is also what high contrast needs.
+
+# The status hues stay put whatever the accent: red means danger in every design.
+fn status_role(dark, hue, chroma, soft_c) = do {
+  soft = if dark then lch(0.29, soft_c * 1.4, hue) else lch(0.955, soft_c, hue)
+  base = if dark then lch(0.78, chroma * 0.8, hue) else lch(0.5, chroma, hue)
+  ground = if dark then lch(0.2, 0.016, hue) else WHITE
+  {soft: soft, fg: legible(legible(base, soft, 4.5), ground, 4.5)}
+}
+
+# Every colour role of one mode, as OKLCH.
+fn roles(dark, h, c0) = do {
+  bg = if dark then lch(0.16, 0.014, h) else lch(0.975, 0.01, h)
+  surface = if dark then lch(0.2, 0.016, h) else lch(0.997, 0.003, h)
+  surface2 = if dark then lch(0.24, 0.018, h) else lch(0.962, 0.013, h)
+  surface3 = if dark then lch(0.28, 0.02, h) else lch(0.935, 0.018, h)
+  fg = legible(if dark then lch(0.95, 0.01, h) else lch(0.2, 0.02, h), surface3, 7.0)
+  muted = legible(if dark then lch(0.77, 0.022, h) else lch(0.48, 0.028, h), surface3, 4.5)
+  accent0 = if dark then lch(0.76, min(c0, 0.16), h) else lch(0.53, c0, h)
+  accent = if dark then legible(accent0, surface3, 3.0) else legible(legible(accent0, WHITE, 4.5), surface3, 3.0)
+  soft = if dark then lch(0.34, min(c0, 0.1), h) else lch(0.925, min(c0, 0.08) * 0.85, h)
+  danger = status_role(dark, 27.0, 0.19, 0.03)
+  success = status_role(dark, 150.0, 0.13, 0.04)
+  warning = status_role(dark, 75.0, 0.12, 0.05)
+  {
+    bg: bg, surface: surface, surface_2: surface2, surface_3: surface3, fg: fg, muted: muted,
+    line: if dark then lch(0.31, 0.02, h) else lch(0.905, 0.014, h),
+    line_strong: legible(if dark then lch(0.5, 0.02, h) else lch(0.72, 0.02, h), surface, 3.0),
+    accent: accent,
+    accent_fg: if dark then legible(lch(0.2, 0.05, h), accent, 4.5) else WHITE,
+    accent_soft: soft,
+    accent_text: legible(legible(if dark then lch(0.85, 0.1, h) else lch(0.45, c0 * 0.9, h), soft, 4.5), surface3, 4.5),
+    danger: danger.fg, danger_soft: danger.soft, success: success.fg, success_soft: success.soft, warning: warning.fg, warning_soft: warning.soft,
+    charts: [0.0, 140.0, 60.0, 200.0, 290.0].map((d) => legible(if dark then lch(0.74, 0.14, h + d) else lch(0.58, 0.16, h + d), surface, 3.0)).concat([muted]),
+    # The backdrop glass sits on: three soft fields of the accent and its neighbours.
+    # Neighbouring hues only (±40°), so the fields blend rather than clash, and deep and calm
+    # in the dark.
+    blobs: if dark then [lch(0.4, min(c0, 0.15), h), lch(0.35, min(c0, 0.12), h + 40.0), lch(0.33, min(c0, 0.13), h - 40.0)] else [lch(0.8, min(c0, 0.15), h), lch(0.87, min(c0, 0.1), h + 45.0), lch(0.79, min(c0, 0.13), h - 45.0)],
+  }
+}
+
+# The pairs a component draws one on the other, and the ratio each must reach: 4.5:1 for
+# text, 3:1 for the parts of a control (WCAG 2.2 1.4.3 and 1.4.11).
+PAIRS = [
+  ["fg", "bg", 4.5], ["fg", "surface", 4.5], ["fg", "surface_2", 4.5], ["fg", "surface_3", 4.5],
+  ["muted", "bg", 4.5], ["muted", "surface", 4.5], ["muted", "surface_2", 4.5],
+  ["accent_text", "accent_soft", 4.5], ["accent_text", "surface", 4.5], ["accent_text", "bg", 4.5],
+  ["accent_fg", "accent", 4.5], ["accent", "surface", 3.0], ["accent", "bg", 3.0], ["line_strong", "surface", 3.0],
+  ["danger", "danger_soft", 4.5], ["danger", "surface", 4.5], ["surface", "danger", 4.5],
+  ["success", "success_soft", 4.5], ["warning", "warning_soft", 4.5], ["bg", "fg", 4.5],
+]
+
+# How opaque a glass of `tint` must be for `texts` to keep 4.5:1 over every part of its
+# backdrop: the least alpha, from `least` in steps of 0.05, found by bisection (more opaque
+# only ever helps, so the answer is a threshold).
+fn glass_alpha(tint, under, texts, least) = do {
+  t = bytes_of(tint)
+  us = under.map(bytes_of)
+  ts = texts.map(bytes_of)
+  reads = (a) => us.filter((u) => do {
+    mixed = over(t, a, u)
+    ts.filter((x) => ratio_of(x, mixed) < 4.5).count() > 0
+  }).count() == 0
+  n = floor((0.96 - least) / 0.05)
+  if reads(least) then least else do {
+    lohi = range(0, 5).reduce([0, n], (lh, i) => if lh[1] - lh[0] <= 1 then lh else do {
+      mid = floor((lh[0] + lh[1]) / 2)
+      if reads(least + mid * 0.05) then [lh[0], mid] else [mid, lh[1]]
+    })
+    if reads(least + lohi[1] * 0.05) then least + lohi[1] * 0.05 else 0.96
+  }
+}
+
+# Two dicts as one, the second winning.
+fn merge(a, b) = b.items().reduce(a, (acc, kv) => acc.insert(kv[0], kv[1]))
+
+fn r3(x) = round(x * 1000.0) / 1000.0
+
+# The material's tokens for one mode: how cards, overlays (menus, dialogs, toasts) and the
+# frame are drawn, each with the solid surface it falls back to.
+fn material_tokens(material, dark, r, h) = do {
+  under = r.blobs.concat([r.bg])
+  texts = [r.fg, r.muted]
+  glass_tint = if dark then r.surface else WHITE
+  solve = (least) => if material == "tonal" then 1.0 else r3(glass_alpha(glass_tint, under, texts, least))
+  frame_a = solve(if dark then 0.45 else 0.4)
+  overlay_a = solve(if dark then 0.6 else 0.62)
+  card_a = if material == "glass" then solve(if dark then 0.42 else 0.45) else 1.0
+  glass = (a) => rgba_of(glass_tint, a)
+  edge = if dark then "rgba(255, 255, 255, 0.1)" else "rgba(255, 255, 255, 0.65)"
+  # Liquid glass catches the light: a soft specular wash from the top edge, over the tint.
+  sheen = if dark then "linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0) 45%)" else "linear-gradient(180deg, rgba(255, 255, 255, 0.4), rgba(255, 255, 255, 0) 45%)"
+  mesh = (soft) => "radial-gradient(75% 65% at 5% 0%, {rgba_of(r.blobs[0], soft)} 0, transparent 75%), radial-gradient(70% 60% at 100% 15%, {rgba_of(r.blobs[1], soft)} 0, transparent 75%), radial-gradient(80% 70% at 75% 100%, {rgba_of(r.blobs[2], soft)} 0, transparent 75%), radial-gradient(60% 50% at 15% 95%, {rgba_of(r.blobs[1], soft * 0.6)} 0, transparent 75%), {hex_of(r.bg)}"
+  blur = (px) => "blur({px}px) saturate(1.7)"
+  solid = {card: hex_of(r.surface), overlay: hex_of(r.surface), frame: hex_of(r.surface_2)}
+  base = {
+    "card-solid": solid.card, "overlay-solid": solid.overlay, "frame-solid": solid.frame,
+    "glass-edge": if material == "tonal" then "transparent" else edge,
+  }
+  looks = match material {
+    "glass" => {"card-sheen": sheen, "overlay-sheen": sheen, "frame-sheen": sheen, "page": mesh(1.0), "card-bg": glass(card_a), "card-line": edge, "card-blur": blur(20), "overlay-bg": glass(overlay_a), "overlay-line": edge, "overlay-blur": blur(28), "frame-bg": glass(frame_a), "frame-line": edge, "frame-blur": blur(28)},
+    "hybrid" => {"card-sheen": "none", "overlay-sheen": sheen, "frame-sheen": sheen, "page": mesh(0.7), "card-bg": solid.card, "card-line": hex_of(r.line), "card-blur": "none", "overlay-bg": glass(overlay_a), "overlay-line": edge, "overlay-blur": blur(28), "frame-bg": glass(frame_a), "frame-line": edge, "frame-blur": blur(28)},
+    _ => {"card-sheen": "none", "overlay-sheen": "none", "frame-sheen": "none", "page": hex_of(r.bg), "card-bg": solid.card, "card-line": hex_of(r.line), "card-blur": "none", "overlay-bg": solid.overlay, "overlay-line": hex_of(r.line), "overlay-blur": "none", "frame-bg": solid.frame, "frame-line": hex_of(r.line), "frame-blur": "none"},
+  }
+  merge(base, looks)
+}
+
+# One mode's colour tokens as CSS custom property values.
+fn colour_tokens(dark, r, h) = do {
+  ink = if dark then lch(0.05, 0.01, h) else lch(0.25, 0.05, h)
+  hover_ink = if dark then WHITE else r.fg
+  {
+    "bg": hex_of(r.bg), "surface": hex_of(r.surface), "surface-2": hex_of(r.surface_2), "surface-3": hex_of(r.surface_3),
+    "fg": hex_of(r.fg), "muted": hex_of(r.muted), "line": hex_of(r.line), "line-strong": hex_of(r.line_strong),
+    "accent": hex_of(r.accent), "accent-fg": hex_of(r.accent_fg), "accent-soft": hex_of(r.accent_soft), "accent-text": hex_of(r.accent_text),
+    "danger": hex_of(r.danger), "danger-soft": hex_of(r.danger_soft), "success": hex_of(r.success), "success-soft": hex_of(r.success_soft),
+    "warning": hex_of(r.warning), "warning-soft": hex_of(r.warning_soft), "focus": hex_of(r.accent),
+    "chart-1": hex_of(r.charts[0]), "chart-2": hex_of(r.charts[1]), "chart-3": hex_of(r.charts[2]),
+    "chart-4": hex_of(r.charts[3]), "chart-5": hex_of(r.charts[4]), "chart-6": hex_of(r.charts[5]),
+    # Material's state layers: what a thing under the pointer, focused, pressed or dragged
+    # gains — its own content colour at 8%, 10%, 10% and 16%.
+    "hover": rgba_of(hover_ink, 0.08), "press": rgba_of(hover_ink, 0.1), "drag": rgba_of(hover_ink, 0.16),
+    "state-hover": "0.08", "state-focus": "0.1", "state-press": "0.1", "state-drag": "0.16", "state-disabled": "0.38",
+    "accent-glow": rgba_of(r.accent, 0.45), "scrim": rgba_of(ink, if dark then 0.6 else 0.35),
+    "scroll-thumb": rgba_of(r.muted, 0.45), "scroll-thumb-hover": rgba_of(r.muted, 0.75),
+    "e-1": "0 1px 2px {rgba_of(ink, if dark then 0.5 else 0.06)}, 0 1px 3px {rgba_of(ink, if dark then 0.3 else 0.08)}",
+    "e-2": "0 1px 2px {rgba_of(ink, if dark then 0.5 else 0.05)}, 0 8px 24px -4px {rgba_of(ink, if dark then 0.45 else 0.1)}",
+    "e-3": "0 6px 16px -4px {rgba_of(ink, if dark then 0.5 else 0.12)}, 0 24px 56px -12px {rgba_of(ink, if dark then 0.6 else 0.22)}",
+  }
+}
+
+# GEOMETRY. Corners are COMPUTED, and nested ones are concentric: a shape inside another sits
+# at the outer radius minus the padding between them, so the two curves share a centre and
+# the gap between them is the same all the way round (Apple's concentricity; a fixed radius
+# inside a rounder container is what makes a corner look pinched). Where that would leave a
+# corner sharper than `FLOOR`, the floor wins. A capsule stays a capsule at any size.
+#
+# The soft shape goes further and derives its outer radii FROM its controls: a card's radius
+# is a control's plus the card's padding, so a button against a card's edge is concentric
+# with it exactly. Sharp keeps small corners everywhere; round makes controls capsules.
+CAPSULE = 999.0
+FLOOR = 4.0
+SHAPE_BASE = {
+  sharp: {ctl: 4.0, field: 4.0, chip: 4.0, card: 8.0, overlay: 8.0, window: 10.0, sheet: 12.0, tip: 4.0},
+  soft: {ctl: 8.0, field: 8.0, chip: 8.0, card: missing, overlay: 14.0, window: 20.0, sheet: missing, tip: 6.0},
+  round: {ctl: CAPSULE, field: 12.0, chip: CAPSULE, card: 28.0, overlay: 20.0, window: 26.0, sheet: 32.0, tip: 8.0},
+}
+SPACING = {
+  comfortable: {scale: [4, 8, 12, 16, 24, 32, 48], card: 16.0, list: 6.0, overlay: 6.0, sheet: 20.0, inset: 8.0, ctl_h: 38, row: 36},
+  compact: {scale: [3, 6, 9, 12, 18, 24, 36], card: 12.0, list: 4.0, overlay: 4.0, sheet: 16.0, inset: 6.0, ctl_h: 32, row: 30},
+}
+fn inner(outer, pad) = if outer >= CAPSULE then CAPSULE else max(FLOOR, outer - pad)
+fn px_of(r) = if r >= CAPSULE then "999px" else "{round(r)}px"
+
+# TYPE. One scale of text styles, after Apple's (large title down to caption), each a size,
+# a line height and a weight. Tracking is computed from the size, not chosen: small text is
+# opened up and large text drawn in, by the dynamic-metrics curve Inter publishes for its UI
+# use — the same behaviour SF Pro's optical sizes build in (12px is neutral, 13px is −0.003em).
+TYPE_STYLES = [
+  ["large-title", 28.0, 34.0, 700], ["title-1", 22.0, 28.0, 700], ["title-2", 18.0, 24.0, 650], ["title-3", 15.0, 20.0, 650],
+  ["headline", 14.0, 20.0, 650], ["body", 14.0, 20.0, 400], ["callout", 13.0, 18.0, 400], ["footnote", 12.0, 16.0, 400], ["caption", 11.0, 14.0, 500],
+]
+export fn tracking(px) = -0.0223 + 0.185 * exp(-0.1745 * px)
+fn type_tokens(density) = do {
+  scale = if density == "compact" then 13.0 / 14.0 else 1.0
+  size_of = (st) => round(st[1] * scale * 2.0) / 2.0
+  styles = TYPE_STYLES.reduce({"type-scale": "{scale}"}, (d, st) => do {
+    size = size_of(st)
+    d.insert("type-{st[0]}", "{st[3]} {size}px/{round(st[2] * scale)}px var(--font)").insert("track-{st[0]}", "{tracking(size):.4f}em")
+  })
+  # The plain sizes components use, as the same scale's steps.
+  pick = (name) => size_of(TYPE_STYLES.filter((st) => st[0] == name)[0])
+  [["t-xs", "caption"], ["t-sm", "callout"], ["t-md", "body"], ["t-lg", "title-2"], ["t-xl", "title-1"], ["t-2xl", "large-title"]].reduce(styles, (d, p) => d.insert(p[0], "{pick(p[1])}px"))
+}
+
+# The radii and paddings of one shape and density, as numbers — `{ctl, card, in_card, list,
+# row, overlay, item, sheet, in_sheet, window, in_window, seg, ...}`. `ui.geometry` answers it so
+# a test can check the nesting rule itself.
+export fn geometry(shape, density) = do {
+  b = SHAPE_BASE.get(shape)
+  sp = SPACING.get(density)
+  card = b.card ?? b.ctl + sp.card
+  sheet = b.sheet ?? b.ctl + sp.sheet
+  {
+    ctl: b.ctl, field: b.field, chip: b.chip, tip: b.tip,
+    card: card, pad_card: sp.card, in_card: inner(card, sp.card),
+    list: card, pad_list: sp.list, row: inner(card, sp.list),
+    overlay: b.overlay, pad_overlay: sp.overlay, item: inner(b.overlay, sp.overlay),
+    sheet: sheet, pad_sheet: sp.sheet, in_sheet: inner(sheet, sp.sheet),
+    window: b.window, inset: sp.inset, in_window: inner(b.window, sp.inset),
+    seg: if b.ctl >= CAPSULE then CAPSULE else b.ctl + 3.0, seg_item: b.ctl,
+    # Pressed, a control's corners ease in (Material's shape morph): to 60% of its resting
+    # radius — a capsule's being half its height.
+    pressed: max(FLOOR, round(min(b.ctl, sp.ctl_h / 2.0) * 0.6)),
+    ctl_h: sp.ctl_h, row_h: sp.row, scale: sp.scale,
+  }
+}
+
+fn geometry_tokens(shape, density) = do {
+  g = geometry(shape, density)
+  scale = range(1, 7).reduce({"s-1": "{g.scale[0]}px"}, (d, i) => d.insert("s-{i + 1}", "{g.scale[i]}px"))
+  merge(scale, {
+    "r-ctl": px_of(g.ctl), "r-btn": px_of(g.ctl), "r-field": px_of(g.field), "r-chip": px_of(g.chip), "r-tip": px_of(g.tip),
+    "r-card": px_of(g.card), "pad-card": px_of(g.pad_card), "r-in-card": px_of(g.in_card),
+    "r-list": px_of(g.list), "pad-list": px_of(g.pad_list), "r-row": px_of(g.row),
+    "r-overlay": px_of(g.overlay), "pad-overlay": px_of(g.pad_overlay), "r-item": px_of(g.item),
+    "r-sheet": px_of(g.sheet), "pad-sheet": px_of(g.pad_sheet), "r-in-sheet": px_of(g.in_sheet),
+    "r-window": px_of(g.window), "inset": px_of(g.inset), "r-in-window": px_of(g.in_window),
+    "r-seg": px_of(g.seg), "r-seg-item": px_of(g.seg_item), "r-pressed": px_of(g.pressed),
+    # A control's resting radius as a length a transition can interpolate: a capsule is half
+    # the control's height, not 999px (which would hold the corner round for most of a morph).
+    "r-ctl-px": "{round(min(g.ctl, g.ctl_h / 2.0))}px",
+    # The names components used before geometry was computed, kept as the same roles.
+    "r-sm": px_of(g.item), "r-md": px_of(g.field), "r-lg": px_of(g.card), "r-xl": px_of(g.sheet),
+    "ctl-h": "{g.ctl_h}px", "row": "{g.row_h}px",
+  })
+}
+
+MATERIALS = ["tonal", "glass", "hybrid"]
+
+# A design: `seed` ("#rrggbb") or `hue` (0 to 359), `material` (tonal | glass | hybrid),
+# `shape` (sharp | soft | round), `density` (comfortable | compact), `effects` (auto | full |
+# light: whether blur is used — auto decides from the machine).
+export fn design(opts = {}) = do {
+  o = opts ?? {}
+  seed = if not o.get("seed").is_missing() then parse_hex(o.seed) else lch(0.53, 0.2, (o.get("hue") ?? 277) * 1.0)
+  material = o.get("material") ?? "hybrid"
+  shape = o.get("shape") ?? "soft"
+  density = o.get("density") ?? "comfortable"
+  effects = o.get("effects") ?? "auto"
+  checked = if MATERIALS.contains(material) and not SHAPE_BASE.get(shape).is_missing() and not SPACING.get(density).is_missing() and ["auto", "full", "light"].contains(effects) then true else raise("a design's material is tonal, glass or hybrid; its shape sharp, soft or round; its density comfortable or compact; its effects auto, full or light", "`ui.design({{hue: 160, material: \"glass\", shape: \"round\"}})`")
+  h = seed.h
+  c0 = clamp(seed.c, 0.04, 0.24)
+  light = roles(false, h, c0)
+  dark = roles(true, h, c0)
+  form = merge(geometry_tokens(shape, density), type_tokens(density))
+  {
+    hue: h, material: material, shape: shape, density: density, effects: effects,
+    light: merge(merge(colour_tokens(false, light, h), material_tokens(material, false, light, h)), form),
+    dark: merge(merge(colour_tokens(true, dark, h), material_tokens(material, true, dark, h)), form),
+    roles: {light: light, dark: dark},
+  }
+}
+
+# Every pair the design's palettes were checked on, in both modes: `{mode, fg, bg, ratio,
+# needs, ok}`. All of them are `ok` by construction; this is how a test proves it.
+export fn contrast_report(d) = ["light", "dark"].flat_map((mode) => PAIRS.map((p) => do {
+  r = d.roles.get(mode)
+  k = contrast(r.get(p[0]), r.get(p[1]))
+  {mode: mode, fg: p[0], bg: p[1], ratio: round(k * 100.0) / 100.0, needs: p[2], ok: k >= p[2]}
+}))
+
+fn decls(tokens, prefix) = tokens.keys().map((k) => "--{prefix}{k}: {tokens.get(k)};").join(" ")
+
+# The stylesheet a design sets on the page: both modes' tokens.
+fn design_css(d) = ":root {{ {decls(d.light, "")} }} :root[data-theme=\"dark\"] {{ {decls(d.dark, "")} }}"
+
+# A part of a view in its own design: both modes' tokens travel on the node (as `--l-*` and
+# `--d-*`) and the stylesheet picks the mode's set, so the scope follows the page's light or
+# dark like everything else — and changes live, like any other attribute.
+export fn scoped(d, node, class = "") = el("div", {class: "hx-scope m-{d.material} {class}", attrs: {"data-effects": if d.effects == "auto" then missing else d.effects, "style": "{decls(d.light, "l-")} {decls(d.dark, "d-")}"}}, [node])
+
+# The rules that map a scope's `--l-*` / `--d-*` onto the tokens components read.
+fn scope_css(d) = do {
+  names = d.light.keys()
+  light = names.map((k) => "--{k}: var(--l-{k});").join(" ")
+  dark = names.map((k) => "--{k}: var(--d-{k});").join(" ")
+  ".hx-scope {{ {light} }} :root[data-theme=\"dark\"] .hx-scope {{ {dark} }}"
+}
+
+# Built when an app starts, not when the module loads: a program that imports `std.ui` only
+# for its components or `view_html` never pays for a design it does not use.
+fn default_design() = design({seed: "#4f46e5", material: "hybrid"})
+
 # --- The design system: tokens and component styles. ------------------------------------
 #
 # Every colour, space, size, radius, shadow and duration is a token (a CSS custom property),
@@ -502,48 +1169,82 @@ fn set_cookie(rt) = "{rt.cookie}={rt.token}; HttpOnly; SameSite=Strict; Path=/"
 
 THEME = """
 :root {
-  --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px; --s-5: 24px; --s-6: 32px; --s-7: 48px;
-  --t-xs: 12px; --t-sm: 13px; --t-md: 15px; --t-lg: 18px; --t-xl: 22px; --t-2xl: 28px;
-  --r-sm: 6px; --r-md: 10px; --r-lg: 14px; --r-full: 999px;
-  --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --r-full: 999px;
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter var", Inter, system-ui, "Segoe UI Variable Text", "Segoe UI", Roboto, sans-serif;
+  /* The motion system as transition values: duration and curve of each spring. */
+  --sp-fast: calc(var(--spring-spatial-fast-ms) * 1ms) var(--spring-spatial-fast);
+  --sp: calc(var(--spring-spatial-ms) * 1ms) var(--spring-spatial);
+  --sp-slow: calc(var(--spring-spatial-slow-ms) * 1ms) var(--spring-spatial-slow);
+  --fx-fast: calc(var(--spring-effects-fast-ms) * 1ms) var(--spring-effects-fast);
+  --fx: calc(var(--spring-effects-ms) * 1ms) var(--spring-effects);
+  --fx-slow: calc(var(--spring-effects-slow-ms) * 1ms) var(--spring-effects-slow);
+  --mono: ui-monospace, "JetBrains Mono", SFMono-Regular, Menlo, Consolas, monospace;
   --dur-1: 120ms; --dur-2: 200ms; --dur-3: 320ms;
   --ease: cubic-bezier(.2, 0, 0, 1);
-  --bg: #f6f7f9; --surface: #ffffff; --surface-2: #f0f2f5; --fg: #14161a; --muted: #586174;
-  --line: #e1e4ea; --line-strong: #b9c0cc; --accent: #4f46e5; --accent-fg: #ffffff;
-  --accent-soft: #e6e8ff; --accent-text: #3f37c9; --danger: #b42318; --danger-soft: #fdecea;
-  --success: #146c2e; --success-soft: #e6f4ea; --warning: #8a5300; --warning-soft: #fdf3e1;
-  --focus: #4f46e5;
-  --e-1: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.08);
-  --e-2: 0 1px 2px rgba(16,24,40,.06), 0 8px 24px rgba(16,24,40,.08);
-  --e-3: 0 4px 12px rgba(16,24,40,.10), 0 24px 48px rgba(16,24,40,.16);
-  --chart-1: #4f46e5; --chart-2: #0e9384; --chart-3: #dc6803; --chart-4: #c11574; --chart-5: #2e90fa; --chart-6: #667085;
-  --card: var(--surface); --shadow: var(--e-2);
   color-scheme: light;
 }
-:root[data-theme="dark"] {
-  --bg: #0d0f14; --surface: #161a22; --surface-2: #1e232d; --fg: #e8eaf0; --muted: #a0a8b8;
-  --line: #2a303c; --line-strong: #4a5363; --accent: #8b87ff; --accent-fg: #0d0f14;
-  --accent-soft: #262a52; --accent-text: #aeabff; --danger: #ff8a80; --danger-soft: #3a1c1c;
-  --success: #6fdc8c; --success-soft: #16301f; --warning: #f5c26b; --warning-soft: #33280f;
-  --focus: #aeabff;
-  --e-1: 0 1px 2px rgba(0,0,0,.4); --e-2: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
-  --e-3: 0 8px 24px rgba(0,0,0,.5), 0 24px 64px rgba(0,0,0,.5);
-  --chart-1: #8b87ff; --chart-2: #3cc9b5; --chart-3: #f79b4b; --chart-4: #f06bb5; --chart-5: #6cb4ff; --chart-6: #a0a8b8;
-  color-scheme: dark;
-}
+:root[data-theme="dark"] { color-scheme: dark; }
 * { box-sizing: border-box; }
-html, body { margin: 0; background: var(--bg); color: var(--fg); font: var(--t-md)/1.5 var(--font);
-  transition: background-color var(--dur-3) ease, color var(--dur-3) ease; }
+html, body { margin: 0; color: var(--fg); font: var(--type-body); letter-spacing: var(--track-body); }
+html { background: var(--bg); -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; font-feature-settings: "cv11", "ss01"; }
+body { min-height: 100vh; }
+/* The design's backdrop is one fixed layer behind the page: it never scrolls, repaints or
+   tiles, however long the page is. */
+body::before { content: ""; position: fixed; inset: 0; z-index: -1; background: var(--page); pointer-events: none; }
+
+/* Scrollbars: thin, rounded, in the design's colours, on a clear track; they show while
+   something scrolls or is pointed at and fade back otherwise, like an overlay scrollbar. */
+::-webkit-scrollbar { width: 14px; height: 14px; background: transparent; }
+::-webkit-scrollbar-thumb { border: 4px solid transparent; background-clip: padding-box; border-radius: 999px;
+  background-color: var(--scroll-thumb); min-height: 40px; }
+::-webkit-scrollbar-thumb:hover, ::-webkit-scrollbar-thumb:active { border-width: 3px; background-color: var(--scroll-thumb-hover); }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+:not(:hover):not(.hx-scrolling)::-webkit-scrollbar-thumb { background-color: transparent; }
+@supports not selector(::-webkit-scrollbar) { * { scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) transparent; } }
+
+/* Materials. A surface takes its look from the design's tokens: `mat-card` (content),
+   `mat-overlay` (menus, dialogs, toasts) and `mat-frame` (toolbars, sidebars). Where blur
+   would stutter or is unwanted, each falls back to the solid surface of its role. */
+.mat-card { background: var(--card-sheen), var(--card-bg); border: 1px solid var(--card-line); -webkit-backdrop-filter: var(--card-blur); backdrop-filter: var(--card-blur); }
+.mat-overlay { background: var(--overlay-sheen), var(--overlay-bg); border: 1px solid var(--overlay-line); -webkit-backdrop-filter: var(--overlay-blur); backdrop-filter: var(--overlay-blur);
+  box-shadow: var(--e-3), inset 0 1px 0 var(--glass-edge); }
+.mat-frame { background: var(--frame-sheen), var(--frame-bg); -webkit-backdrop-filter: var(--frame-blur); backdrop-filter: var(--frame-blur); }
+:root[data-perf="light"] .mat-card, [data-effects="light"] .mat-card, :root[data-effects="light"] .mat-card { background: var(--card-solid); -webkit-backdrop-filter: none; backdrop-filter: none; }
+:root[data-perf="light"] .mat-overlay, [data-effects="light"] .mat-overlay, :root[data-effects="light"] .mat-overlay { background: var(--overlay-solid); -webkit-backdrop-filter: none; backdrop-filter: none; }
+:root[data-perf="light"] .mat-frame, [data-effects="light"] .mat-frame, :root[data-effects="light"] .mat-frame { background: var(--frame-solid); -webkit-backdrop-filter: none; backdrop-filter: none; }
+:root[data-perf="light"] [data-effects="full"] .mat-card { background: var(--card-bg); -webkit-backdrop-filter: var(--card-blur); backdrop-filter: var(--card-blur); }
+:root[data-perf="light"] [data-effects="full"] .mat-overlay { background: var(--overlay-bg); -webkit-backdrop-filter: var(--overlay-blur); backdrop-filter: var(--overlay-blur); }
+:root[data-perf="light"] [data-effects="full"] .mat-frame { background: var(--frame-bg); -webkit-backdrop-filter: var(--frame-blur); backdrop-filter: var(--frame-blur); }
+@media (prefers-reduced-transparency: reduce) {
+  .mat-card { background: var(--card-solid) !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+  .mat-overlay { background: var(--overlay-solid) !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+  .mat-frame { background: var(--frame-solid) !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+}
+@media (prefers-contrast: more) {
+  .mat-card, .mat-overlay { background: var(--surface) !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; border-color: var(--line-strong) !important; }
+  .mat-frame { background: var(--surface-2) !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+}
+.hx-scope { color: var(--fg); }
 #root { max-width: 1120px; margin: 0 auto; padding: var(--s-6) var(--s-5) var(--s-7); }
-h1 { font-size: var(--t-2xl); letter-spacing: -0.02em; line-height: 1.2; margin: 0 0 var(--s-1); }
-h2 { font-size: var(--t-sm); font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 var(--s-3); }
-.subheading { font-size: var(--t-lg); font-weight: 600; margin: 0; }
+h1 { font: var(--type-large-title); letter-spacing: var(--track-large-title); margin: 0 0 var(--s-1); }
+h2 { font: var(--type-headline); letter-spacing: var(--track-headline); color: var(--muted); margin: 0 0 var(--s-3); }
+.subheading { font: var(--type-title-3); letter-spacing: var(--track-title-3); margin: 0; }
+/* The type scale as classes, for text that is not a heading. */
+.t-large-title { font: var(--type-large-title); letter-spacing: var(--track-large-title); } .t-title-1 { font: var(--type-title-1); letter-spacing: var(--track-title-1); }
+.t-title-2 { font: var(--type-title-2); letter-spacing: var(--track-title-2); } .t-title-3 { font: var(--type-title-3); letter-spacing: var(--track-title-3); }
+.t-headline { font: var(--type-headline); letter-spacing: var(--track-headline); } .t-body { font: var(--type-body); letter-spacing: var(--track-body); }
+.t-callout { font: var(--type-callout); letter-spacing: var(--track-callout); } .t-footnote { font: var(--type-footnote); letter-spacing: var(--track-footnote); }
+.t-caption { font: var(--type-caption); letter-spacing: var(--track-caption); }
 .para { margin: 0; max-width: 68ch; }
-.code { font: var(--t-sm) var(--mono); background: var(--surface-2); padding: 1px 6px; border-radius: var(--r-sm); }
-.label, .hint { color: var(--muted); }
+.code { font: var(--t-sm) var(--mono); background: var(--surface-2); padding: 1px 6px; border-radius: var(--r-item); }
+.label, .hint, .meta { color: var(--muted); }
+.meta { font: var(--type-footnote); letter-spacing: var(--track-footnote); }
+.strong { font-weight: 600; }
+.two-line { display: flex; flex-direction: column; min-width: 0; line-height: 1.35; }
 ::placeholder { color: var(--muted); opacity: 1; }
-:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: var(--r-sm); }
+:focus-visible { outline: 3px solid color-mix(in srgb, var(--focus) 55%, transparent); outline-offset: 2px; }
+.ic { width: 20px; height: 20px; flex: none; } .ic.sm { width: 17px; height: 17px; } .ic.xs { width: 14px; height: 14px; } .ic.lg { width: 28px; height: 28px; }
+.glyph { line-height: 1; }
 
 .col { display: flex; flex-direction: column; }
 .row { display: flex; flex-wrap: wrap; align-items: stretch; }
@@ -555,111 +1256,282 @@ h2 { font-size: var(--t-sm); font-weight: 600; text-transform: uppercase; letter
 .spacer { flex: 1; }
 .divider { border: 0; border-top: 1px solid var(--line); margin: var(--s-2) 0; width: 100%; }
 
-.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); padding: var(--s-4) var(--s-5);
-  box-shadow: var(--e-2); transition: background-color var(--dur-3) ease, border-color var(--dur-3) ease; min-width: 0;
-  display: flex; flex-direction: column; gap: var(--s-3); }
+/* Surfaces. Every corner below is a computed token; an inner corner is its container's minus
+   the padding between them, so nested curves stay concentric. */
+.card { border-radius: var(--r-card); padding: var(--pad-card); min-width: 0; display: flex; flex-direction: column; gap: var(--s-3);
+  box-shadow: var(--e-1), inset 0 1px 0 var(--glass-edge); contain: layout paint; }
 .card > h2 { margin: 0; }
-.stat { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+.card .list, .card .table-wrap, .card .inset { border-radius: var(--r-in-card); }
+.stat { display: flex; justify-content: space-between; padding: var(--s-2) 0; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
 .stat:last-child { border-bottom: 0; }
 .stat-name { color: var(--muted); }
 .stat-value { font-weight: 600; }
-.badge { display: inline-flex; align-items: center; height: 22px; padding: 0 var(--s-2); border-radius: var(--r-full);
-  font-size: var(--t-xs); font-weight: 600; background: var(--surface-2); color: var(--fg); }
+.badge { display: inline-flex; align-items: center; height: 22px; padding: 0 9px; border-radius: 999px; font-size: var(--t-xs); font-weight: 650;
+  white-space: nowrap; background: var(--surface-3); color: var(--fg); }
 .badge.accent { background: var(--accent-soft); color: var(--accent-text); }
 .badge.success { background: var(--success-soft); color: var(--success); }
 .badge.warning { background: var(--warning-soft); color: var(--warning); }
 .badge.danger { background: var(--danger-soft); color: var(--danger); }
 
-.btn { appearance: none; display: inline-flex; align-items: center; justify-content: center; gap: var(--s-2);
-  border: 1px solid var(--line-strong); background: var(--surface); color: var(--fg); font: 500 var(--t-md)/1 var(--font);
-  min-height: 36px; padding: 0 var(--s-4); border-radius: var(--r-md); cursor: pointer; box-shadow: var(--e-1);
-  transition: transform var(--dur-1) var(--ease), background-color var(--dur-2) ease, border-color var(--dur-2) ease, box-shadow var(--dur-2) ease; }
-.btn:hover { background: var(--surface-2); }
-.btn:active { transform: scale(.97); }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
-.btn.primary:hover { filter: brightness(1.06); }
-.btn.danger { background: var(--danger); border-color: var(--danger); color: var(--surface); }
-.btn.ghost { background: transparent; border-color: transparent; box-shadow: none; }
-.btn.ghost:hover { background: var(--surface-2); }
-.btn.icon { min-height: 32px; width: 32px; padding: 0; color: var(--muted); }
-.btn[disabled] { opacity: .5; cursor: not-allowed; transform: none; }
+/* Buttons. Press sinks on a fast spatial spring and eases the corners in; hover and colour
+   use effects springs, which never overshoot. */
+.btn { appearance: none; position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 7px; flex: none;
+  height: var(--ctl-h); padding: 0 calc(var(--ctl-h) * .42); border-radius: var(--r-ctl-px); border: 1px solid transparent; cursor: pointer;
+  font: 600 var(--t-sm)/1 var(--font); letter-spacing: var(--track-callout); white-space: nowrap; color: var(--fg); background: var(--surface);
+  box-shadow: var(--e-1), inset 0 0 0 1px var(--line); isolation: isolate;
+  transition: transform var(--sp-fast), border-radius var(--sp-fast), background-color var(--fx-fast), box-shadow var(--fx), color var(--fx-fast); }
+.btn::after { content: ""; position: absolute; inset: -1px; border-radius: inherit; background: currentColor; opacity: 0; pointer-events: none; transition: opacity var(--fx-fast); z-index: -1; }
+.btn:hover::after { opacity: var(--state-hover); }
+.btn:focus-visible::after { opacity: var(--state-focus); }
+.btn:active::after { opacity: var(--state-press); }
+.btn:active { transform: scale(.97); border-radius: var(--r-pressed); }
+.btn.primary { background: var(--accent); color: var(--accent-fg); box-shadow: 0 1px 2px var(--accent-glow), 0 6px 16px -8px var(--accent-glow); }
+.btn.tonal { background: var(--accent-soft); color: var(--accent-text); box-shadow: none; }
+.btn.outline { background: transparent; box-shadow: inset 0 0 0 1px var(--line-strong); }
+.btn.ghost { background: transparent; box-shadow: none; }
+.btn.danger { background: var(--danger); color: var(--surface); box-shadow: none; }
+.btn.icon { width: var(--ctl-h); padding: 0; color: var(--muted); }
+.btn.icon:hover { color: var(--fg); }
+.btn[disabled] { opacity: var(--state-disabled); cursor: not-allowed; transform: none; border-radius: var(--r-ctl-px); }
+.btn[disabled]::after { opacity: 0; }
 .caret { font-size: var(--t-xs); color: var(--muted); }
+.badge, .tip, .kbd, .rail-label, .table th { letter-spacing: var(--track-caption); }
+.meta, .hint, .error, .field-label, .li-trail, .crumbs, .delta, .seg, .chip, .table { letter-spacing: var(--track-footnote); }
 .btn.primary .caret { color: inherit; }
+.fab { position: absolute; right: var(--s-4); bottom: var(--s-4); z-index: 4; width: 56px; height: 56px; border: 0; cursor: pointer; display: grid; place-items: center;
+  border-radius: min(calc(var(--r-ctl) + 8px), 999px); background: var(--accent); color: var(--accent-fg);
+  box-shadow: 0 10px 24px -8px var(--accent-glow), var(--e-2); transition: transform var(--sp-fast), border-radius var(--sp-fast); }
+.fab:hover { transform: translateY(-2px) scale(1.04); }
+.fab:active { transform: scale(.94); border-radius: min(calc(var(--r-ctl) + 4px), 999px); }
 
+/* Fields. */
 .form { display: flex; flex-direction: column; gap: var(--s-4); }
 .field { display: flex; flex-direction: column; gap: 6px; }
-.field-label { font-weight: 600; font-size: var(--t-sm); }
+.field-label { font-weight: 600; font-size: var(--t-sm); padding: 0; }
 .field-notes:empty { display: none; }
 .hint, .error { margin: 0; font-size: var(--t-sm); }
 .error { color: var(--danger); font-weight: 500; }
 .input { font: var(--t-md)/1.4 var(--font); color: var(--fg); background: var(--surface); border: 1px solid var(--line-strong);
-  border-radius: var(--r-md); padding: 8px var(--s-3); min-height: 38px; width: 100%;
-  transition: border-color var(--dur-2) ease, box-shadow var(--dur-2) ease; }
-.input:focus-visible { outline: none; border-color: var(--focus); box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 30%, transparent); }
+  border-radius: var(--r-field); padding: 0 calc(var(--ctl-h) * .3); height: var(--ctl-h); width: 100%;
+  transition: border-color var(--fx-fast), box-shadow var(--fx); }
+.input:hover { border-color: var(--muted); }
+.input:focus-visible { outline: none; border-color: var(--focus); box-shadow: 0 0 0 4px color-mix(in srgb, var(--focus) 24%, transparent); }
 .field.invalid .input { border-color: var(--danger); }
-textarea.input { resize: vertical; }
+textarea.input { resize: vertical; height: auto; padding-top: 8px; padding-bottom: 8px; }
 select.input { appearance: none; padding-right: 32px; background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
   linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 18px) 55%, calc(100% - 13px) 55%;
   background-size: 5px 5px; background-repeat: no-repeat; }
-.check, .switch { display: inline-flex; align-items: center; gap: var(--s-2); cursor: pointer; user-select: none; min-height: 32px; }
-.check input { width: 18px; height: 18px; accent-color: var(--accent); margin: 0; }
-.switch { position: relative; }
-.switch input { position: absolute; opacity: 0; width: 40px; height: 24px; margin: 0; cursor: pointer; z-index: 1; }
-.switch .track { width: 40px; height: 24px; border-radius: var(--r-full); background: var(--line-strong); position: relative; flex: none;
-  transition: background-color var(--dur-2) ease; }
-.switch .thumb { position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: var(--e-1);
-  transition: transform calc(var(--spring-snappy-ms) * 1ms) var(--spring-snappy); }
-.switch input:checked + .track { background: var(--accent); }
-.switch input:checked + .track .thumb { transform: translateX(16px); }
-.switch input:focus-visible + .track { outline: 2px solid var(--focus); outline-offset: 2px; }
-.slider { width: 100%; accent-color: var(--accent); }
+.search { display: flex; align-items: center; gap: 8px; height: var(--ctl-h); padding: 0 6px 0 calc(var(--ctl-h) * .3); min-width: 0;
+  border-radius: var(--r-field); background: var(--surface-2); color: var(--muted); border: 1px solid transparent; transition: border-color var(--fx-fast), box-shadow var(--fx); }
+.search:focus-within { border-color: var(--focus); box-shadow: 0 0 0 4px color-mix(in srgb, var(--focus) 24%, transparent); }
+.search-input { flex: 1; min-width: 0; width: 0; border: 0; background: transparent; color: var(--fg); font: var(--t-md) var(--font); height: 100%; outline: none; }
+.search-input::-webkit-search-cancel-button { -webkit-appearance: none; }
+.kbd { font: 600 var(--t-xs)/1 var(--font); padding: 3px 6px; border-radius: 6px; background: var(--surface); color: var(--muted); border: 1px solid var(--line); box-shadow: 0 1px 0 var(--line); }
 
-.progress { height: 8px; border-radius: var(--r-full); background: var(--surface-2); overflow: hidden; border: 1px solid var(--line); }
-.progress-bar { display: block; height: 100%; background: var(--accent); transform-origin: left;
-  transition: transform calc(var(--spring-gentle-ms) * 1ms) var(--spring-gentle); }
-.toasts { position: fixed; right: var(--s-5); bottom: var(--s-5); display: flex; flex-direction: column; gap: var(--s-2); z-index: 50; width: min(360px, calc(100vw - 32px)); }
-.toast { display: flex; align-items: center; gap: var(--s-3); background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--line-strong);
-  border-radius: var(--r-md); padding: var(--s-2) var(--s-2) var(--s-2) var(--s-4); box-shadow: var(--e-3); }
+/* Choices. Checkboxes and radios are the platform's own inputs, drawn over. */
+.check { position: relative; display: inline-flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; min-height: 28px; }
+.check input { position: absolute; opacity: 0; width: 20px; height: 20px; margin: 0; cursor: pointer; }
+.check .box { width: 20px; height: 20px; flex: none; display: grid; place-items: center; border-radius: min(6px, var(--r-ctl)); border: 1.5px solid var(--line-strong);
+  background: var(--surface); color: transparent; transition: background-color var(--fx-fast), border-color var(--fx-fast), color var(--fx-fast), box-shadow var(--fx), transform var(--sp-fast); }
+.check .box.round { border-radius: 50%; }
+.check:hover .box { border-color: var(--muted); }
+.check:active .box { transform: scale(.9); }
+.check input:checked + .box { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.check input:checked + .box.round { background: var(--surface); box-shadow: inset 0 0 0 5px var(--accent); }
+.check input:focus-visible + .box { outline: 3px solid color-mix(in srgb, var(--focus) 55%, transparent); outline-offset: 2px; }
+.radios { border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.radios legend { margin-bottom: 4px; }
+
+/* The switch: a capsule track and a white thumb that stretches while pressed (Apple's), on
+   spatial springs. */
+.switch { position: relative; display: inline-flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; min-height: 32px; }
+.switch input { position: absolute; opacity: 0; width: 46px; height: 28px; margin: 0; cursor: pointer; z-index: 1; }
+.switch .track { width: 46px; height: 28px; border-radius: 999px; background: var(--surface-3); position: relative; flex: none;
+  box-shadow: inset 0 0 0 1px var(--line); transition: background-color var(--fx), box-shadow var(--fx); }
+.switch .thumb { position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 999px; background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .18), 0 3px 8px rgba(0, 0, 0, .14); transform-origin: left center;
+  transition: transform var(--sp-fast), translate var(--sp-fast); }
+.switch input:checked + .track { background: var(--accent); box-shadow: none; }
+.switch input:checked + .track .thumb { translate: 18px 0; transform-origin: right center; }
+.switch input:active + .track .thumb { transform: scaleX(1.22); }
+.switch input:focus-visible + .track { outline: 3px solid color-mix(in srgb, var(--focus) 55%, transparent); outline-offset: 2px; }
+.switch.row-switch { display: flex; flex-direction: row-reverse; justify-content: space-between; width: 100%; }
+.switch.row-switch input { right: 0; }
+
+.slider { -webkit-appearance: none; appearance: none; width: 100%; height: 6px; border-radius: 999px; margin: 10px 0; cursor: pointer;
+  background: linear-gradient(90deg, var(--accent) var(--fill, 50%), var(--surface-3) var(--fill, 50%)); }
+.slider::-webkit-slider-thumb { -webkit-appearance: none; width: 22px; height: 22px; border-radius: 50%; background: #fff; border: 0;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .06), 0 2px 6px rgba(0, 0, 0, .22); transition: transform var(--sp-fast); }
+.slider:active::-webkit-slider-thumb { transform: scale(1.15); }
+.slider::-moz-range-thumb { width: 22px; height: 22px; border-radius: 50%; background: #fff; border: 0; box-shadow: 0 2px 6px rgba(0, 0, 0, .22); }
+.slider:focus-visible { outline-offset: 6px; }
+
+/* The segmented control: the chosen option's raised thumb glides between options. */
+.segmented { display: inline-flex; gap: 2px; padding: 3px; border-radius: var(--r-seg); background: var(--surface-3); box-shadow: inset 0 0 0 1px var(--line); }
+.seg { position: relative; border: 0; background: transparent; cursor: pointer; height: calc(var(--ctl-h) - 6px); padding: 0 14px;
+  border-radius: var(--r-seg-item); font: 600 var(--t-sm) var(--font); color: var(--muted); transition: color var(--fx-fast); }
+.seg:hover { color: var(--fg); }
+.seg.on { color: var(--fg); }
+.seg-thumb { position: absolute; inset: 0; border-radius: inherit; background: var(--surface); box-shadow: var(--e-1), 0 0 0 .5px var(--line); }
+.seg-label { position: relative; }
+.segmented.sm .seg { height: 26px; padding: 0 10px; font-size: var(--t-xs); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { display: inline-flex; align-items: center; gap: 5px; height: calc(var(--ctl-h) - 6px); padding: 0 12px; border-radius: var(--r-chip); cursor: pointer;
+  border: 1px solid var(--line-strong); background: transparent; color: var(--muted); font: 550 var(--t-sm) var(--font);
+  transition: background-color var(--fx-fast), border-color var(--fx-fast), color var(--fx-fast), transform var(--sp-fast); }
+.chip:hover { background: var(--hover); color: var(--fg); }
+.chip:active { transform: scale(.96); }
+.chip.on { background: var(--accent-soft); color: var(--accent-text); border-color: transparent; }
+.stepper { display: inline-flex; align-items: center; gap: 2px; padding: 3px; border-radius: var(--r-seg); background: var(--surface-3); }
+.stepper .btn.icon { width: calc(var(--ctl-h) - 6px); height: calc(var(--ctl-h) - 6px); border-radius: var(--r-seg-item); }
+.stepper-value { min-width: 3ch; text-align: center; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+/* Feedback. */
+.progress { height: 8px; border-radius: 999px; background: var(--surface-3); overflow: hidden; }
+.progress-bar { display: block; height: 100%; border-radius: inherit; background: var(--accent); transform-origin: left; transition: transform var(--sp); }
+.ring { display: block; transform: rotate(-90deg); flex: none; }
+.ring-track { fill: none; stroke: var(--surface-3); stroke-width: 3.5; }
+.ring-fill { fill: none; stroke: var(--accent); stroke-width: 3.5; stroke-linecap: round; transition: stroke-dashoffset var(--sp); }
+.ring-text { transform: rotate(90deg); transform-origin: 18px 18px; font: 700 10px var(--font); fill: var(--fg); }
+.skeleton { display: flex; flex-direction: column; gap: 8px; }
+.skeleton span { position: relative; overflow: hidden; height: 10px; border-radius: 999px; background: var(--surface-3); }
+.skeleton span.short { width: 60%; }
+.skeleton span::after { content: ""; position: absolute; inset: 0; transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--surface) 70%, transparent), transparent); animation: hx-shimmer 1.4s ease-in-out infinite; }
+@keyframes hx-shimmer { to { transform: translateX(100%); } }
+.toasts { position: fixed; right: var(--s-5); bottom: var(--s-5); display: flex; flex-direction: column; gap: var(--s-2); z-index: 50; width: min(380px, calc(100% - 32px)); pointer-events: none; }
+.toast { pointer-events: auto; display: flex; align-items: center; gap: 4px; min-height: 48px; padding: var(--pad-overlay) var(--pad-overlay) var(--pad-overlay) calc(var(--pad-overlay) + 10px);
+  border-radius: var(--r-overlay); font-weight: 500; }
+.toast .btn { height: 34px; border-radius: var(--r-item); }
+.toast .btn.icon { width: 34px; }
 .toast-text { flex: 1; }
-.toast.success { border-left-color: var(--success); } .toast.warning { border-left-color: var(--warning); }
-.toast.danger { border-left-color: var(--danger); } .toast.accent { border-left-color: var(--accent); }
+.toast-action { color: var(--accent-text); padding: 0 12px; }
+.toast.success .toast-text::before, .toast.warning .toast-text::before, .toast.danger .toast-text::before, .toast.accent .toast-text::before {
+  content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 10px; vertical-align: 1px; background: var(--line-strong); }
+.toast.success .toast-text::before { background: var(--success); } .toast.warning .toast-text::before { background: var(--warning); }
+.toast.danger .toast-text::before { background: var(--danger); } .toast.accent .toast-text::before { background: var(--accent); }
 .tip-wrap { position: relative; display: inline-flex; }
 .tip { position: absolute; bottom: calc(100% + 8px); left: 50%; translate: -50% 4px; white-space: nowrap; pointer-events: none;
-  background: var(--fg); color: var(--bg); font-size: var(--t-sm); padding: 4px var(--s-2); border-radius: var(--r-sm);
-  opacity: 0; transition: opacity var(--dur-2) ease, translate var(--dur-2) var(--ease); z-index: 20; }
-.tip-wrap:hover .tip, .tip-wrap:focus-within .tip { opacity: 1; translate: -50% 0; }
+  background: var(--fg); color: var(--bg); font-size: var(--t-xs); font-weight: 550; padding: 5px 8px; border-radius: var(--r-tip);
+  opacity: 0; transition: opacity var(--fx), translate var(--sp-fast); z-index: 20; }
+.tip-wrap:hover .tip, .tip-wrap:focus-within .tip { opacity: 1; translate: -50% 0; transition-delay: .35s, .35s; }
 
+/* Navigation and overlays. */
 .tabbar { display: flex; gap: var(--s-1); border-bottom: 1px solid var(--line); margin-bottom: var(--s-4); }
 .tab { appearance: none; background: none; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; padding: var(--s-2) var(--s-3);
-  font: 500 var(--t-md) var(--font); color: var(--muted); cursor: pointer; border-radius: var(--r-sm) var(--r-sm) 0 0;
-  transition: color var(--dur-2) ease, border-color var(--dur-2) ease; }
+  font: 550 var(--t-md) var(--font); color: var(--muted); cursor: pointer; border-radius: var(--r-item) var(--r-item) 0 0;
+  transition: color var(--fx-fast), border-color var(--fx); }
 .tab:hover { color: var(--fg); }
 .tab[aria-selected="true"] { color: var(--accent-text); border-bottom-color: var(--accent); }
-.tabpanel:not([hidden]) { animation: hx-rise calc(var(--spring-gentle-ms) * 1ms) var(--spring-gentle); }
+.tabpanel:not([hidden]) { animation: hx-rise var(--sp); }
 .menu { position: relative; display: inline-block; }
 .menu-list { position: absolute; top: calc(100% + 6px); left: 0; min-width: 200px; z-index: 30; display: flex; flex-direction: column;
-  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-md); box-shadow: var(--e-3); padding: var(--s-1); transform-origin: top left; }
-.menu-item { appearance: none; background: none; border: 0; text-align: left; font: var(--t-md) var(--font); color: var(--fg);
-  padding: var(--s-2) var(--s-3); border-radius: var(--r-sm); cursor: pointer; }
-.menu-item:hover, .menu-item:focus-visible { background: var(--accent-soft); color: var(--accent-text); outline: none; }
-.dialog { border: 1px solid var(--line); border-radius: var(--r-lg); padding: 0; width: min(520px, calc(100vw - 32px));
-  background: var(--surface); color: var(--fg); box-shadow: var(--e-3); }
-.dialog[open] { animation: hx-pop calc(var(--spring-snappy-ms) * 1ms) var(--spring-snappy); }
-.dialog::backdrop { background: rgba(10, 12, 18, .45); backdrop-filter: blur(2px); }
-.dialog[open]::backdrop { animation: hx-fade var(--dur-3) ease; }
-.dialog-head { display: flex; align-items: center; justify-content: space-between; padding: var(--s-3) var(--s-3) 0 var(--s-5); }
-.dialog-head h2 { margin: 0; font-size: var(--t-lg); text-transform: none; letter-spacing: 0; color: var(--fg); }
-.dialog-body { padding: var(--s-3) var(--s-5) var(--s-4); }
-.dialog-actions { display: flex; justify-content: flex-end; gap: var(--s-2); padding: var(--s-3) var(--s-5) var(--s-4); border-top: 1px solid var(--line); }
+  border-radius: var(--r-overlay); padding: var(--pad-overlay); transform-origin: top left; }
+.menu-list.end { left: auto; right: 0; transform-origin: top right; }
+.menu-item { appearance: none; background: none; border: 0; text-align: left; font: var(--t-md) var(--font); color: var(--fg); display: flex; align-items: center; gap: 10px;
+  height: 34px; padding: 0 10px; border-radius: var(--r-item); cursor: pointer; transition: background-color var(--fx-fast); white-space: nowrap; }
+.menu-item .ic { color: var(--muted); }
+.menu-item.danger { color: var(--danger); } .menu-item.danger .ic { color: inherit; }
+.menu-item:hover .ic, .menu-item:focus-visible .ic { color: inherit; }
+.menu-item:hover, .menu-item:focus-visible { background: var(--accent); color: var(--accent-fg); outline: none; }
+.dialog { border-radius: var(--r-sheet); padding: 0; width: min(520px, calc(100vw - 32px)); color: var(--fg); }
+.dialog[open] { animation: hx-pop var(--sp); }
+.dialog::backdrop { background: var(--scrim); }
+.dialog[open]::backdrop { animation: hx-fade var(--fx-slow); }
+.dialog-head { display: flex; align-items: center; justify-content: space-between; padding: var(--s-3) var(--s-3) 0 var(--pad-sheet); }
+.dialog-head h2 { margin: 0; font-size: var(--t-lg); color: var(--fg); }
+.dialog-body { padding: var(--s-3) var(--pad-sheet) var(--s-4); }
+.dialog-actions { display: flex; justify-content: flex-end; gap: var(--s-2); padding: var(--s-3) var(--pad-sheet) var(--pad-sheet); }
+.sheet-layer { position: fixed; inset: 0; z-index: 60; display: flex; align-items: flex-end; justify-content: center; padding: var(--inset); }
+.sheet-layer.closed { display: none; }
+.scrim { position: absolute; inset: 0; background: var(--scrim); }
+.sheet { position: relative; width: min(560px, 100%); max-height: 85%; overflow: auto; border-radius: var(--r-sheet); padding: 6px var(--pad-sheet) var(--pad-sheet);
+  display: flex; flex-direction: column; gap: var(--s-3); }
+.grabber { width: 36px; height: 5px; border-radius: 999px; background: var(--line-strong); align-self: center; margin-bottom: 2px; }
+.sheet-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); margin-right: calc(var(--s-2) - var(--pad-sheet) / 2); }
+.sheet-title { margin: 0; font-size: var(--t-lg); color: var(--fg); }
+.sheet-body { display: flex; flex-direction: column; gap: var(--s-3); }
+.sheet-actions { display: flex; justify-content: flex-end; gap: var(--s-2); }
 
-.table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); overscroll-behavior: contain; }
+/* Lists, people and summaries. */
+.list { display: flex; flex-direction: column; gap: 1px; padding: var(--pad-list); border-radius: var(--r-list); min-width: 0; }
+.li-wrap { display: block; min-width: 0; }
+.li { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 48px; padding: 6px 10px; border-radius: var(--r-row); border: 0;
+  background: transparent; color: inherit; font: inherit; text-align: left; transition: background-color var(--fx-fast); }
+button.li { cursor: pointer; }
+button.li:hover { background: var(--hover); }
+button.li:active { background: var(--press); }
+.li.on { background: var(--accent-soft); }
+.li.on .li-title { color: var(--accent-text); }
+.li .two-line { flex: 1; }
+.li-title { font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.li-lead { display: grid; place-items: center; flex: none; width: 36px; height: 36px; border-radius: max(var(--floor, 4px), calc(var(--r-row) - 6px)); background: var(--accent-soft); color: var(--accent-text); }
+.li-lead:has(.avatar) { background: none; }
+.li-trail { color: var(--muted); font-size: var(--t-sm); font-variant-numeric: tabular-nums; flex: none; }
+.avatar { display: inline-grid; place-items: center; flex: none; width: 32px; height: 32px; border-radius: 50%; font: 700 13px var(--font); color: #fff; box-shadow: 0 0 0 2px var(--surface); }
+.avatar.sm { width: 26px; height: 26px; font-size: 11px; } .avatar.lg { width: 44px; height: 44px; font-size: 17px; }
+.avatar.a0 { background: #6d5bd0; } .avatar.a1 { background: #c2410c; } .avatar.a2 { background: #0f766e; }
+.avatar.a3 { background: #be185d; } .avatar.a4 { background: #1d4ed8; } .avatar.a5 { background: #4d7c0f; }
+.avatar.more { background: var(--surface-3); color: var(--fg); }
+.avatars { display: flex; } .avatars .avatar + .avatar { margin-left: -8px; }
+.empty { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 4px; padding: var(--s-6) var(--s-4); color: var(--muted); }
+.empty p { margin: 0; }
+.empty-icon { width: 56px; height: 56px; border-radius: 999px; display: grid; place-items: center; background: var(--surface-3); color: var(--muted); margin-bottom: 6px; }
+.empty-title { font-weight: 650; color: var(--fg); }
+.stat-tile { border-radius: var(--r-card); padding: var(--pad-card); display: flex; flex-direction: column; gap: 2px; min-width: 0; box-shadow: var(--e-1), inset 0 1px 0 var(--glass-edge); }
+.stat-big { font-size: 26px; font-weight: 750; letter-spacing: -.025em; font-variant-numeric: tabular-nums; line-height: 1.2; }
+.delta { font-size: var(--t-sm); font-weight: 650; } .delta.up { color: var(--success); } .delta.down { color: var(--danger); } .delta.flat { color: var(--muted); }
+.spark { width: 100%; height: 30px; margin-top: 6px; overflow: visible; }
+.spark polyline { fill: none; stroke: var(--accent); stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; stroke-linecap: round; }
+.crumbs ol { display: flex; align-items: center; gap: 2px; list-style: none; margin: 0; padding: 0; color: var(--muted); font-size: var(--t-sm); }
+.crumbs li { display: flex; align-items: center; gap: 2px; }
+.crumb { padding: 2px 4px; }
+.crumb.link { border: 0; background: none; color: inherit; font: inherit; cursor: pointer; border-radius: var(--r-item); transition: color var(--fx-fast), background-color var(--fx-fast); }
+.crumb.link:hover { color: var(--fg); background: var(--hover); }
+.crumb.current { color: var(--fg); font-weight: 600; }
+
+/* The app's frame: a rail, and a toolbar floating over content that scrolls beneath it. */
+.shell { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr); height: 100%; min-height: 0; }
+.shell-main { position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column; container-type: inline-size; }
+.shell-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; outline: none;
+  padding: calc(var(--ctl-h) + var(--inset) * 3) var(--pad-card) calc(var(--s-7) + 40px); }
+.toolbar { position: absolute; top: var(--inset); left: var(--inset); right: var(--inset); z-index: 5; display: flex; align-items: center; gap: 8px; pointer-events: none; }
+.tb-item { pointer-events: auto; display: flex; align-items: center; gap: 2px; padding: 3px; flex: none; border-radius: var(--r-in-window);
+  border: 1px solid var(--frame-line); box-shadow: var(--e-2), inset 0 1px 0 var(--glass-edge); }
+.tb-item:has(.search) { flex: 1 1 0; min-width: 0; max-width: 440px; }
+.tb-item:last-child { margin-left: auto; }
+.tb-item:first-child { margin-left: 0; }
+.tb-item .search { flex: 1; min-width: 0; background: transparent; border-color: transparent; }
+@container (max-width: 420px) { .tb-item .kbd { display: none; } }
+.tb-item .btn.icon, .tb-item .menu > .btn.icon { width: var(--ctl-h); height: var(--ctl-h); border-radius: max(4px, calc(var(--r-in-window) - 3px)); box-shadow: none; }
+:root:not([data-perf="light"]) .shell-scroll, :root [data-effects="full"] .shell-scroll { -webkit-mask-image: linear-gradient(to bottom, rgba(0, 0, 0, .35), #000 calc(var(--ctl-h) + var(--inset) * 2.5)); mask-image: linear-gradient(to bottom, rgba(0, 0, 0, .35), #000 calc(var(--ctl-h) + var(--inset) * 2.5)); }
+[data-effects="light"] .shell-scroll { -webkit-mask-image: none; mask-image: none; }
+.rail { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 76px; padding: var(--s-3) 0; border-right: 1px solid var(--frame-line); }
+.rail-items { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+.rail-item { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 100%; border: 0; background: none; padding: 2px 0; cursor: pointer; color: var(--muted); font: inherit; }
+.rail-pill { position: relative; width: 52px; height: 32px; border-radius: 999px; display: grid; place-items: center; transition: background-color var(--fx-fast); }
+.rail-pill .ic { position: relative; }
+.rail-glow { position: absolute; inset: 0; border-radius: inherit; background: var(--accent-soft); }
+.rail-item:hover .rail-pill { background: var(--hover); }
+.rail-item.on { color: var(--fg); }
+.rail-item.on .ic { color: var(--accent-text); }
+.rail-label { font-size: 11px; font-weight: 600; }
+
+.table-wrap { overflow: auto; border-radius: var(--r-card); overscroll-behavior: contain; box-shadow: var(--e-1), inset 0 1px 0 var(--glass-edge); }
 .table { border-collapse: separate; border-spacing: 0; width: 100%; font-variant-numeric: tabular-nums; font-size: var(--t-sm); }
-.table th { position: sticky; top: 0; z-index: 1; background: var(--surface-2); text-align: left; font-weight: 600; height: var(--row);
-  padding: 0 var(--s-3); border-bottom: 1px solid var(--line); white-space: nowrap; }
+/* The header is the table's own surface, not a band of another colour: rows scroll beneath it
+   (blurred, on glass), and it meets the scrollbar's gutter without a seam. */
+.table th { position: sticky; top: 0; z-index: 1; background: var(--card-bg); -webkit-backdrop-filter: var(--card-blur); backdrop-filter: var(--card-blur);
+  text-align: left; font-weight: 650; font-size: var(--t-xs); text-transform: capitalize; height: var(--row);
+  padding: 0 var(--s-3); border-bottom: 1px solid var(--line); white-space: nowrap; color: var(--muted); }
+:root[data-perf="light"] .table th, [data-effects="light"] .table th { background: var(--card-solid); -webkit-backdrop-filter: none; backdrop-filter: none; }
+:root[data-perf="light"] [data-effects="full"] .table th { background: var(--card-bg); -webkit-backdrop-filter: var(--card-blur); backdrop-filter: var(--card-blur); }
+.table th:first-child, .table td:first-child { padding-left: var(--pad-card); }
+.table th:last-child, .table td:last-child { padding-right: var(--pad-card); }
 .table td { height: var(--row); padding: 0 var(--s-3); border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
 .table .num { text-align: right; }
 .table tr.pad td { padding: 0; border: 0; height: inherit; }
-.table tbody tr:not(.pad):hover td { background: var(--surface-2); }
+.table tbody tr:not(.pad):hover td { background: var(--hover); }
 
 .chart { width: 100%; height: auto; display: block; overflow: visible; }
 .chart .gridline { stroke: var(--line); stroke-width: 1; }
@@ -679,7 +1551,11 @@ select.input { appearance: none; padding-right: 32px; background-image: linear-g
 @keyframes hx-rise { from { opacity: 0; transform: translateY(6px); } }
 @keyframes hx-pop { from { opacity: 0; transform: scale(.96); } }
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after, ::backdrop { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
+  /* Transitions are switched OFF, not shortened: a 0.01ms duration with the default
+     `transition-property: all` would make every property of every element transition, and
+     an inherited change (a button's colour) would move its children. Animations are cut to
+     one 0.01ms iteration, so their end events still fire. */
+  *, *::before, *::after, ::backdrop { transition-duration: 0s !important; transition-delay: 0s !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
 }
 """
 
@@ -692,6 +1568,20 @@ select.input { appearance: none; padding-right: 32px; background-image: linear-g
 CLIENT = """
 (() => {
   const root = document.getElementById('root');
+  // The machine's performance tier. Without GPU compositing (a software rasteriser), blur and
+  // large translucent layers cost a frame each; the design's glass then draws as solid
+  // surfaces (`data-perf="light"` in the stylesheet). Asked once, before the first frame.
+  (() => {
+    let light = false;
+    try {
+      const gl = document.createElement('canvas').getContext('webgl');
+      const info = gl && gl.getExtension('WEBGL_debug_renderer_info');
+      const r = info ? String(gl.getParameter(info.UNMASKED_RENDERER_WEBGL)) : '';
+      light = !gl || /swiftshader|llvmpipe|softpipe|software/i.test(r);
+    } catch (_) { light = true; }
+    if ((navigator.hardwareConcurrency || 4) <= 2) light = true;
+    document.documentElement.dataset.perf = light ? 'light' : 'full';
+  })();
   const SVG = 'http://www.w3.org/2000/svg';
   const still = matchMedia('(prefers-reduced-motion: reduce)');
   const css = getComputedStyle(document.documentElement);
@@ -731,25 +1621,58 @@ CLIENT = """
     if (k === 'checked' && n.tagName === 'INPUT' && !owned(n)) n.checked = false;
   }
 
-  // --- Motion. `enter` and `exit` name a preset; `layout` animates a node from where it was
-  // to where it is (FLIP). All of it is transform and opacity — the compositor's properties.
+  // --- Motion. Every movement is a spring: the same physics as Helix's `spring_curve`,
+  // solved here once per animation and handed to the compositor as a `linear()` curve, so the
+  // frames are the GPU's. What makes them springs rather than curves is VELOCITY: a thing
+  // that is already moving when its target changes keeps moving, and curves into the new
+  // target instead of stopping dead and starting over.
+  const tok = (name, field, d) => Number(css.getPropertyValue('--spring-' + name + '-' + field)) || d;
+  const springOf = (name) => ({ k: tok(name, 'k', 700), z: tok(name, 'z', 0.9) });
+  // Unit displacement decaying to rest, starting with velocity v0 (displacements per second).
+  function solve({ k, z }, v0) {
+    const w0 = Math.sqrt(k);
+    if (z >= 0.999) {
+      const c = v0 + w0;
+      return (t) => (1 + c * t) * Math.exp(-w0 * t);
+    }
+    const wd = w0 * Math.sqrt(1 - z * z), b = (v0 + z * w0) / wd;
+    return (t) => Math.exp(-z * w0 * t) * (Math.cos(wd * t) + b * Math.sin(wd * t));
+  }
+  // The curve and its length: settled once it stays within 0.1% of rest.
+  function curve(sp, v0) {
+    const x = solve(sp, v0);
+    let end = 0.05;
+    for (let t = 0; t < 4; t += 1 / 240) if (Math.abs(x(t)) > 0.001) end = t + 1 / 240;
+    const pts = [];
+    for (let i = 0; i <= 40; i++) pts.push((1 - x((end * i) / 40)).toFixed(4));
+    pts[40] = '1';
+    return { x, ms: Math.round(end * 1000), easing: 'linear(' + pts.join(', ') + ')' };
+  }
+  const velocityAt = (x, t) => (x(t + 0.002) - x(Math.max(0, t - 0.002))) / (t > 0.002 ? 0.004 : 0.002);
+
   const PRESETS = {
-    fade: [{ opacity: 0 }, { opacity: 1 }],
-    rise: [{ opacity: 0, transform: 'translateY(8px)' }, { opacity: 1, transform: 'none' }],
-    pop: [{ opacity: 0, transform: 'scale(.96)' }, { opacity: 1, transform: 'none' }],
-    grow: [{ transform: 'scaleY(0)' }, { transform: 'none' }],
+    fade: { from: {}, spring: 'effects' },
+    rise: { from: { transform: 'translateY(10px)' }, spring: 'spatial' },
+    pop: { from: { transform: 'scale(.94)' }, spring: 'spatial-fast' },
+    grow: { from: { transform: 'scaleY(0)' }, spring: 'spatial' },
+    sheet: { from: { transform: 'translateY(105%)' }, spring: 'spatial', solid: true },
   };
+  // Arrival: the movement on a spatial spring, the fade on an effects spring (a fade must not
+  // overshoot), each on the compositor.
   function enter(n) {
     if (still.matches || !(n instanceof Element)) return;
     const els = n.matches('[data-enter]') ? [n] : [];
     for (const e of [...els, ...n.querySelectorAll('[data-enter]')]) {
-      const kf = PRESETS[e.dataset.enter];
-      if (kf) e.animate(kf, { ...spring('gentle'), fill: 'backwards' });
+      const p = PRESETS[e.dataset.enter];
+      if (!p) continue;
+      if (p.from.transform) { const c = curve(springOf(p.spring), 0); e.animate([{ transform: p.from.transform }, { transform: 'none' }], { duration: c.ms, easing: c.easing, fill: 'backwards', composite: 'add' }); }
+      if (!p.solid) { const f = curve(springOf('effects'), 0); e.animate([{ opacity: 0 }, { opacity: 1 }], { duration: f.ms, easing: f.easing, fill: 'backwards' }); }
     }
   }
+  // Leaving: quicker than arriving, critically damped, then gone.
   function leave(p, n) {
-    const kf = n instanceof Element && !still.matches && PRESETS[n.dataset.exit];
-    if (!kf) { p.removeChild(n); return; }
+    const pre = n instanceof Element && !still.matches && PRESETS[n.dataset.exit];
+    if (!pre) { p.removeChild(n); return; }
     n.__gone = true;
     p.__leaving = (p.__leaving || 0) + 1;
     n.setAttribute('aria-hidden', 'true');
@@ -761,22 +1684,74 @@ CLIENT = """
       p.__leaving -= 1;
       flipTo(moving);
     };
-    n.animate([...kf].reverse(), { duration: 160, easing: 'ease-in', fill: 'forwards' }).finished.then(done, done);
+    const c = curve(springOf('effects-fast'), 0);
+    const kf = [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: pre.from.transform || 'none' }];
+    n.animate(kf, { duration: c.ms, easing: c.easing, fill: 'forwards' }).finished.then(done, done);
   }
+
+  // Layout (FLIP): a node marked `layout` that moves is animated from where it was. Each axis
+  // is its own spring, carrying its own velocity — so a list reordered twice in quick
+  // succession bends smoothly toward the newest order instead of jumping.
+  const motions = new WeakMap();
   function flipFrom() {
     if (still.matches) return null;
     const m = new Map();
-    for (const e of root.querySelectorAll('[data-layout]')) if (!e.__gone) m.set(e, e.getBoundingClientRect());
+    for (const e of root.querySelectorAll('[data-layout]')) if (!e.__gone && !e.dataset.share) m.set(e, e.getBoundingClientRect());
     return m.size ? m : null;
+  }
+  function currentVelocity(e) {
+    const r = motions.get(e);
+    if (!r) return [0, 0];
+    const t = (performance.now() - r.t0) / 1000;
+    return r.axes.map((a) => (a && t * 1000 < a.ms ? a.from * velocityAt(a.x, t) : 0));
   }
   function flipTo(m) {
     if (!m) return;
-    const s = spring('snappy');
+    const sp = springOf('spatial');
     for (const [e, a] of m) {
       if (!e.isConnected || e.__gone) continue;
+      const v = currentVelocity(e);
+      const old = motions.get(e);
+      if (old) for (const an of old.anims) an.cancel();
       const b = e.getBoundingClientRect();
-      const dx = a.left - b.left, dy = a.top - b.top;
-      if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) e.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }], s);
+      const d = [a.left - b.left, a.top - b.top];
+      if (Math.abs(d[0]) < 0.5 && Math.abs(d[1]) < 0.5) { motions.delete(e); continue; }
+      const axes = d.map((dist, i) => {
+        if (Math.abs(dist) < 0.5) return null;
+        // The velocity of the offset, as a fraction of the new distance per second; the offset
+        // shrinks toward zero, so moving toward the target is negative velocity.
+        return { from: dist, ...curve(sp, -v[i] / dist) };
+      });
+      const anims = [];
+      if (axes[0]) anims.push(e.animate([{ transform: `translateX(${d[0]}px)` }, { transform: 'translateX(0)' }], { duration: axes[0].ms, easing: axes[0].easing, composite: 'add' }));
+      if (axes[1]) anims.push(e.animate([{ translate: `0 ${d[1]}px` }, { translate: '0 0' }], { duration: axes[1].ms, easing: axes[1].easing, composite: 'add' }));
+      motions.set(e, { t0: performance.now(), axes, anims });
+    }
+  }
+
+  // Shared elements: a node marked `share: "name"` that is in this frame and the last — the
+  // same node moved, or a new one taking an old one's place — morphs from the old one's box:
+  // a selection glides to the next option, a row grows into the detail it opens.
+  function sharedFrom() {
+    if (still.matches) return null;
+    const m = new Map();
+    for (const e of root.querySelectorAll('[data-share]')) if (!e.__gone) m.set(e.dataset.share, e.getBoundingClientRect());
+    return m.size ? m : null;
+  }
+  function sharedTo(m) {
+    if (!m) return;
+    for (const e of root.querySelectorAll('[data-share]')) {
+      const a = m.get(e.dataset.share);
+      if (!a || e.__gone) continue;
+      const prev = motions.get(e);
+      if (prev) for (const an of prev.anims) an.cancel();
+      const b = e.getBoundingClientRect();
+      if (!b.width || !b.height) continue;
+      const dx = a.left - b.left, dy = a.top - b.top, sx = a.width / b.width, sy = a.height / b.height;
+      if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5 && Math.abs(sx - 1) < 0.01 && Math.abs(sy - 1) < 0.01) continue;
+      const c = curve(springOf('spatial'), 0);
+      const an = e.animate([{ transformOrigin: '0 0', transform: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})` }, { transformOrigin: '0 0', transform: 'none' }], { duration: c.ms, easing: c.easing });
+      motions.set(e, { t0: performance.now(), axes: [null, null], anims: [an] });
     }
   }
 
@@ -822,6 +1797,7 @@ CLIENT = """
     const structural = ops.some((o) => o.op !== 'text' && o.op !== 'attrs');
     const saved = structural ? note() : null;
     const moving = structural ? flipFrom() : null;
+    const sharing = ops.length ? sharedFrom() : null;
     const arrived = [];
     for (const o of ops) {
       if (o.op === 'replace') {
@@ -854,6 +1830,7 @@ CLIENT = """
     for (const n of arrived) enter(n);
     if (saved) restore(saved);
     flipTo(moving);
+    sharedTo(sharing);
     // A newly shown menu (or anything marked `autofocus`) takes focus to its first item.
     for (const n of arrived) {
       const f = n instanceof Element && (n.matches('[autofocus]') ? n : n.querySelector('[autofocus]'));
@@ -880,20 +1857,31 @@ CLIENT = """
   // carries the stylesheet, the title and the client's hash, which is how a hot reload's new
   // styles arrive. The stream is reconnected at once when it drops — after a reload the app
   // is back within a fraction of a second, and the browser's own retry waits seconds.
-  let version = 0, delay = 100;
-  const built = document.documentElement.dataset.client;
-  function connect() {
-    const es = new EventSource('/events');
-    es.onopen = () => { delay = 100; };
-    es.onmessage = (e) => {
-      const d = JSON.parse(e.data);
+  let version = 0, delay = 100, scheduled = false;
+  const pending = [];
+  function drain() {
+    scheduled = false;
+    for (const d of pending.splice(0)) {
       if (d.client && d.client !== built) { location.reload(); return; }
       if (d.css != null) { const st = document.getElementById('hx-style'); if (st && st.textContent !== d.css) st.textContent = d.css; }
+      if (d.effects != null) { if (d.effects === 'auto') delete document.documentElement.dataset.effects; else document.documentElement.dataset.effects = d.effects; }
       if (d.title != null && document.title !== d.title) document.title = d.title;
       apply(d.ops);
       document.documentElement.dataset.theme = d.theme || 'light';
       version += 1;
       document.documentElement.dataset.version = version;
+    }
+  }
+  const built = document.documentElement.dataset.client;
+  function connect() {
+    const es = new EventSource('/events');
+    es.onopen = () => { delay = 100; };
+    // Frames are applied on the next animation frame, all that arrived since the last one
+    // together: a burst of frames (a slider dragged, a list filling) is one layout and one
+    // paint per display refresh, never several per refresh.
+    es.onmessage = (e) => {
+      pending.push(JSON.parse(e.data));
+      if (!scheduled) { scheduled = true; requestAnimationFrame(drain); }
     };
     es.onerror = () => { es.close(); setTimeout(connect, delay); delay = Math.min(delay * 2, 2000); };
   }
@@ -940,6 +1928,14 @@ CLIENT = """
     e.preventDefault();
     post({ msg: f.dataset.submit, value: Object.fromEntries(new FormData(f)) }, false);
   });
+  // A scroller shows its scrollbar while it moves and for a moment after.
+  const quiet = new WeakMap();
+  document.addEventListener('scroll', (e) => {
+    const s = e.target instanceof Element ? e.target : document.documentElement;
+    s.classList.add('hx-scrolling');
+    clearTimeout(quiet.get(s));
+    quiet.set(s, setTimeout(() => s.classList.remove('hx-scrolling'), 900));
+  }, { capture: true, passive: true });
   document.addEventListener('scroll', (e) => {
     const t = e.target instanceof Element && e.target.closest('[data-scroll]');
     if (t) post({ msg: t.dataset.scroll, value: Math.round(t.scrollTop) }, true);
@@ -974,34 +1970,47 @@ CLIENT = """
       if (d && d.tagName !== 'DIALOG') { e.preventDefault(); post({ msg: d.dataset.dismiss, value: null }, false); }
       return;
     }
-    const group = t.closest && (t.closest('[role="tablist"]') || t.closest('[role="menu"]'));
+    const group = t.closest && (t.closest('[role="tablist"]') || t.closest('[role="menu"]') || t.closest('div[role="radiogroup"]'));
     if (!group) return;
-    const tablist = group.getAttribute('role') === 'tablist';
-    const items = Array.from(group.querySelectorAll(tablist ? '[role="tab"]' : '[role="menuitem"]'));
+    const role = group.getAttribute('role');
+    const tablist = role === 'tablist', radios = role === 'radiogroup';
+    const items = Array.from(group.querySelectorAll(tablist ? '[role="tab"]' : radios ? '[role="radio"]' : '[role="menuitem"]'));
     const i = items.indexOf(t);
     if (i < 0) return;
     const prev = tablist ? 'ArrowLeft' : 'ArrowUp', next = tablist ? 'ArrowRight' : 'ArrowDown';
     let j = null;
-    if (e.key === next) j = (i + 1) % items.length;
-    else if (e.key === prev) j = (i - 1 + items.length) % items.length;
+    if (e.key === next || (radios && e.key === 'ArrowRight')) j = (i + 1) % items.length;
+    else if (e.key === prev || (radios && e.key === 'ArrowLeft')) j = (i - 1 + items.length) % items.length;
     else if (e.key === 'Home') j = 0;
     else if (e.key === 'End') j = items.length - 1;
     if (j === null) return;
     e.preventDefault();
     items[j].focus();
-    if (tablist) items[j].click();
+    if (tablist || radios) items[j].click();
   });
 })();
 """
 
 # The whole stylesheet: the motion tokens, the design system, and the app's own `style`.
-fn css_of(spec) = ":root {{ {motion_tokens()} }}{THEME}{spec.get("style") ?? ""}"
+# An app's design: `design:` in its spec, a design or a function of the model — so an app can
+# change its whole look live (a theme picker); the page restyles when the design changes.
+fn design_of(spec, model) = do {
+  d = spec.get("design")
+  if d.is_missing() then default_design() else if type_of(d) == "Function" then do {
+    r = try d(model)
+    if r.ok then r.value else default_design()
+  } else d
+}
+fn css_with(spec, d) = ":root {{ {motion_tokens()} }}{design_css(d)}{scope_css(d)}{THEME}{spec.get("style") ?? ""}"
+fn css_of(spec, model) = css_with(spec, design_of(spec, model))
 
 fn page(spec, rt, model) = do {
   title = html_escape("{spec.title}")
   body = render((spec.view)(model))
   theme = theme_of(spec, model)
-  "<!doctype html><html lang=\"en\" data-theme=\"{theme}\" data-client=\"{rt.client}\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{title}</title><style id=\"hx-style\">{rt.css}</style></head><body><main id=\"root\">{body}</main><script>{CLIENT}</script></body></html>"
+  effects = rt.design.effects
+  fx = if effects == "auto" then "" else " data-effects=\"{effects}\""
+  "<!doctype html><html lang=\"en\" data-theme=\"{theme}\"{fx} data-client=\"{rt.client}\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{title}</title><style id=\"hx-style\">{rt.css}</style></head><body><main id=\"root\">{body}</main><script>{CLIENT}</script></body></html>"
 }
 fn theme_of(spec, model) = if spec.get("theme").is_missing() then "light" else do {
   t = try (spec.theme)(model)
@@ -1066,12 +2075,12 @@ fn step(spec, model, ev) = do {
 
 # A frame is the patch operations that bring a client's page up to date, and the theme.
 # JSON, because an SSE `data:` line cannot carry raw newlines.
-fn frame(ops, theme) = {ops: ops, theme: theme}.to_json()
+fn frame(ops, theme, rt, restyled) = if restyled then {ops: ops, theme: theme, css: rt.css, effects: rt.design.effects}.to_json() else {ops: ops, theme: theme}.to_json()
 
 # A subscriber's FIRST frame carries the whole page around the view too — the stylesheet, the
 # title, and which client built it — because after a hot reload all three may have changed
 # and the page was loaded by the program before. A client older than this runtime reloads.
-fn first_frame(ops, theme, rt) = {ops: ops, theme: theme, css: rt.css, title: rt.title, client: rt.client}.to_json()
+fn first_frame(ops, theme, rt) = {ops: ops, theme: theme, css: rt.css, effects: rt.design.effects, title: rt.title, client: rt.client}.to_json()
 
 # `tree` is the view every current subscriber is showing. A change sends them its diff — and
 # nothing at all when the diff is empty, as a timer whose `update` changed nothing leaves it; a
@@ -1095,16 +2104,20 @@ fn serve(l, spec, rt, model, tree, conns, streams, timers) = do {
   next = if changed then drawn.value else tree
   theme = theme_of(spec, ticked)
   ops = if changed then view_diff(tree, next) else []
-  kept = if ops.count() == 0 then streams else do {
-    f = frame(ops, theme)
+  # A design that changed restyles every page: the new stylesheet rides on the frame.
+  d_now = if changed and type_of(spec.get("design")) == "Function" then design_of(spec, ticked) else st.rt.design
+  restyled = changed and d_now != st.rt.design
+  rt2 = if restyled then {...st.rt, design: d_now, css: css_with(spec, d_now)} else st.rt
+  kept = if ops.count() == 0 and not restyled then streams else do {
+    f = frame(ops, theme, rt2, restyled)
     streams.filter((s) => s.send(f))
   }
   first = if st.streams.count() == 0 then [] else do {
-    f = first_frame(view_diff(missing, next), theme, st.rt)
+    f = first_frame(view_diff(missing, next), theme, rt2)
     st.streams.filter((s) => s.send(f))
   }
   later = schedule(timers.map((x) => if x.due <= t then advance(x, t) else x), subs_of(spec, ticked), t)
-  serve(l, spec, st.rt, ticked, next, st.keep, kept.concat(first), later)
+  serve(l, spec, rt2, ticked, next, st.keep, kept.concat(first), later)
 }
 
 # --- Hot reload. ---------------------------------------------------------------------------
@@ -1161,7 +2174,8 @@ export fn app(spec) = do {
   l = listen(port)
   generation = dev_generation()
   reload = if generation.is_missing() then false else generation > 1
-  rt = {...session(port), dev: not generation.is_missing(), css: css_of(spec), title: "{spec.title}", client: sha256(CLIENT)}
+  d0 = design_of(spec, spec.init)
+  rt = {...session(port), dev: not generation.is_missing(), design: d0, css: css_with(spec, d0), title: "{spec.title}", client: sha256(CLIENT)}
   url = "http://127.0.0.1:{port}/?token={rt.token}"
   # Under `--watch` the supervisor reads this line and shows the link once, on the first start.
   logged = elog("{spec.title} on {url}")
