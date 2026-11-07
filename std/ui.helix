@@ -382,7 +382,7 @@ export fn dialog(id, open, title, children, close, actions = []) = el("dialog", 
 # A sheet: a panel that rises from the bottom over a dimmed scrim, for a task that belongs to
 # what is on screen (share, filter, details). Escape, the scrim or the close button send
 # `close`. Its corners are concentric with the window's, and its controls with it.
-export fn sheet(id, open, title, children, close, actions = []) = if not open then el("div", {key: "{id}-layer", class: "sheet-layer closed"}, []) else el("div", {key: "{id}-layer", class: "sheet-layer", exit: "fade"}, [
+export fn sheet(id, open, title, children, close, actions = []) = if not open then el("div", {key: "{id}-layer-closed", class: "sheet-layer closed"}, []) else el("div", {key: "{id}-layer", class: "sheet-layer", exit: "fade"}, [
   el("div", {class: "scrim", click: close, enter: "fade", aria: {hidden: true}}, []),
   el("section", {id: id, class: "sheet mat-overlay", role: "dialog", dismiss: close, enter: "sheet", aria: {labelledby: "{id}-title", modal: true}}, [
     el("div", {class: "grabber", aria: {hidden: true}}, []),
@@ -394,17 +394,20 @@ export fn sheet(id, open, title, children, close, actions = []) = if not open th
 # A context menu: the menu a right click opens, where the pointer was (`at` is `{x, y}`, or
 # missing when closed). It is a `menu` — arrows, Home, End, Escape — and it is kept on screen
 # by the client however close to an edge it opened. `items` are `menu`'s.
-export fn context_menu(id, at, items, close) = if at.is_missing() then el("div", {key: "{id}-ctx", class: "ctx-closed"}, []) else
+export fn context_menu(id, at, items, close) = if at.is_missing() then el("div", {key: "{id}-ctx-closed", class: "ctx-closed"}, []) else
+  do {
+  first = range(0, items.count()).filter((i) => not (items[i].get("separator") ?? false) and not (items[i].get("disabled") ?? false)).first() ?? -1
   el("div", {key: "{id}-ctx", id: id, role: "menu", class: "menu-list context-menu mat-overlay", enter: "pop", exit: "fade", dismiss: close, aria: {label: "Actions"},
     style: {left: "{at.x}px", top: "{at.y}px"}}, range(0, items.count()).map((i) => do {
       it = items[i]
       if it.get("separator") ?? false then el("div", {class: "menu-sep", role: "separator"}, []) else
         el("button", {role: "menuitem", class: if it.get("danger") ?? false then "menu-item danger" else "menu-item", click: it.msg, value: it.get("value"),
-          attrs: {type: "button", tabindex: "-1", autofocus: i == 0, disabled: it.get("disabled") ?? false}}, present([
+          attrs: {type: "button", tabindex: "-1", autofocus: i == first, disabled: it.get("disabled") ?? false}}, present([
             if it.get("icon").is_missing() then missing else glyph(it.icon, "sm"), el("span", {class: "spacer-text"}, [text(it.label)]),
             if it.get("shortcut").is_missing() then missing else el("span", {class: "menu-kbd"}, [text(it.shortcut)]),
         ]))
   }))
+  }
 
 # Which of `items` (`[{label, …}]`) a typed query matches, best first: an exact prefix, then a
 # word starting with it, then the letters in order anywhere ("nf" finds "New folder").
@@ -428,7 +431,7 @@ fn in_order(q, l) = q.chars().reduce(0, (from, c) => if from < 0 then -1 else do
 # `selected` (an index into those) marked. Typing sends `query`; the arrows and Enter send
 # `nav` with the key ("ArrowDown", "Enter"); a click sends `pick` with the item's value; Escape
 # or a press outside sends `close`. The app keeps the query and the selection.
-export fn command_palette(id, open, query, items, selected, query_msg, nav, pick, close, placeholder = "Type a command or search") = if not open then el("div", {key: "{id}-palette", class: "palette-layer closed"}, []) else do {
+export fn command_palette(id, open, query, items, selected, query_msg, nav, pick, close, placeholder = "Type a command or search") = if not open then el("div", {key: "{id}-palette-closed", class: "palette-layer closed"}, []) else do {
   shown = palette_matches(query, items).take(50)
   sel = if shown.count() == 0 then -1 else clamp(selected, 0, shown.count() - 1)
   el("div", {key: "{id}-palette", class: "palette-layer", exit: "fade"}, [
@@ -437,7 +440,7 @@ export fn command_palette(id, open, query, items, selected, query_msg, nav, pick
       el("div", {class: "palette-search", keydown: nav, shortcuts: "ArrowUp ArrowDown Enter Escape"}, [
         icon("search", "sm"),
         el("input", {id: "{id}-input", class: "palette-input", input: query_msg, role: "combobox",
-          aria: {label: placeholder, expanded: true, controls: "{id}-list", activedescendant: if sel < 0 then missing else "{id}-opt-{sel}", autocomplete: "list"},
+          aria: {label: placeholder, expanded: shown.count() > 0, controls: if shown.count() == 0 then missing else "{id}-list", activedescendant: if sel < 0 then missing else "{id}-opt-{sel}", autocomplete: "list"},
           attrs: {type: "text", value: "{query}", placeholder: placeholder, autocomplete: "off", spellcheck: "false", autofocus: true}}, []),
         kbd("esc"),
       ]),
@@ -1626,7 +1629,7 @@ button.li:active { background: var(--press); }
 /* The app's frame: a rail, and a toolbar floating over content that scrolls beneath it. */
 .shell { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr); height: 100%; min-height: 0; }
 .shell-main { position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column; container-type: inline-size; }
-.shell-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; outline: none;
+.shell-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; outline: none; scroll-padding-top: calc(var(--ctl-h) + var(--inset) * 3);
   padding: calc(var(--ctl-h) + var(--inset) * 3) var(--pad-card) calc(var(--s-7) + 40px); }
 .toolbar { position: absolute; top: var(--inset); left: var(--inset); right: var(--inset); z-index: 5; display: flex; align-items: center; gap: 8px; pointer-events: none; }
 .tb-item { pointer-events: auto; display: flex; align-items: center; gap: 2px; padding: 3px; flex: none; border-radius: var(--r-in-window);
@@ -1742,8 +1745,14 @@ CLIENT = """
   const kid = (p, i) => live(p)[i];
   function at(path) { let n = root.firstChild; for (const i of path) n = kid(n, i); return n; }
   const owned = (n) => n === document.activeElement;   // a focused control owns its value (D6)
+  // ...while the person is editing it. A value the app sends that is not what the field last
+  // sent, with nothing from the field still on its way, is the app's answer — a search cleared
+  // by Escape — and the field shows it. (Before, the attribute then matched the app's tree, so
+  // the value was never sent again and the field stayed wrong.)
+  const answered = (n, v) => v !== n.value && v !== n.__sent && !busy(n.dataset.input || n.dataset.change);
   function setAttr(n, k, v) {
     n.setAttribute(k, v);
+    if (k === 'value' && (n.tagName === 'INPUT' || n.tagName === 'SELECT') && owned(n) && answered(n, v)) { n.value = v; return; }
     if (owned(n)) return;
     if (k === 'value' && (n.tagName === 'INPUT' || n.tagName === 'SELECT')) n.value = v;
     else if (k === 'checked' && n.tagName === 'INPUT') n.checked = true;
@@ -1851,9 +1860,10 @@ CLIENT = """
       if (Math.abs(d[0]) < 0.5 && Math.abs(d[1]) < 0.5) { motions.delete(e); continue; }
       const axes = d.map((dist, i) => {
         if (Math.abs(dist) < 0.5) return null;
-        // The velocity of the offset, as a fraction of the new distance per second; the offset
-        // shrinks toward zero, so moving toward the target is negative velocity.
-        return { from: dist, ...curve(sp, -v[i] / dist) };
+        // The offset's velocity as a fraction of the new distance per second: the curve is the
+        // offset over the distance, so this is its starting slope (negative when it is already
+        // closing in on the target).
+        return { from: dist, ...curve(sp, v[i] / dist) };
       });
       const anims = [];
       if (axes[0]) anims.push(e.animate([{ transform: `translateX(${d[0]}px)` }, { transform: 'translateX(0)' }], { duration: axes[0].ms, easing: axes[0].easing, composite: 'add' }));
@@ -1871,12 +1881,18 @@ CLIENT = """
     for (const e of root.querySelectorAll('[data-share]')) if (!e.__gone) m.set(e.dataset.share, e.getBoundingClientRect());
     return m.size ? m : null;
   }
+  // Where the layout puts a node, untouched by its animations (offsets ignore transforms).
+  const layoutOf = (e) => (e instanceof HTMLElement && e.offsetParent ? [e.offsetLeft, e.offsetTop, e.offsetWidth, e.offsetHeight].join(' ') : null);
   function sharedTo(m) {
     if (!m) return;
     for (const e of root.querySelectorAll('[data-share]')) {
       const a = m.get(e.dataset.share);
       if (!a || e.__gone) continue;
       const prev = motions.get(e);
+      // Still morphing toward the same place: a frame that changed something else leaves it be,
+      // rather than starting it over from rest.
+      const here = layoutOf(e);
+      if (prev && prev.lay && prev.lay === here && prev.anims.some((an) => an.playState === 'running')) continue;
       if (prev) for (const an of prev.anims) an.cancel();
       const b = e.getBoundingClientRect();
       if (!b.width || !b.height) continue;
@@ -1884,7 +1900,7 @@ CLIENT = """
       if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5 && Math.abs(sx - 1) < 0.01 && Math.abs(sy - 1) < 0.01) continue;
       const c = curve(springOf('spatial'), 0);
       const an = e.animate([{ transformOrigin: '0 0', transform: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})` }, { transformOrigin: '0 0', transform: 'none' }], { duration: c.ms, easing: c.easing });
-      motions.set(e, { t0: performance.now(), axes: [null, null], anims: [an] });
+      motions.set(e, { t0: performance.now(), axes: [null, null], anims: [an], lay: here });
     }
   }
 
@@ -1900,6 +1916,7 @@ CLIENT = """
     const k = inside ? ident(a) : null;
     let ctl = null;
     for (let p = inside ? a : null; p && p !== root; p = p.parentElement) {
+      if (p.__opener && p.__opener.isConnected) { ctl = p.__opener; break; }
       if (p.id) { const c = root.querySelector('[aria-controls="' + CSS.escape(p.id) + '"]'); if (c) { ctl = c; break; } }
     }
     let sel = null;
@@ -1908,21 +1925,23 @@ CLIENT = """
     for (const n of root.querySelectorAll('[data-key], [data-scroll]')) if (n.scrollTop || n.scrollLeft) scrolls.push([n, ident(n), n.scrollTop, n.scrollLeft]);
     return { a, inside, k, ctl, sel, scrolls, x: window.scrollX, y: window.scrollY };
   }
-  function restore(s) {
+  function restore(s, whole) {
     const lost = s.inside && (!root.contains(s.a) || s.a.closest('[aria-hidden="true"]'));
     if (lost) {
-      const n = (s.k && byIdent(s.k)) || (s.ctl && s.ctl.isConnected ? s.ctl : null);
+      const same = s.k && byIdent(s.k);
+      const n = same || (s.ctl && s.ctl.isConnected ? s.ctl : null);
       if (n) {
-        if (n.tagName === s.a.tagName && 'value' in n && 'value' in s.a) n.value = s.a.value;
+        if (same && n.tagName === s.a.tagName && 'value' in n && 'value' in s.a) n.value = s.a.value;
         n.focus({ preventScroll: true });
         try { if (s.sel && n.setSelectionRange) n.setSelectionRange(s.sel[0], s.sel[1], s.sel[2]); } catch (_) {}
       }
     }
     for (const [old, k, top, left] of s.scrolls) {
-      const n = old.isConnected ? old : (k && byIdent(k));
+      if (old.isConnected) continue;
+      const n = k && byIdent(k);
       if (n && (n.scrollTop !== top || n.scrollLeft !== left)) { n.scrollTop = top; n.scrollLeft = left; }
     }
-    if (window.scrollX !== s.x || window.scrollY !== s.y) window.scrollTo(s.x, s.y);
+    if (whole && (window.scrollX !== s.x || window.scrollY !== s.y)) window.scrollTo(s.x, s.y);
   }
 
   // --- Applying a frame.
@@ -1935,12 +1954,18 @@ CLIENT = """
     for (const o of ops) {
       if (o.op === 'replace') {
         if (o.path.length === 0) root.replaceChildren(build(o.node, null));
-        else { const n = at(o.path); const b = build(o.node, nsOf(n.parentNode)); n.replaceWith(b); arrived.push(b); }
+        else {
+          // A node with an exit is not cut away when another takes its place (a sheet
+          // closing to its placeholder): the new one goes in, and the old one leaves.
+          const n = at(o.path), p = n.parentNode, b = build(o.node, nsOf(p));
+          if (n instanceof Element && n.dataset.exit && !still.matches) { p.insertBefore(b, n); leave(p, n); } else n.replaceWith(b);
+          arrived.push(b);
+        }
       } else if (o.op === 'text') {
         const t = at(o.path);
         t.nodeValue = o.text;
         const p = t.parentNode;
-        if (p && p.tagName === 'TEXTAREA' && !owned(p)) p.value = o.text;
+        if (p && p.tagName === 'TEXTAREA' && (!owned(p) || answered(p, o.text))) p.value = o.text;
       } else if (o.op === 'attrs') {
         const n = at(o.path);
         for (const k of o.remove) removeAttr(n, k);
@@ -1961,15 +1986,20 @@ CLIENT = """
       }
     }
     for (const n of arrived) enter(n);
-    if (saved) restore(saved);
+    if (saved) restore(saved, ops.some((o) => o.op === 'replace' && o.path.length === 0));
     flipTo(moving);
     sharedTo(sharing);
     reveal();
-    for (const n of arrived) if (n instanceof Element) place(n);
+    place(root);
     // A newly shown menu (or anything marked `autofocus`) takes focus to its first item.
     for (const n of arrived) {
       const f = n instanceof Element && (n.matches('[autofocus]') ? n : n.querySelector('[autofocus]'));
-      if (f) { f.focus({ preventScroll: true }); break; }
+      if (f) {
+        const from = document.activeElement;
+        if (from && from !== document.body && !n.contains(from)) n.__opener = from;
+        f.focus({ preventScroll: true });
+        break;
+      }
     }
     syncDialogs();
   }
@@ -2037,7 +2067,8 @@ CLIENT = """
     // paint per display refresh, never several per refresh.
     es.onmessage = (e) => {
       pending.push(JSON.parse(e.data));
-      if (!scheduled) { scheduled = true; requestAnimationFrame(drain); }
+      if (document.hidden) drain();
+      else if (!scheduled) { scheduled = true; requestAnimationFrame(drain); }
     };
     es.onerror = () => { es.close(); setTimeout(connect, delay); delay = Math.min(delay * 2, 2000); };
   }
@@ -2048,12 +2079,13 @@ CLIENT = """
   // never dropped. Only the last: typing that follows a submit must reach `update` after it,
   // and merging into an earlier waiting event would move it ahead.
   const queue = [];
-  let inflight = false;
+  let inflight = null;
+  const busy = (msg) => !!msg && ((inflight && inflight.msg === msg) || queue.some((q) => q.ev.msg === msg));
   function flush() {
     if (inflight || queue.length === 0) return;
     const ev = queue.shift().ev;
-    inflight = true;
-    fetch('/event', { method: 'POST', body: JSON.stringify(ev) }).finally(() => { inflight = false; flush(); });
+    inflight = ev;
+    fetch('/event', { method: 'POST', body: JSON.stringify(ev) }).finally(() => { inflight = null; flush(); });
   }
   function post(ev, continuous) {
     const last = queue[queue.length - 1];
@@ -2091,11 +2123,11 @@ CLIENT = """
   });
   document.addEventListener('input', (e) => {
     const t = e.target.closest('[data-input]');
-    if (t) post({ msg: t.dataset.input, value: valueOf(t) }, true);
+    if (t) { t.__sent = String(t.value); post({ msg: t.dataset.input, value: valueOf(t) }, true); }
   });
   document.addEventListener('change', (e) => {
     const t = e.target.closest('[data-change]');
-    if (t) post({ msg: t.dataset.change, value: valueOf(t) }, false);
+    if (t) { t.__sent = String(t.value); post({ msg: t.dataset.change, value: valueOf(t) }, false); }
   });
   document.addEventListener('submit', (e) => {
     const f = e.target.closest('[data-submit]');
@@ -2141,8 +2173,10 @@ CLIENT = """
   // A key as a chord: "Ctrl+K", "Shift+ArrowDown", "Enter", "/". A printed character carries
   // Shift already ("?" rather than "Shift+/"), so Shift is named only on keys that print none.
   function chord(e) {
-    const k = e.key === ' ' ? 'Space' : e.key.length === 1 ? e.key.toUpperCase() : e.key;
-    const m = [(e.ctrlKey || e.metaKey) && 'Ctrl', e.altKey && 'Alt', e.shiftKey && (e.key.length > 1 || e.key === ' ') && 'Shift'].filter(Boolean);
+    const held = e.ctrlKey || e.metaKey || e.altKey;
+    const code = /^(Key[A-Z]|Digit[0-9])$/.test(e.code || '') ? e.code.slice(-1) : null;
+    const k = e.key === ' ' ? 'Space' : held && code ? code : e.key.length === 1 ? e.key.toUpperCase() : e.key;
+    const m = [(e.ctrlKey || e.metaKey) && 'Ctrl', e.altKey && 'Alt', e.shiftKey && (held || e.key.length > 1 || e.key === ' ') && 'Shift'].filter(Boolean);
     return [...m, k].join('+');
   }
   const editable = (t) => t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName);
@@ -2161,14 +2195,29 @@ CLIENT = """
       if (top && (top.dataset.shortcuts || '').split(' ').includes(c)) scope = top;
     }
     if (!scope) return false;
-    const d = t.closest && t.closest('dialog');
+    const d = t.closest && t.closest('dialog, [role="dialog"][aria-modal="true"]');
     if (d && !d.contains(scope)) return false;
     e.preventDefault();
     post({ msg: scope.dataset.keydown, value: c }, false);
     return true;
   }
+  // Tab stays inside an open modal that is not a <dialog> (the platform's does this itself).
+  const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  function trap(e) {
+    const m = Array.from(root.querySelectorAll('[role="dialog"][aria-modal="true"]')).filter((x) => x.tagName !== 'DIALOG' && !x.__gone).pop();
+    if (!m) return false;
+    const f = Array.from(m.querySelectorAll(FOCUSABLE)).filter((x) => x.getClientRects().length);
+    if (!f.length) return false;
+    const a = document.activeElement, i = f.indexOf(a);
+    const j = !m.contains(a) ? 0 : e.shiftKey ? (i <= 0 ? f.length - 1 : null) : (i === f.length - 1 ? 0 : null);
+    if (j === null) return false;
+    e.preventDefault();
+    f[j].focus();
+    return true;
+  }
   document.addEventListener('keydown', (e) => {
     const t = e.target;
+    if (e.key === 'Tab' && !e.ctrlKey && !e.altKey && !e.metaKey && trap(e)) return;
     if (!e.isComposing && shortcut(e)) return;
     if (e.key === 'Escape') {
       const d = t.closest && t.closest('[data-dismiss]');
@@ -2179,7 +2228,7 @@ CLIENT = """
     if (!group) return;
     const role = group.getAttribute('role');
     const tablist = role === 'tablist', radios = role === 'radiogroup';
-    const items = Array.from(group.querySelectorAll(tablist ? '[role="tab"]' : radios ? '[role="radio"]' : '[role="menuitem"]'));
+    const items = Array.from(group.querySelectorAll(tablist ? '[role="tab"]' : radios ? '[role="radio"]' : '[role="menuitem"]')).filter((x) => !x.disabled && x.getAttribute('aria-disabled') !== 'true');
     const i = items.indexOf(t);
     if (i < 0) return;
     const prev = tablist ? 'ArrowLeft' : 'ArrowUp', next = tablist ? 'ArrowRight' : 'ArrowDown';

@@ -234,6 +234,7 @@ async function session(browser, url, motion) {
   await shot('gallery-sheet');
   await post(() => p.keyboard.press('Escape'));
   check(await p.evaluate(() => !document.getElementById('share')), 'Escape closes the sheet');
+  check(await p.evaluate(() => document.activeElement && document.activeElement.matches('[data-click="open-sheet"]')), 'and focus goes back to the button that opened it');
 
   // A toast's action: removing a row offers Undo, and Undo brings it back.
   const before_rows = await p.evaluate(() => document.querySelectorAll('[aria-label="Files"] [role=listitem]').length);

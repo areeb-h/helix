@@ -34,6 +34,7 @@ function folder() {
   fs.writeFileSync(path.join(root, 'Notes', 'plan.md'), '# Plan\n\n- ship it\n');
   fs.writeFileSync(path.join(root, 'Reports', 'revenue.csv'), 'region,revenue\nNorth,1200\nSouth,980\n');
   fs.writeFileSync(path.join(root, 'readme.txt'), 'hello');
+  fs.writeFileSync(path.join(root, '.hidden-note'), 'hidden');
   fs.symlinkSync('../outside', path.join(root, 'outside-link'));
   return { base, root, outside };
 }
@@ -122,7 +123,30 @@ async function main() {
     await axe('context menu open');
     await p.screenshot({ path: path.join(OUT, 'files-context-menu.png') });
     await step(() => p.keyboard.press('Escape'));
-    check(!(await p.isVisible('.context-menu')), 'Escape closes it');
+    check(await settles(() => p.isVisible('.context-menu'), false), 'Escape closes it (once it has faded out)');
+    check(await settles(() => p.evaluate(() => { const a = document.activeElement.closest('.li'); return a ? a.textContent.includes('readme.txt') : false; }), true), 'and focus goes back to the row it opened from');
+
+    // On a link, Open is there but disabled: the first item that can be chosen takes focus, and
+    // the arrow keys pass over the disabled one.
+    const link = await (await p.$('.li:has-text("outside-link")')).boundingBox();
+    await step(() => p.mouse.click(link.x + 60, link.y + 20, { button: 'right' }));
+    const focused = () => p.evaluate(() => document.activeElement.textContent.trim());
+    check(await settles(focused, 'Copy path'), 'a disabled first item does not take focus');
+    await p.keyboard.press('ArrowDown');
+    await p.keyboard.press('ArrowDown');
+    await p.keyboard.press('ArrowDown');
+    check(await focused() === 'Copy path', 'the arrows pass over the disabled item');
+    await step(() => p.keyboard.press('Escape'));
+
+    // Opened near the bottom-right corner, the menu is moved to stay on the screen.
+    const vp = p.viewportSize();
+    await step(() => p.mouse.click(vp.width - 12, vp.height - 12, { button: 'right' }));
+    const shown = await p.$('.context-menu');
+    if (shown) {
+      const b = await shown.boundingBox();
+      check(b.x + b.width <= vp.width && b.y + b.height <= vp.height, 'a menu opened at the corner stays on the screen');
+      await step(() => p.keyboard.press('Escape'));
+    }
 
     // `/` searches; Escape clears.
     await step(() => p.keyboard.press('/'));
@@ -130,19 +154,35 @@ async function main() {
     await p.keyboard.type('re');
     check(await settles(() => p.evaluate(() => [...document.querySelectorAll('.li-title')].map((e) => e.textContent).join(',')), 'Reports,readme.txt'), 'typing filters the folder');
     await step(() => p.keyboard.press('Escape'));
+    check(await settles(() => p.evaluate(() => document.querySelector('.search-input').value), ''), 'Escape empties the field it is typed in, not only the filter');
+
+    // Shift with Ctrl is its own chord: Ctrl+Shift+H is not Ctrl+H.
+    const count = () => p.evaluate(() => document.querySelectorAll('.li-title').length);
+    await p.click('body', { position: { x: 600, y: 760 } });
+    const n0 = await count();
+    await step(() => p.keyboard.press('Control+Shift+H'));
+    check(await count() === n0, 'Ctrl+Shift+H is not read as Ctrl+H');
 
     // The command palette: Ctrl+K, type, Enter.
     await p.click('body', { position: { x: 600, y: 760 } });
     await step(() => p.keyboard.press('Control+k'));
     check(await p.isVisible('.palette'), 'Ctrl+K opens the command palette');
     check(await p.evaluate(() => document.activeElement.classList.contains('palette-input')), 'with focus in its search box');
+    // Inside the palette, the app's shortcuts behind it do not fire, and Tab stays in it.
+    const n1 = await count();
+    await step(() => p.keyboard.press('Control+h'));
+    check(await count() === n1, "the app's shortcuts do not fire from inside the palette");
+    await p.keyboard.press('Tab');
+    await p.keyboard.press('Tab');
+    check(await p.evaluate(() => !!document.activeElement.closest('.palette')), 'Tab stays inside the palette');
+    await p.focus('.palette-input');
     await p.keyboard.type('pho');
     await p.waitForTimeout(300);
     await axe('palette open');
     await p.screenshot({ path: path.join(OUT, 'files-palette.png') });
     await step(() => p.keyboard.press('Enter'));
     check(await settles(title, 'Photos'), 'Enter runs the chosen result (a folder)');
-    check(!(await p.isVisible('.palette')), 'and closes the palette');
+    check(await settles(() => p.isVisible('.palette'), false), 'and closes the palette');
 
     // Writing: a new folder, then to the Trash and back with Undo.
     await step(() => p.keyboard.press('Backspace'));

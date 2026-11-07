@@ -494,7 +494,9 @@ fn rail(m) = ui.rail("Places", [["home", "Home", "home"]].concat(if m.write then
 fn context_items(m) = do {
   e = selected(m)
   dir = not e.is_missing() and e.kind == "dir"
-  [{label: if dir then "Open" else "Show", msg: "cmd", value: "cmd:open", icon: if dir then "folder" else "eye", shortcut: "Enter"}, {label: "Copy path", msg: "cmd", value: "cmd:copy", icon: "copy"}]
+  link = not e.is_missing() and e.kind == "link"
+  # A link is never followed, so it cannot be opened: the item is there, and disabled.
+  [{label: if dir or link then "Open" else "Show", msg: "cmd", value: "cmd:open", icon: if dir then "folder" else "eye", shortcut: "Enter", disabled: link}, {label: "Copy path", msg: "cmd", value: "cmd:copy", icon: "copy"}]
     .concat(if m.write then [{separator: true, label: "", msg: ""}, {label: "Rename…", msg: "cmd", value: "cmd:rename", icon: "pen", shortcut: "F2"}, {label: "Move to the Trash", msg: "cmd", value: "cmd:delete", icon: "trash", danger: true, shortcut: "Del"}] else [])
 }
 
