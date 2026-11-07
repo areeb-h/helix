@@ -847,7 +847,12 @@ export fn open_url(url) = do {
 #   - another local process does not have it — the port alone is no longer enough;
 #   - a web page elsewhere cannot send it — SameSite=Strict keeps a cross-site POST cookieless,
 #     and a page that rebinds its DNS to 127.0.0.1 is a different origin with no cookie at all;
-#   - the `Host` header must also name this machine, which refuses a rebound request outright.
+#   - the `Host` header must also name this machine, which refuses a rebound request outright;
+#   - a request that changes something (a POST) must come from the app's own page. A cookie is
+#     scoped by host, not port, and every port of 127.0.0.1 is the same SITE, so SameSite lets
+#     a page served from ANY other local port send the cookie along. A browser names where a
+#     POST came from (`Origin`, and `Sec-Fetch-Site`): one from another origin is refused. A
+#     client that is not a browser sends neither, and has no cookie unless it holds the token.
 #
 # A cookie is scoped by host, not port, so its name carries the port: two apps side by side do
 # not overwrite each other's sessions. Tokens are compared by their HMAC under a second secret,
@@ -873,6 +878,11 @@ fn cookie_token(rt, req) = do {
 fn local_host(rt, req) = do {
   h = req.headers.get("host")
   if h.is_missing() then false else ["127.0.0.1:{rt.port}", "localhost:{rt.port}", "[::1]:{rt.port}"].contains(h)
+}
+fn same_origin(req) = do {
+  o = req.headers.get("origin")
+  site = req.headers.get("sec-fetch-site")
+  (o.is_missing() or o == "http://{req.headers.get("host")}") and (site.is_missing() or site == "same-origin")
 }
 fn set_cookie(rt) = "{rt.cookie}={rt.token}; HttpOnly; SameSite=Strict; Path=/"
 
@@ -2231,7 +2241,7 @@ fn handle(spec, st, c) = do {
 # the request must carry the cookie — or, on the one link the app printed, the token itself.
 fn guard(spec, st, c, req) = do {
   rt = st.rt
-  if not local_host(rt, req) then refuse(st, c, 421, "this app answers only on 127.0.0.1") else if same_token(rt, cookie_token(rt, req)) then (if rt.dev and req.path.starts_with("/__dev/") then dev_route(spec, st, c, req) else route(spec, st, c, req)) else if req.method == "GET" and same_token(rt, query_token(req.query)) then do {
+  if not local_host(rt, req) then refuse(st, c, 421, "this app answers only on 127.0.0.1") else if req.method != "GET" and not same_origin(req) then refuse(st, c, 403, "this app takes changes only from its own page") else if same_token(rt, cookie_token(rt, req)) then (if rt.dev and req.path.starts_with("/__dev/") then dev_route(spec, st, c, req) else route(spec, st, c, req)) else if req.method == "GET" and same_token(rt, query_token(req.query)) then do {
     sent = c.respond({status: 303, headers: {"Set-Cookie": set_cookie(rt), "Location": "/", "Cache-Control": "no-store"}})
     {...st, keep: st.keep.concat([c])}
   } else refuse(st, c, 403, "open the link this app printed when it started; it carries the session")

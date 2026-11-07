@@ -5174,6 +5174,14 @@ fn an_app_answers_only_its_session() {
     assert!(traded.contains(&set) && traded.contains("Location: /"), "{traded}");
     let page = get("/", &host, &cookie);
     assert!(page.starts_with("HTTP/1.1 200") && page.contains("Stopwatch"), "{}", &page[..200.min(page.len())]);
+    // A page on ANY other local port is the same site, so the browser sends the cookie with its
+    // POST too — and also says where it came from, which is refused. The app's own page is not.
+    let foreign = format!("{cookie}Origin: http://127.0.0.1:8000\r\n");
+    assert!(post("start", &foreign).starts_with("HTTP/1.1 403"), "a POST from another local origin must be refused");
+    let sibling = format!("{cookie}Sec-Fetch-Site: same-site\r\n");
+    assert!(post("start", &sibling).starts_with("HTTP/1.1 403"), "a same-site, cross-origin POST must be refused");
+    let own = format!("{cookie}Origin: http://{host}\r\nSec-Fetch-Site: same-origin\r\n");
+    assert!(post("stop", &own).starts_with("HTTP/1.1 204"), "its own page's POST is taken");
 
     // Subscribe, start the stopwatch, and count the frames the 50 ms timer produces.
     let mut events = TcpStream::connect(("127.0.0.1", PORT)).unwrap();
