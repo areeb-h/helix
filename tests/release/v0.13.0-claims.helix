@@ -1,0 +1,70 @@
+# The v0.13.0 release notes, as a program.
+#
+# Every line below is a claim the changelog makes, quoted or taken from its examples. The
+# expectations in `v0.13.0-claims.expected` are authored BY HAND from the notes — capturing
+# them from a binary would prove only that the binary agrees with itself. What only a running
+# server or a browser can show (the session's 403/421, hot reload, focus across a patch, zero
+# axe-core violations) is pinned by `tests/cli.rs` and `tests/ui/gallery.cjs`; the cells here
+# are the claims a program can check.
+
+# --- Added: "`import std.ui` works from any directory: the app library is compiled into
+# --- `helix`." This file sits in tests/release/, with no std/ beside it.
+import std.ui
+
+# --- Added: "`view_html(tree)` … the first paint". Text and attributes are escaped.
+print(view_html(ui.el("p", {class: "note"}, [ui.text("a < b")])))
+
+# --- Added: "`view_diff` answers the patch operations … matched by `key` …, so a new list item
+# --- is one insert and a reordered one is one move."
+fn item(k) = ui.el("li", {key: k}, [ui.text(k)])
+fn list(ks) = ui.el("ul", {}, ks.map(item))
+print(view_diff(list(["a", "b"]), list(["a", "b", "c"])).map((o) => o.op))
+print(view_diff(list(["a", "b", "c"]), list(["c", "a", "b"])).map((o) => o.op))
+print(view_diff(list(["a", "b"]), list(["a", "b"])).count())
+
+# --- Added: "`view_html` reads the props components need: `id`, `role`, `aria` (a record of
+# --- ARIA attributes) …; and a Bool in `attrs` is an HTML boolean attribute."
+print(view_html(ui.el("button", {id: "b", role: "switch", aria: {checked: false}, attrs: {disabled: true, hidden: false}}, [])))
+
+# --- Added: "Subscriptions: `ui.every(ms, msg)`. … each tick reaches `update` as an ordinary
+# --- event carrying the clock — so a recorded session replays exactly, ticks included."
+print(ui.every(50, "tick"))
+clock = {
+  init: {elapsed: 0.0, last: missing},
+  update: (m, e) => if m.last.is_missing() then {...m, last: e.value} else {elapsed: m.elapsed + e.value - m.last, last: e.value},
+  view: (m) => ui.heading("{m.elapsed:.2f}"),
+}
+print(ui.replay(clock, [{msg: "tick", value: 10.0}, {msg: "tick", value: 11.25}]).last())
+
+# --- Added: the components are "accessible by construction": a field's error is tied to it by
+# --- `aria-describedby` and sets `aria-invalid`; validators answer the first message that applies.
+print(ui.check("", [ui.required("Enter your name."), ui.min_length(2, "Two letters at least.")]))
+print(ui.check("A", [ui.required("Enter your name."), ui.min_length(2, "Two letters at least.")]))
+print(ui.check("Ada", [ui.required("Enter your name."), ui.min_length(2, "Two letters at least.")]))
+print(view_html(ui.text_input("name", "Name", "", "name", error: "Enter your name.")).contains("aria-describedby=\"name-error\" aria-invalid=\"true\""))
+# The selected tab is announced as selected, and only it is in the Tab order.
+tabs = view_html(ui.tabs("t", "b", [{id: "a", label: "A", content: ui.text("1")}, {id: "b", label: "B", content: ui.text("2")}], "tab"))
+print(tabs.contains("id=\"t-tab-b\" role=\"tab\" data-click=\"tab\" data-value=\"b\" aria-selected=\"true\""))
+print(tabs.contains("aria-selected=\"false\" aria-controls=\"t-panel-a\" type=\"button\" tabindex=\"-1\""))
+
+# --- Added: "a virtualised `data_table` over a DataFrame" — 10,000 rows, a screenful in the page.
+df = dataframe({id: range(1, 10001)})
+table = view_html(ui.data_table("t", df, 180000, "scroll", "Rows"))
+print(table.contains("aria-rowcount=\"10001\""))
+# Data rows in the page: the 10 a 360 px window shows at 36 px each, and 6 either side.
+print(table.split("<tr data-key=").count() - 1)
+
+# --- Added: "Hot reload … `dev_generation()` tells a program which start it is (missing outside
+# --- `--watch`)."
+print(dev_generation())
+
+# --- Fixed: "a `href` … that runs script when followed — `javascript:`, however it is spelled or
+# --- spaced … — is replaced by `about:blank#blocked`".
+print(view_html(ui.el("a", {attrs: {href: " JaVa ScRiPt:alert(1)"}}, [ui.text("x")])))
+
+# --- Fixed: "a 5-row table at 180,000 px rendered nothing. The window is clamped to the data".
+five = view_html(ui.data_table("t", dataframe({id: range(1, 6)}), 180000, "scroll", "Rows"))
+print(five.split("<tr data-key=").count() - 1)
+
+# --- Fixed: "Charts with no data raised … They now draw an empty frame that says \"No data\"".
+print(view_html(ui.line_chart("Rates", [])).contains("No data"))
