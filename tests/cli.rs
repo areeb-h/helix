@@ -4807,6 +4807,24 @@ fn an_app_survives_bad_events_and_a_failing_view() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `open_window` exists in every build (so an app type-checks and runs anywhere) and shows
+/// ONLY the app's own `127.0.0.1` page: anything else is refused before a window could open.
+/// In a build without `--features desktop` it answers false, and `std.ui` falls back to the
+/// browser. (A real window is `tests/ui/window.sh`, run by CI's `desktop` job.)
+#[test]
+fn open_window_shows_only_the_apps_own_page() {
+    let (out, err, code) = run(&["eval", "print(open_window(\"http://127.0.0.1:8080/?token=ab\", \"App\"))"], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    if !cfg!(feature = "desktop") {
+        assert_eq!(out, "false\n", "a build without a window answers false");
+    }
+    for url in ["https://example.com/", "http://localhost:8080/", "http://127.0.0.1:8080@evil.com/", "file:///etc/passwd"] {
+        let (_, err, code) = run(&["eval", &format!("print(open_window(\"{url}\"))")], &[], "");
+        assert_eq!(code, Some(1), "{url} must be refused");
+        assert!(err.contains("a window shows only this app's own page on 127.0.0.1"), "{url}: {err}");
+    }
+}
+
 /// An app answers only the person who started it (ADR 0055 Phase 1). A localhost port is
 /// reachable by every local process, and by any web page through DNS rebinding — so before
 /// the session, `curl 127.0.0.1:PORT/event` could drive the app. Now: no token is 403, a
@@ -4819,14 +4837,22 @@ fn an_app_answers_only_its_session() {
     use std::time::{Duration, Instant};
 
     const PORT: u16 = 18471;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_helix"))
+    // Killed on drop, so a failing assertion cannot leave the app holding the port.
+    struct App(std::process::Child);
+    impl Drop for App {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = App(Command::new(env!("CARGO_BIN_EXE_helix"))
         .args(["run", "examples/apps/stopwatch.helix", "--port", &PORT.to_string()])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("failed to spawn the app");
+        .expect("failed to spawn the app"));
     let mut banner = String::new();
-    BufReader::new(child.stderr.take().unwrap()).read_line(&mut banner).unwrap();
+    BufReader::new(child.0.stderr.take().unwrap()).read_line(&mut banner).unwrap();
     let token = banner.split("token=").nth(1).map(|t| t.trim().to_string()).unwrap_or_default();
     assert_eq!(token.len(), 64, "the app should print its link: {banner}");
 
@@ -4853,7 +4879,10 @@ fn an_app_answers_only_its_session() {
 
     assert!(get("/", &host, "").starts_with("HTTP/1.1 403"), "no token must be refused");
     assert!(post("start", "").starts_with("HTTP/1.1 403"), "an event without the session must be refused");
-    let wrong = format!("Cookie: helix_app_{PORT}=0{}\r\n", &token[1..]);
+    // A token one character off. (Replacing the first character with a FIXED digit was the
+    // right token whenever it already began with that digit — one run in sixteen.)
+    let first = if token.starts_with('0') { '1' } else { '0' };
+    let wrong = format!("Cookie: helix_app_{PORT}={first}{}\r\n", &token[1..]);
     assert!(get("/", &host, &wrong).starts_with("HTTP/1.1 403"), "a wrong token must be refused");
     let rebound = get(&format!("/?token={token}"), &format!("evil.example:{PORT}"), "");
     assert!(rebound.starts_with("HTTP/1.1 421"), "a foreign Host must be refused: {rebound}");
@@ -4900,8 +4929,7 @@ fn an_app_answers_only_its_session() {
         adopt.len()
     ));
     assert!(r.starts_with("HTTP/1.1 404"), "{r}");
-    let _ = child.kill();
-    let _ = child.wait();
+    drop(child);
 }
 
 /// Recursion just under `MAX_CALL_DEPTH` answers on every engine, whatever the function's
