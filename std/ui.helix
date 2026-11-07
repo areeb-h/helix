@@ -186,11 +186,12 @@ fn field(id, label, control, hint, error) = do {
   ])
 }
 
+# A field with no value yet (`missing`) is empty, not the word "missing".
 export fn text_input(id, label, value, msg, hint = missing, error = missing, kind = "text", placeholder = missing) =
-  field(id, label, el("input", {class: "input", input: msg, attrs: {type: kind, name: id, value: "{value}", placeholder: placeholder}}, []), hint, error)
+  field(id, label, el("input", {class: "input", input: msg, attrs: {type: kind, name: id, value: "{value ?? ""}", placeholder: placeholder}}, []), hint, error)
 
 export fn textarea(id, label, value, msg, rows = 4, hint = missing, error = missing) =
-  field(id, label, el("textarea", {class: "input", input: msg, attrs: {name: id, rows: "{rows}"}}, [text(value)]), hint, error)
+  field(id, label, el("textarea", {class: "input", input: msg, attrs: {name: id, rows: "{rows}"}}, [text(value ?? "")]), hint, error)
 
 # `options` is a list of values, or of [value, caption] pairs.
 export fn select(id, label, value, options, msg, hint = missing, error = missing) = do {
@@ -262,7 +263,7 @@ export fn stepper(id, label, value, msg, lo = 0, hi = 99, step = 1) = el("div", 
 # A search box with its icon, and the shortcut that reaches it shown at its end.
 export fn search_field(id, label, value, msg, placeholder = "Search", shortcut = missing) = el("label", {class: "search"}, present([
   icon("search", "sm"),
-  el("input", {id: id, class: "search-input", input: msg, aria: {label: label}, attrs: {type: "search", name: id, value: "{value}", placeholder: placeholder, autocomplete: "off"}}, []),
+  el("input", {id: id, class: "search-input", input: msg, aria: {label: label}, attrs: {type: "search", name: id, value: "{value ?? ""}", placeholder: placeholder, autocomplete: "off"}}, []),
   if shortcut.is_missing() then missing else kbd(shortcut),
 ]))
 
@@ -283,13 +284,18 @@ export fn check(value, rules) = rules.reduce(missing, (err, rule) => if err.is_m
 # --- Feedback. ---------------------------------------------------------------------------
 
 # `value` from 0 to `max`. The bar scales on the compositor.
-export fn progress(label, value, max = 1.0) = el("div", {class: "progress", role: "progressbar", aria: {label: label, valuemin: "0", valuemax: "{max}", valuenow: "{value}"}}, [
-  el("span", {class: "progress-bar", style: {transform: "scaleX({clamp(value / max, 0.0, 1.0):.4f})"}}, []),
-])
+export fn progress(label, value, max = 1.0) = do {
+  q = if max == 0 then 0.0 else value / max
+  f = if is_finite(q) then clamp(q, 0.0, 1.0) else 0.0
+  el("div", {class: "progress", role: "progressbar", aria: {label: label, valuemin: "0", valuemax: "{max}", valuenow: "{value}"}}, [
+    el("span", {class: "progress-bar", style: {transform: "scaleX({f:.4f})"}}, []),
+  ])
+}
 
 # A ring that fills to `value` of `max` — compact progress, read as a percentage.
 export fn ring(label, value, max = 100.0, size = 44) = do {
-  f = clamp(value / max, 0.0, 1.0)
+  q = if max == 0 then 0.0 else value / max
+  f = if is_finite(q) then clamp(q, 0.0, 1.0) else 0.0
   c = 2.0 * pi * 15.0
   el("svg", {class: "ring", role: "img", aria: {label: "{label}: {round(f * 100.0)}%"}, style: {width: "{size}px", height: "{size}px"}, attrs: {viewBox: "0 0 36 36"}}, [
     el("circle", {class: "ring-track", attrs: {cx: "18", cy: "18", r: "15"}}, []),
@@ -325,18 +331,22 @@ export fn tooltip(id, tip, child) = do {
 
 # --- Navigation and overlays. ------------------------------------------------------------
 
+# An id made from a value: ARIA's id lists are separated by spaces, so a value with a space
+# (or anything else an id should not hold) is spelled out, and two values never share an id.
+fn id_part(v) = "{v}".chars().map((c) => if c.re_match("^[A-Za-z0-9-]$") then c else "_{ord(c)}_").join("")
+
 # Tabs: `items` is `[{id, label, content}]`. Every panel is rendered and the unselected ones are
 # `hidden`, so each tab's `aria-controls` names a real element. Arrow keys, Home and End move
 # between tabs and select them; only the selected tab is in the Tab order.
 export fn tabs(id, selected, items, msg, label = missing) = el("div", {class: "tabs"}, [
   el("div", {class: "tabbar", role: "tablist", aria: {label: label}}, items.map((t) => el("button", {
-    id: "{id}-tab-{t.id}", role: "tab", class: "tab", click: msg, value: t.id,
-    aria: {selected: t.id == selected, controls: "{id}-panel-{t.id}"},
+    id: "{id}-tab-{id_part(t.id)}", role: "tab", class: "tab", click: msg, value: t.id,
+    aria: {selected: t.id == selected, controls: "{id}-panel-{id_part(t.id)}"},
     attrs: {type: "button", tabindex: if t.id == selected then "0" else "-1"},
     }, [text(t.label)]))),
   ].concat(items.map((t) => el("div", {
-    key: "{id}-panel-{t.id}", id: "{id}-panel-{t.id}", role: "tabpanel", class: "tabpanel",
-    aria: {labelledby: "{id}-tab-{t.id}"}, attrs: {tabindex: "0", hidden: t.id != selected},
+    key: "{id}-panel-{id_part(t.id)}", id: "{id}-panel-{id_part(t.id)}", role: "tabpanel", class: "tabpanel",
+    aria: {labelledby: "{id}-tab-{id_part(t.id)}"}, attrs: {tabindex: "0", hidden: t.id != selected},
     }, [t.content]))))
 
 # A menu button. `items` is `[{label, msg, value?}]`. Open, it takes focus to its first item;
@@ -488,7 +498,8 @@ export fn stat_tile(label, value, delta = missing, trend = "up", series = missin
   if delta.is_missing() then missing else el("span", {class: "delta {trend}"}, [text(delta)]),
   if series.is_missing() then missing else sparkline(series, "{label} trend"),
 ]))
-export fn sparkline(values, label) = do {
+export fn sparkline(values, label) = if values.filter((v) => is_finite(v)).count() == 0 then el("svg", {class: "spark", role: "img", aria: {label: "{label} (no data)"}, attrs: {viewBox: "0 0 100 30", preserveAspectRatio: "none"}}, []) else do {
+  values = values.map((v) => if is_finite(v) then v else missing).drop_missing()
   n = values.count()
   lo = values.min()
   hi = values.max()
@@ -554,7 +565,9 @@ export fn rail(label, items, selected, msg, top = missing, bottom = missing) = e
 export fn data_table(id, df, offset, scroll, label, height = 360, row_height = 36) = do {
   n = df.count()
   # Before the first scroll report the offset may not be a number yet: that is the top.
-  offset = if type_of(offset) == "Int" or type_of(offset) == "Float" then offset else 0
+  # It is the page's report, so it is only trusted to be a number, and one within the table.
+  row_height = max(row_height, 1)
+  offset = if (type_of(offset) == "Int" or type_of(offset) == "Float") and is_finite(offset) then clamp(offset, 0, n * row_height) else 0
   cols = df.columns()
   numeric = df.schema().filter((c) => c.type == "Int" or c.type == "Float").map((c) => c.name)
   # The window is clamped to the data. The offset is the browser's last report, and after the
@@ -576,7 +589,7 @@ export fn data_table(id, df, offset, scroll, label, height = 360, row_height = 3
 }
 
 fn fmt_cell(v) = match type_of(v) {
-  "Float" => if abs(v) >= 1000.0 then "{v:.1f}" else "{v:.3f}",
+  "Float" => if is_nan(v) then "NaN" else if not is_finite(v) then (if v > 0.0 then "∞" else "−∞") else if abs(v) >= 1000.0 then "{v:.1f}" else "{v:.3f}",
   "Missing" => "—",
   _ => "{v}",
 }
@@ -586,12 +599,15 @@ fn fmt_cell(v) = match type_of(v) {
 # A timer: every `ms` milliseconds the app receives `{msg, value}`, the value being the wall
 # clock (`now()`). An app lists its timers as a function of the model, so a timer exists only
 # while the model asks for it — a stopwatch that is stopped has none, and nothing polls.
-export fn every(ms, msg) = {every: ms, msg: msg}
+export fn every(ms, msg) = if not ((type_of(ms) == "Int" or type_of(ms) == "Float") and is_finite(ms) and ms > 0) then raise("a timer's period is a positive number of milliseconds, not {ms}", "`ui.every(1000, \"tick\")`") else if type_of(msg) != "String" then raise("a timer's message is a string, not {type_of(msg)}", "`ui.every(1000, \"tick\")`") else {every: ms, msg: msg}
 
+# No timer is faster than this, so a period of 0 cannot spin the loop.
+FASTEST_MS = 10
+fn timer_ok(x) = type_of(x) == "Record" and (type_of(x.get("every")) == "Int" or type_of(x.get("every")) == "Float") and is_finite(x.every) and type_of(x.get("msg")) == "String"
 fn subs_of(spec, model) = if spec.get("subscriptions").is_missing() then [] else do {
   s = try (spec.subscriptions)(model)
-  if s.ok then s.value else do {
-    logged = elog("subscriptions failed: {s.error}; no timers until the model changes")
+  if s.ok and type_of(s.value) == "Array" then s.value.filter(timer_ok).map((x) => {every: max(x.every, FASTEST_MS), msg: x.msg}) else do {
+    logged = elog(if s.ok then "subscriptions returned {type_of(s.value)}, not a list of `ui.every(…)`; no timers until the model changes" else "subscriptions failed: {s.error}; no timers until the model changes")
     []
   }
 }
@@ -735,7 +751,14 @@ MB = 30.0
 
 # The range a chart's axis covers. No data is a chart too — before the first result arrives
 # it is the normal state — so an empty series draws an empty frame rather than raising.
-fn extent(vs) = if vs.count() == 0 then {lo: 0.0, hi: 1.0, empty: true} else {lo: vs.min() * 1.0, hi: vs.max() * 1.0, empty: false}
+# A value that is not a finite number (NaN, ∞ — a division by zero upstream) is not drawn and
+# never sets the axis.
+fn finite(vs) = vs.filter((v) => type_of(v) != "Missing" and is_finite(v))
+fn drawable(v) = type_of(v) != "Missing" and is_finite(v)
+fn extent(vs0) = do {
+  vs = finite(vs0)
+  if vs.count() == 0 then {lo: 0.0, hi: 1.0, empty: true} else {lo: vs.min() * 1.0, hi: vs.max() * 1.0, empty: false}
+}
 fn no_data(label) = el("text", {class: "axis-label", attrs: {x: "{CW / 2.0}", y: "{CH / 2.0}", "text-anchor": "middle"}}, [text("No data")])
 
 fn px(ax, v) = ML + (v - ax.lo) / (ax.hi - ax.lo) * (CW - ML - MR)
@@ -759,7 +782,7 @@ export fn line_chart(label, series) = do {
   ay = axis(ey.lo, ey.hi, 5)
   lines = range(0, series.count()).map((k) => do {
     s = series[k]
-    pts = range(0, s.xs.count()).map((i) => "{px(ax, s.xs[i]):.1f},{py(ay, s.ys[i]):.1f}")
+    pts = range(0, s.xs.count()).filter((i) => drawable(s.xs[i]) and drawable(s.ys[i])).map((i) => "{px(ax, s.xs[i]):.1f},{py(ay, s.ys[i]):.1f}")
     path = if pts.count() == 0 then "M0,0" else "M{pts.join(" L")}"
     el("path", {key: "line-{s.name}", class: "series s{k % 6 + 1}", style: {d: "path(\"{path}\")"}, attrs: {d: path}}, [])
   })
@@ -774,7 +797,7 @@ export fn scatter_chart(label, xs, ys) = do {
   ey = extent(ys)
   ax = axis(ex.lo, ex.hi, 6)
   ay = axis(ey.lo, ey.hi, 5)
-  dots = range(0, xs.count()).map((i) => el("circle", {key: "p{i}", class: "dot s1", style: {cx: "{px(ax, xs[i]):.1f}px", cy: "{py(ay, ys[i]):.1f}px"}, attrs: {r: "4"}}, []))
+  dots = range(0, xs.count()).filter((i) => drawable(xs[i]) and drawable(ys[i])).map((i) => el("circle", {key: "p{i}", class: "dot s1", style: {cx: "{px(ax, xs[i]):.1f}px", cy: "{py(ay, ys[i]):.1f}px"}, attrs: {r: "4"}}, []))
   chart_frame(label, ax, ay, dots, missing, empty: ex.empty)
 }
 
@@ -786,7 +809,7 @@ export fn bar_chart(label, labels, values) = do {
   slot = (CW - ML - MR) / max(labels.count(), 1)
   base = py(ay, 0.0)
   bars = range(0, labels.count()).map((i) => do {
-    top = py(ay, values[i])
+    top = if drawable(values[i]) then py(ay, values[i]) else base
     h = abs(base - top)
     y = min(base, top)
     el("rect", {key: "bar-{labels[i]}", class: "bar s1", style: {y: "{y:.1f}px", height: "{h:.1f}px"}, enter: "grow", attrs: {x: "{ML + i * slot + slot * 0.18:.1f}", y: "{y:.1f}", width: "{slot * 0.64:.1f}", height: "{h:.1f}", rx: "4"}}, [
@@ -1193,7 +1216,9 @@ export fn design(opts = {}) = do {
   density = o.get("density") ?? "comfortable"
   effects = o.get("effects") ?? "auto"
   checked = if MATERIALS.contains(material) and not SHAPE_BASE.get(shape).is_missing() and not SPACING.get(density).is_missing() and ["auto", "full", "light"].contains(effects) then true else raise("a design's material is tonal, glass or hybrid; its shape sharp, soft or round; its density comfortable or compact; its effects auto, full or light", "`ui.design({{hue: 160, material: \"glass\", shape: \"round\"}})`")
-  h = seed.h
+  # A grey seed has no hue — what `atan2` gives for it is rounding noise (an olive, for most
+  # greys) — so it gets a graphite one: the cool, nearly neutral grey of Apple's graphite accent.
+  h = if seed.c < 0.01 then 250.0 else seed.h
   c0 = clamp(seed.c, 0.04, 0.24)
   light = roles(false, h, c0)
   dark = roles(true, h, c0)
@@ -2164,15 +2189,21 @@ CLIENT = """
 # The whole stylesheet: the motion tokens, the design system, and the app's own `style`.
 # An app's design: `design:` in its spec, a design or a function of the model — so an app can
 # change its whole look live (a theme picker); the page restyles when the design changes.
-fn design_of(spec, model) = do {
+# A function that raises, or returns something that is not a design, keeps the look the page
+# has (`last`) and says why: one bad model must not restyle the app, or end it.
+fn design_of(spec, model, last) = do {
   d = spec.get("design")
   if d.is_missing() then default_design() else if type_of(d) == "Function" then do {
     r = try d(model)
-    if r.ok then r.value else default_design()
-  } else d
+    if r.ok and is_design(r.value) then r.value else do {
+      logged = elog(if r.ok then "design returned {type_of(r.value)}, which is not a `ui.design(…)`; the last design is kept" else "design failed: {r.error}; the last design is kept")
+      last ?? default_design()
+    }
+  } else if is_design(d) then d else raise("`design:` is a `ui.design(…)`, or a function of the model that returns one", "`design: ui.design({{seed: \"#0f766e\"}})`")
 }
+fn is_design(d) = type_of(d) == "Record" and ["light", "dark", "effects", "material"].filter((k) => d.get(k).is_missing()).count() == 0
 fn css_with(spec, d) = ":root {{ {motion_tokens()} }}{design_css(d)}{scope_css(d)}{THEME}{spec.get("style") ?? ""}"
-fn css_of(spec, model) = css_with(spec, design_of(spec, model))
+fn css_of(spec, model) = css_with(spec, design_of(spec, model, missing))
 
 fn page(spec, rt, model) = do {
   title = html_escape("{spec.title}")
@@ -2275,7 +2306,7 @@ fn serve(l, spec, rt, model, tree, conns, streams, timers) = do {
   theme = theme_of(spec, ticked)
   ops = if changed then view_diff(tree, next) else []
   # A design that changed restyles every page: the new stylesheet rides on the frame.
-  d_now = if changed and type_of(spec.get("design")) == "Function" then design_of(spec, ticked) else st.rt.design
+  d_now = if changed and type_of(spec.get("design")) == "Function" then design_of(spec, ticked, st.rt.design) else st.rt.design
   restyled = changed and d_now != st.rt.design
   rt2 = if restyled then {...st.rt, design: d_now, css: css_with(spec, d_now)} else st.rt
   kept = if ops.count() == 0 and not restyled then streams else do {
@@ -2344,7 +2375,7 @@ export fn app(spec) = do {
   l = listen(port)
   generation = dev_generation()
   reload = if generation.is_missing() then false else generation > 1
-  d0 = design_of(spec, spec.init)
+  d0 = design_of(spec, spec.init, missing)
   rt = {...session(port), dev: not generation.is_missing(), design: d0, css: css_with(spec, d0), title: "{spec.title}", client: sha256(CLIENT)}
   url = "http://127.0.0.1:{port}/?token={rt.token}"
   # Under `--watch` the supervisor reads this line and shows the link once, on the first start.
