@@ -125,7 +125,7 @@ jobs:
       - name: Install WebKitGTK, a virtual display and a window manager
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev xvfb openbox xdotool wmctrl x11-utils imagemagick
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev xvfb openbox xdotool wmctrl x11-utils imagemagick dbus-daemon gdb
           # A fresh runner has no font cache; GTK and WebKit would build it on their first start,
           # on the main thread, before the window can appear.
           fc-cache -f
@@ -136,6 +136,8 @@ jobs:
           # sandbox work; the alternative (WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS) would test
           # a configuration no user should ship.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          # The runner's own session bus, for the record: the test runs each window in a fresh one.
+          echo "bus=${DBUS_SESSION_BUS_ADDRESS:-unset} runtime=${XDG_RUNTIME_DIR:-unset}"; ls -l "${XDG_RUNTIME_DIR:-/nonexistent}" 2>&1 | head -5
       - name: clippy (desktop)
         run: cargo clippy --profile gate --features postgres,desktop --all-targets -- -D warnings
       - name: Build with a window

@@ -9,8 +9,9 @@
 #   3. the window's close button (WM_DELETE_WINDOW, as a person clicks it) ends the app and
 #      frees its port;
 #   4. a program that ends while its window is open exits with ITS exit code.
-# A screenshot of the window lands in out-dir. Needs Xvfb, openbox, xdotool, wmctrl, curl and
-# ImageMagick's `import`. Exits non-zero on any failed check.
+# A screenshot of the window lands in out-dir. Needs Xvfb, openbox, xdotool, wmctrl, curl,
+# ImageMagick's `import` and dbus-run-session (gdb, if present, explains a hang). Exits non-zero
+# on any failed check.
 set -u
 HELIX=${1:-target/desktop/gate/helix}
 OUT=${2:-target/ui}
@@ -20,6 +21,19 @@ ok() { echo "  ok   $1"; }
 bad() { echo "  FAIL $1"; fails=$((fails + 1)); }
 work=$(mktemp -d)
 trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$work"' EXIT
+
+# Each windowed run gets its own session bus, as a desktop login gives one. A CI runner's own
+# user bus can carry services that never finish starting outside a real desktop session (the
+# desktop portal waits for one), and GTK and WebKit then block on each call to them for D-Bus's
+# 25 s timeout — a window that appears late and a page that never starts. That is the runner's
+# environment, not the app's, so it is kept out of the test.
+in_session() { dbus-run-session -- "$@"; }
+# What the app's threads are doing, when it does not do what it should.
+stacks() {
+  local p
+  p=$(pgrep -n -x helix) || return 0
+  command -v gdb >/dev/null && sudo -n gdb -p "$p" -batch -ex 'thread apply all bt 12' 2>/dev/null | grep -E '^(Thread|#)' | head -80
+}
 
 echo "— no display: --window falls back and still serves"
 env -u DISPLAY -u WAYLAND_DISPLAY "$HELIX" run examples/apps/gallery.helix --port 18960 --window >"$work/nodisp.log" 2>&1 &
@@ -36,13 +50,14 @@ sleep 1
 export DISPLAY=:91
 openbox >/dev/null 2>&1 &
 sleep 1
-"$HELIX" run examples/apps/gallery.helix --port 18961 --window >"$work/win.log" 2>&1 &
+start=$(date +%s)
+in_session "$HELIX" run examples/apps/gallery.helix --port 18961 --window >"$work/win.log" 2>&1 &
 pid=$!
 wid=""
 # Up to 30 s: a first start on a fresh machine can spend many seconds building caches.
 for _ in $(seq 300); do wid=$(xdotool search --name '^Component gallery$' 2>/dev/null | head -1); [ -n "$wid" ] && break; sleep 0.1; done
 if [ -n "$wid" ]; then
-  ok "a window titled \"Component gallery\" opened"
+  ok "a window titled \"Component gallery\" opened ($(( $(date +%s) - start )) s)"
   sleep 3
   geo=$(xdotool getwindowgeometry "$wid" | grep Geometry | awk '{print $2}')
   [ "$geo" = "1100x760" ] && ok "at the default size ($geo)" || bad "window size is $geo, not 1100x760"
@@ -50,7 +65,7 @@ if [ -n "$wid" ]; then
   # WebKit draws page content in separate processes; if they never started, the window maps
   # but stays blank and its event loop waits on them. Say which, so a failure names its cause.
   procs=$(ps -eo comm | grep -c '^WebKit' || true)
-  [ "$procs" -ge 2 ] && ok "WebKit's page processes are running ($procs)" || bad "WebKit's page processes did not start ($procs) — is its sandbox allowed to run?"
+  [ "$procs" -ge 2 ] && ok "WebKit's page processes are running ($procs)" || { bad "WebKit's page processes did not start ($procs)"; stacks; }
   # The close button, as a window manager delivers it (WM_DELETE_WINDOW). The app may still be
   # busy loading its page on a slow machine, so it has up to 20 s to act on it.
   # By the window's own id, retried: on a slow machine the window manager can still be
@@ -62,7 +77,7 @@ if [ -n "$wid" ]; then
   for _ in $(seq 200); do kill -0 $pid 2>/dev/null || break; sleep 0.1; done
   if kill -0 $pid 2>/dev/null; then
     bad "the app outlived its window's close button"
-    echo "windows still on the display:"; wmctrl -l; tail -5 "$work/win.log"
+    echo "windows still on the display:"; wmctrl -l; tail -5 "$work/win.log"; stacks
     kill $pid
   else
     ok "closing the window ends the app"
@@ -75,7 +90,7 @@ fi
 
 echo "— a program that ends while its window is open"
 printf 'w = open_window("http://127.0.0.1:18962/", "short", 400, 300)\nsleep(500)\nraise("boom")\n' >"$work/fail.helix"
-timeout 60 "$HELIX" run "$work/fail.helix" >/dev/null 2>"$work/fail.log"
+timeout 60 dbus-run-session -- "$HELIX" run "$work/fail.helix" >/dev/null 2>"$work/fail.log"
 status=$?
 [ $status = 1 ] && grep -q 'boom' "$work/fail.log" && ok "exits with the program's code (1) and its error" || bad "exit $status: $(cat "$work/fail.log")"
 
