@@ -424,8 +424,8 @@ tests of the same one. Details in [docs/execution-engine.md](docs/execution-engi
 
 ## Status & roadmap
 
-A mature implementation, **not a prototype**: **1,058 tests** (619 library + 404 CLI + 3
-native-df + 32 dual-engine differential), plus 165 programs run under both DataFrame backends
+A mature implementation, **not a prototype**: **1,060 tests** (620 library + 405 CLI + 3
+native-df + 32 dual-engine differential), plus 167 programs run under both DataFrame backends
 and a whole-tree type-check over 106 files — zero compiler warnings, with a differential oracle and a VM/tree-walker
 parity gate on every change. Phase status (full plan in
 [docs/ROADMAP.md](docs/ROADMAP.md)):

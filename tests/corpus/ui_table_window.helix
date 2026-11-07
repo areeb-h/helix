@@ -1,0 +1,20 @@
+# A virtualised `ui.data_table` always shows rows that exist. The window is computed from the
+# scroll offset the browser last reported; when the data shrinks (a filter, a new query) that
+# offset can lie far past the end, and the window used to start there — a 5-row table scrolled
+# to 180,000 px rendered NO rows. The window is now clamped to the data: it shows the last
+# screenful that exists, and the browser's own scroll position follows the shorter table.
+import std.ui
+
+fn rows(df, offset) = view_html(ui.data_table("t", df, offset, "scroll", "Rows")).split("<tr data-key=\"r").drop(1).map((s) => s.split("\"")[0].to_int())
+
+small = dataframe({id: range(1, 6)})
+print(rows(small, 180000))
+print(rows(small, 0))
+
+big = dataframe({id: range(1, 10001)})
+past = rows(big, 999999999)
+print("{past.count()} rows, {past[0]} to {past.last()}")
+top = rows(big, 0)
+print("{top.count()} rows, {top[0]} to {top.last()}")
+middle = rows(big, 180000)
+print("{middle.count()} rows, {middle[0]} to {middle.last()}")

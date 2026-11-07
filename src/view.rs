@@ -82,6 +82,84 @@ fn shown(v: &Value, line: usize, col: usize) -> Result<String, HelixError> {
     Ok(s)
 }
 
+// --- What a view may not contain. -------------------------------------------------------
+//
+// A view is often built from data a person typed, so the renderer — not each app — is where
+// markup injection is stopped. A tag or attribute NAME is written into the page as it is, so a
+// name is refused unless it is a plain name: `img src=x onerror=…` as a tag would otherwise be a
+// live element. Elements and attributes that run script are refused outright: an app has
+// `click`/`input`/… for events and no reason to emit `<script>` or `onclick`. And a URL that
+// runs script when followed — `javascript:` (however it is spelled) — is made inert rather than
+// refused, because a URL is usually DATA, and one person's bad link must not take the whole view
+// down.
+
+/// Elements that execute, embed or retarget a document: refused in any view.
+const REFUSED_TAGS: [&str; 10] = ["script", "iframe", "frame", "frameset", "object", "embed", "applet", "base", "meta", "link"];
+
+/// Attributes whose value is a URL the browser may follow or load.
+const URL_ATTRS: [&str; 9] = ["href", "src", "action", "formaction", "xlink:href", "poster", "cite", "background", "ping"];
+
+/// What an inert URL is replaced by.
+const INERT_URL: &str = "about:blank#blocked";
+
+/// A tag name: a letter, then letters, digits and `-` (SVG's `clipPath` and custom elements'
+/// `x-chart` included).
+fn valid_tag(t: &str) -> bool {
+    let mut c = t.chars();
+    c.next().is_some_and(|f| f.is_ascii_alphabetic()) && c.all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+}
+
+/// An attribute name: a letter or `_`, then letters, digits, `-`, `_`, `.` and `:` (`xlink:href`).
+fn valid_attr(a: &str) -> bool {
+    let mut c = a.chars();
+    c.next().is_some_and(|f| f.is_ascii_alphabetic() || f == '_')
+        && c.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':'))
+}
+
+/// Whether a URL runs script when followed. Browsers ignore ASCII whitespace and control
+/// characters inside a scheme and compare it without case, so ` JaVa\tScRiPt:` counts.
+fn scripting_url(attr: &str, v: &str) -> bool {
+    let scheme: String = v
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace() && !c.is_ascii_control())
+        .take(16)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    // `data:` is a document only where the browser navigates to it; as an image it is data.
+    let navigates = matches!(attr, "href" | "xlink:href" | "action" | "formaction");
+    scheme.starts_with("javascript:") || scheme.starts_with("vbscript:") || (navigates && scheme.starts_with("data:"))
+}
+
+/// Check one element's tag and attributes, making a scripting URL inert.
+fn guard(tag: &str, attrs: &mut [(String, String)], line: usize, col: usize) -> Result<(), HelixError> {
+    if !valid_tag(tag) {
+        return Err(HelixError::new(format!("`{tag}` is not an element name: a view's tag is a letter, then letters, digits and `-`"), line, col)
+            .hint("a tag is written into the page as it is, so only a plain name can be one."));
+    }
+    if REFUSED_TAGS.iter().any(|r| r.eq_ignore_ascii_case(tag)) {
+        return Err(HelixError::new(format!("`<{tag}>` cannot be part of a view: it runs or loads a document"), line, col)
+            .hint("an app's behaviour is its `update`; its events are the `click`, `input`, `change` and `submit` props."));
+    }
+    for (k, v) in attrs.iter_mut() {
+        if !valid_attr(k) {
+            return Err(HelixError::new(format!("`{k}` is not an attribute name"), line, col)
+                .hint("an attribute name is a letter or `_`, then letters, digits, `-`, `_`, `.` and `:`."));
+        }
+        let lower = k.to_ascii_lowercase();
+        if lower.starts_with("on") {
+            return Err(HelixError::new(format!("`{k}` is an inline script handler, which a view cannot carry"), line, col)
+                .hint("send a message instead: `click: \"save\"` posts {msg: \"save\"} to `update`."));
+        }
+        if lower == "srcdoc" || (lower == "attributename" && v.trim().to_ascii_lowercase().ends_with("href")) {
+            return Err(HelixError::new(format!("`{k}` can load script into the page, so a view cannot carry it"), line, col));
+        }
+        if URL_ATTRS.contains(&lower.as_str()) && scripting_url(&lower, v) {
+            *v = INERT_URL.to_string();
+        }
+    }
+    Ok(())
+}
+
 fn shape_err(what: &str, line: usize, col: usize) -> HelixError {
     HelixError::new(format!("a view node must be an element record {{tag, props, children}} or text; {what}"), line, col)
         .hint("build views with `ui.el(tag, props, children)` and `ui.text(s)`.")
@@ -168,6 +246,7 @@ fn parse(v: &Value, line: usize, col: usize) -> Result<Node, HelixError> {
             }
         }
     }
+    guard(tag.as_str(), &mut attrs, line, col)?;
     let kids = match get(v, "children") {
         Some(Value::Array(a)) => a.to_values().iter().map(|c| parse(c, line, col)).collect::<Result<Vec<_>, _>>()?,
         _ => Vec::new(),
@@ -380,6 +459,33 @@ mod tests {
             Value::Array(a) => a.to_values().iter().map(|o| format!("{o}")).collect(),
             other => panic!("not an array: {other}"),
         }
+    }
+
+    #[test]
+    fn markup_that_runs_script_is_refused_or_made_inert() {
+        let render = |t: Value| view_html(&t, 0, 0);
+        let err = |t: Value| render(t).err().map(|e| e.message).unwrap_or_default();
+        assert!(err(el("img src=x onerror=alert(1)", vec![], vec![])).contains("not an element name"));
+        assert!(err(el("script", vec![], vec![text("alert(1)")])).contains("cannot be part of a view"));
+        assert!(err(el("IFRAME", vec![], vec![])).contains("cannot be part of a view"));
+        assert!(err(el("a", vec![("attrs", rec(vec![("onclick", s("x"))]))], vec![])).contains("inline script handler"));
+        assert!(err(el("animate", vec![("attrs", rec(vec![("attributeName", s("href"))]))], vec![])).contains("can load script"));
+        // An attribute name from data is checked like a tag: a dict key can be anything.
+        let mut d = crate::value::DictMap::default();
+        d.insert(crate::value::DictKey::Str(Rc::new("x onmouseover".into())), s("y"));
+        let bad = el("a", vec![("attrs", Value::Dict(Rc::new(crate::value::Dict::from_map(d))))], vec![]);
+        assert!(err(bad).contains("not an attribute name"));
+        // A scripting URL, however spelled, is made inert; ordinary and image-data URLs are kept.
+        for url in ["javascript:alert(1)", " JaVa\tScRiPt:alert(1)", "vbscript:x", "data:text/html,<b>"] {
+            let Value::Str(h) = render(el("a", vec![("attrs", rec(vec![("href", s(url))]))], vec![])).unwrap() else { panic!() };
+            assert_eq!(h.as_str(), "<a href=\"about:blank#blocked\"></a>", "{url}");
+        }
+        let Value::Str(h) = render(el("img", vec![("attrs", rec(vec![("src", s("data:image/png;base64,AA=="))]))], vec![])).unwrap() else { panic!() };
+        assert_eq!(h.as_str(), "<img src=\"data:image/png;base64,AA==\">");
+        let Value::Str(h) = render(el("a", vec![("attrs", rec(vec![("href", s("https://example.com/?q=javascript:"))]))], vec![])).unwrap() else { panic!() };
+        assert_eq!(h.as_str(), "<a href=\"https://example.com/?q=javascript:\"></a>");
+        // SVG names keep working.
+        assert!(render(el("clipPath", vec![("attrs", rec(vec![("xlink:href", s("#a")), ("stroke-width", s("2"))]))], vec![])).is_ok());
     }
 
     #[test]

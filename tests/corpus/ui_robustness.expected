@@ -1,0 +1,15 @@
+exit: 0
+--- stdout ---
+ok      line chart, no series
+ok      scatter, no points
+ok      bar chart, no bars
+ok      table, offset not yet reported
+ok      table, no rows
+refused a tag that is not a name: `img src=x onerror=alert(1)` is not an element name: a view's tag is a letter, then letters, digits and `-`
+refused a script element: `<script>` cannot be part of a view: it runs or loads a document
+refused an inline handler: `onclick` is an inline script handler, which a view cannot carry
+refused an attribute name from data: `x onmouseover` is not an attribute name
+<a href="about:blank#blocked">link</a>
+<a href="https://example.com/?q=javascript:">link</a>
+refused a spring with no stiffness: a spring needs a positive stiffness and damping, got 0.0 and 10.0
+--- stderr ---

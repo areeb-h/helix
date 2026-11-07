@@ -1,0 +1,33 @@
+# What a view must survive, and what it must refuse (std.ui and the renderer).
+#
+# Survive: an app's first render is often of NO data — a chart before the first result, a
+# table before the first scroll report — and a component that raised there stopped the app
+# before it served a page. Every chart drew `min` of an empty array; a table with no offset yet
+# could not choose a branch.
+#
+# Refuse: a view is often built from what a person typed, so the RENDERER stops markup
+# injection. A tag or attribute name is written into the page as it is, so only a plain name is
+# one (`img src=x onerror=…` was a live element); `<script>` and inline handlers are refused;
+# and a URL that runs script when followed is made inert, however it is spelled, because a URL
+# is usually data and one bad link must not take the view down.
+import std.ui
+
+fn ok(name, f) = do {
+  r = try f()
+  print(if r.ok then "ok      {name}" else "refused {name}: {r.error}")
+}
+
+r_a = ok("line chart, no series", () => view_html(ui.line_chart("Rates", [])).contains("No data"))
+r_b = ok("scatter, no points", () => view_html(ui.scatter_chart("Cloud", [], [])).contains("aria-label=\"Cloud (no data)\""))
+r_c = ok("bar chart, no bars", () => view_html(ui.bar_chart("Counts", [], [])))
+r_d = ok("table, offset not yet reported", () => view_html(ui.data_table("t", dataframe({id: [1, 2]}), missing, "s", "T")))
+r_e = ok("table, no rows", () => view_html(ui.data_table("t", dataframe({id: [1, 2]}).filter(@id > 5), 0, "s", "T")))
+
+r_f = ok("a tag that is not a name", () => view_html(ui.el("img src=x onerror=alert(1)", {}, [])))
+r_g = ok("a script element", () => view_html(ui.el("script", {}, [ui.text("alert(1)")])))
+r_h = ok("an inline handler", () => view_html(ui.el("a", {attrs: {onclick: "alert(1)"}}, [])))
+r_i = ok("an attribute name from data", () => view_html(ui.el("a", {attrs: {"x onmouseover": "y"}}, [])))
+print(view_html(ui.el("a", {attrs: {href: " JaVaScRiPt:alert(1)"}}, [ui.text("link")])))
+print(view_html(ui.el("a", {attrs: {href: "https://example.com/?q=javascript:"}}, [ui.text("link")])))
+
+r_j = ok("a spring with no stiffness", () => ui.spring("transform", 0.0, 10.0))
