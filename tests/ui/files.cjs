@@ -102,6 +102,22 @@ async function main() {
     await step(() => p.keyboard.press('Backspace'));
     check(await settles(title, 'Demo') && await settles(selectedName, 'Notes'), 'Backspace goes up and keeps the folder it left selected');
 
+    // The sidebar: a tree of the folders this app listed (never the link), which opens one when
+    // chosen, and a divider that resizes it.
+    check(await p.evaluate(() => [...document.querySelectorAll('#folders .tree-label')].map((e) => e.textContent).join(',')) === 'Notes,Photos,Reports', 'the sidebar lists the folders, and not the link');
+    await step(() => p.click('#folders-Reports > .tree-row'));
+    check(await settles(title, 'Reports'), 'choosing a folder in the tree opens it');
+    check(await p.getAttribute('#folders-Reports', 'aria-selected') === 'true', 'and the tree marks it');
+    await step(() => p.keyboard.press('Alt+ArrowLeft'));
+    const side = () => p.evaluate(() => document.querySelector('.files-split .split-pane').getBoundingClientRect().width);
+    const w0 = await side();
+    const hb = await (await p.$('.files-split .split-handle')).boundingBox();
+    await p.mouse.move(hb.x + hb.width / 2, hb.y + 200);
+    await p.mouse.down();
+    for (let i = 1; i <= 10; i++) { await p.mouse.move(hb.x + hb.width / 2 + 6 * i, hb.y + 200); await p.waitForTimeout(16); }
+    await p.mouse.up();
+    check(await settles(async () => Math.round((await side()) - w0), 60), `dragging the divider widens the sidebar (${w0} → ${await side()})`);
+
     // A double click opens; a link is never followed, by any gesture.
     await step(() => p.dblclick('.li:has-text("Reports")'));
     check(await title() === 'Reports', 'a double click opens a folder');

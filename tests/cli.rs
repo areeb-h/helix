@@ -4818,8 +4818,18 @@ fn the_component_gallery_replays_identically_on_every_engine() {
     }
     assert!(seen.windows(2).all(|w| w[0] == w[1]), "engines disagree on the replayed UI");
     let s: Vec<&str> = seen[0].lines().collect();
-    assert_eq!(s.len(), 16, "one screen per event");
+    assert_eq!(s.len(), 23, "one screen per event");
     let has = |i: usize, what: &str| assert!(s[i].contains(what), "screen {i} lacks {what}");
+    // Gestures (ADR 0057): what the page sends when something is let go, and what the app makes
+    // of it. A size is kept; a move that fits the list moves it, and a stale one is ignored.
+    has(16, "aria-valuenow=\"300\"");
+    let tasks = |i: usize| s[i].split("data-reorder=\"order\"").nth(1).unwrap_or("").split("<span class=\"li-title\">").skip(1).map(|t| t.split('<').next().unwrap_or("")).collect::<Vec<_>>().join(" | ");
+    assert_eq!(tasks(17), "Test on a phone | Design the sheet | Build the gestures | Ship it");
+    assert_eq!(tasks(18), tasks(17), "a move that does not fit the list is ignored");
+    has(19, "aria-expanded=\"true\" aria-selected=\"false\"");
+    has(20, "Selected: docs/guide.md");
+    has(21, "aria-expanded=\"true\" aria-controls=\"gestures-body\"");
+    has(22, "class=\"popover mat-overlay start\" id=\"view-options-pop\" role=\"dialog\"");
     // An empty submit: every error shows, tied to its field.
     has(0, "aria-describedby=\"name-error\" aria-invalid=\"true\"");
     has(0, "<p class=\"error\" id=\"name-error\" data-key=\"error\" data-enter=\"rise\" data-exit=\"fade\">Enter your name.</p>");

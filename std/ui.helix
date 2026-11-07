@@ -90,6 +90,7 @@ ICONS = {
   plus: ["M12 5v14", "M5 12h14"],
   minus: ["M5 12h14"],
   close: ["M6 6l12 12", "M18 6 6 18"],
+  grip: ["M9 6h.01", "M15 6h.01", "M9 12h.01", "M15 12h.01", "M9 18h.01", "M15 18h.01"],
   check: ["M5 12.5l4.5 4.5L19 7.5"],
   chevron_right: ["M9.5 6l6 6-6 6"],
   chevron_left: ["M14.5 6l-6 6 6 6"],
@@ -284,7 +285,9 @@ export fn check(value, rules) = rules.reduce(missing, (err, rule) => if err.is_m
 # --- Feedback. ---------------------------------------------------------------------------
 
 # `value` from 0 to `max`. The bar scales on the compositor.
-export fn progress(label, value, max = 1.0) = do {
+# With no `value` (missing) the bar is indeterminate: it sweeps, and says only that work is
+# under way.
+export fn progress(label, value, max = 1.0) = if value.is_missing() then el("div", {class: "progress indeterminate", role: "progressbar", aria: {label: label}}, [el("span", {class: "progress-bar"}, [])]) else do {
   q = if max == 0 then 0.0 else value / max
   f = if is_finite(q) then clamp(q, 0.0, 1.0) else 0.0
   el("div", {class: "progress", role: "progressbar", aria: {label: label, valuemin: "0", valuemax: "{max}", valuenow: "{value}"}}, [
@@ -311,13 +314,15 @@ export fn skeleton(lines = 3) = el("div", {class: "skeleton", aria: {hidden: tru
 # A live region of toasts, `[{id, text, tone?, action?}]`. What arrives is announced politely;
 # each toast rises in, fades out, and the others glide into place. `action` is `{label, msg,
 # value?}` — an Undo, say. Dismissing sends `{msg: dismiss, value: "<id>"}`; the app removes
-# it (a timer in `subscriptions` can expire them).
+# it (a timer in `subscriptions` can expire them). A toast thrown sideways is dismissed the same
+# way: the page sends exactly what its close button sends.
 export fn toasts(items, dismiss) = el("div", {class: "toasts", role: "status", aria: {live: "polite"}}, items.map((t) => do {
   act = t.get("action")
-  el("div", {key: "toast-{t.id}", class: "toast mat-overlay {t.get("tone") ?? "neutral"}", enter: "rise", exit: "fade", layout: true}, present([
-    el("span", {class: "toast-text"}, [text(t.text)]),
-    if act.is_missing() then missing else el("button", {class: "btn ghost toast-action", click: act.msg, value: act.get("value"), attrs: {type: "button"}}, [text(act.label)]),
-    icon_button("close", "Dismiss", dismiss, "{t.id}"),
+  el("div", {key: "toast-{t.id}", class: "toast mat-overlay {t.get("tone") ?? "neutral"}", enter: "rise", exit: "fade", layout: true,
+    drag: dismiss, drag_axis: "x", drag_commit: 80, value: "{t.id}"}, present([
+      el("span", {class: "toast-text"}, [text(t.text)]),
+      if act.is_missing() then missing else el("button", {class: "btn ghost toast-action", click: act.msg, value: act.get("value"), attrs: {type: "button"}}, [text(act.label)]),
+      icon_button("close", "Dismiss", dismiss, "{t.id}"),
   ]))
 }))
 
@@ -381,11 +386,12 @@ export fn dialog(id, open, title, children, close, actions = []) = el("dialog", 
 
 # A sheet: a panel that rises from the bottom over a dimmed scrim, for a task that belongs to
 # what is on screen (share, filter, details). Escape, the scrim or the close button send
-# `close`. Its corners are concentric with the window's, and its controls with it.
+# `close`. Its corners are concentric with the window's, and its controls with it. Pulled down
+# by its grabber far enough (or flicked), it closes too; let go sooner, it springs back.
 export fn sheet(id, open, title, children, close, actions = []) = if not open then el("div", {key: "{id}-layer-closed", class: "sheet-layer closed"}, []) else el("div", {key: "{id}-layer", class: "sheet-layer", exit: "fade"}, [
   el("div", {class: "scrim", click: close, enter: "fade", aria: {hidden: true}}, []),
-  el("section", {id: id, class: "sheet mat-overlay", role: "dialog", dismiss: close, enter: "sheet", aria: {labelledby: "{id}-title", modal: true}}, [
-    el("div", {class: "grabber", aria: {hidden: true}}, []),
+  el("section", {id: id, class: "sheet mat-overlay", role: "dialog", dismiss: close, enter: "sheet", drag: close, drag_axis: "down", drag_commit: 96, aria: {labelledby: "{id}-title", modal: true}}, [
+    el("div", {class: "grabber-zone", handle: true, aria: {hidden: true}}, [el("div", {class: "grabber"}, [])]),
     el("header", {class: "sheet-head"}, [el("h2", {id: "{id}-title", class: "sheet-title"}, [text(title)]), el("button", {class: "btn ghost icon", click: close, aria: {label: "Close"}, attrs: {type: "button", autofocus: true}}, [icon("close")])]),
     el("div", {class: "sheet-body"}, children),
     ].concat(if actions.count() == 0 then [] else [el("footer", {class: "sheet-actions"}, actions)])),
@@ -557,6 +563,109 @@ export fn rail(label, items, selected, msg, top = missing, bottom = missing) = e
   el("div", {class: "spacer"}, []),
   bottom,
 ]))
+
+# --- Gestures: panes, order, disclosure, trees, popovers. ------------------------------------
+#
+# The page's script does the dragging (see "Gestures" in the client); a view only says what can
+# be dragged and which message hears the outcome, so all of these replay without a browser.
+
+# Two panes and the divider between them. `size` is the first pane's width (or height, with
+# `axis: "y"`) in px; dragging the divider, or the arrow keys on it, sends `{msg, value:
+# <size>}` as it moves — keep it with `ui.resized(e.value, min, max)`. `done: true` comes with
+# the last one, for an app that saves it.
+export fn split_view(first, second, size, msg, axis = "x", min = 160, max = 640, label = "Resize") = do {
+  s = clamp(size, min, max)
+  el("div", {class: "split {axis}"}, [
+    el("div", {class: "split-pane", style: {flex_basis: "{s}px"}}, [first]),
+    el("div", {class: "split-handle", role: "separator", resize: msg, drag_axis: axis,
+      aria: {label: label, orientation: if axis == "x" then "vertical" else "horizontal", valuenow: "{round(s)}", valuemin: "{min}", valuemax: "{max}"},
+      attrs: {tabindex: "0"}}, [el("span", {class: "split-grip"}, [])]),
+    el("div", {class: "split-pane rest"}, [second]),
+  ])
+}
+# A size from the page, kept within bounds (it is the page's report, so only a number counts).
+export fn resized(v, min, max, fallback = missing) = if (type_of(v) == "Int" or type_of(v) == "Float") and is_finite(v) then clamp(round(v), min, max) else (fallback ?? min)
+
+# A list a person can put in order. `items` is `[{key, title, subtitle?, leading?}]`; a row is
+# dragged by its grip (on a touch screen, by a short press anywhere on it), and Alt with ↑ or ↓
+# moves the focused one. The app is sent `{msg, value: {key, from, to}}` — apply it with
+# `ui.reordered(items, e.value)`.
+export fn sortable(id, label, items, msg) = el("div", {class: "sortable-wrap"}, [
+  el("div", {id: id, class: "list sortable mat-card", role: "list", reorder: msg, aria: {label: label}}, items.map((it) =>
+    el("div", {role: "listitem", class: "li-wrap", key: "{it.key}", layout: true}, [el("div", {class: "li"}, present([
+      if it.get("leading").is_missing() then missing else el("span", {class: "li-lead"}, [it.leading]),
+      el("span", {class: "two-line"}, present([el("span", {class: "li-title"}, [text(it.title)]), if it.get("subtitle").is_missing() then missing else el("span", {class: "meta"}, [text(it.subtitle)])])),
+      el("button", {class: "btn ghost icon drag-handle", handle: true, aria: {label: "Move {it.title}", describedby: "{id}-how"}, attrs: {type: "button"}}, [icon("grip")]),
+  ]))]))),
+  el("span", {id: "{id}-how", class: "sr-only"}, [text("Drag to reorder, or press Alt with the up and down arrows.")]),
+])
+# `items` with one moved as `mv` (`{key, from, to}`) says. A move that does not fit the list —
+# stale, forged, out of range — leaves it as it was.
+# Items are matched by their `key` field, or by `key_of(item)` when it is given.
+export fn reordered(items, mv, key_of = missing) = do {
+  key = if key_of.is_missing() then (x) => x.key else key_of
+  ok = type_of(mv) == "Record" and type_of(mv.get("from")) == "Int" and type_of(mv.get("to")) == "Int"
+  if not ok then items else if mv.from < 0 or mv.from >= items.count() or mv.to < 0 or mv.to >= items.count() or "{key(items[mv.from])}" != "{mv.get("key")}" then items else do {
+    rest = range(0, items.count()).filter((i) => i != mv.from).map((i) => items[i])
+    rest.take(mv.to).concat([items[mv.from]]).concat(rest.drop(mv.to))
+  }
+}
+
+# A disclosure: a heading that shows or hides what follows it. Clicking it sends `{msg, value:
+# id}`. The body is always there, so it can spring open (its height animates) — closed, it is
+# inert, out of reach of the keyboard and of screen readers.
+export fn disclosure(id, title, open, msg, children, subtitle = missing) = el("div", {class: if open then "disclosure open" else "disclosure"}, [
+  el("button", {id: "{id}-head", class: "disc-head", click: msg, value: id, aria: {expanded: open, controls: "{id}-body"}, attrs: {type: "button"}}, present([
+    icon("chevron_right", "sm"), el("span", {class: "spacer-text"}, [text(title)]),
+    if subtitle.is_missing() then missing else el("span", {class: "meta"}, [text(subtitle)]),
+  ])),
+  el("div", {id: "{id}-body", class: "disc-body", role: "region", aria: {labelledby: "{id}-head"}, attrs: {inert: not open}}, [el("div", {class: "disc-inner"}, [el("div", {class: "disc-content"}, children)])]),
+])
+# Disclosures one under another; `open` is the list of ids that are open.
+export fn accordion(items, open, msg) = el("div", {class: "accordion"}, items.map((it) => disclosure(it.id, it.title, open.contains(it.id), msg, [it.content], subtitle: it.get("subtitle"))))
+
+# A tree: folders in folders. `nodes` is `[{key, label, icon?, children?, expandable?}]`;
+# `open` lists the keys that are expanded. A row's chevron sends `{toggle, key}`, the row itself
+# `{select, key}`. The keyboard is the platform's: ↑ ↓ move, → opens or goes in, ← closes or
+# goes out, Home and End, Enter selects. Only what is open is drawn, so a large tree costs what
+# is visible.
+export fn tree(id, label, nodes, open, selected, toggle, select) = do {
+  focus_key = if has_key(nodes, open, selected) then selected else (if nodes.count() == 0 then missing else nodes[0].key)
+  el("ul", {id: id, role: "tree", class: "tree", aria: {label: label}}, tree_items(id, nodes, open, selected, focus_key, toggle, select, 1))
+}
+fn has_key(nodes, open, k) = nodes.filter((n) => n.key == k or (open.contains(n.key) and has_key(n.get("children") ?? [], open, k))).count() > 0
+fn tree_items(id, nodes, open, selected, focus_key, toggle, select, level) = nodes.map((n) => do {
+  kids = n.get("children") ?? []
+  can = n.get("expandable") ?? (kids.count() > 0)
+  shown = can and open.contains(n.key)
+  on = n.key == selected
+  el("li", {key: "{id}-{n.key}", id: "{id}-{id_part(n.key)}", role: "treeitem", class: "tree-item",
+    aria: {level: "{level}", expanded: if can then shown else missing, selected: on},
+    attrs: {tabindex: if n.key == focus_key then "0" else "-1"}}, present([
+      el("div", {class: if on then "tree-row on" else "tree-row", click: select, value: "{n.key}", style: {padding_left: "{(level - 1) * 16 + 4}px"}}, [
+        if can then el("span", {class: "tree-twisty", click: toggle, value: "{n.key}", aria: {hidden: true}}, [icon("chevron_right", "xs")]) else el("span", {class: "tree-twisty none", aria: {hidden: true}}, []),
+        icon(n.get("icon") ?? (if can then "folder" else "doc"), "sm"),
+        el("span", {class: "tree-label"}, [text(n.label)]),
+      ]),
+      if shown and kids.count() > 0 then el("ul", {role: "group", class: "tree-group"}, tree_items(id, kids, open, selected, focus_key, toggle, select, level + 1)) else missing,
+  ]))
+})
+
+# A popover: a button that opens a small panel of anything — a filter, a colour, a form —
+# anchored to it. Opened, focus goes into it; Escape or a press outside sends `toggle`.
+export fn popover(id, caption, open, toggle, content, icon = missing, align = "start", title = missing) = do {
+  trigger = if icon.is_missing() then el("button", {id: "{id}-button", class: "btn default", click: toggle,
+    aria: {haspopup: "dialog", expanded: open, controls: if open then "{id}-pop" else missing}, attrs: {type: "button"}}, [text(caption), el("span", {class: "caret", aria: {hidden: true}}, [text("▾")])])
+    else el("button", {id: "{id}-button", class: "btn ghost icon", click: toggle,
+      aria: {label: caption, haspopup: "dialog", expanded: open, controls: if open then "{id}-pop" else missing}, attrs: {type: "button", title: caption}}, [glyph(icon)])
+  panel = if not open then [] else [el("div", {key: "{id}-pop", id: "{id}-pop", role: "dialog", class: "popover mat-overlay {align}", enter: "pop", exit: "fade",
+    aria: {label: title ?? caption}, attrs: {tabindex: "-1", autofocus: true}}, [content])]
+  el("div", {class: "menu", dismiss: if open then toggle else missing}, [trigger].concat(panel))
+}
+
+# Something is happening and how long it will take is not known: a spinner (a progress bar
+# with no value is the other form, `ui.progress(label, missing)`).
+export fn spinner(label, size = "md") = el("span", {class: "spinner {size}", role: "progressbar", aria: {label: label}}, [])
 
 # --- Data. -------------------------------------------------------------------------------
 
@@ -1683,6 +1792,77 @@ button.li:active { background: var(--press); }
 .chart path.series { fill: none; }
 .chart .legend-item { font-size: 14px; font-family: var(--font); stroke: none; }
 
+/* Gestures. A draggable thing keeps the browser's own pan on the other axis, so a list still
+   scrolls under a finger; while something is held, nothing on the page selects text. */
+[data-drag-axis="x"], [data-drag-axis="left"], [data-drag-axis="right"] { touch-action: pan-y; }
+[data-drag-axis="y"], [data-drag-axis="up"], [data-drag-axis="down"] { touch-action: pan-x; }
+[data-drag]:not([data-drag-axis]), [data-drag-axis="both"], [data-drag-handle], [data-resize] { touch-action: none; }
+[data-drag]:has([data-drag-handle]) { touch-action: auto; }
+:root[data-gesture], :root[data-gesture] * { user-select: none; -webkit-user-select: none; }
+:root[data-gesture="grab"] * { cursor: grabbing !important; }
+:root[data-gesture="col"] * { cursor: col-resize !important; }
+:root[data-gesture="row"] * { cursor: row-resize !important; }
+.hx-dragged { position: relative; z-index: 5; transition: none !important; }
+.hx-reordering > [data-key]:not(.hx-dragged) { transition: translate var(--sp) !important; }
+[data-reorder] > .hx-dragged > .li, [data-reorder] > .hx-lifted > .li { background: var(--surface); box-shadow: var(--e-3); scale: 1.015; }
+[data-reorder] > [data-key] > .li { transition: background-color var(--fx-fast), box-shadow var(--fx), scale var(--sp-fast); }
+.drag-handle { cursor: grab; color: var(--muted); }
+.drag-handle .ic { stroke-width: 3; }
+.toast[data-drag] { cursor: default; }
+.grabber-zone { display: grid; place-items: center; height: 18px; margin: -6px calc(-1 * var(--pad-sheet)) -4px; cursor: grab; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
+/* Split view. */
+.split { display: flex; min-width: 0; min-height: 0; }
+.split.y { flex-direction: column; }
+.split-pane { flex: none; min-width: 0; min-height: 0; overflow: auto; }
+.split-pane.rest { flex: 1; }
+.split-handle { flex: none; display: grid; place-items: center; width: 14px; cursor: col-resize; border-radius: 999px; outline-offset: -2px; }
+.split.y > .split-handle { width: auto; height: 14px; cursor: row-resize; }
+.split-grip { width: 4px; height: 40px; border-radius: 999px; background: var(--line-strong); opacity: .55; transition: opacity var(--fx-fast), background-color var(--fx-fast), scale var(--sp-fast); }
+.split.y > .split-handle .split-grip { width: 40px; height: 4px; }
+.split-handle:hover .split-grip, .split-handle:focus-visible .split-grip { opacity: 1; }
+.split-handle.hx-dragged .split-grip { opacity: 1; background: var(--accent); scale: 1.15; }
+
+/* Disclosure. The body's height springs, from nothing to what it holds (grid rows 0fr → 1fr). */
+.accordion { display: flex; flex-direction: column; gap: 2px; }
+.disc-head { appearance: none; border: 0; background: none; width: 100%; display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 10px; border-radius: var(--r-in-card);
+  color: var(--fg); font: var(--type-headline); letter-spacing: var(--track-headline); text-align: left; cursor: pointer; transition: background-color var(--fx-fast); }
+.disc-head:hover { background: var(--hover); }
+.disc-head > .ic { color: var(--muted); transition: rotate var(--sp-fast); flex: none; }
+.disclosure.open > .disc-head > .ic { rotate: 90deg; }
+.disc-body { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows var(--sp), opacity var(--fx); }
+.disclosure.open > .disc-body { grid-template-rows: 1fr; opacity: 1; }
+.disc-inner { overflow: hidden; min-height: 0; }
+.disc-content { padding: 4px 10px 10px 34px; display: flex; flex-direction: column; gap: var(--s-2); }
+
+/* Tree. */
+.tree, .tree-group { list-style: none; margin: 0; padding: 0; }
+.tree-item { outline: none; }
+.tree-row { display: flex; align-items: center; gap: 6px; height: 30px; padding-right: 8px; border-radius: var(--r-item); cursor: pointer; color: var(--fg); font: var(--type-callout);
+  transition: background-color var(--fx-fast); min-width: 0; }
+.tree-row:hover { background: var(--hover); }
+.tree-row.on { background: var(--accent-soft); color: var(--accent-text); }
+.tree-item:focus-visible > .tree-row { outline: 3px solid color-mix(in srgb, var(--focus) 55%, transparent); outline-offset: -1px; }
+.tree-row > .ic { color: var(--muted); flex: none; }
+.tree-row.on > .ic { color: inherit; }
+.tree-twisty { width: 18px; height: 18px; display: grid; place-items: center; flex: none; color: var(--muted); border-radius: 5px; transition: rotate var(--sp-fast), background-color var(--fx-fast); }
+.tree-twisty:not(.none):hover { background: var(--hover); }
+.tree-item[aria-expanded="true"] > .tree-row > .tree-twisty { rotate: 90deg; }
+.tree-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Popover and progress that does not know how long. */
+.popover { position: absolute; top: calc(100% + 6px); left: 0; z-index: 30; min-width: 260px; max-width: min(360px, calc(100vw - 32px)); padding: var(--pad-overlay);
+  border-radius: var(--r-overlay); transform-origin: top left; outline: none; display: flex; flex-direction: column; gap: var(--s-2); }
+.popover.end { left: auto; right: 0; transform-origin: top right; }
+.spinner { display: inline-block; flex: none; width: 20px; height: 20px; border-radius: 50%; background: conic-gradient(from 0deg, transparent 0 8%, var(--accent));
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2.5px)); mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2.5px));
+  animation: hx-spin .9s linear infinite; }
+.spinner.sm { width: 16px; height: 16px; } .spinner.lg { width: 32px; height: 32px; }
+.progress.indeterminate .progress-bar { width: 40%; transform: none; animation: hx-sweep 1.5s cubic-bezier(.45, 0, .25, 1) infinite; }
+@keyframes hx-spin { to { rotate: 1turn; } }
+@keyframes hx-sweep { from { translate: -100% 0; } to { translate: 250% 0; } }
+
 @keyframes hx-fade { from { opacity: 0; } }
 @keyframes hx-rise { from { opacity: 0; transform: translateY(6px); } }
 @keyframes hx-pop { from { opacity: 0; transform: scale(.96); } }
@@ -1692,6 +1872,8 @@ button.li:active { background: var(--press); }
      an inherited change (a button's colour) would move its children. Animations are cut to
      one 0.01ms iteration, so their end events still fire. */
   *, *::before, *::after, ::backdrop { transition-duration: 0s !important; transition-delay: 0s !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
+  /* Work under way still shows as such: a still bar at half strength, not one swept away. */
+  .progress.indeterminate .progress-bar { animation: none !important; width: 100%; opacity: .45; }
 }
 """
 
@@ -1838,7 +2020,7 @@ CLIENT = """
   function flipFrom() {
     if (still.matches) return null;
     const m = new Map();
-    for (const e of root.querySelectorAll('[data-layout]')) if (!e.__gone && !e.dataset.share) m.set(e, e.getBoundingClientRect());
+    for (const e of root.querySelectorAll('[data-layout]')) if (!e.__gone && !e.__held && !e.dataset.share) m.set(e, e.getBoundingClientRect());
     return m.size ? m : null;
   }
   function currentVelocity(e) {
@@ -1849,27 +2031,31 @@ CLIENT = """
   }
   function flipTo(m) {
     if (!m) return;
-    const sp = springOf('spatial');
     for (const [e, a] of m) {
       if (!e.isConnected || e.__gone) continue;
       const v = currentVelocity(e);
-      const old = motions.get(e);
-      if (old) for (const an of old.anims) an.cancel();
       const b = e.getBoundingClientRect();
-      const d = [a.left - b.left, a.top - b.top];
-      if (Math.abs(d[0]) < 0.5 && Math.abs(d[1]) < 0.5) { motions.delete(e); continue; }
-      const axes = d.map((dist, i) => {
-        if (Math.abs(dist) < 0.5) return null;
-        // The offset's velocity as a fraction of the new distance per second: the curve is the
-        // offset over the distance, so this is its starting slope (negative when it is already
-        // closing in on the target).
-        return { from: dist, ...curve(sp, v[i] / dist) };
-      });
-      const anims = [];
-      if (axes[0]) anims.push(e.animate([{ transform: `translateX(${d[0]}px)` }, { transform: 'translateX(0)' }], { duration: axes[0].ms, easing: axes[0].easing, composite: 'add' }));
-      if (axes[1]) anims.push(e.animate([{ translate: `0 ${d[1]}px` }, { translate: '0 0' }], { duration: axes[1].ms, easing: axes[1].easing, composite: 'add' }));
-      motions.set(e, { t0: performance.now(), axes, anims });
+      springFrom(e, [a.left - b.left, a.top - b.top], v);
     }
+  }
+  // `e` is drawn at its place in the layout and seen `d` away from it, moving at `v` (px/s):
+  // it springs home on each axis from there, at that speed.
+  function springFrom(e, d, v) {
+    const old = motions.get(e);
+    if (old) for (const an of old.anims) an.cancel();
+    if (Math.abs(d[0]) < 0.5 && Math.abs(d[1]) < 0.5) { motions.delete(e); return; }
+    const sp = springOf('spatial');
+    const axes = d.map((dist, i) => {
+      if (Math.abs(dist) < 0.5) return null;
+      // The offset's velocity as a fraction of the new distance per second: the curve is the
+      // offset over the distance, so this is its starting slope (negative when it is already
+      // closing in on the target).
+      return { from: dist, ...curve(sp, v[i] / dist) };
+    });
+    const anims = [];
+    if (axes[0]) anims.push(e.animate([{ transform: `translateX(${d[0]}px)` }, { transform: 'translateX(0)' }], { duration: axes[0].ms, easing: axes[0].easing, composite: 'add' }));
+    if (axes[1]) anims.push(e.animate([{ translate: `0 ${d[1]}px` }, { translate: '0 0' }], { duration: axes[1].ms, easing: axes[1].easing, composite: 'add' }));
+    motions.set(e, { t0: performance.now(), axes, anims });
   }
 
   // Shared elements: a node marked `share: "name"` that is in this frame and the last — the
@@ -1909,7 +2095,9 @@ CLIENT = """
   // given back to the node now carrying the same key or id — or, for a menu that closed under
   // the focus, to the button that controls it.
   const ident = (n) => n && n.getAttribute && (n.getAttribute('data-key') || n.id || null);
-  const byIdent = (k) => root.querySelector('[data-key="' + CSS.escape(k) + '"]') || document.getElementById(k);
+  // The node now carrying a key or id — never one that is on its way out.
+  const staying = (n) => n && !n.closest('[aria-hidden="true"]') && !n.inert ? n : null;
+  const byIdent = (k) => staying(Array.from(root.querySelectorAll('[data-key="' + CSS.escape(k) + '"]')).find((n) => staying(n))) || staying(document.getElementById(k));
   function note() {
     const a = document.activeElement;
     const inside = a && a !== document.body && root.contains(a);
@@ -1927,6 +2115,8 @@ CLIENT = """
   }
   function restore(s, whole) {
     const lost = s.inside && (!root.contains(s.a) || s.a.closest('[aria-hidden="true"]'));
+    // Still here, but moved without `moveBefore`: it was blurred on the way, and gets it back.
+    if (s.inside && !lost && document.activeElement !== s.a) s.a.focus({ preventScroll: true });
     if (lost) {
       const same = s.k && byIdent(s.k);
       const n = same || (s.ctl && s.ctl.isConnected ? s.ctl : null);
@@ -1979,10 +2169,13 @@ CLIENT = """
         const p = at(o.path);
         leave(p, kid(p, o.at));
       } else if (o.op === 'move') {
+        // Moved, not taken out and put back: a node taken out of the page loses its focus.
+        // `moveBefore` keeps it (and a running animation's state) where the browser has it.
         const p = at(o.path);
-        const n = kid(p, o.from);
-        p.removeChild(n);
-        p.insertBefore(n, kid(p, o.to) || null);
+        const rest = Array.from(live(p));
+        const n = rest.splice(o.from, 1)[0];
+        const ref = rest[o.to] || null;
+        if (p.moveBefore) p.moveBefore(n, ref); else p.insertBefore(n, ref);
       }
     }
     for (const n of arrived) enter(n);
@@ -2052,7 +2245,11 @@ CLIENT = """
       if (d.css != null) { const st = document.getElementById('hx-style'); if (st && st.textContent !== d.css) st.textContent = d.css; }
       if (d.effects != null) { if (d.effects === 'auto') delete document.documentElement.dataset.effects; else document.documentElement.dataset.effects = d.effects; }
       if (d.title != null && document.title !== d.title) document.title = d.title;
+      // A gesture this frame answers lands where the frame puts it, from where it was let go.
+      const due = d.acks ? settling.filter((s) => d.acks.includes(s.seq)) : [];
+      const seen = due.map(boxes);
       apply(d.ops);
+      due.forEach((s, i) => settle(s, seen[i]));
       document.documentElement.dataset.theme = d.theme || 'light';
       version += 1;
       document.documentElement.dataset.version = version;
@@ -2168,6 +2365,287 @@ CLIENT = """
     if (d.tagName === 'DIALOG' && d.dataset.dismiss) { e.preventDefault(); post({ msg: d.dataset.dismiss, value: null }, false); }
   }, true);
 
+
+  // --- Gestures: dragging. What can be dragged, and which way, is the view's data:
+  //
+  //  - `drag` (with `drag_axis`): the node follows the pointer here, on the page, with no
+  //    round trip. Let go, the app is sent the node's `value` (what a click would send) with
+  //    `drag: {dx, dy, vx, vy}`, and its next frame decides what became of the node — kept,
+  //    moved or gone. It springs there from where it was let go, at the speed it was thrown.
+  //    With `drag_commit` (px), only a throw that would carry it that far, counting its
+  //    momentum, is sent; a smaller one springs back and the app hears nothing. An axis given
+  //    as a direction ("down", "left"…) travels freely only that way: the other way it
+  //    resists, like a rubber band.
+  //  - `reorder` on a container: its keyed children can be dragged into a new order — by
+  //    their `handle` when they have one, and on a touch screen after a short press — and the
+  //    others make room as it passes. Let go, the app is sent `{key, from, to}`. Alt with an
+  //    arrow key moves the focused one.
+  //  - `resize` on a divider: the size the pane before it would have, sent as it moves, and
+  //    once more with `done: true` when it is let go. The arrow keys move it 16 px (64 with
+  //    Shift).
+  //
+  // A gesture's last event carries a `seq`, and the frame that answers it lists it in `acks`
+  // even when nothing changed — so the page knows when the app has decided, and never guesses.
+  const AXES = { x: [1, 0], left: [1, 0], right: [1, 0], y: [0, 1], up: [0, 1], down: [0, 1], both: [1, 1] };
+  const SIGN = { left: [-1, 0], right: [1, 0], up: [0, -1], down: [0, 1] };
+  const TAB = Math.random().toString(36).slice(2, 10);
+  let g = null, seqs = 0, swallow = false;
+  const settling = [];
+  const rowwise = (box) => /^row/.test(getComputedStyle(box).flexDirection) && getComputedStyle(box).display.includes('flex');
+  const keyedKids = (box) => Array.from(box.children).filter((c) => c.dataset.key && !c.__gone);
+  function grabbed(t) {
+    if (!(t instanceof Element) || editable(t)) return null;
+    for (let p = t; p && p !== root; p = p.parentElement) {
+      if (p.dataset.resize) return { kind: 'resize', el: p };
+      const box = p.parentElement;
+      const sortable = box && box.dataset.reorder && p.dataset.key;
+      if (p.dataset.drag || sortable) {
+        const h = p.querySelector('[data-drag-handle]');
+        if (h && !h.contains(t)) return null;
+        return p.dataset.drag ? { kind: 'drag', el: p, handle: !!h } : { kind: 'reorder', el: p, box, handle: !!h };
+      }
+    }
+    return null;
+  }
+  function axisOf(hit) {
+    if (hit.kind === 'drag') { const a = hit.el.dataset.dragAxis || 'both'; return { axis: AXES[a] || AXES.both, dir: a }; }
+    const box = hit.kind === 'reorder' ? hit.box : hit.el.parentElement;
+    const a = hit.el.dataset.dragAxis || (box && rowwise(box) ? 'x' : 'y');
+    return { axis: AXES[a] || AXES.y, dir: a };
+  }
+  const rubber = (v, dim) => Math.sign(v) * (1 - 1 / ((Math.abs(v) * 0.55) / Math.max(dim, 1) + 1)) * Math.max(dim, 1);
+  // The pointer's speed over its last tenth of a second, px/s; nothing if it had stopped.
+  function velocity(track, axis) {
+    const b = track[track.length - 1];
+    const a = track.find((p) => b[0] - p[0] <= 100) || track[0];
+    const dt = (b[0] - a[0]) / 1000;
+    if (dt <= 0 || performance.now() - b[0] > 80) return [0, 0];
+    return [((b[1] - a[1]) / dt) * axis[0], ((b[2] - a[2]) / dt) * axis[1]];
+  }
+  document.addEventListener('pointerdown', (e) => {
+    if (g || e.button !== 0 || !e.isPrimary) return;
+    const hit = grabbed(e.target);
+    if (!hit || hit.el.__gone) return;
+    g = { ...hit, ...axisOf(hit), id: e.pointerId, x0: e.clientX, y0: e.clientY, on: false, d: [0, 0],
+          track: [[e.timeStamp, e.clientX, e.clientY]], touch: e.pointerType === 'touch', held: false };
+    // On a touch screen a row of a list that scrolls is dragged after a short press, so a
+    // swipe still scrolls the list.
+    if (g.touch && g.kind === 'reorder' && !g.handle) {
+      const mine = g;
+      mine.wait = setTimeout(() => { if (g === mine) { mine.held = true; mine.el.classList.add('hx-lifted'); } }, 350);
+    }
+  });
+  document.addEventListener('pointermove', (e) => {
+    if (!g || e.pointerId !== g.id) return;
+    const raw = [e.clientX - g.x0, e.clientY - g.y0];
+    g.track.push([e.timeStamp, e.clientX, e.clientY]);
+    if (g.track.length > 32) g.track.shift();
+    if (!g.on) {
+      if (Math.hypot(raw[0], raw[1]) < 4) return;
+      const along = Math.abs(raw[0] * g.axis[0]) + Math.abs(raw[1] * g.axis[1]);
+      const across = Math.abs(raw[0] * (1 - g.axis[0])) + Math.abs(raw[1] * (1 - g.axis[1]));
+      // A touch that moves across the axis first is a scroll, and a press too short is a swipe.
+      if ((g.touch && across > along) || (g.wait && !g.held)) { clearTimeout(g.wait); g = null; return; }
+      begin();
+    }
+    e.preventDefault();
+    move(raw);
+  }, { passive: false });
+  document.addEventListener('touchmove', (e) => { if (g && (g.on || g.held)) e.preventDefault(); }, { passive: false });
+  document.addEventListener('pointerup', (e) => { if (g && e.pointerId === g.id) end(false); });
+  document.addEventListener('pointercancel', (e) => { if (g && e.pointerId === g.id) end(true); });
+  // The click that ends a drag is not a click.
+  document.addEventListener('click', (e) => { if (swallow) { swallow = false; e.stopPropagation(); e.preventDefault(); } }, true);
+  function begin() {
+    const el = g.el;
+    g.on = true;
+    swallow = true;
+    try { el.setPointerCapture(g.id); } catch (_) {}
+    // Taken while it is still springing: from where it is seen, not where it is going.
+    const seen = el.getBoundingClientRect();
+    const old = motions.get(el);
+    if (old) { for (const an of old.anims) an.cancel(); motions.delete(el); }
+    const now = el.getBoundingClientRect();
+    g.x0 -= seen.left - now.left;
+    g.y0 -= seen.top - now.top;
+    g.r = now;
+    document.documentElement.dataset.gesture = g.kind !== 'resize' ? 'grab' : g.axis[0] ? 'col' : 'row';
+    el.classList.add('hx-dragged');
+    if (g.kind === 'resize') {
+      const prev = el.previousElementSibling, r = prev ? prev.getBoundingClientRect() : now;
+      g.s0 = g.axis[0] ? r.width : r.height;
+      g.size = Math.round(g.s0);
+      return;
+    }
+    g.items = g.kind === 'reorder' ? keyedKids(g.box) : [el];
+    for (const it of g.items) it.__held = true;
+    if (g.kind === 'reorder') {
+      g.rects = g.items.map((it) => it.getBoundingClientRect());
+      g.from = g.to = g.items.indexOf(el);
+      const ax = g.axis[0] ? 0 : 1, lo = (r) => (ax ? r.top : r.left), hi = (r) => (ax ? r.bottom : r.right);
+      g.gap = g.rects.length > 1 ? Math.max(0, lo(g.rects[1]) - hi(g.rects[0])) : 0;
+      g.box.classList.add('hx-reordering');
+    }
+  }
+  function move(raw) {
+    const el = g.el;
+    if (g.kind === 'resize') {
+      const size = Math.round(g.s0 + raw[0] * g.axis[0] + raw[1] * g.axis[1]);
+      if (size !== g.size) { g.size = size; post({ msg: el.dataset.resize, value: size, done: false }, true); }
+      return;
+    }
+    let d = [raw[0] * g.axis[0], raw[1] * g.axis[1]];
+    if (g.kind === 'reorder') {
+      // Within the list it moves freely; past either end it resists.
+      const ax = g.axis[0] ? 0 : 1, lo = (r) => (ax ? r.top : r.left), hi = (r) => (ax ? r.bottom : r.right);
+      const a = g.rects[g.from], min = lo(g.rects[0]) - lo(a), max = hi(g.rects[g.rects.length - 1]) - hi(a), size = hi(a) - lo(a);
+      const v = d[ax];
+      d[ax] = v < min ? min + rubber(v - min, size) : v > max ? max + rubber(v - max, size) : v;
+    } else {
+      const s = SIGN[g.dir];
+      if (s) d = d.map((v, i) => (s[i] && v * s[i] < 0 ? rubber(v, i ? g.r.height : g.r.width) : v));
+    }
+    g.d = d;
+    el.style.translate = `${d[0]}px ${d[1]}px`;
+    if (g.kind === 'reorder') makeRoom();
+  }
+  // The slot the dragged row is over, and the rows between it and its old slot moved aside.
+  function makeRoom() {
+    const ax = g.axis[0] ? 0 : 1, lo = (r) => (ax ? r.top : r.left), size = (r) => (ax ? r.height : r.width);
+    const a = g.rects[g.from], c = lo(a) + size(a) / 2 + g.d[ax];
+    let to = g.from;
+    g.rects.forEach((r, j) => {
+      const mid = lo(r) + size(r) / 2;
+      if (j < g.from && c < mid) to = Math.min(to, j);
+      if (j > g.from && c > mid) to = Math.max(to, j);
+    });
+    g.to = to;
+    const step = size(a) + g.gap;
+    g.items.forEach((it, j) => {
+      if (j === g.from) return;
+      const shift = j > g.from && j <= to ? -step : j < g.from && j >= to ? step : 0;
+      it.style.translate = ax ? `0 ${shift}px` : `${shift}px 0`;
+    });
+  }
+  function end(cancel) {
+    const G = g;
+    g = null;
+    clearTimeout(G.wait);
+    G.el.classList.remove('hx-lifted');
+    if (!G.on) return;
+    setTimeout(() => { swallow = false; }, 0);
+    delete document.documentElement.dataset.gesture;
+    const el = G.el;
+    el.classList.remove('hx-dragged');
+    if (G.box) G.box.classList.remove('hx-reordering');
+    if (G.kind === 'resize') {
+      post({ msg: el.dataset.resize, value: cancel ? Math.round(G.s0) : G.size, done: true }, false);
+      return;
+    }
+    const v = velocity(G.track, G.axis);
+    let ev = null;
+    if (!cancel && G.kind === 'reorder' && G.to !== G.from) ev = { msg: G.box.dataset.reorder, value: { key: el.dataset.key, from: G.from, to: G.to } };
+    if (!cancel && G.kind === 'drag') {
+      // Where its momentum would carry it: the pointer's speed for a fifth of a second.
+      const reach = G.d.map((d, i) => d + v[i] * 0.2);
+      const s = SIGN[G.dir];
+      const far = s ? reach[0] * s[0] + reach[1] * s[1] : Math.hypot(reach[0], reach[1]);
+      const commit = Number(el.dataset.dragCommit || 0);
+      if (!commit || far >= commit) ev = { msg: el.dataset.drag, value: el.dataset.value ?? null, drag: { dx: Math.round(G.d[0]), dy: Math.round(G.d[1]), vx: Math.round(v[0]), vy: Math.round(v[1]) } };
+    }
+    const s = { els: G.items, dragged: el, v };
+    if (!ev) { settle(s, null); return; }
+    s.seq = TAB + ':' + ++seqs;
+    ev.seq = s.seq;
+    // An app that never answers (an update that raised and was logged) still gets its node back.
+    s.timer = setTimeout(() => settle(s, null), 2000);
+    settling.push(s);
+    post(ev, false);
+  }
+  const boxes = (s) => new Map(s.els.map((e) => [e, e.getBoundingClientRect()]));
+  // Leaving, itself or with what holds it (a sheet whose layer is fading out).
+  const leaving = (e) => { for (let p = e; p; p = p.parentElement) if (p.__gone) return true; return false; };
+  // A gesture lands: each node it held springs from where it was seen to where the layout now
+  // puts it — the dragged one at the speed it was let go. One the frame removed carries on the
+  // way it was thrown while it fades.
+  function settle(s, seen) {
+    clearTimeout(s.timer);
+    const i = settling.indexOf(s);
+    if (i >= 0) settling.splice(i, 1);
+    const was = seen || boxes(s);
+    for (const e of s.els) {
+      e.__held = false;
+      const v = e === s.dragged ? s.v : [0, 0];
+      if (leaving(e)) { if (!still.matches) fling(e, v); continue; }
+      const n = e.isConnected ? e : e.dataset.key ? byIdent(e.dataset.key) : null;
+      e.style.translate = '';
+      if (!n) continue;
+      n.style.translate = '';
+      const a = was.get(e), b = n.getBoundingClientRect();
+      if (a && !still.matches) springFrom(n, [a.left - b.left, a.top - b.top], v);
+    }
+  }
+  function fling(e, v) {
+    const c = curve(springOf('effects-fast'), 0);
+    const from = e.style.translate || '0px 0px';
+    const [x, y] = from.split(' ').map((p) => parseFloat(p) || 0);
+    const to = `${x + v[0] * 0.25}px ${y + v[1] * 0.25}px`;
+    e.animate([{ translate: from }, { translate: to }], { duration: c.ms, easing: 'ease-out', fill: 'forwards' });
+  }
+
+  // A tree's keys (WAI-ARIA's tree view): ↑ ↓ move between the rows that are showing, → opens
+  // a closed row or goes to its first child, ← closes an open row or goes to its parent, Home
+  // and End, and Enter or Space selects. Opening and closing are the row's own chevron.
+  function treeKey(e, tree, t) {
+    const rows = Array.from(tree.querySelectorAll('[role="treeitem"]')).filter((x) => !x.__gone && x.getClientRects().length);
+    const i = rows.indexOf(t);
+    if (i < 0) return false;
+    const twisty = t.querySelector(':scope > .tree-row > .tree-twisty:not(.none)');
+    const open = t.getAttribute('aria-expanded');
+    let to = null;
+    if (e.key === 'ArrowDown') to = rows[i + 1];
+    else if (e.key === 'ArrowUp') to = rows[i - 1];
+    else if (e.key === 'Home') to = rows[0];
+    else if (e.key === 'End') to = rows[rows.length - 1];
+    else if (e.key === 'ArrowRight') { if (open === 'false' && twisty) twisty.click(); else if (open === 'true') to = t.querySelector(':scope > [role="group"] > [role="treeitem"]'); }
+    else if (e.key === 'ArrowLeft') { if (open === 'true' && twisty) twisty.click(); else to = t.parentElement && t.parentElement.closest('[role="treeitem"]'); }
+    else if (e.key === 'Enter' || e.key === ' ') { const r = t.querySelector(':scope > .tree-row'); if (r) r.click(); }
+    else return false;
+    e.preventDefault();
+    if (to) to.focus();
+    return true;
+  }
+
+  // The keyboard's way to do what a drag does.
+  function gestureKey(e) {
+    const t = e.target;
+    if (!(t instanceof Element) || !/^Arrow/.test(e.key) || e.ctrlKey || e.metaKey) return false;
+    const sep = t.closest('[data-resize]');
+    if (sep && !e.altKey) {
+      const { axis } = axisOf({ kind: 'resize', el: sep });
+      const dir = axis[0] ? { ArrowLeft: -1, ArrowRight: 1 }[e.key] : { ArrowUp: -1, ArrowDown: 1 }[e.key];
+      const prev = sep.previousElementSibling;
+      if (!dir || !prev) return false;
+      const r = prev.getBoundingClientRect();
+      e.preventDefault();
+      post({ msg: sep.dataset.resize, value: Math.round((axis[0] ? r.width : r.height) + dir * (e.shiftKey ? 64 : 16)), done: true }, false);
+      return true;
+    }
+    if (!e.altKey || editable(t)) return false;
+    for (let p = t; p && p !== root; p = p.parentElement) {
+      const box = p.parentElement;
+      if (!box || !box.dataset.reorder || !p.dataset.key) continue;
+      const items = keyedKids(box), from = items.indexOf(p);
+      const dir = rowwise(box) ? { ArrowLeft: -1, ArrowRight: 1 }[e.key] : { ArrowUp: -1, ArrowDown: 1 }[e.key];
+      const to = from + (dir || 0);
+      if (!dir || to < 0 || to >= items.length) return false;
+      e.preventDefault();
+      post({ msg: box.dataset.reorder, value: { key: p.dataset.key, from, to } }, false);
+      return true;
+    }
+    return false;
+  }
+
   // Keyboard paths for the composite widgets: tabs and menus move with the arrow keys, Home
   // and End (WAI-ARIA Authoring Practices); a tab is selected as it is reached.
   // A key as a chord: "Ctrl+K", "Shift+ArrowDown", "Enter", "/". A printed character carries
@@ -2185,9 +2663,13 @@ CLIENT = """
   const fieldKey = (c) => /^(Ctrl|Alt)\+/.test(c) || ['Escape', 'Enter', 'ArrowUp', 'ArrowDown'].includes(c);
   // Shortcuts: the nearest node with `keydown` whose `shortcuts` name this chord; with nothing
   // focused, the app's own. A shortcut outside an open dialog never fires from inside it.
+  const COMPOSITE = '[role="tree"], [role="menu"], [role="tablist"], [role="radiogroup"], [role="separator"][data-resize]';
+  const moves = (c) => /^(Arrow(Up|Down|Left|Right)|Home|End|Enter|Space)$/.test(c);
   function shortcut(e) {
     const t = e.target, c = chord(e);
     if (editable(t) && !fieldKey(c)) return false;
+    // A tree, a menu, tabs: their arrow keys, Home, End and Enter are theirs.
+    if (moves(c) && t.closest && t.closest(COMPOSITE)) return false;
     let scope = t.closest && t.closest('[data-keydown]');
     while (scope && !(scope.dataset.shortcuts || '').split(' ').includes(c)) scope = scope.parentElement && scope.parentElement.closest('[data-keydown]');
     if (!scope && (t === document.body || !root.contains(t))) {
@@ -2217,8 +2699,14 @@ CLIENT = """
   }
   document.addEventListener('keydown', (e) => {
     const t = e.target;
+    if (g && g.on && e.key === 'Escape') { e.preventDefault(); end(true); return; }
     if (e.key === 'Tab' && !e.ctrlKey && !e.altKey && !e.metaKey && trap(e)) return;
+    // What the focused thing itself does with a key (a divider's arrows, a row moved with Alt)
+    // comes before the app's shortcuts.
+    if (gestureKey(e)) return;
     if (!e.isComposing && shortcut(e)) return;
+    const tree = t.closest && t.getAttribute && t.getAttribute('role') === 'treeitem' && t.closest('[role="tree"]');
+    if (tree && !e.ctrlKey && !e.metaKey && !e.altKey && treeKey(e, tree, t)) return;
     if (e.key === 'Escape') {
       const d = t.closest && t.closest('[data-dismiss]');
       if (d && d.tagName !== 'DIALOG') { e.preventDefault(); post({ msg: d.dataset.dismiss, value: null }, false); }
@@ -2317,10 +2805,18 @@ fn route(spec, st, c, req) = match "{req.method} {req.path}" {
     ev = if parsed.ok then parsed.value else missing
     if type_of(ev) != "Record" then refuse(st, c, 400, "an event is a JSON record {{msg, value}}") else do {
       sent = c.respond({status: 204, text: ""})
-      {...st, model: step(spec, st.model, ev), keep: st.keep.concat([c]), changed: true}
+      {...st, model: step(spec, st.model, ev), keep: st.keep.concat([c]), changed: true, acks: st.acks.concat(ack_of(ev))}
     }
   },
   _ => refuse(st, c, 404, "not found"),
+}
+
+# A gesture's last event carries a `seq` the page made up; the frame after it lists it in
+# `acks`, even when nothing changed, so the page knows the app has decided where the thing it
+# let go of belongs (see the client's "Gestures"). Only a short string is echoed.
+fn ack_of(ev) = do {
+  q = ev.get("seq")
+  if type_of(q) == "String" and q.count() <= 40 then [q] else []
 }
 
 # One event through `update`. An update that raises is logged and the model kept: one bad
@@ -2335,7 +2831,10 @@ fn step(spec, model, ev) = do {
 
 # A frame is the patch operations that bring a client's page up to date, and the theme.
 # JSON, because an SSE `data:` line cannot carry raw newlines.
-fn frame(ops, theme, rt, restyled) = if restyled then {ops: ops, theme: theme, css: rt.css, effects: rt.design.effects}.to_json() else {ops: ops, theme: theme}.to_json()
+fn frame(ops, theme, rt, restyled, acks = []) = do {
+  f = if restyled then {ops: ops, theme: theme, css: rt.css, effects: rt.design.effects} else {ops: ops, theme: theme}
+  (if acks.count() == 0 then f else {...f, acks: acks}).to_json()
+}
 
 # A subscriber's FIRST frame carries the whole page around the view too — the stylesheet, the
 # title, and which client built it — because after a hot reload all three may have changed
@@ -2349,7 +2848,7 @@ fn serve(l, spec, rt, model, tree, conns, streams, timers) = do {
   ready = l.wait(conns, sleep_ms(timers, clock_monotonic()))
   fresh = l.accept_poll()
   live = if fresh.is_missing() then conns else conns.concat([fresh])
-  st = live.reduce({model: model, rt: rt, keep: [], streams: [], changed: false}, (s, c) => handle(spec, s, c))
+  st = live.reduce({model: model, rt: rt, keep: [], streams: [], changed: false, acks: []}, (s, c) => handle(spec, s, c))
   t = clock_monotonic()
   due = timers.filter((x) => x.due <= t)
   ticked = due.reduce(st.model, (m, x) => step(spec, m, {msg: x.msg, value: now()}))
@@ -2368,8 +2867,8 @@ fn serve(l, spec, rt, model, tree, conns, streams, timers) = do {
   d_now = if changed and type_of(spec.get("design")) == "Function" then design_of(spec, ticked, st.rt.design) else st.rt.design
   restyled = changed and d_now != st.rt.design
   rt2 = if restyled then {...st.rt, design: d_now, css: css_with(spec, d_now)} else st.rt
-  kept = if ops.count() == 0 and not restyled then streams else do {
-    f = frame(ops, theme, rt2, restyled)
+  kept = if ops.count() == 0 and not restyled and st.acks.count() == 0 then streams else do {
+    f = frame(ops, theme, rt2, restyled, st.acks)
     streams.filter((s) => s.send(f))
   }
   first = if st.streams.count() == 0 then [] else do {

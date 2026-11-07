@@ -164,7 +164,7 @@ fn preview_of(m) = do {
       else if e.kind == "link" then {kind: "note", text: "A symbolic link. Files never follows links, so nothing in this folder can lead it outside its root."}
       else if e.kind == "dir" then do {
         r = try read_dir(path)
-        {kind: "folder", text: if r.ok then "{r.value.count()} items" else "Can't be read"}
+        {kind: "folder", text: if r.ok then (if r.value.count() == 1 then "1 item" else "{r.value.count()} items") else "Can't be read"}
       }
       else if e.kind != "file" then {kind: "note", text: "A special file (a device, socket or pipe). It is not opened."}
       else if e.cat == "image" and e.size <= IMAGE_LIMIT then do {
@@ -186,6 +186,23 @@ fn text_preview(path, e) = do {
   if t.is_missing() then {kind: "note", text: "Not text, or not UTF-8 — no preview."} else {kind: "text", text: t, cut: e.size > TEXT_LIMIT}
 }
 
+# --- The folder tree: the root's folders, and the folders in the ones that are open. ---------
+#
+# It is read the way the list is — `list_folder`, which re-checks every folder on the way and
+# lists links as links — so a folder in the tree is one this app listed, and a link is never in
+# it. A key is the folder's names joined by "/", which a name cannot contain.
+
+fn folder_nodes(m, names, depth) = do {
+  dirs = list_folder(m.root, names).entries.filter((e) => e.kind == "dir" and (m.hidden or not e.name.starts_with(".")) and not (names.count() == 0 and e.name == TRASH)).sort_by((e) => e.name.lower()).take(200)
+  dirs.map((e) => do {
+    k = names.concat([e.name]).join("/")
+    {key: k, label: e.name, icon: "folder", expandable: true, children: if depth < 8 and m.tree_open.contains(k) then folder_nodes(m, names.concat([e.name]), depth + 1) else []}
+  })
+}
+fn with_tree(m) = {...m, tree: folder_nodes(m, [], 0)}
+fn in_tree(nodes, k) = nodes.filter((n) => n.key == k or in_tree(n.children, k)).count() > 0
+fn toggled(xs, x) = if xs.contains(x) then xs.filter((y) => y != x) else xs.concat([x])
+
 # --- The model. -------------------------------------------------------------------------------
 
 fn go(m, names, record = true) = do {
@@ -193,9 +210,11 @@ fn go(m, names, record = true) = do {
   n = {...m, path: names, entries: l.entries, error: l.error, query: "", ctx: missing,
     back: if record and names != m.path then m.back.concat([m.path]).drop(max(m.back.count() - 49, 0)) else m.back,
     fwd: if record and names != m.path then [] else m.fwd,
-    recent: if names.count() == 0 then m.recent else [names].concat(m.recent.filter((r) => r != names)).take(8)}
+    recent: if names.count() == 0 then m.recent else [names].concat(m.recent.filter((r) => r != names)).take(8),
+    # The folders above this one open in the tree, so the tree shows where the list is.
+    tree_open: m.tree_open.concat(range(1, names.count()).map((k) => names.take(k).join("/")).filter((k) => not m.tree_open.contains(k)))}
   v = visible(n)
-  with_preview({...n, sel: if v.count() == 0 then "" else v[0].name})
+  with_preview(with_tree({...n, sel: if v.count() == 0 then "" else v[0].name}))
 }
 fn with_preview(m) = {...m, preview: preview_of(m)}
 fn reload(m) = do {
@@ -322,7 +341,7 @@ fn run_command(m, v) = do {
     else match v {
       "cmd:home" => go(n, []),
       "cmd:up" => up(n),
-      "cmd:hidden" => with_preview({...n, hidden: not n.hidden}),
+      "cmd:hidden" => with_preview(with_tree({...n, hidden: not n.hidden})),
       "cmd:view" => {...n, view: if n.view == "list" then "grid" else "list"},
       "cmd:theme" => {...n, dark: not n.dark},
       "cmd:new" => if n.write then {...n, dialog: {kind: "new", target: "", error: missing}} else n,
@@ -350,7 +369,7 @@ fn on_key(m, k) = match k {
   },
   "Alt+ArrowRight" => if m.fwd.count() == 0 then m else go({...m, back: m.back.concat([m.path]), fwd: m.fwd.drop(1)}, m.fwd[0], false),
   "Ctrl+K" => {...m, palette: {open: true, query: "", sel: 0}},
-  "Ctrl+H" => with_preview({...m, hidden: not m.hidden}),
+  "Ctrl+H" => with_preview(with_tree({...m, hidden: not m.hidden})),
   "/" => {...m, focus: m.focus + 1},
   "F2" => run_command(m, "cmd:rename"),
   "Delete" => to_trash(m, m.sel),
@@ -406,6 +425,10 @@ fn update(m, e) = match e.msg {
   "dismiss" => {...m, toasts: m.toasts.filter((t) => "{t.id}" != e.value)},
   "tick" => {...m, toasts: m.toasts.map((t) => if t.born.is_missing() then {...t, born: e.value} else t).filter((t) => e.value - t.born < 5.0)},
   "scroll" => {...m, offset: e.value},
+  # The tree sends a key; only a folder the tree holds — one this app listed — is opened.
+  "tree-select" => if in_tree(m.tree, "{e.value}") then go(m, "{e.value}".split("/")) else m,
+  "tree-toggle" => if in_tree(m.tree, "{e.value}") then with_tree({...m, tree_open: toggled(m.tree_open, "{e.value}")}) else m,
+  "side" => {...m, side: ui.resized(e.value, 160, 380, m.side)},
   _ => m,
 }
 
@@ -513,7 +536,13 @@ fn dialog(m) = do {
 }
 
 fn view(m) = ui.el("div", {class: "files", keydown: "key", shortcuts: KEYS}, [
-  ui.shell(rail(m), toolbar(m), ui.el("div", {class: "files-body"}, [listing(m), inspector(m)]), label: "Files"),
+  ui.shell(rail(m), toolbar(m), ui.el("div", {class: "files-split"}, [ui.split_view(
+    ui.el("nav", {class: "sidebar", aria: {label: "Folders"}}, [
+      ui.el("h2", {class: "side-title"}, [ui.text("Folders")]),
+      if m.tree.count() == 0 then ui.el("p", {class: "meta side-empty"}, [ui.text("No folders here.")]) else ui.tree("folders", "Folders", m.tree, m.tree_open, m.path.join("/"), "tree-toggle", "tree-select"),
+    ]),
+    ui.el("div", {class: "files-body"}, [listing(m), inspector(m)]),
+    m.side, "side", min: 160, max: 380, label: "Resize the sidebar")]), label: "Files"),
   ui.context_menu("ctx", m.ctx, context_items(m), "close-ctx"),
   ui.command_palette("palette", m.palette.open, m.palette.query, commands(m), m.palette.sel, "palette-query", "palette-key", "palette-pick", "palette-close", placeholder: "Go to a folder, or run a command"),
   dialog(m),
@@ -526,6 +555,13 @@ STYLE = """
 .files .shell { height: 100vh; }
 .logo { width: 38px; height: 38px; border-radius: max(4px, calc(var(--r-window) - 12px)); display: grid; place-items: center; margin-bottom: 10px;
   background: var(--accent); color: var(--accent-fg); box-shadow: 0 6px 16px -6px var(--accent-glow); }
+.files-split > .split { align-items: stretch; }
+.files-split .split-pane:first-child { position: sticky; top: calc(var(--ctl-h) + var(--inset) * 3); align-self: flex-start; max-height: calc(100vh - var(--ctl-h) - var(--inset) * 6); }
+.files-split .split-pane.rest { container-type: inline-size; }
+.sidebar { padding: 0 var(--s-1); }
+.side-title { font: var(--type-footnote); font-weight: 650; color: var(--muted); margin: 4px 8px 6px; text-transform: none; }
+.side-empty { margin: 0 8px; }
+@container (max-width: 760px) { .files-split .split-pane:first-child, .files-split .split-handle { display: none; } }
 .files-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s-4); align-items: start; }
 @container (min-width: 860px) { .files-body { grid-template-columns: minmax(0, 1fr) 320px; } }
 @container (max-width: 859px) { .inspector { display: none; } }
@@ -564,7 +600,7 @@ fn spec_of(root, write, material) = {
   init: go({
     root: root, write: write, path: [], entries: [], error: "", sel: "", query: "", view: "list", sort: "name", desc: false, hidden: false,
     back: [], fwd: [], recent: [], ctx: missing, menu: false, palette: {open: false, query: "", sel: 0}, dialog: missing,
-    toasts: [], next: 1, trash: [], preview: {kind: "none"}, offset: 0, focus: 0, dark: false,
+    toasts: [], next: 1, trash: [], preview: {kind: "none"}, offset: 0, focus: 0, dark: false, side: 220, tree_open: [], tree: [],
     }, [], false),
   update: update,
   view: view,

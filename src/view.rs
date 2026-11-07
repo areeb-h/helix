@@ -219,6 +219,19 @@ fn parse(v: &Value, line: usize, col: usize) -> Result<Node, HelixError> {
         ("shortcuts", "data-shortcuts"),
         ("reveal", "data-reveal"),
         ("copy", "data-copy"),
+        // Gestures (the page's script does the dragging; the app hears the outcome). `drag`
+        // names the message a node sends when it is let go, with `drag: {dx, dy, vx, vy}`;
+        // `drag_axis` is "x", "y", "both" or a direction ("down", "left"…), and `drag_commit`
+        // the distance (px) a throw must reach to be sent at all. `reorder` on a container
+        // names the message its keyed children send when dragged into a new order (`{key,
+        // from, to}`); `resize` on a divider names the message that carries the size of the
+        // pane before it. `handle: true` marks the part of a draggable node that grabs it.
+        ("drag", "data-drag"),
+        ("drag_axis", "data-drag-axis"),
+        ("drag_commit", "data-drag-commit"),
+        ("reorder", "data-reorder"),
+        ("resize", "data-resize"),
+        ("handle", "data-drag-handle"),
     ] {
         if let Some(v) = get(&props, prop) {
             attrs.push((out.to_string(), text_of(&v, line, col)?));
@@ -529,6 +542,27 @@ mod tests {
             "<button class=\"btn\" id=\"b1\" role=\"switch\" data-value=\"7\" data-change=\"c\" data-dismiss=\"close\" \
              data-enter=\"pop\" data-exit=\"fade\" data-layout=\"true\" aria-expanded=\"false\" \
              aria-has-popup=\"menu\" disabled=\"\" type=\"button\"></button>"
+        );
+    }
+
+    #[test]
+    fn gestures_are_data_the_page_reads() {
+        let v = el(
+            "div",
+            vec![
+                ("reorder", s("moved")),
+                ("drag", s("thrown")),
+                ("drag_axis", s("down")),
+                ("drag_commit", Value::Int(96)),
+                ("resize", s("size")),
+                ("handle", Value::Bool(true)),
+            ],
+            vec![],
+        );
+        let Value::Str(h) = view_html(&v, 0, 0).expect("render") else { panic!() };
+        assert_eq!(
+            h.as_str(),
+            "<div data-drag=\"thrown\" data-drag-axis=\"down\" data-drag-commit=\"96\" data-reorder=\"moved\" data-resize=\"size\" data-drag-handle=\"true\"></div>"
         );
     }
 

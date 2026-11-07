@@ -4,6 +4,26 @@
 
 ### Added
 
+- **Gestures, as view props (ADR 0057).** The page does the dragging, with no round trip.
+  When it is let go, the app gets one event, and the node springs to wherever the next frame
+  puts it, at the speed it was thrown.
+  - **The props:**
+    - `drag` (with `drag_axis` and `drag_commit`) sends the node's `value` with
+      `drag: {dx, dy, vx, vy}`;
+    - `reorder` on a container sends `{key, from, to}`;
+    - `resize` on a divider sends the size it would give;
+    - `handle` marks what grabs.
+  - **Keyboard paths:** a divider's arrows, Alt with ↑ ↓ on a row, and Escape.
+  - **The frame that answers a gesture names it** (`acks`), so the page never guesses.
+- **New components:**
+  - `ui.split_view` with `ui.resized`, and `ui.sortable` with `ui.reordered`;
+  - `ui.tree`, WAI-ARIA's tree view and its keys;
+  - `ui.disclosure` and `ui.accordion`, whose height springs open;
+  - `ui.popover`, `ui.spinner`, and `ui.progress(label, missing)` for a bar with no known end.
+- **Swipes on existing components:** toasts can be swiped away sideways, and the sheet pulled
+  down by its grabber.
+- **The file manager has a resizable sidebar of folders**, a tree read with the same rules as
+  the list: a link is never in it.
 - **A file manager, `examples/apps/files.helix`, built on `std.ui`.** Run it with
   `helix run examples/apps/files.helix --root ~/Documents --window`.
   - **Browsing:** a sidebar, a toolbar with back, forward and up, search, and list or icon views.
