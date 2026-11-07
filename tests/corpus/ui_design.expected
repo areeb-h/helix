@@ -20,7 +20,7 @@ opacity 112ms line
 transform 337ms line
 <div class="segmented md" id="v" role="radiogroup" aria-label="View"><button class="seg" role="radio" data-click="pick" data-value="a" aria-checked="false" type="button" tabindex="-1"><span class="seg-label">A</span></button><button class="seg on" role="radio" data-click="pick" data-value="b" aria-checked="true" type="button" tabindex="0"><span class="seg-thumb" data-share="v-thumb" aria-hidden="true"></span><span class="seg-label">B</span></button></div>
 true
-<div class="sheet-layer closed" data-key="s-layer"></div>
+<div class="sheet-layer closed" data-key="s-layer-closed"></div>
 true
 <span class="avatar md a2" role="img" aria-label="Ada Lovelace" title="Ada Lovelace">A</span>
 <svg class="ic md" role="img" aria-label="Done" viewBox="0 0

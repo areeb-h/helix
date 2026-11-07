@@ -402,17 +402,17 @@ export fn sheet(id, open, title, children, close, actions = []) = if not open th
 # by the client however close to an edge it opened. `items` are `menu`'s.
 export fn context_menu(id, at, items, close) = if at.is_missing() then el("div", {key: "{id}-ctx-closed", class: "ctx-closed"}, []) else
   do {
-  first = range(0, items.count()).filter((i) => not (items[i].get("separator") ?? false) and not (items[i].get("disabled") ?? false)).first() ?? -1
-  el("div", {key: "{id}-ctx", id: id, role: "menu", class: "menu-list context-menu mat-overlay", enter: "pop", exit: "fade", dismiss: close, aria: {label: "Actions"},
-    style: {left: "{at.x}px", top: "{at.y}px"}}, range(0, items.count()).map((i) => do {
-      it = items[i]
-      if it.get("separator") ?? false then el("div", {class: "menu-sep", role: "separator"}, []) else
-        el("button", {role: "menuitem", class: if it.get("danger") ?? false then "menu-item danger" else "menu-item", click: it.msg, value: it.get("value"),
-          attrs: {type: "button", tabindex: "-1", autofocus: i == first, disabled: it.get("disabled") ?? false}}, present([
-            if it.get("icon").is_missing() then missing else glyph(it.icon, "sm"), el("span", {class: "spacer-text"}, [text(it.label)]),
-            if it.get("shortcut").is_missing() then missing else el("span", {class: "menu-kbd"}, [text(it.shortcut)]),
-        ]))
-  }))
+    first = range(0, items.count()).filter((i) => not (items[i].get("separator") ?? false) and not (items[i].get("disabled") ?? false)).first() ?? -1
+    el("div", {key: "{id}-ctx", id: id, role: "menu", class: "menu-list context-menu mat-overlay", enter: "pop", exit: "fade", dismiss: close, aria: {label: "Actions"},
+      style: {left: "{at.x}px", top: "{at.y}px"}}, range(0, items.count()).map((i) => do {
+        it = items[i]
+        if it.get("separator") ?? false then el("div", {class: "menu-sep", role: "separator"}, []) else
+          el("button", {role: "menuitem", class: if it.get("danger") ?? false then "menu-item danger" else "menu-item", click: it.msg, value: it.get("value"),
+            attrs: {type: "button", tabindex: "-1", autofocus: i == first, disabled: it.get("disabled") ?? false}}, present([
+              if it.get("icon").is_missing() then missing else glyph(it.icon, "sm"), el("span", {class: "spacer-text"}, [text(it.label)]),
+              if it.get("shortcut").is_missing() then missing else el("span", {class: "menu-kbd"}, [text(it.shortcut)]),
+          ]))
+    }))
   }
 
 # Which of `items` (`[{label, …}]`) a typed query matches, best first: an exact prefix, then a
