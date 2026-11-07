@@ -578,8 +578,13 @@ MOTION = {snappy: [420.0, 41.0], gentle: [170.0, 26.0], bouncy: [260.0, 18.0]}
 # overshoots flickers. Each comes fast (small things: a switch, a button), default (things
 # that cover part of the screen: a menu, a sheet) and slow (things that cover all of it).
 # As `[stiffness, damping ratio]`.
+#
+# The stiffnesses are Material 3's (800 / 380 / 200, from its Compose motion tokens). The
+# damping sits between Material Expressive's (0.6 / 0.8 / 0.8, playful) and Apple's
+# critically damped "smooth": a small thing settles with a hint of give, a large one glides —
+# and none of them wobble, which is what reads as "buttery" rather than "bouncy".
 SPRINGS = {
-  "spatial-fast": [1400.0, 0.9], "spatial": [700.0, 0.9], "spatial-slow": [300.0, 0.9],
+  "spatial-fast": [800.0, 0.75], "spatial": [380.0, 0.85], "spatial-slow": [200.0, 0.9],
   "effects-fast": [3800.0, 1.0], "effects": [1600.0, 1.0], "effects-slow": [800.0, 1.0],
 }
 
@@ -998,7 +1003,10 @@ fn colour_tokens(dark, r, h) = do {
     "warning": hex_of(r.warning), "warning-soft": hex_of(r.warning_soft), "focus": hex_of(r.accent),
     "chart-1": hex_of(r.charts[0]), "chart-2": hex_of(r.charts[1]), "chart-3": hex_of(r.charts[2]),
     "chart-4": hex_of(r.charts[3]), "chart-5": hex_of(r.charts[4]), "chart-6": hex_of(r.charts[5]),
-    "hover": rgba_of(hover_ink, if dark then 0.07 else 0.05), "press": rgba_of(hover_ink, if dark then 0.12 else 0.09),
+    # Material's state layers: what a thing under the pointer, focused, pressed or dragged
+    # gains — its own content colour at 8%, 10%, 10% and 16%.
+    "hover": rgba_of(hover_ink, 0.08), "press": rgba_of(hover_ink, 0.1), "drag": rgba_of(hover_ink, 0.16),
+    "state-hover": "0.08", "state-focus": "0.1", "state-press": "0.1", "state-drag": "0.16", "state-disabled": "0.38",
     "accent-glow": rgba_of(r.accent, 0.45), "scrim": rgba_of(ink, if dark then 0.6 else 0.35),
     "scroll-thumb": rgba_of(r.muted, 0.45), "scroll-thumb-hover": rgba_of(r.muted, 0.75),
     "e-1": "0 1px 2px {rgba_of(ink, if dark then 0.5 else 0.06)}, 0 1px 3px {rgba_of(ink, if dark then 0.3 else 0.08)}",
@@ -1030,6 +1038,27 @@ SPACING = {
 fn inner(outer, pad) = if outer >= CAPSULE then CAPSULE else max(FLOOR, outer - pad)
 fn px_of(r) = if r >= CAPSULE then "999px" else "{round(r)}px"
 
+# TYPE. One scale of text styles, after Apple's (large title down to caption), each a size,
+# a line height and a weight. Tracking is computed from the size, not chosen: small text is
+# opened up and large text drawn in, by the dynamic-metrics curve Inter publishes for its UI
+# use — the same behaviour SF Pro's optical sizes build in (12px is neutral, 13px is −0.003em).
+TYPE_STYLES = [
+  ["large-title", 28.0, 34.0, 700], ["title-1", 22.0, 28.0, 700], ["title-2", 18.0, 24.0, 650], ["title-3", 15.0, 20.0, 650],
+  ["headline", 14.0, 20.0, 650], ["body", 14.0, 20.0, 400], ["callout", 13.0, 18.0, 400], ["footnote", 12.0, 16.0, 400], ["caption", 11.0, 14.0, 500],
+]
+export fn tracking(px) = -0.0223 + 0.185 * exp(-0.1745 * px)
+fn type_tokens(density) = do {
+  scale = if density == "compact" then 13.0 / 14.0 else 1.0
+  size_of = (st) => round(st[1] * scale * 2.0) / 2.0
+  styles = TYPE_STYLES.reduce({"type-scale": "{scale}"}, (d, st) => do {
+    size = size_of(st)
+    d.insert("type-{st[0]}", "{st[3]} {size}px/{round(st[2] * scale)}px var(--font)").insert("track-{st[0]}", "{tracking(size):.4f}em")
+  })
+  # The plain sizes components use, as the same scale's steps.
+  pick = (name) => size_of(TYPE_STYLES.filter((st) => st[0] == name)[0])
+  [["t-xs", "caption"], ["t-sm", "callout"], ["t-md", "body"], ["t-lg", "title-2"], ["t-xl", "title-1"], ["t-2xl", "large-title"]].reduce(styles, (d, p) => d.insert(p[0], "{pick(p[1])}px"))
+}
+
 # The radii and paddings of one shape and density, as numbers — `{ctl, card, in_card, list,
 # row, overlay, item, sheet, in_sheet, window, in_window, seg, ...}`. `ui.geometry` answers it so
 # a test can check the nesting rule itself.
@@ -1046,6 +1075,9 @@ export fn geometry(shape, density) = do {
     sheet: sheet, pad_sheet: sp.sheet, in_sheet: inner(sheet, sp.sheet),
     window: b.window, inset: sp.inset, in_window: inner(b.window, sp.inset),
     seg: if b.ctl >= CAPSULE then CAPSULE else b.ctl + 3.0, seg_item: b.ctl,
+    # Pressed, a control's corners ease in (Material's shape morph): to 60% of its resting
+    # radius — a capsule's being half its height.
+    pressed: max(FLOOR, round(min(b.ctl, sp.ctl_h / 2.0) * 0.6)),
     ctl_h: sp.ctl_h, row_h: sp.row, scale: sp.scale,
   }
 }
@@ -1060,7 +1092,10 @@ fn geometry_tokens(shape, density) = do {
     "r-overlay": px_of(g.overlay), "pad-overlay": px_of(g.pad_overlay), "r-item": px_of(g.item),
     "r-sheet": px_of(g.sheet), "pad-sheet": px_of(g.pad_sheet), "r-in-sheet": px_of(g.in_sheet),
     "r-window": px_of(g.window), "inset": px_of(g.inset), "r-in-window": px_of(g.in_window),
-    "r-seg": px_of(g.seg), "r-seg-item": px_of(g.seg_item),
+    "r-seg": px_of(g.seg), "r-seg-item": px_of(g.seg_item), "r-pressed": px_of(g.pressed),
+    # A control's resting radius as a length a transition can interpolate: a capsule is half
+    # the control's height, not 999px (which would hold the corner round for most of a morph).
+    "r-ctl-px": "{round(min(g.ctl, g.ctl_h / 2.0))}px",
     # The names components used before geometry was computed, kept as the same roles.
     "r-sm": px_of(g.item), "r-md": px_of(g.field), "r-lg": px_of(g.card), "r-xl": px_of(g.sheet),
     "ctl-h": "{g.ctl_h}px", "row": "{g.row_h}px",
@@ -1084,7 +1119,7 @@ export fn design(opts = {}) = do {
   c0 = clamp(seed.c, 0.04, 0.24)
   light = roles(false, h, c0)
   dark = roles(true, h, c0)
-  form = geometry_tokens(shape, density)
+  form = merge(geometry_tokens(shape, density), type_tokens(density))
   {
     hue: h, material: material, shape: shape, density: density, effects: effects,
     light: merge(merge(colour_tokens(false, light, h), material_tokens(material, false, light, h)), form),
@@ -1132,7 +1167,6 @@ DEFAULT_DESIGN = design({seed: "#4f46e5", material: "hybrid"})
 
 THEME = """
 :root {
-  --t-xs: 11.5px; --t-sm: 12.5px; --t-md: 14px; --t-lg: 17px; --t-xl: 22px; --t-2xl: 28px;
   --r-full: 999px;
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter var", Inter, system-ui, "Segoe UI Variable Text", "Segoe UI", Roboto, sans-serif;
   /* The motion system as transition values: duration and curve of each spring. */
@@ -1149,7 +1183,7 @@ THEME = """
 }
 :root[data-theme="dark"] { color-scheme: dark; }
 * { box-sizing: border-box; }
-html, body { margin: 0; color: var(--fg); font: var(--t-md)/1.5 var(--font); letter-spacing: -0.006em; }
+html, body { margin: 0; color: var(--fg); font: var(--type-body); letter-spacing: var(--track-body); }
 html { background: var(--bg); -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; font-feature-settings: "cv11", "ss01"; }
 body { min-height: 100vh; }
 /* The design's backdrop is one fixed layer behind the page: it never scrolls, repaints or
@@ -1190,13 +1224,19 @@ body::before { content: ""; position: fixed; inset: 0; z-index: -1; background: 
 }
 .hx-scope { color: var(--fg); }
 #root { max-width: 1120px; margin: 0 auto; padding: var(--s-6) var(--s-5) var(--s-7); }
-h1 { font-size: var(--t-2xl); font-weight: 700; letter-spacing: -0.022em; line-height: 1.15; margin: 0 0 var(--s-1); }
-h2 { font-size: var(--t-sm); font-weight: 650; letter-spacing: -0.005em; color: var(--muted); margin: 0 0 var(--s-3); }
-.subheading { font-size: var(--t-lg); font-weight: 650; letter-spacing: -0.012em; margin: 0; }
+h1 { font: var(--type-large-title); letter-spacing: var(--track-large-title); margin: 0 0 var(--s-1); }
+h2 { font: var(--type-headline); letter-spacing: var(--track-headline); color: var(--muted); margin: 0 0 var(--s-3); }
+.subheading { font: var(--type-title-3); letter-spacing: var(--track-title-3); margin: 0; }
+/* The type scale as classes, for text that is not a heading. */
+.t-large-title { font: var(--type-large-title); letter-spacing: var(--track-large-title); } .t-title-1 { font: var(--type-title-1); letter-spacing: var(--track-title-1); }
+.t-title-2 { font: var(--type-title-2); letter-spacing: var(--track-title-2); } .t-title-3 { font: var(--type-title-3); letter-spacing: var(--track-title-3); }
+.t-headline { font: var(--type-headline); letter-spacing: var(--track-headline); } .t-body { font: var(--type-body); letter-spacing: var(--track-body); }
+.t-callout { font: var(--type-callout); letter-spacing: var(--track-callout); } .t-footnote { font: var(--type-footnote); letter-spacing: var(--track-footnote); }
+.t-caption { font: var(--type-caption); letter-spacing: var(--track-caption); }
 .para { margin: 0; max-width: 68ch; }
 .code { font: var(--t-sm) var(--mono); background: var(--surface-2); padding: 1px 6px; border-radius: var(--r-item); }
 .label, .hint, .meta { color: var(--muted); }
-.meta { font-size: var(--t-sm); }
+.meta { font: var(--type-footnote); letter-spacing: var(--track-footnote); }
 .strong { font-weight: 600; }
 .two-line { display: flex; flex-direction: column; min-width: 0; line-height: 1.35; }
 ::placeholder { color: var(--muted); opacity: 1; }
@@ -1234,14 +1274,15 @@ h2 { font-size: var(--t-sm); font-weight: 650; letter-spacing: -0.005em; color: 
 /* Buttons. Press sinks on a fast spatial spring and eases the corners in; hover and colour
    use effects springs, which never overshoot. */
 .btn { appearance: none; position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 7px; flex: none;
-  height: var(--ctl-h); padding: 0 calc(var(--ctl-h) * .42); border-radius: var(--r-ctl); border: 1px solid transparent; cursor: pointer;
-  font: 600 var(--t-sm)/1 var(--font); letter-spacing: -0.003em; white-space: nowrap; color: var(--fg); background: var(--surface);
+  height: var(--ctl-h); padding: 0 calc(var(--ctl-h) * .42); border-radius: var(--r-ctl-px); border: 1px solid transparent; cursor: pointer;
+  font: 600 var(--t-sm)/1 var(--font); letter-spacing: var(--track-callout); white-space: nowrap; color: var(--fg); background: var(--surface);
   box-shadow: var(--e-1), inset 0 0 0 1px var(--line); isolation: isolate;
   transition: transform var(--sp-fast), border-radius var(--sp-fast), background-color var(--fx-fast), box-shadow var(--fx), color var(--fx-fast); }
 .btn::after { content: ""; position: absolute; inset: -1px; border-radius: inherit; background: currentColor; opacity: 0; pointer-events: none; transition: opacity var(--fx-fast); z-index: -1; }
-.btn:hover::after { opacity: .07; }
-.btn:active::after { opacity: .13; }
-.btn:active { transform: scale(.965); border-radius: calc(var(--r-ctl) * .7); }
+.btn:hover::after { opacity: var(--state-hover); }
+.btn:focus-visible::after { opacity: var(--state-focus); }
+.btn:active::after { opacity: var(--state-press); }
+.btn:active { transform: scale(.97); border-radius: var(--r-pressed); }
 .btn.primary { background: var(--accent); color: var(--accent-fg); box-shadow: 0 1px 2px var(--accent-glow), 0 6px 16px -8px var(--accent-glow); }
 .btn.tonal { background: var(--accent-soft); color: var(--accent-text); box-shadow: none; }
 .btn.outline { background: transparent; box-shadow: inset 0 0 0 1px var(--line-strong); }
@@ -1249,9 +1290,11 @@ h2 { font-size: var(--t-sm); font-weight: 650; letter-spacing: -0.005em; color: 
 .btn.danger { background: var(--danger); color: var(--surface); box-shadow: none; }
 .btn.icon { width: var(--ctl-h); padding: 0; color: var(--muted); }
 .btn.icon:hover { color: var(--fg); }
-.btn[disabled] { opacity: .45; cursor: not-allowed; transform: none; }
+.btn[disabled] { opacity: var(--state-disabled); cursor: not-allowed; transform: none; border-radius: var(--r-ctl-px); }
 .btn[disabled]::after { opacity: 0; }
 .caret { font-size: var(--t-xs); color: var(--muted); }
+.badge, .tip, .kbd, .rail-label, .table th { letter-spacing: var(--track-caption); }
+.meta, .hint, .error, .field-label, .li-trail, .crumbs, .delta, .seg, .chip, .table { letter-spacing: var(--track-footnote); }
 .btn.primary .caret { color: inherit; }
 .fab { position: absolute; right: var(--s-4); bottom: var(--s-4); z-index: 4; width: 56px; height: 56px; border: 0; cursor: pointer; display: grid; place-items: center;
   border-radius: min(calc(var(--r-ctl) + 8px), 999px); background: var(--accent); color: var(--accent-fg);
@@ -1477,7 +1520,7 @@ button.li:active { background: var(--press); }
 /* The header is the table's own surface, not a band of another colour: rows scroll beneath it
    (blurred, on glass), and it meets the scrollbar's gutter without a seam. */
 .table th { position: sticky; top: 0; z-index: 1; background: var(--card-bg); -webkit-backdrop-filter: var(--card-blur); backdrop-filter: var(--card-blur);
-  text-align: left; font-weight: 650; font-size: var(--t-xs); letter-spacing: .02em; text-transform: capitalize; height: var(--row);
+  text-align: left; font-weight: 650; font-size: var(--t-xs); text-transform: capitalize; height: var(--row);
   padding: 0 var(--s-3); border-bottom: 1px solid var(--line); white-space: nowrap; color: var(--muted); }
 :root[data-perf="light"] .table th, [data-effects="light"] .table th { background: var(--card-solid); -webkit-backdrop-filter: none; backdrop-filter: none; }
 :root[data-perf="light"] [data-effects="full"] .table th { background: var(--card-bg); -webkit-backdrop-filter: var(--card-blur); backdrop-filter: var(--card-blur); }

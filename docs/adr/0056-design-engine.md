@@ -111,7 +111,37 @@ and a row can grow into its detail view.
 Frames are applied once per display refresh, so a burst of frames is one layout. Under
 reduced motion nothing moves.
 
-### 6. Designs are live
+### 6. Type, state layers and pressed shapes (from the platforms' own guidance)
+
+- **Type scale.** One computed scale of text styles, after Apple's: large title, titles 1–3,
+  headline, body, callout, footnote and caption, as `--type-*` and `.t-*`. Compact density
+  scales it to a 13 px body, the macOS body size. Tracking is computed from the size by the
+  dynamic-metrics curve Inter publishes for UI text (`ui.tracking(px)`). Small text opens up
+  and large text draws in, which is what SF Pro's optical sizes do: 12 px is neutral and 13 px
+  is −0.003 em. Apple's SF table gives −6/1000 em at 13 pt.
+- **State layers.** Material's opacities: hover 8%, focus 10%, pressed 10%, dragged 16%, in
+  the content's own colour. A disabled control's content is at 38%.
+- **Pressed shapes.** As in Material 3's buttons, a pressed control's corners ease in, to 60%
+  of the resting radius, on the fast spatial spring. A capsule's resting radius is written as
+  half its height, not 999 px, so the morph interpolates over its whole length.
+- **Springs.** The stiffnesses are Material 3's: 800 for fast, 380 for default and 200 for
+  slow, from its Compose motion tokens. The damping (0.75, 0.85 and 0.9) sits between Material
+  Expressive's playful 0.6 to 0.8 and Apple's critically damped "smooth". A small thing settles
+  with a hint of give; nothing wobbles.
+
+Apple's guidance this follows (WWDC25 "Meet Liquid Glass" and "Get to know the new design
+system"):
+
+- Glass is for the navigation layer that floats over content, never glass on glass.
+- Only primary actions are tinted.
+- Corners are fixed, capsule (half the height) or concentric (the parent's radius minus the
+  padding).
+- macOS small and medium controls stay rounded rectangles; large ones are capsules.
+- A pinned header gets a "hard" scroll edge; a scroll view gets a soft one.
+- Reduce Transparency frosts glass, Increase Contrast turns surfaces plain black or white with
+  a border, and Reduce Motion removes elasticity.
+
+### 7. Designs are live
 
 `design:` may be a function of the model. A frame whose design changed carries the new
 stylesheet, so an app can offer a theme picker. `ui.scoped(design, node)` gives a subtree its

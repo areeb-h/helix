@@ -23,6 +23,12 @@
     comfortable or compact spacing.
   - **Live designs.** `design:` may be a function of the model, so the page restyles live.
     `ui.scoped(design, node)` gives part of a view its own design.
+- **Type, interaction feedback and pressed shapes from Apple's and Google's guidance.**
+  - **A type scale after Apple's text styles.** It runs from large title to caption, with
+    tracking computed from each size.
+  - **Material's state layers.** Hover is 8%, focus and press 10%, drag 16%, and disabled 38%.
+  - **Pressed shapes.** A pressed control's corners ease in, as in Material 3's buttons.
+  - **Retuned springs.** Material 3's stiffnesses, damped so that nothing wobbles.
 - **Motion, version 2.**
   - **Two spring families.** Spatial springs move things and effects springs fade things; each
     comes in fast, default and slow (`motion(prop, "spatial")`).
