@@ -1,56 +1,20 @@
-# Design lab — three directions for the next design system, side by side, live.
+# Design lab — the design engine's three materials side by side, live.
 #
 #   helix run examples/apps/design-lab.helix --window
 #
-# The same small file browser drawn three ways: A is glass (translucent, blurred surfaces over
-# a colourful backdrop), B is Material-style tonal (colour roles from one seed, state layers,
-# pill shapes), C is a hybrid (tonal content inside a glass frame). Every colour is derived
-# from ONE accent hue in OKLCH, so dragging the hue re-themes all three at once and keeps
-# their contrast steady. "Reduce transparency" shows the fallback glass needs: the same
-# surfaces, solid.
+# One small app drawn three ways by `ui.design`: A is glass (translucent, blurred surfaces
+# over a backdrop the design generates), B is tonal (solid, colour-layered surfaces), C is the
+# hybrid (solid content, a glass frame). Every colour comes from one seed — pick a swatch or
+# drag the hue — and every text colour is proven to reach WCAG AA on what it sits on. Shape,
+# density and effects are design options too; "Light" effects is what a machine without a
+# GPU gets on its own.
 #
-# A prototype for choosing a direction, not the engine: the tokens here are hand-written CSS
-# that the theme engine would generate.
+# The three panes share one model, so whatever you do in one happens in all three: the
+# comparison stays like for like.
 
 import std.ui
 
-init = {hue: 265, dark: false, solid: false, sel: 0, nav: "home", chip: "all", sync: true, menu: ""}
-
-fn update(m, e) = match e.msg {
-  "hue" => if e.value.is_missing() then m else {...m, hue: e.value},
-  "dark" => {...m, dark: e.value},
-  "solid" => {...m, solid: e.value},
-  "sel" => {...m, sel: to_int(e.value), menu: ""},
-  "nav" => {...m, nav: e.value},
-  "chip" => {...m, chip: e.value},
-  "sync" => {...m, sync: e.value},
-  "menu" => {...m, menu: if m.menu == e.value then "" else e.value},
-  "close-menu" => {...m, menu: ""},
-  _ => m,
-}
-
-# --- Icons: 24-unit strokes, drawn in the current text colour. ---------------------------
-
-ICONS = {
-  home: ["M4 10.5 12 4l8 6.5V19a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z"],
-  recent: ["M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z", "M12 7.5V12l3 2"],
-  star: ["M12 3.5l2.6 5.3 5.9.9-4.25 4.15 1 5.85L12 16.9l-5.25 2.8 1-5.85L3.5 9.7l5.9-.9z"],
-  trash: ["M4 7h16", "M9.5 7V4.5h5V7", "M6.5 7l.9 12.5a1 1 0 0 0 1 .9h7.2a1 1 0 0 0 1-.9L17.5 7"],
-  folder: ["M3.5 7a1.5 1.5 0 0 1 1.5-1.5h4.2l2 2H19a1.5 1.5 0 0 1 1.5 1.5v8.5A1.5 1.5 0 0 1 19 19H5a1.5 1.5 0 0 1-1.5-1.5z"],
-  image: ["M5 4.5h14A1.5 1.5 0 0 1 20.5 6v12a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 18V6A1.5 1.5 0 0 1 5 4.5z", "M9 8.2a1.8 1.8 0 1 0 0 3.6 1.8 1.8 0 0 0 0-3.6z", "M20.5 15.5l-5-5-9.5 9"],
-  doc: ["M7 3.5h7l4.5 4.5v11a1.5 1.5 0 0 1-1.5 1.5H7A1.5 1.5 0 0 1 5.5 19V5A1.5 1.5 0 0 1 7 3.5z", "M13.5 3.5V8.5h5", "M8.5 13h7", "M8.5 16.5h5"],
-  sheet: ["M5 4.5h14A1.5 1.5 0 0 1 20.5 6v12a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 18V6A1.5 1.5 0 0 1 5 4.5z", "M3.5 10h17", "M3.5 15h17", "M10 4.5v15"],
-  search: ["M10.5 4a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13z", "M20 20l-4.6-4.6"],
-  more: ["M12 6.5h.01", "M12 12h.01", "M12 17.5h.01"],
-  plus: ["M12 5v14", "M5 12h14"],
-  cloud: ["M7.5 18.5a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18.4 9.1 4.25 4.25 0 0 1 17.5 18.5z"],
-  check: ["M5 12.5l4.5 4.5L19 7.5"],
-}
-
-fn icon(name, cls = "ic") = ui.el("svg", {class: cls, aria: {hidden: true}, attrs: {viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round"}},
-  ICONS.get(name).map((d) => ui.el("path", {attrs: {d: d}}, [])))
-
-# --- The shared content. ------------------------------------------------------------------
+SEEDS = ["#4f46e5", "#7c3aed", "#db2777", "#ea580c", "#ca8a04", "#059669", "#0891b2", "#2563eb"]
 
 FILES = [
   {name: "Q3 report.pdf", icon: "doc", meta: "Today, 09:41", size: "2.4 MB", tint: 0},
@@ -58,312 +22,542 @@ FILES = [
   {name: "Budget 2027.csv", icon: "sheet", meta: "Mon", size: "96 KB", tint: 2},
   {name: "Designs", icon: "folder", meta: "14 items", size: "—", tint: 3},
   {name: "Meeting notes.md", icon: "doc", meta: "Oct 28", size: "4 KB", tint: 0},
+  {name: "Brand kit", icon: "folder", meta: "32 items", size: "—", tint: 3},
+  {name: "Roadmap.key", icon: "chart", meta: "Oct 21", size: "18 MB", tint: 1},
+  {name: "Customer list.csv", icon: "sheet", meta: "Oct 19", size: "212 KB", tint: 2},
+  {name: "Onboarding.mp4", icon: "image", meta: "Oct 12", size: "64 MB", tint: 1},
+  {name: "Contracts", icon: "folder", meta: "8 items", size: "—", tint: 3},
+  {name: "Release notes.md", icon: "doc", meta: "Oct 3", size: "9 KB", tint: 0},
+  {name: "Icons.svg", icon: "image", meta: "Sep 30", size: "48 KB", tint: 1},
 ]
-NAV = [["home", "Home"], ["recent", "Recent"], ["star", "Starred"], ["trash", "Trash"]]
-CHIPS = [["all", "All"], ["image", "Images"], ["doc", "Documents"]]
 
-fn rail(m) = ui.el("nav", {class: "rail glassy", aria: {label: "Places"}}, [
-  ui.el("div", {class: "logo"}, [icon("cloud")]),
-  ].concat(NAV.map((n) => ui.el("button", {class: if m.nav == n[0] then "nav on" else "nav", click: "nav", value: n[0], aria: {current: if m.nav == n[0] then "page" else missing}, attrs: {type: "button"}}, [
-    ui.el("span", {class: "pill"}, [icon(n[0])]),
-    ui.el("span", {class: "nav-label"}, [ui.text(n[1])]),
+PEOPLE = ["Ada", "Grace", "Linus", "Margaret", "Alan", "Barbara"]
+STATUSES = [["Shipped", "success"], ["In review", "accent"], ["Blocked", "danger"], ["Draft", "neutral"], ["At risk", "warning"]]
+
+fn rows_data() = range(0, 30).map((i) => {
+  id: "HX-{1040 + i}",
+  title: ["Glass fallback", "Tonal palettes", "Spring motion", "Scrollbars", "Contrast proofs", "Window chrome"][i % 6],
+  owner: (i * 5) % 6,
+  status: STATUSES[(i * 3) % 5],
+  points: (i * 7) % 13 + 1,
+})
+ROWS = rows_data()
+
+fn designs_for(m) = do {
+  base = if m.seed == "" then {hue: m.hue} else {seed: m.seed}
+  opts = {...base, shape: m.shape, density: m.density, effects: m.effects}
+  {glass: ui.design({...opts, material: "glass"}), tonal: ui.design({...opts, material: "tonal"}), hybrid: ui.design({...opts, material: "hybrid"})}
+}
+
+fn with_designs(m) = {...m, designs: designs_for(m)}
+
+init = with_designs({
+  seed: "#4f46e5", hue: 277, shape: "soft", density: "comfortable", effects: "full", dark: false, layout: "compare",
+  tab: "files", sel: 1, chip: "all", menu: "", sheet: false, files: range(0, 12),
+  name: "Northwind", vis: "team", view: "list", agree: true, beta: false, cadence: "weekly", notify: true, sync: true,
+  quality: 72, copies: 2, toasts: [], next: 1,
+})
+
+fn toast(m, text, undo) = do {
+  all = m.toasts.concat([{id: m.next, text: text, undo: undo, born: missing}])
+  {...m, toasts: all.drop(max(all.count() - 3, 0)), next: m.next + 1}
+}
+
+fn update(m, e) = match e.msg {
+  "seed" => with_designs({...m, seed: e.value}),
+  "hue" => if e.value.is_missing() then m else with_designs({...m, hue: e.value, seed: ""}),
+  "shape" => with_designs({...m, shape: e.value}),
+  "density" => with_designs({...m, density: e.value}),
+  "effects" => with_designs({...m, effects: e.value}),
+  "dark" => {...m, dark: e.value},
+  "layout" => {...m, layout: e.value},
+  "tab" => {...m, tab: e.value, menu: ""},
+  "sel" => {...m, sel: to_int(e.value), menu: ""},
+  "chip" => {...m, chip: e.value},
+  "menu" => {...m, menu: if m.menu == e.value then "" else e.value},
+  "close-menu" => {...m, menu: ""},
+  "trash" => if not m.files.contains(m.sel) then {...m, menu: ""} else toast({...m, menu: "", files: m.files.filter((i) => i != m.sel)}, "Moved “{FILES[m.sel].name}” to trash", m.sel),
+  "undo" => do {
+    i = to_int(e.value)
+    {...m, files: m.files.concat([i]).sort(), toasts: m.toasts.filter((t) => t.undo != i)}
+  },
+  "star" => toast({...m, menu: ""}, "Added “{FILES[m.sel].name}” to starred", missing),
+  "sheet" => {...m, sheet: true, menu: ""},
+  "close-sheet" => {...m, sheet: false},
+  "share" => toast({...m, sheet: false}, "Invite sent to the design team", missing),
+  "toast" => toast(m, "Saved “{m.name}”", missing),
+  "dismiss" => {...m, toasts: m.toasts.filter((t) => "{t.id}" != e.value)},
+  "tick" => {...m, toasts: m.toasts.map((t) => if t.born.is_missing() then {...t, born: e.value} else t).filter((t) => e.value - t.born < 4.0)},
+  "name" => {...m, name: e.value},
+  "vis" => {...m, vis: e.value},
+  "view" => {...m, view: e.value},
+  "agree" => {...m, agree: e.value},
+  "beta" => {...m, beta: e.value},
+  "cadence" => {...m, cadence: e.value},
+  "notify" => {...m, notify: e.value},
+  "sync" => {...m, sync: e.value},
+  "quality" => if e.value.is_missing() then m else {...m, quality: e.value},
+  "copies" => {...m, copies: clamp(m.copies + to_int(e.value), 0, 9)},
+  _ => m,
+}
+
+# --- Icons: 24-unit strokes in the current text colour. -----------------------------------
+
+ICONS = {
+  home: ["M4 10.5 12 4l8 6.5V19a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z"],
+  star: ["M12 3.5l2.6 5.3 5.9.9-4.25 4.15 1 5.85L12 16.9l-5.25 2.8 1-5.85L3.5 9.7l5.9-.9z"],
+  trash: ["M4 7h16", "M9.5 7V4.5h5V7", "M6.5 7l.9 12.5a1 1 0 0 0 1 .9h7.2a1 1 0 0 0 1-.9L17.5 7"],
+  folder: ["M3.5 7a1.5 1.5 0 0 1 1.5-1.5h4.2l2 2H19a1.5 1.5 0 0 1 1.5 1.5v8.5A1.5 1.5 0 0 1 19 19H5a1.5 1.5 0 0 1-1.5-1.5z"],
+  image: ["M5 4.5h14A1.5 1.5 0 0 1 20.5 6v12a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 18V6A1.5 1.5 0 0 1 5 4.5z", "M9 8.2a1.8 1.8 0 1 0 0 3.6 1.8 1.8 0 0 0 0-3.6z", "M20.5 15.5l-5-5-9.5 9"],
+  doc: ["M7 3.5h7l4.5 4.5v11a1.5 1.5 0 0 1-1.5 1.5H7A1.5 1.5 0 0 1 5.5 19V5A1.5 1.5 0 0 1 7 3.5z", "M13.5 3.5V8.5h5", "M8.5 13h7", "M8.5 16.5h5"],
+  sheet: ["M5 4.5h14A1.5 1.5 0 0 1 20.5 6v12a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 18V6A1.5 1.5 0 0 1 5 4.5z", "M3.5 10h17", "M3.5 15h17", "M10 4.5v15"],
+  chart: ["M4 20V10", "M10 20V4", "M16 20v-7", "M22 20H2"],
+  search: ["M10.5 4a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13z", "M20 20l-4.6-4.6"],
+  more: ["M12 6.5h.01", "M12 12h.01", "M12 17.5h.01"],
+  plus: ["M12 5v14", "M5 12h14"],
+  minus: ["M5 12h14"],
+  cloud: ["M7.5 18.5a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18.4 9.1 4.25 4.25 0 0 1 17.5 18.5z"],
+  check: ["M5 12.5l4.5 4.5L19 7.5"],
+  bell: ["M6 16V11a6 6 0 1 1 12 0v5l1.5 2h-15z", "M10 20.5a2 2 0 0 0 4 0"],
+  share: ["M12 15V4", "M8 7.5 12 3.5l4 4", "M5 12v6.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V12"],
+  chevron: ["M9.5 6l6 6-6 6"],
+  close: ["M6 6l12 12", "M18 6 6 18"],
+  pen: ["M15.5 4.5l4 4L9 19H5v-4z"],
+  sparkle: ["M12 3v4", "M12 17v4", "M3 12h4", "M17 12h4", "M6 6l2.5 2.5", "M15.5 15.5 18 18", "M6 18l2.5-2.5", "M15.5 8.5 18 6"],
+}
+
+fn icon(name, cls = "ic") = ui.el("svg", {class: cls, aria: {hidden: true}, attrs: {viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round"}},
+  ICONS.get(name).map((d) => ui.el("path", {attrs: {d: d}}, [])))
+
+fn present(xs) = xs.filter((x) => not x.is_missing())
+fn on_if(base, on) = if on then "{base} on" else base
+fn btn(caption, msg, kind, value = missing, ico = missing) = ui.el("button", {class: "lx-btn {kind}", click: msg, value: value, attrs: {type: "button"}}, present([if ico.is_missing() then missing else icon(ico, "ic sm"), ui.text(caption)]))
+fn ibtn(ico, label, msg, value = missing, expanded = missing) = ui.el("button", {class: "lx-ibtn", click: msg, value: value, aria: {label: label, expanded: expanded}, attrs: {type: "button", title: label}}, [icon(ico)])
+
+# A segmented control: one choice of a few, as a radio group of buttons.
+fn segmented(label, value, options, msg, small = false) = ui.el("div", {class: if small then "lx-seg sm" else "lx-seg", role: "radiogroup", aria: {label: label}},
+  options.map((o) => ui.el("button", {class: on_if("lx-seg-item", o[0] == value), role: "radio", click: msg, value: o[0], aria: {checked: o[0] == value}, attrs: {type: "button"}}, [ui.text(o[1])])))
+
+fn switch_row(label, hint, on, msg) = ui.el("label", {class: "lx-switch-row"}, [
+  ui.el("span", {class: "lx-row-text"}, [ui.el("span", {class: "lx-strong"}, [ui.text(label)]), ui.el("span", {class: "lx-meta"}, [ui.text(hint)])]),
+  ui.el("span", {class: "lx-switch"}, [
+    ui.el("input", {role: "switch", change: msg, aria: {label: label}, attrs: {type: "checkbox", checked: on}}, []),
+    ui.el("span", {class: "track", aria: {hidden: true}}, [ui.el("span", {class: "thumb"}, [])]),
+  ]),
+])
+
+fn avatar(i) = ui.el("span", {class: "lx-avatar a{i % 5}", attrs: {title: PEOPLE[i]}}, [ui.text(PEOPLE[i].take(1))])
+fn badge(text, tone) = ui.el("span", {class: "lx-badge {tone}"}, [ui.text(text)])
+fn txt(cls, s) = ui.el("span", {class: cls}, [ui.text(s)])
+fn two_lines(a, b) = ui.el("span", {class: "lx-row-text"}, [txt("lx-strong", a), txt("lx-meta", b)])
+
+# --- One app, drawn by whichever design its pane is in. -----------------------------------
+
+fn rail(m) = ui.el("nav", {class: "lx-rail mat-frame", aria: {label: "Sections"}}, [
+  ui.el("div", {class: "lx-logo"}, [icon("cloud")]),
+  ].concat([["files", "home", "Files"], ["controls", "sparkle", "Controls"], ["activity", "chart", "Activity"]].map((t) =>
+    ui.el("button", {class: on_if("lx-nav", m.tab == t[0]), click: "tab", value: t[0], aria: {current: if m.tab == t[0] then "page" else missing}, attrs: {type: "button"}}, [
+      ui.el("span", {class: "pill"}, [icon(t[1])]), txt("lx-nav-label", t[2]),
+  ]))).concat([ui.el("div", {class: "lx-grow"}, []), avatar(0)]))
+
+fn topbar(m, pane) = ui.el("header", {class: "lx-top mat-frame"}, [
+  ui.el("div", {class: "lx-search"}, [icon("search", "ic sm"), txt("lx-search-text", "Search"), ui.el("kbd", {class: "lx-kbd"}, [ui.text("⌘K")])]),
+  ibtn("bell", "Notifications", "toast"),
+  ibtn("more", "More", "menu", pane, m.menu == pane),
+])
+
+fn files_tab(m) = do {
+  shown = m.files.filter((i) => m.chip == "all" or FILES[i].icon == m.chip)
+  ui.el("div", {class: "lx-stack"}, [
+    ui.el("nav", {class: "lx-crumbs", aria: {label: "Breadcrumb"}}, [
+      ui.text("Home"), icon("chevron", "ic xs"), ui.text("Projects"), icon("chevron", "ic xs"),
+      ui.el("span", {class: "lx-strong", aria: {current: "page"}}, [ui.text("2027")]),
+    ]),
+    ui.el("div", {class: "lx-title-row"}, [ui.el("h2", {class: "lx-title"}, [ui.text("Projects")]), txt("lx-meta", "{shown.count()} items")]),
+    ui.el("div", {class: "lx-chips"}, [["all", "All"], ["image", "Images"], ["doc", "Docs"], ["folder", "Folders"]].map((c) =>
+      ui.el("button", {class: on_if("lx-chip", m.chip == c[0]), click: "chip", value: c[0], aria: {pressed: m.chip == c[0]}, attrs: {type: "button"}}, present([if m.chip == c[0] then icon("check", "ic xs") else missing, ui.text(c[1])])))),
+    ui.el("div", {class: "lx-list mat-card"}, if shown.count() == 0 then [ui.el("div", {class: "lx-empty"}, [icon("folder", "ic lg"), txt("lx-strong", "Nothing here"), txt("lx-meta", "Try another filter.")])] else shown.map((i) => do {
+      f = FILES[i]
+      ui.el("button", {class: on_if("lx-item", m.sel == i), click: "sel", value: "{i}", key: "f{i}", layout: true, exit: "fade", attrs: {type: "button"}}, [
+        ui.el("span", {class: "lx-file-ic t{f.tint}"}, [icon(f.icon)]),
+        ui.el("span", {class: "lx-row-text"}, [txt("lx-name", f.name), txt("lx-meta", f.meta)]),
+        txt("lx-size", f.size),
+      ])
+    })),
+    ui.el("section", {class: "lx-card mat-card"}, [
+      ui.el("div", {class: "lx-between"}, [two_lines("Cloud storage", "31.6 of 50 GB used"), badge("Pro", "accent")]),
+      ui.el("div", {class: "lx-meter", role: "meter", aria: {label: "Storage used", valuenow: 63, valuemin: 0, valuemax: 100}}, [ui.el("span", {style: {width: "63%"}}, [])]),
+      ui.el("div", {class: "lx-actions"}, [btn("Upgrade", "toast", "filled"), btn("Share", "sheet", "tonal", missing, "share")]),
+    ]),
+  ])
+}
+
+fn ring(pct) = do {
+  c = 2.0 * pi * 15.0
+  ui.el("svg", {class: "lx-ring", role: "img", aria: {label: "{pct}% complete"}, attrs: {viewBox: "0 0 36 36"}}, [
+    ui.el("circle", {class: "lx-ring-track", attrs: {cx: "18", cy: "18", r: "15"}}, []),
+    ui.el("circle", {class: "lx-ring-fill", attrs: {cx: "18", cy: "18", r: "15", "stroke-dasharray": "{c:.2f}", "stroke-dashoffset": "{c * (1.0 - pct / 100.0):.2f}"}}, []),
+    ui.el("text", {attrs: {x: "18", y: "21", "text-anchor": "middle"}}, [ui.text("{pct}")]),
+  ])
+}
+
+fn choice(kind, msg, name, value, on, label) = ui.el("label", {class: "lx-check"}, [
+  ui.el("input", {change: msg, attrs: {type: kind, name: name, value: value, checked: on}}, []),
+  ui.el("span", {class: if kind == "radio" then "lx-radio-dot" else "lx-box", aria: {hidden: true}}, if kind == "radio" then [] else [icon("check", "ic xs")]),
+  ui.text(label),
+])
+
+fn controls_tab(m) = ui.el("div", {class: "lx-stack"}, [
+  ui.el("div", {class: "lx-title-row"}, [ui.el("h2", {class: "lx-title"}, [ui.text("Settings")]), badge(if m.sync then "Synced" else "Offline", if m.sync then "success" else "warning")]),
+  ui.el("div", {class: "lx-cols"}, [
+    ui.el("section", {class: "lx-card mat-card"}, [
+      ui.el("label", {class: "lx-field"}, [
+        txt("lx-label", "Project name"),
+        ui.el("input", {class: "lx-input", input: "name", attrs: {value: m.name, placeholder: "Untitled", maxlength: "32"}}, []),
+        txt("lx-meta", "{m.name.count()} / 32"),
+      ]),
+      ui.el("label", {class: "lx-field"}, [
+        txt("lx-label", "Visibility"),
+        ui.el("select", {class: "lx-input lx-select", change: "vis"}, [["private", "Only me"], ["team", "My team"], ["public", "Anyone with the link"]].map((o) => ui.el("option", {attrs: {value: o[0], selected: o[0] == m.vis}}, [ui.text(o[1])]))),
+      ]),
+      ui.el("div", {class: "lx-field"}, [txt("lx-label", "Layout"), segmented("Layout", m.view, [["list", "List"], ["grid", "Grid"], ["board", "Board"]], "view")]),
+    ]),
+    ui.el("section", {class: "lx-card mat-card"}, [
+      switch_row("Notifications", "Mentions and reviews", m.notify, "notify"),
+      switch_row("Auto-sync", "Keep files up to date", m.sync, "sync"),
+      ui.el("div", {class: "lx-divider"}, []),
+      ui.el("div", {class: "lx-field", role: "radiogroup", aria: {label: "Digest"}}, [txt("lx-label", "Digest")].concat([["daily", "Daily"], ["weekly", "Weekly"], ["never", "Never"]].map((o) => choice("radio", "cadence", "cadence", o[0], m.cadence == o[0], o[1])))),
+      choice("checkbox", "agree", "agree", "on", m.agree, "Share usage data"),
+      choice("checkbox", "beta", "beta", "on", m.beta, "Try beta features"),
+    ]),
+    ui.el("section", {class: "lx-card mat-card"}, [
+      ui.el("div", {class: "lx-between"}, [txt("lx-label", "Export quality"), txt("lx-value", "{m.quality}%")]),
+      ui.el("input", {class: "lx-range", input: "quality", aria: {label: "Export quality"}, attrs: {type: "range", min: "0", max: "100", value: "{m.quality}", style: "--p: {m.quality}%"}}, []),
+      ui.el("div", {class: "lx-between"}, [
+        txt("lx-label", "Copies"),
+        ui.el("div", {class: "lx-stepper"}, [ibtn("minus", "Fewer copies", "copies", "-1"), ui.el("span", {class: "lx-value", aria: {live: "polite"}}, [ui.text("{m.copies}")]), ibtn("plus", "More copies", "copies", "1")]),
+      ]),
+      ui.el("div", {class: "lx-between"}, [two_lines("Rendering", "{m.quality}% of frames done"), ring(m.quality)]),
+      ui.el("div", {class: "lx-skeleton", aria: {hidden: true}}, [ui.el("span", {}, []), ui.el("span", {}, []), ui.el("span", {class: "short"}, [])]),
+    ]),
+    ui.el("section", {class: "lx-card mat-card"}, [
+      txt("lx-label", "Buttons"),
+      ui.el("div", {class: "lx-wrap"}, [btn("Filled", "toast", "filled"), btn("Tonal", "toast", "tonal"), btn("Outline", "toast", "outline"), btn("Text", "toast", "text")]),
+      ui.el("div", {class: "lx-wrap"}, [btn("Delete", "trash", "danger", missing, "trash"), btn("Share", "sheet", "outline", missing, "share"), ibtn("pen", "Edit", "toast"), ibtn("star", "Star", "star")]),
+      ui.el("div", {class: "lx-between"}, [
+        ui.el("div", {class: "lx-avatars"}, range(0, 5).map((i) => avatar(i)).concat([ui.el("span", {class: "lx-avatar more"}, [ui.text("+3")])])),
+        ui.el("div", {class: "lx-wrap"}, [badge("New", "accent"), badge("Live", "success"), badge("Late", "danger")]),
+      ]),
+    ]),
+  ]),
+])
+
+fn spark(seed) = do {
+  ys = range(0, 12).map((i) => 10.0 + 8.0 * sin(i * 0.9 + seed) + i * 0.8)
+  pts = range(0, 12).map((i) => "{i * 10},{30.0 - ys[i]:.1f}").join(" ")
+  ui.el("svg", {class: "lx-spark", aria: {hidden: true}, attrs: {viewBox: "0 0 110 30", preserveAspectRatio: "none"}}, [ui.el("polyline", {attrs: {points: pts}}, [])])
+}
+
+fn activity_tab(m) = ui.el("div", {class: "lx-stack"}, [
+  ui.el("div", {class: "lx-title-row"}, [ui.el("h2", {class: "lx-title"}, [ui.text("Activity")]), txt("lx-meta", "Last 30 days")]),
+  ui.el("div", {class: "lx-stats"}, [["Shipped", "128", "+12%", 0.3], ["Reviews", "46", "+4%", 1.7], ["Blocked", "3", "−2", 2.9]].map((s) =>
+    ui.el("div", {class: "lx-stat mat-card"}, [txt("lx-meta", s[0]), txt("lx-big", s[1]), txt("lx-delta", s[2]), spark(s[3])]))),
+  ui.el("div", {class: "lx-table-wrap mat-card", role: "region", aria: {label: "Issues"}, attrs: {tabindex: "0"}}, [
+    ui.el("table", {class: "lx-table"}, [
+      ui.el("thead", {}, [ui.el("tr", {}, ["Issue", "Title", "Owner", "Status", "Pts"].map((h) => ui.el("th", {attrs: {scope: "col"}}, [ui.text(h)])))]),
+      ui.el("tbody", {}, ROWS.map((r) => ui.el("tr", {key: r.id}, [
+        ui.el("td", {class: "lx-mono"}, [ui.text(r.id)]), ui.el("td", {}, [ui.text(r.title)]),
+        ui.el("td", {}, [ui.el("span", {class: "lx-owner"}, [avatar(r.owner), ui.text(PEOPLE[r.owner])])]),
+        ui.el("td", {}, [badge(r.status[0], r.status[1])]), ui.el("td", {class: "lx-num"}, [ui.text("{r.points}")]),
+      ]))),
+    ]),
+  ]),
+])
+
+fn menu(m, pane) = if m.menu != pane then missing else ui.el("div", {class: "lx-menu mat-overlay", role: "menu", enter: "pop", exit: "fade", dismiss: "close-menu", key: "menu-{pane}"}, [
+  ["Share…", "share", "sheet"], ["Add to starred", "star", "star"], ["Move to trash", "trash", "trash"],
+  ].map((it) => ui.el("button", {class: "lx-menu-item", role: "menuitem", click: it[2], attrs: {type: "button", tabindex: "-1"}}, [icon(it[1], "ic sm"), ui.text(it[0])])))
+
+fn sheet(m) = if not m.sheet then [] else [
+  ui.el("div", {class: "lx-scrim", key: "scrim", enter: "fade", exit: "fade", click: "close-sheet"}, []),
+  ui.el("section", {class: "lx-sheet mat-overlay", key: "sheet", enter: "rise", exit: "fade", dismiss: "close-sheet", role: "dialog", aria: {label: "Share"}}, [
+    ui.el("div", {class: "lx-grabber", aria: {hidden: true}}, []),
+    ui.el("div", {class: "lx-between"}, [ui.el("h3", {class: "lx-title sm"}, [ui.text("Share “{FILES[m.sel].name}”")]), ibtn("close", "Close", "close-sheet")]),
+    ui.el("div", {class: "lx-search lx-invite"}, [txt("lx-search-text", "Add people or groups")]),
+    ui.el("div", {class: "lx-people"}, range(0, 3).map((i) => ui.el("div", {class: "lx-between"}, [
+      ui.el("span", {class: "lx-owner"}, [avatar(i), two_lines(PEOPLE[i], if i == 0 then "Owner" else "Can edit")]),
+    ]))),
+    ui.el("div", {class: "lx-actions end"}, [btn("Cancel", "close-sheet", "text"), btn("Send invite", "share", "filled")]),
+  ]),
+]
+
+fn toasts(m) = ui.el("div", {class: "lx-toasts", role: "status", aria: {live: "polite"}}, m.toasts.map((t) =>
+  ui.el("div", {class: "lx-toast mat-overlay", key: "t{t.id}", enter: "rise", exit: "fade", layout: true}, present([
+    txt("lx-grow", t.text),
+    if t.undo.is_missing() then missing else btn("Undo", "undo", "text", "{t.undo}"),
+    ui.el("button", {class: "lx-ibtn sm", click: "dismiss", value: "{t.id}", aria: {label: "Dismiss"}, attrs: {type: "button"}}, [icon("close", "ic xs")]),
 ]))))
 
-fn toolbar(pane) = ui.el("header", {class: "bar glassy"}, [
-  ui.el("div", {class: "search"}, [icon("search"), ui.el("span", {}, [ui.text("Search files")])]),
-  ui.el("button", {class: "ibtn", click: "menu", value: pane, aria: {label: "More", expanded: false}, attrs: {type: "button"}}, [icon("more")]),
-])
-
-fn chips(m) = ui.el("div", {class: "chips"}, CHIPS.map((c) => ui.el("button", {class: if m.chip == c[0] then "chip on" else "chip", click: "chip", value: c[0], aria: {pressed: m.chip == c[0]}, attrs: {type: "button"}}, [
-  if m.chip == c[0] then icon("check", "ic sm") else missing,
-  ui.text(c[1]),
-  ].filter((x) => not x.is_missing()))))
-
-fn rows(m) = ui.el("div", {class: "list"}, range(0, FILES.count()).map((i) => do {
-  f = FILES[i]
-  ui.el("button", {class: if m.sel == i then "item on" else "item", click: "sel", value: "{i}", key: "f{i}", attrs: {type: "button"}}, [
-    ui.el("span", {class: "badge-ic t{f.tint}"}, [icon(f.icon)]),
-    ui.el("span", {class: "item-text"}, [ui.el("span", {class: "item-name"}, [ui.text(f.name)]), ui.el("span", {class: "item-meta"}, [ui.text(f.meta)])]),
-    ui.el("span", {class: "item-size"}, [ui.text(f.size)]),
-  ])
-}))
-
-fn panel(m) = ui.el("section", {class: "panel"}, [
-  ui.el("div", {class: "panel-head"}, [
-    ui.el("div", {}, [ui.el("div", {class: "panel-title"}, [ui.text("Cloud sync")]), ui.el("div", {class: "item-meta"}, [ui.text("31.6 of 50 GB used")])]),
-    ui.el("label", {class: "sw"}, [
-      ui.el("input", {role: "switch", change: "sync", aria: {label: "Cloud sync"}, attrs: {type: "checkbox", checked: m.sync}}, []),
-      ui.el("span", {class: "track", aria: {hidden: true}}, [ui.el("span", {class: "thumb"}, [])]),
-    ]),
-  ]),
-  ui.el("div", {class: "meter", aria: {hidden: true}}, [ui.el("span", {style: {width: "63%"}}, [])]),
-  ui.el("div", {class: "actions"}, [
-    ui.el("button", {class: "b-filled", attrs: {type: "button"}}, [ui.text("Upgrade")]),
-    ui.el("button", {class: "b-tonal", attrs: {type: "button"}}, [ui.text("Manage")]),
-  ]),
-])
-
-fn menu(m, pane) = if m.menu != pane then missing else ui.el("div", {class: "menu glassy", role: "menu", enter: "pop", dismiss: "close-menu", key: "menu-{pane}"}, [
-  ["Rename", "doc"], ["Add to starred", "star"], ["Move to trash", "trash"],
-  ].map((it) => ui.el("button", {class: "menu-item", role: "menuitem", click: "close-menu", attrs: {type: "button", tabindex: "-1"}}, [icon(it[1]), ui.text(it[0])])))
-
-fn frame_of(m, pane) = ui.el("div", {class: "win"}, [
+fn app_window(m, pane) = ui.el("div", {class: "lx-win"}, [
   rail(m),
-  ui.el("main", {class: "content"}, [
-    toolbar(pane),
-    ui.el("div", {class: "scroll"}, [
-      ui.el("div", {class: "title-row"}, [ui.el("h2", {class: "title"}, [ui.text("Projects")]), ui.el("span", {class: "item-meta"}, [ui.text("5 items")])]),
-      chips(m),
-      rows(m),
-      panel(m),
-    ]),
-    ui.el("button", {class: "fab", aria: {label: "New"}, attrs: {type: "button"}}, [icon("plus")]),
+  ui.el("main", {class: "lx-content"}, present([
+    topbar(m, pane),
+    ui.el("div", {class: "lx-scroll"}, [match m.tab { "controls" => controls_tab(m), "activity" => activity_tab(m), _ => files_tab(m) }]),
+    if m.tab == "files" then ui.el("button", {class: "lx-fab", click: "toast", aria: {label: "New file"}, attrs: {type: "button"}}, [icon("plus")]) else missing,
     menu(m, pane),
-    ].filter((x) => not x.is_missing())),
+    ]).concat(sheet(m)).concat([toasts(m)])),
 ])
 
 PANES = [
-  {id: "glass", letter: "A", name: "Glass", blurb: "Translucent, blurred surfaces over a vivid backdrop. Depth from light, not shadow."},
-  {id: "tonal", letter: "B", name: "Material tonal", blurb: "Colour roles from one seed. Tonal surfaces, state layers, pill shapes, a FAB."},
-  {id: "hybrid", letter: "C", name: "Hybrid", blurb: "Tonal, solid content for reading; glass only on the frame: rail, toolbar, menus."},
+  {id: "glass", letter: "A", name: "Glass", blurb: "Translucent, blurred surfaces over a backdrop the design generates."},
+  {id: "tonal", letter: "B", name: "Tonal", blurb: "Solid surfaces layered by tone from one seed. Calm and fast everywhere."},
+  {id: "hybrid", letter: "C", name: "Hybrid", blurb: "Solid content for reading; glass only on the frame, menus and sheets."},
 ]
 
-fn pane(m, p) = ui.el("figure", {class: "pane m-{p.id}{if m.solid then " solid" else ""}", key: p.id}, [
-  ui.el("figcaption", {class: "cap"}, [
-    ui.el("span", {class: "letter"}, [ui.text(p.letter)]),
-    ui.el("span", {}, [ui.el("strong", {}, [ui.text(p.name)]), ui.el("span", {class: "blurb"}, [ui.text(p.blurb)])]),
+fn pane(m, p) = ui.el("figure", {class: "lx-pane", key: p.id}, [
+  ui.el("figcaption", {class: "lx-cap"}, [
+    txt("lx-letter", p.letter),
+    ui.el("span", {}, [ui.el("strong", {}, [ui.text(p.name)]), txt("lx-blurb", p.blurb)]),
   ]),
-  ui.el("div", {class: "stage"}, [frame_of(m, p.id)]),
+  ui.scoped(m.designs.get(p.id), ui.el("div", {class: "lx-stage"}, [app_window(m, p.id)]), "lx-scope"),
 ])
+
+fn swatch(m, s) = ui.el("button", {class: on_if("lx-swatch", m.seed == s), click: "seed", value: s, aria: {label: "Seed colour {s}", pressed: m.seed == s}, attrs: {type: "button"}, style: {background: s}}, [])
+
+fn group(label, control, cls = "lab-label") = ui.el("div", {class: "lab-group"}, [txt(cls, label), control])
 
 fn controls(m) = ui.el("header", {class: "lab-top"}, [
-  ui.el("div", {}, [ui.el("h1", {}, [ui.text("Design lab")]), ui.el("p", {class: "lab-sub"}, [ui.text("One accent hue, three directions. Everything is live: click, toggle, open the ⋯ menu.")])]),
+  ui.el("div", {class: "lab-title"}, [ui.el("h1", {}, [ui.text("Design lab")]), ui.el("p", {class: "lab-sub"}, [ui.text("One seed, three materials, every text colour proven AA. All three panes share one model.")])]),
   ui.el("div", {class: "lab-controls"}, [
-    ui.el("label", {class: "hue"}, [
-      ui.el("span", {}, [ui.text("Accent hue {m.hue}°")]),
-      ui.el("input", {class: "hue-slider", input: "hue", aria: {label: "Accent hue"}, attrs: {type: "range", min: "0", max: "359", step: "1", value: "{m.hue}"}}, []),
-    ]),
-    ui.toggle("dark", "Dark", m.dark, "dark"),
-    ui.toggle("solid", "Reduce transparency", m.solid, "solid"),
+    group("Seed", ui.el("div", {class: "lab-swatches"}, SEEDS.map((s) => swatch(m, s)))),
+    group(if m.seed == "" then "Hue {m.hue}°" else "Hue", ui.el("input", {class: "hue-slider", input: "hue", aria: {label: "Accent hue"}, attrs: {type: "range", min: "0", max: "359", step: "1", value: "{m.hue}"}}, [])),
+    group("Shape", segmented("Shape", m.shape, [["sharp", "Sharp"], ["soft", "Soft"], ["round", "Round"]], "shape", true)),
+    group("Density", segmented("Density", m.density, [["comfortable", "Cozy"], ["compact", "Compact"]], "density", true)),
+    group("Effects", segmented("Effects", m.effects, [["auto", "Auto"], ["full", "Full"], ["light", "Light"]], "effects", true), "lab-label perf-note"),
+    group("View", segmented("View", m.layout, [["compare", "All"], ["glass", "A"], ["tonal", "B"], ["hybrid", "C"]], "layout", true)),
+    group("Mode", ui.toggle("dark", "Dark", m.dark, "dark")),
   ]),
 ])
 
-fn view(m) = ui.el("div", {class: "lab", attrs: {style: "--h: {m.hue}"}}, [
+fn view(m) = ui.el("div", {class: "lab"}, [
   controls(m),
-  ui.el("div", {class: "panes"}, PANES.map((p) => pane(m, p))),
+  ui.el("div", {class: "lx-panes {m.layout}"}, PANES.filter((p) => m.layout == "compare" or m.layout == p.id).map((p) => pane(m, p))),
 ])
 
 STYLE = """
-#root { max-width: none; padding: 18px 22px 22px; }
-.lab { display: flex; flex-direction: column; gap: 16px; }
-.lab-top { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; flex-wrap: wrap; }
-.lab-top h1 { font-size: 22px; margin: 0; }
-.lab-sub { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
-.lab-controls { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
-.hue { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
-.hue-slider { -webkit-appearance: none; appearance: none; width: 220px; height: 12px; border-radius: 99px; outline-offset: 3px;
-  background: linear-gradient(90deg, oklch(.65 .19 0), oklch(.65 .19 60), oklch(.65 .19 120), oklch(.65 .19 180), oklch(.65 .19 240), oklch(.65 .19 300), oklch(.65 .19 359)); }
-.hue-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 20px; height: 20px; border-radius: 50%; background: #fff; border: 2px solid rgba(0,0,0,.25); box-shadow: 0 1px 4px rgba(0,0,0,.3); }
-.panes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
-.pane { margin: 0; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
-.cap { display: flex; gap: 10px; align-items: flex-start; font-size: 13px; min-height: 40px; }
-.cap strong { display: block; font-size: 14px; }
-.blurb { color: var(--muted); font-size: 12px; line-height: 1.35; display: block; }
-.letter { flex: none; width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center; font-weight: 700; font-size: 13px;
-  background: var(--fg); color: var(--bg); }
+#root { max-width: none; padding: 14px 18px 18px; }
+body { background: var(--bg); }
+.lab { display: flex; flex-direction: column; gap: 12px; }
+.lab-top { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px 20px; flex-wrap: wrap; }
+.lab-title h1 { font-size: 20px; margin: 0; letter-spacing: -.02em; }
+.lab-sub { margin: 2px 0 0; color: var(--muted); font-size: 12.5px; }
+.lab-controls { display: flex; gap: 10px 16px; align-items: flex-end; flex-wrap: wrap; }
+.lab-group { display: flex; flex-direction: column; gap: 4px; }
+.lab-label { font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+:root[data-perf="light"] .perf-note::after { content: " · no GPU here, so Auto = Light"; text-transform: none; letter-spacing: 0; font-weight: 500; }
+.lab-swatches { display: flex; gap: 5px; height: 30px; align-items: center; }
+.lx-swatch { width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--surface); box-shadow: 0 0 0 1px var(--line-strong); cursor: pointer; padding: 0;
+  transition: transform calc(var(--spring-bouncy-ms) * 1ms) var(--spring-bouncy); }
+.lx-swatch:hover { transform: scale(1.12); }
+.lx-swatch.on { box-shadow: 0 0 0 2px var(--fg); transform: scale(1.12); }
+.hue-slider { -webkit-appearance: none; appearance: none; width: 150px; height: 10px; border-radius: 99px; margin: 10px 0;
+  background: linear-gradient(90deg, #f43f5e, #f59e0b, #84cc16, #10b981, #06b6d4, #3b82f6, #8b5cf6, #ec4899, #f43f5e); }
+.hue-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%; background: #fff; border: 2px solid rgba(0,0,0,.25); box-shadow: 0 1px 4px rgba(0,0,0,.3); }
+.lab .switch { min-height: 30px; }
 
-/* --- One stage: a backdrop and a window on it. Colour tokens per direction follow. --- */
-.stage { position: relative; height: 610px; border-radius: 22px; padding: 18px; overflow: hidden; isolation: isolate; }
-.win { position: relative; height: 100%; display: grid; grid-template-columns: 76px 1fr; overflow: hidden;
-  border-radius: var(--win-r); background: var(--win-bg); box-shadow: var(--win-shadow); border: 1px solid var(--win-line); color: var(--on); }
-.ic { width: 20px; height: 20px; flex: none; }
-.ic.sm { width: 16px; height: 16px; }
-button { font: inherit; color: inherit; }
+.lx-panes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.lx-panes:not(.compare) { grid-template-columns: minmax(0, 1fr); }
+.lx-pane { margin: 0; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.lx-cap { display: flex; gap: 10px; align-items: flex-start; font-size: 13px; min-height: 34px; }
+.lx-cap strong { display: block; font-size: 13.5px; }
+.lx-blurb { color: var(--muted); font-size: 12px; line-height: 1.35; display: block; }
+.lx-letter { flex: none; width: 24px; height: 24px; border-radius: 7px; display: grid; place-items: center; font-weight: 700; font-size: 12px; background: var(--fg); color: var(--bg); }
 
-.rail { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 14px 0; }
-.logo { width: 38px; height: 38px; border-radius: 12px; display: grid; place-items: center; margin-bottom: 10px; background: var(--pri); color: var(--on-pri); box-shadow: var(--glow); }
-.nav { display: flex; flex-direction: column; align-items: center; gap: 3px; background: none; border: 0; padding: 4px 0; cursor: pointer; color: var(--on-2); width: 100%; }
-.nav .pill { width: 52px; height: 30px; border-radius: 99px; display: grid; place-items: center; transition: background-color var(--dur-2) ease, color var(--dur-2) ease; }
-.nav-label { font-size: 11px; font-weight: 500; }
-.nav:hover .pill { background: var(--hover); }
-.nav.on { color: var(--on); }
-.nav.on .pill { background: var(--pri-c); color: var(--on-pri-c); }
+/* --- The stage and the window, from the design's tokens. ------------------------------ */
+.lx-scope { border-radius: 22px; overflow: hidden; contain: layout paint; }
+.lx-stage { position: relative; height: max(480px, calc(100vh - 236px)); padding: 14px; background: var(--page); isolation: isolate; font-size: 13.5px; }
+.lx-win { position: relative; height: 100%; display: grid; grid-template-columns: 68px minmax(0, 1fr); overflow: hidden; border-radius: var(--r-xl);
+  box-shadow: var(--e-3), inset 0 1px 0 var(--glass-edge); border: 1px solid var(--frame-line); background: var(--frame-solid); }
+.m-glass .lx-win, .m-hybrid .lx-win { background: transparent; }
+.ic { width: 20px; height: 20px; flex: none; } .ic.sm { width: 17px; height: 17px; } .ic.xs { width: 14px; height: 14px; } .ic.lg { width: 30px; height: 30px; }
+.lx-win button { font: inherit; color: inherit; }
+.lx-grow { flex: 1; }
+.lx-strong { font-weight: 600; }
+.lx-meta { font-size: 12px; color: var(--muted); }
+.lx-row-text { display: flex; flex-direction: column; min-width: 0; }
+.lx-item .lx-row-text { flex: 1; }
+.lx-between { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.lx-wrap { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.lx-stack { display: flex; flex-direction: column; gap: 12px; }
 
-.content { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-.bar { display: flex; gap: 8px; align-items: center; padding: 12px 12px 10px; }
-.search { flex: 1; display: flex; gap: 8px; align-items: center; height: 40px; padding: 0 14px; border-radius: 99px; background: var(--field); color: var(--on-2); font-size: 13px; border: 1px solid var(--field-line); }
-.ibtn { width: 40px; height: 40px; border-radius: 50%; border: 0; background: none; display: grid; place-items: center; cursor: pointer; }
-.ibtn:hover { background: var(--hover); }
-.scroll { flex: 1; overflow: auto; padding: 4px 14px 80px; display: flex; flex-direction: column; gap: 12px; }
-.title-row { display: flex; align-items: baseline; justify-content: space-between; }
-.title { margin: 0; font-size: 20px; font-weight: 650; letter-spacing: -.01em; text-transform: none; color: var(--on); }
-.chips { display: flex; gap: 6px; flex-wrap: wrap; }
-.chip { display: inline-flex; align-items: center; gap: 4px; height: 30px; padding: 0 12px; border-radius: var(--chip-r); border: 1px solid var(--outline); background: transparent; font-size: 12.5px; font-weight: 500; cursor: pointer; color: var(--on-2);
+.lx-rail { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 12px 0; border-right: 1px solid var(--frame-line); }
+.m-tonal .lx-rail { background: var(--surface-2); }
+.lx-logo { width: 36px; height: 36px; border-radius: var(--r-md); display: grid; place-items: center; margin-bottom: 8px; background: var(--accent); color: var(--accent-fg); box-shadow: 0 6px 16px -6px var(--accent-glow); }
+.lx-nav { display: flex; flex-direction: column; align-items: center; gap: 3px; background: none; border: 0; padding: 4px 0; cursor: pointer; color: var(--muted); width: 100%; }
+.lx-nav .pill { width: 48px; height: 30px; border-radius: 99px; display: grid; place-items: center; transition: background-color var(--dur-2) ease, color var(--dur-2) ease; }
+.lx-nav-label { font-size: 10.5px; font-weight: 600; }
+.lx-nav:hover .pill { background: var(--hover); }
+.lx-nav.on { color: var(--fg); }
+.lx-nav.on .pill { background: var(--accent-soft); color: var(--accent-text); }
+
+.lx-content { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; container-type: inline-size; }
+.m-tonal .lx-content, .m-hybrid .lx-content { background: var(--bg); }
+.lx-top { display: flex; gap: 6px; align-items: center; padding: 10px 10px 10px 14px; border-bottom: 1px solid var(--frame-line); position: relative; z-index: 2; }
+.m-tonal .lx-top { background: var(--bg); border-bottom-color: transparent; }
+.lx-search { flex: 1; display: flex; gap: 8px; align-items: center; height: var(--ctl-h); padding: 0 6px 0 12px; border-radius: var(--r-field); background: var(--surface-2); color: var(--muted); font-size: 13px; min-width: 0; }
+.m-glass .lx-search { background: rgba(255, 255, 255, .35); }
+:root[data-theme="dark"] .m-glass .lx-search { background: rgba(255, 255, 255, .07); }
+.lx-search-text { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lx-kbd { font: 600 11px var(--font); padding: 2px 6px; border-radius: 6px; background: var(--surface); color: var(--muted); border: 1px solid var(--line); }
+.lx-ibtn { flex: none; width: 36px; height: 36px; border-radius: 50%; border: 0; background: none; display: grid; place-items: center; cursor: pointer; color: var(--muted);
+  transition: background-color var(--dur-1) ease, transform calc(var(--spring-snappy-ms) * 1ms) var(--spring-snappy); }
+.lx-ibtn:hover { background: var(--hover); color: var(--fg); }
+.lx-ibtn:active { background: var(--press); transform: scale(.92); }
+.lx-ibtn.sm { width: 28px; height: 28px; }
+.lx-scroll { flex: 1; overflow: auto; padding: 12px 14px 90px; overscroll-behavior: contain; }
+
+.lx-crumbs { display: flex; gap: 4px; align-items: center; color: var(--muted); font-size: 12px; }
+.lx-crumbs .lx-strong { color: var(--fg); }
+.lx-title-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.lx-title { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -.02em; text-transform: none; color: var(--fg); }
+.lx-title.sm { font-size: 16px; }
+.lx-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.lx-chip { display: inline-flex; align-items: center; gap: 4px; height: 30px; padding: 0 12px; border-radius: var(--r-chip); border: 1px solid var(--line-strong); background: transparent; font-size: 12.5px; font-weight: 500; cursor: pointer; color: var(--muted);
+  transition: background-color var(--dur-2) ease, border-color var(--dur-2) ease, color var(--dur-2) ease; }
+.lx-chip:hover { background: var(--hover); color: var(--fg); }
+.lx-chip.on { background: var(--accent-soft); color: var(--accent-text); border-color: transparent; }
+
+.lx-list { border-radius: var(--r-lg); padding: 5px; display: flex; flex-direction: column; gap: 1px; }
+.lx-item { display: flex; align-items: center; gap: 10px; padding: 7px 9px; border-radius: var(--r-md); border: 0; background: transparent; text-align: left; cursor: pointer;
+  transition: background-color var(--dur-1) ease; }
+.lx-item:hover { background: var(--hover); }
+.lx-item:active { background: var(--press); }
+.lx-item.on { background: var(--accent-soft); }
+.lx-item.on .lx-name { color: var(--accent-text); }
+.lx-file-ic { width: 34px; height: 34px; border-radius: var(--r-md); display: grid; place-items: center; flex: none; }
+.lx-file-ic.t0 { background: var(--accent-soft); color: var(--accent-text); }
+.lx-file-ic.t1 { background: color-mix(in srgb, var(--chart-4) 16%, var(--surface)); color: var(--chart-4); }
+.lx-file-ic.t2 { background: var(--success-soft); color: var(--success); }
+.lx-file-ic.t3 { background: var(--warning-soft); color: var(--warning); }
+.lx-name { font-size: 13.5px; font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lx-size { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.lx-empty { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 28px 10px; color: var(--muted); }
+
+.lx-card { border-radius: var(--r-lg); padding: 14px; display: flex; flex-direction: column; gap: 12px; box-shadow: var(--e-1), inset 0 1px 0 var(--glass-edge); }
+.m-tonal .lx-card, .m-tonal .lx-list, .m-tonal .lx-stat, .m-tonal .lx-table-wrap { border-color: transparent; box-shadow: none; }
+.lx-meter { height: 8px; border-radius: 99px; background: var(--surface-3); overflow: hidden; }
+.lx-meter > span { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+.lx-actions { display: flex; gap: 8px; } .lx-actions.end { justify-content: flex-end; }
+
+.lx-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: var(--ctl-h); padding: 0 16px; border-radius: var(--r-btn); border: 1px solid transparent;
+  font-weight: 600; font-size: 13px; cursor: pointer; position: relative; overflow: hidden; white-space: nowrap;
+  transition: transform calc(var(--spring-snappy-ms) * 1ms) var(--spring-snappy), box-shadow var(--dur-2) ease, background-color var(--dur-2) ease; }
+.lx-btn::after { content: ""; position: absolute; inset: 0; background: currentColor; opacity: 0; transition: opacity var(--dur-1) ease; pointer-events: none; }
+.lx-btn:hover::after { opacity: .08; } .lx-btn:active::after { opacity: .14; } .lx-btn:active { transform: scale(.96); }
+.lx-btn.filled { background: var(--accent); color: var(--accent-fg); box-shadow: 0 6px 16px -8px var(--accent-glow); }
+.lx-btn.tonal { background: var(--accent-soft); color: var(--accent-text); }
+.lx-btn.outline { border-color: var(--line-strong); color: var(--fg); background: transparent; }
+.lx-btn.text { color: var(--accent-text); background: transparent; padding: 0 10px; }
+.lx-btn.danger { background: var(--danger-soft); color: var(--danger); }
+
+.lx-cols { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+@container (min-width: 620px) { .lx-cols { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@container (min-width: 960px) { .lx-cols { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.lx-field { display: flex; flex-direction: column; gap: 6px; }
+.lx-label { font-size: 12px; font-weight: 600; color: var(--fg); }
+.lx-value { font-weight: 700; font-variant-numeric: tabular-nums; min-width: 2ch; text-align: center; }
+.lx-input { font: 13.5px var(--font); color: var(--fg); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-field);
+  height: var(--ctl-h); padding: 0 12px; width: 100%; transition: border-color var(--dur-2) ease, box-shadow var(--dur-2) ease; }
+.lx-input:hover { border-color: var(--muted); }
+.lx-input:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 22%, transparent); }
+.lx-select { appearance: none; padding-right: 32px; background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 17px) 52%, calc(100% - 12px) 52%; background-size: 5px 5px; background-repeat: no-repeat; }
+.lx-seg { display: inline-flex; padding: 3px; gap: 2px; border-radius: calc(var(--r-btn) + 3px); background: var(--surface-3); }
+.lx-seg-item { border: 0; background: transparent; height: calc(var(--ctl-h) - 8px); padding: 0 12px; border-radius: var(--r-btn); font: 600 12.5px var(--font); color: var(--muted); cursor: pointer;
+  transition: background-color var(--dur-2) ease, color var(--dur-2) ease, box-shadow var(--dur-2) ease; }
+.lx-seg-item:hover { color: var(--fg); }
+.lx-seg-item.on { background: var(--surface); color: var(--fg); box-shadow: var(--e-1); }
+.lx-seg.sm .lx-seg-item { height: 24px; padding: 0 9px; font-size: 12px; }
+.lab .lx-seg { background: var(--surface-2); border: 1px solid var(--line); }
+.lx-switch-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; cursor: pointer; }
+.lx-switch { position: relative; display: inline-flex; flex: none; }
+.lx-switch input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; z-index: 1; }
+.lx-switch .track { width: 44px; height: 26px; border-radius: 99px; background: var(--surface-3); border: 2px solid var(--line-strong); display: flex; align-items: center; padding: 0 3px;
   transition: background-color var(--dur-2) ease, border-color var(--dur-2) ease; }
-.chip:hover { background: var(--hover); }
-.chip.on { background: var(--pri-c); color: var(--on-pri-c); border-color: transparent; }
-.list { display: flex; flex-direction: column; gap: var(--item-gap); background: var(--list-bg); border-radius: var(--card-r); padding: var(--list-pad); border: 1px solid var(--list-line); }
-.item { display: flex; align-items: center; gap: 11px; padding: 8px 10px; border-radius: var(--item-r); border: 0; background: transparent; text-align: left; cursor: pointer; position: relative;
-  transition: background-color var(--dur-2) ease, transform var(--spring-snappy-ms) var(--spring-snappy); }
-.item:hover { background: var(--hover); }
-.item:active { transform: scale(.985); }
-.item.on { background: var(--sel); }
-.badge-ic { width: 36px; height: 36px; border-radius: 11px; display: grid; place-items: center; flex: none; }
-.badge-ic.t0 { background: oklch(var(--tint-l) var(--tint-c) var(--h)); color: oklch(var(--tint-on) .14 var(--h)); }
-.badge-ic.t1 { background: oklch(var(--tint-l) var(--tint-c) calc(var(--h) + 90)); color: oklch(var(--tint-on) .14 calc(var(--h) + 90)); }
-.badge-ic.t2 { background: oklch(var(--tint-l) var(--tint-c) calc(var(--h) + 180)); color: oklch(var(--tint-on) .14 calc(var(--h) + 180)); }
-.badge-ic.t3 { background: oklch(var(--tint-l) var(--tint-c) calc(var(--h) - 60)); color: oklch(var(--tint-on) .14 calc(var(--h) - 60)); }
-.item-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.item-name { font-size: 13.5px; font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.item-meta { font-size: 12px; color: var(--on-2); }
-.item-size { font-size: 12px; color: var(--on-2); font-variant-numeric: tabular-nums; }
-.panel { background: var(--card-bg); border-radius: var(--card-r); padding: 14px; display: flex; flex-direction: column; gap: 12px; border: 1px solid var(--list-line); }
-.panel-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
-.panel-title { font-weight: 600; font-size: 14px; }
-.meter { height: 8px; border-radius: 99px; background: var(--track); overflow: hidden; }
-.meter > span { display: block; height: 100%; border-radius: inherit; background: var(--meter); }
-.actions { display: flex; gap: 8px; }
-.b-filled, .b-tonal { height: 38px; padding: 0 18px; border-radius: var(--btn-r); border: 0; font-weight: 600; font-size: 13px; cursor: pointer; position: relative; overflow: hidden;
-  transition: transform var(--spring-snappy-ms) var(--spring-snappy), box-shadow var(--dur-2) ease, filter var(--dur-2) ease; }
-.b-filled { background: var(--btn-bg); color: var(--on-pri); box-shadow: var(--glow); }
-.b-tonal { background: var(--pri-c); color: var(--on-pri-c); }
-.b-filled::after, .b-tonal::after { content: ""; position: absolute; inset: 0; background: currentColor; opacity: 0; transition: opacity var(--dur-1) ease; }
-.b-filled:hover::after, .b-tonal:hover::after { opacity: .08; }
-.b-filled:active::after, .b-tonal:active::after { opacity: .14; }
-.b-filled:active, .b-tonal:active { transform: scale(.97); }
-.fab { position: absolute; right: 16px; bottom: 16px; width: 54px; height: 54px; border-radius: var(--fab-r); border: 0; display: grid; place-items: center; cursor: pointer;
-  background: var(--fab-bg); color: var(--fab-on); box-shadow: var(--fab-shadow); transition: transform var(--spring-bouncy-ms) var(--spring-bouncy); }
-.fab:hover { transform: translateY(-2px) scale(1.04); }
-.fab:active { transform: scale(.95); }
-.sw { position: relative; display: inline-flex; cursor: pointer; }
-.sw input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
-.sw .track { width: 46px; height: 28px; border-radius: 99px; background: var(--track); border: 2px solid var(--outline); display: flex; align-items: center; padding: 0 4px;
-  transition: background-color var(--dur-2) ease, border-color var(--dur-2) ease; }
-.sw .thumb { width: 16px; height: 16px; border-radius: 50%; background: var(--on-2); transition: transform var(--spring-bouncy-ms) var(--spring-bouncy), width var(--dur-2) ease, background-color var(--dur-2) ease; }
-.sw input:checked + .track { background: var(--pri); border-color: var(--pri); }
-.sw input:checked + .track .thumb { transform: translateX(16px) scale(1.25); background: var(--on-pri); }
-.sw input:focus-visible + .track { outline: 2px solid var(--pri); outline-offset: 2px; }
-.menu { position: absolute; top: 54px; right: 12px; width: 200px; padding: 6px; border-radius: var(--menu-r); display: flex; flex-direction: column; z-index: 5;
-  background: var(--menu-bg); box-shadow: var(--menu-shadow); border: 1px solid var(--win-line); transform-origin: top right; }
-.menu-item { display: flex; gap: 10px; align-items: center; height: 38px; padding: 0 10px; border: 0; background: none; border-radius: calc(var(--menu-r) - 6px); font-size: 13px; cursor: pointer; text-align: left; }
-.menu-item:hover, .menu-item:focus-visible { background: var(--hover); outline: none; }
-.menu-item .ic { width: 18px; height: 18px; color: var(--on-2); }
+.lx-switch .thumb { width: 14px; height: 14px; border-radius: 50%; background: var(--muted);
+  transition: transform calc(var(--spring-bouncy-ms) * 1ms) var(--spring-bouncy), background-color var(--dur-2) ease; }
+.lx-switch input:checked + .track { background: var(--accent); border-color: var(--accent); }
+.lx-switch input:checked + .track .thumb { transform: translateX(17px) scale(1.3); background: var(--accent-fg); }
+.lx-switch input:focus-visible + .track { outline: 2px solid var(--focus); outline-offset: 2px; }
+.lx-divider { height: 1px; background: var(--line); }
+.lx-check { position: relative; display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 13.5px; min-height: 28px; }
+.lx-check input { position: absolute; opacity: 0; width: 20px; height: 20px; margin: 0; cursor: pointer; }
+.lx-box, .lx-radio-dot { width: 20px; height: 20px; flex: none; display: grid; place-items: center; border: 2px solid var(--line-strong); color: transparent;
+  transition: background-color var(--dur-1) ease, border-color var(--dur-1) ease, color var(--dur-1) ease, box-shadow var(--dur-2) ease; }
+.lx-box { border-radius: 6px; } .lx-radio-dot { border-radius: 50%; }
+.lx-check input:checked + .lx-box { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.lx-check input:checked + .lx-radio-dot { border-color: var(--accent); box-shadow: inset 0 0 0 4px var(--surface), inset 0 0 0 10px var(--accent); }
+.lx-check input:focus-visible + span { outline: 2px solid var(--focus); outline-offset: 2px; }
+.lx-check:hover .lx-box, .lx-check:hover .lx-radio-dot { border-color: var(--muted); }
+.lx-range { -webkit-appearance: none; appearance: none; width: 100%; height: 6px; border-radius: 99px; margin: 8px 0;
+  background: linear-gradient(90deg, var(--accent) var(--p), var(--surface-3) var(--p)); }
+.lx-range::-webkit-slider-thumb { -webkit-appearance: none; width: 20px; height: 20px; border-radius: 50%; background: var(--surface); border: 5px solid var(--accent); box-shadow: var(--e-1);
+  transition: transform calc(var(--spring-bouncy-ms) * 1ms) var(--spring-bouncy); }
+.lx-range:active::-webkit-slider-thumb { transform: scale(1.2); }
+.lx-range:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
+.lx-stepper { display: inline-flex; align-items: center; gap: 4px; padding: 2px; border-radius: 99px; background: var(--surface-3); }
+.lx-ring { width: 46px; height: 46px; transform: rotate(-90deg); }
+.lx-ring-track { fill: none; stroke: var(--surface-3); stroke-width: 4; }
+.lx-ring-fill { fill: none; stroke: var(--accent); stroke-width: 4; stroke-linecap: round; transition: stroke-dashoffset calc(var(--spring-gentle-ms) * 1ms) var(--spring-gentle); }
+.lx-ring text { transform: rotate(90deg); transform-origin: 18px 18px; font: 700 10px var(--font); fill: var(--fg); }
+.lx-skeleton { display: flex; flex-direction: column; gap: 8px; }
+.lx-skeleton span { height: 10px; border-radius: 99px; background: linear-gradient(90deg, var(--surface-3) 0%, var(--surface-2) 40%, var(--surface-3) 80%); background-size: 300% 100%; animation: lx-shimmer 1.6s ease-in-out infinite; }
+.lx-skeleton span.short { width: 60%; }
+@keyframes lx-shimmer { from { background-position: 100% 0; } to { background-position: 0 0; } }
+.lx-avatars { display: flex; }
+.lx-avatar { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; font: 700 11.5px var(--font); color: #fff; flex: none; border: 2px solid var(--surface); }
+.lx-avatars .lx-avatar + .lx-avatar { margin-left: -8px; }
+.lx-avatar.a0 { background: #6d5bd0; } .lx-avatar.a1 { background: #c2410c; } .lx-avatar.a2 { background: #0f766e; } .lx-avatar.a3 { background: #be185d; } .lx-avatar.a4 { background: #1d4ed8; }
+.lx-avatar.more { background: var(--surface-3); color: var(--fg); }
+.lx-rail .lx-avatar { width: 32px; height: 32px; }
+.lx-badge { display: inline-flex; align-items: center; height: 22px; padding: 0 9px; border-radius: 99px; font-size: 11.5px; font-weight: 650; white-space: nowrap; background: var(--surface-3); color: var(--fg); }
+.lx-badge.accent { background: var(--accent-soft); color: var(--accent-text); } .lx-badge.success { background: var(--success-soft); color: var(--success); }
+.lx-badge.danger { background: var(--danger-soft); color: var(--danger); } .lx-badge.warning { background: var(--warning-soft); color: var(--warning); }
 
-/* --- A. Glass. ----------------------------------------------------------------------- */
-.m-glass .stage { background:
-  radial-gradient(60% 50% at 12% 18%, oklch(.74 .19 var(--h)) 0, transparent 70%),
-  radial-gradient(55% 45% at 92% 12%, oklch(.82 .15 calc(var(--h) + 70)) 0, transparent 70%),
-  radial-gradient(60% 55% at 78% 92%, oklch(.72 .19 calc(var(--h) - 70)) 0, transparent 70%),
-  radial-gradient(50% 40% at 20% 85%, oklch(.85 .12 calc(var(--h) + 150)) 0, transparent 70%),
-  oklch(.9 .05 var(--h)); }
-.m-glass {
-  --on: oklch(.2 .03 var(--h)); --on-2: oklch(.36 .04 var(--h)); --outline: oklch(1 0 0 / .55);
-  --pri: oklch(.55 .22 var(--h)); --on-pri: #fff; --pri-c: oklch(1 0 0 / .62); --on-pri-c: oklch(.38 .18 var(--h));
-  --win-r: 26px; --win-bg: oklch(1 0 0 / .26); --win-line: oklch(1 0 0 / .55);
-  --win-shadow: 0 30px 60px -20px oklch(.3 .1 var(--h) / .45), inset 0 1px 0 oklch(1 0 0 / .7);
-  --hover: oklch(1 0 0 / .35); --sel: oklch(1 0 0 / .6); --field: oklch(1 0 0 / .45); --field-line: oklch(1 0 0 / .6);
-  --list-bg: oklch(1 0 0 / .3); --list-line: oklch(1 0 0 / .5); --card-bg: oklch(1 0 0 / .4); --list-pad: 6px; --item-gap: 2px;
-  --card-r: 20px; --item-r: 14px; --chip-r: 99px; --btn-r: 99px; --menu-r: 18px; --fab-r: 50%;
-  --btn-bg: linear-gradient(135deg, oklch(.6 .22 var(--h)), oklch(.58 .22 calc(var(--h) + 40)));
-  --glow: 0 6px 18px -4px oklch(.55 .22 var(--h) / .6);
-  --fab-bg: linear-gradient(135deg, oklch(.62 .21 var(--h)), oklch(.6 .22 calc(var(--h) + 40))); --fab-on: #fff; --fab-shadow: 0 12px 28px -6px oklch(.5 .22 var(--h) / .7);
-  --track: oklch(1 0 0 / .45); --meter: linear-gradient(90deg, oklch(.6 .22 var(--h)), oklch(.7 .18 calc(var(--h) + 60)));
-  --menu-bg: oklch(1 0 0 / .55); --menu-shadow: 0 20px 40px -10px oklch(.3 .1 var(--h) / .4);
-  --tint-l: .97; --tint-c: .04; --tint-on: .5;
-}
-.m-glass .win, .m-glass .menu, .m-hybrid .glassy, .m-hybrid .menu { -webkit-backdrop-filter: blur(28px) saturate(1.7); backdrop-filter: blur(28px) saturate(1.7); }
-.m-glass .list, .m-glass .panel { -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); }
+.lx-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 10px; }
+.lx-stat { border-radius: var(--r-lg); padding: 12px; display: flex; flex-direction: column; gap: 2px; box-shadow: var(--e-1), inset 0 1px 0 var(--glass-edge); min-width: 0; }
+.lx-big { font-size: 24px; font-weight: 750; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.lx-delta { font-size: 12px; font-weight: 600; color: var(--success); }
+.lx-spark { width: 100%; height: 30px; margin-top: 6px; }
+.lx-spark polyline { fill: none; stroke: var(--accent); stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; stroke-linecap: round; }
+.lx-table-wrap { border-radius: var(--r-lg); overflow: auto; max-height: 300px; box-shadow: var(--e-1); }
+.lx-table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 12.5px; }
+.lx-table th { position: sticky; top: 0; z-index: 1; text-align: left; font-weight: 650; color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em;
+  height: var(--row); padding: 0 12px; background: var(--surface-2); border-bottom: 1px solid var(--line); white-space: nowrap; }
+.lx-table td { height: var(--row); padding: 0 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.lx-table tbody tr { transition: background-color var(--dur-1) ease; }
+.lx-table tbody tr:hover { background: var(--hover); }
+.lx-mono { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.lx-num { text-align: right; font-variant-numeric: tabular-nums; }
+.lx-owner { display: inline-flex; align-items: center; gap: 8px; }
+.lx-table .lx-avatar { width: 22px; height: 22px; font-size: 10px; border-width: 0; }
 
-/* --- B. Material tonal. ---------------------------------------------------------------- */
-.m-tonal .stage { background: oklch(.93 .025 var(--h)); }
-.m-tonal {
-  --on: oklch(.22 .02 var(--h)); --on-2: oklch(.42 .03 var(--h)); --outline: oklch(.74 .025 var(--h));
-  --pri: oklch(.5 .19 var(--h)); --on-pri: #fff; --pri-c: oklch(.9 .07 var(--h)); --on-pri-c: oklch(.3 .13 var(--h));
-  --win-r: 28px; --win-bg: oklch(.985 .008 var(--h)); --win-line: transparent; --win-shadow: 0 1px 3px oklch(.2 .05 var(--h) / .15), 0 8px 24px -8px oklch(.2 .05 var(--h) / .2);
-  --hover: oklch(.5 .1 var(--h) / .08); --sel: oklch(.92 .045 var(--h)); --field: oklch(.94 .02 var(--h)); --field-line: transparent;
-  --list-bg: oklch(.96 .014 var(--h)); --list-line: transparent; --card-bg: oklch(.95 .02 var(--h)); --list-pad: 6px; --item-gap: 2px;
-  --card-r: 20px; --item-r: 14px; --chip-r: 8px; --btn-r: 99px; --menu-r: 14px; --fab-r: 16px;
-  --btn-bg: var(--pri); --glow: none;
-  --fab-bg: oklch(.88 .08 var(--h)); --fab-on: oklch(.28 .13 var(--h)); --fab-shadow: 0 3px 8px oklch(.2 .05 var(--h) / .25);
-  --track: oklch(.9 .02 var(--h)); --meter: var(--pri);
-  --menu-bg: oklch(.95 .02 var(--h)); --menu-shadow: 0 6px 18px oklch(.2 .05 var(--h) / .22);
-  --tint-l: .92; --tint-c: .06; --tint-on: .42;
-}
-.m-tonal .rail { background: oklch(.955 .016 var(--h)); }
-
-/* --- C. Hybrid: tonal content, glass frame. ------------------------------------------- */
-.m-hybrid .stage { background:
-  radial-gradient(70% 60% at 0% 0%, oklch(.8 .13 var(--h)) 0, transparent 70%),
-  radial-gradient(60% 60% at 100% 100%, oklch(.84 .1 calc(var(--h) + 60)) 0, transparent 70%),
-  oklch(.93 .03 var(--h)); }
-.m-hybrid {
-  --on: oklch(.22 .02 var(--h)); --on-2: oklch(.42 .03 var(--h)); --outline: oklch(.76 .025 var(--h));
-  --pri: oklch(.52 .2 var(--h)); --on-pri: #fff; --pri-c: oklch(.9 .07 var(--h)); --on-pri-c: oklch(.3 .14 var(--h));
-  --win-r: 24px; --win-bg: oklch(1 0 0 / .35); --win-line: oklch(1 0 0 / .6); --win-shadow: 0 24px 50px -18px oklch(.3 .1 var(--h) / .4), inset 0 1px 0 oklch(1 0 0 / .7);
-  --hover: oklch(.5 .1 var(--h) / .08); --sel: oklch(.92 .05 var(--h)); --field: oklch(1 0 0 / .6); --field-line: oklch(1 0 0 / .7);
-  --list-bg: oklch(.99 .005 var(--h)); --list-line: oklch(.9 .02 var(--h)); --card-bg: oklch(.97 .015 var(--h)); --list-pad: 6px; --item-gap: 2px;
-  --card-r: 18px; --item-r: 12px; --chip-r: 99px; --btn-r: 12px; --menu-r: 16px; --fab-r: 18px;
-  --btn-bg: var(--pri); --glow: 0 4px 14px -4px oklch(.52 .2 var(--h) / .55);
-  --fab-bg: var(--pri); --fab-on: #fff; --fab-shadow: 0 10px 24px -6px oklch(.5 .2 var(--h) / .6);
-  --track: oklch(.9 .02 var(--h)); --meter: var(--pri);
-  --menu-bg: oklch(1 0 0 / .6); --menu-shadow: 0 18px 40px -12px oklch(.3 .1 var(--h) / .4);
-  --tint-l: .93; --tint-c: .06; --tint-on: .45;
-}
-.m-hybrid .content { background: oklch(.985 .006 var(--h) / .92); border-left: 1px solid oklch(1 0 0 / .5); }
-.m-hybrid .bar { background: oklch(1 0 0 / .4); border-bottom: 1px solid oklch(.9 .02 var(--h) / .6); }
-
-/* --- Dark. ------------------------------------------------------------------------------ */
-:root[data-theme="dark"] .m-glass .stage { background:
-  radial-gradient(60% 50% at 12% 18%, oklch(.45 .17 var(--h)) 0, transparent 70%),
-  radial-gradient(55% 45% at 92% 12%, oklch(.45 .14 calc(var(--h) + 70)) 0, transparent 70%),
-  radial-gradient(60% 55% at 78% 92%, oklch(.42 .17 calc(var(--h) - 70)) 0, transparent 70%),
-  oklch(.18 .03 var(--h)); }
-:root[data-theme="dark"] .m-glass {
-  --on: oklch(.96 .01 var(--h)); --on-2: oklch(.8 .03 var(--h)); --outline: oklch(1 0 0 / .18);
-  --pri: oklch(.72 .17 var(--h)); --on-pri: oklch(.18 .05 var(--h)); --pri-c: oklch(1 0 0 / .16); --on-pri-c: oklch(.95 .03 var(--h));
-  --win-bg: oklch(.2 .02 var(--h) / .4); --win-line: oklch(1 0 0 / .14); --win-shadow: 0 30px 60px -20px oklch(0 0 0 / .7), inset 0 1px 0 oklch(1 0 0 / .12);
-  --hover: oklch(1 0 0 / .08); --sel: oklch(1 0 0 / .14); --field: oklch(1 0 0 / .08); --field-line: oklch(1 0 0 / .12);
-  --list-bg: oklch(1 0 0 / .05); --list-line: oklch(1 0 0 / .1); --card-bg: oklch(1 0 0 / .07);
-  --btn-bg: linear-gradient(135deg, oklch(.74 .16 var(--h)), oklch(.72 .16 calc(var(--h) + 40)));
-  --fab-bg: linear-gradient(135deg, oklch(.74 .16 var(--h)), oklch(.72 .16 calc(var(--h) + 40))); --fab-on: oklch(.18 .05 var(--h));
-  --track: oklch(1 0 0 / .12); --menu-bg: oklch(.25 .02 var(--h) / .6); --tint-l: .32; --tint-c: .06; --tint-on: .85;
-}
-:root[data-theme="dark"] .m-tonal .stage { background: oklch(.13 .015 var(--h)); }
-:root[data-theme="dark"] .m-tonal {
-  --on: oklch(.93 .01 var(--h)); --on-2: oklch(.76 .025 var(--h)); --outline: oklch(.45 .02 var(--h));
-  --pri: oklch(.8 .12 var(--h)); --on-pri: oklch(.25 .1 var(--h)); --pri-c: oklch(.36 .1 var(--h)); --on-pri-c: oklch(.92 .05 var(--h));
-  --win-bg: oklch(.18 .012 var(--h)); --win-shadow: 0 8px 24px -8px oklch(0 0 0 / .6);
-  --hover: oklch(.9 .05 var(--h) / .08); --sel: oklch(.3 .05 var(--h)); --field: oklch(.24 .015 var(--h));
-  --list-bg: oklch(.21 .014 var(--h)); --card-bg: oklch(.23 .018 var(--h));
-  --fab-bg: oklch(.38 .1 var(--h)); --fab-on: oklch(.92 .05 var(--h));
-  --track: oklch(.28 .015 var(--h)); --menu-bg: oklch(.25 .016 var(--h)); --tint-l: .32; --tint-c: .07; --tint-on: .85;
-}
-:root[data-theme="dark"] .m-tonal .rail { background: oklch(.2 .014 var(--h)); }
-:root[data-theme="dark"] .m-hybrid .stage { background:
-  radial-gradient(70% 60% at 0% 0%, oklch(.4 .14 var(--h)) 0, transparent 70%),
-  radial-gradient(60% 60% at 100% 100%, oklch(.38 .1 calc(var(--h) + 60)) 0, transparent 70%),
-  oklch(.16 .02 var(--h)); }
-:root[data-theme="dark"] .m-hybrid {
-  --on: oklch(.94 .01 var(--h)); --on-2: oklch(.77 .025 var(--h)); --outline: oklch(.45 .02 var(--h));
-  --pri: oklch(.76 .15 var(--h)); --on-pri: oklch(.2 .06 var(--h)); --pri-c: oklch(.36 .1 var(--h)); --on-pri-c: oklch(.93 .04 var(--h));
-  --win-bg: oklch(.2 .02 var(--h) / .45); --win-line: oklch(1 0 0 / .12); --win-shadow: 0 24px 50px -18px oklch(0 0 0 / .7), inset 0 1px 0 oklch(1 0 0 / .1);
-  --hover: oklch(.9 .05 var(--h) / .08); --sel: oklch(.32 .06 var(--h)); --field: oklch(1 0 0 / .08); --field-line: oklch(1 0 0 / .12);
-  --list-bg: oklch(.2 .012 var(--h)); --list-line: oklch(.28 .015 var(--h)); --card-bg: oklch(.22 .016 var(--h));
-  --fab-on: oklch(.2 .06 var(--h)); --track: oklch(.3 .015 var(--h)); --menu-bg: oklch(.24 .02 var(--h) / .65); --tint-l: .32; --tint-c: .07; --tint-on: .85;
-}
-:root[data-theme="dark"] .m-hybrid .content { background: oklch(.17 .012 var(--h) / .92); border-left-color: oklch(1 0 0 / .08); }
-:root[data-theme="dark"] .m-hybrid .bar { background: oklch(1 0 0 / .04); border-bottom-color: oklch(1 0 0 / .08); }
-
-/* --- Reduce transparency: glass falls back to solid surfaces of the same colour role. --- */
-.solid .win, .solid .menu, .solid .glassy, .solid .list, .solid .panel { -webkit-backdrop-filter: none !important; backdrop-filter: none !important; }
-.solid.m-glass { --win-bg: oklch(.97 .015 var(--h)); --menu-bg: oklch(.97 .015 var(--h)); --list-bg: oklch(.99 .006 var(--h)); --card-bg: oklch(.95 .02 var(--h));
-  --sel: oklch(.9 .05 var(--h)); --pri-c: oklch(.9 .06 var(--h)); --field: oklch(.94 .02 var(--h)); --hover: oklch(.5 .1 var(--h) / .08); }
-.solid.m-hybrid { --win-bg: oklch(.96 .018 var(--h)); --menu-bg: oklch(.97 .015 var(--h)); --field: oklch(.94 .02 var(--h)); }
-:root[data-theme="dark"] .solid.m-glass { --win-bg: oklch(.2 .02 var(--h)); --menu-bg: oklch(.24 .02 var(--h)); --list-bg: oklch(.23 .015 var(--h)); --card-bg: oklch(.25 .02 var(--h));
-  --sel: oklch(.32 .06 var(--h)); --pri-c: oklch(.36 .1 var(--h)); --field: oklch(.26 .015 var(--h)); --hover: oklch(.9 .05 var(--h) / .08); }
-:root[data-theme="dark"] .solid.m-hybrid { --win-bg: oklch(.2 .02 var(--h)); --menu-bg: oklch(.24 .02 var(--h)); --field: oklch(.26 .015 var(--h)); }
-
-@media (max-width: 1100px) { .panes { grid-template-columns: 1fr; } }
+.lx-fab { position: absolute; right: 16px; bottom: 16px; width: 54px; height: 54px; border-radius: max(var(--r-lg), 16px); border: 0; display: grid; place-items: center; cursor: pointer; z-index: 3;
+  background: var(--accent); color: var(--accent-fg); box-shadow: 0 12px 26px -8px var(--accent-glow), var(--e-2); transition: transform calc(var(--spring-bouncy-ms) * 1ms) var(--spring-bouncy); }
+.lx-fab:hover { transform: translateY(-2px) scale(1.05); }
+.lx-fab:active { transform: scale(.94); }
+.lx-menu { position: absolute; top: 52px; right: 10px; width: 200px; padding: 5px; border-radius: var(--r-lg); display: flex; flex-direction: column; z-index: 6; transform-origin: top right; }
+.lx-menu-item { display: flex; gap: 10px; align-items: center; height: 36px; padding: 0 10px; border: 0; background: none; border-radius: var(--r-md); font-size: 13px; cursor: pointer; text-align: left; }
+.lx-menu-item:hover, .lx-menu-item:focus-visible { background: var(--hover); outline: none; }
+.lx-menu-item:last-child { color: var(--danger); }
+.lx-scrim { position: absolute; inset: 0; background: var(--scrim); z-index: 7; }
+.lx-sheet { position: absolute; left: 8px; right: 8px; bottom: 8px; z-index: 8; border-radius: var(--r-xl); padding: 8px 16px 16px; display: flex; flex-direction: column; gap: 12px; }
+.lx-grabber { width: 36px; height: 4px; border-radius: 99px; background: var(--line-strong); align-self: center; }
+.lx-invite { flex: none; border: 1px solid var(--line-strong); background: transparent; }
+.lx-people { display: flex; flex-direction: column; gap: 10px; }
+.lx-toasts { position: absolute; left: 12px; right: 12px; bottom: 12px; display: flex; flex-direction: column; gap: 8px; z-index: 9; pointer-events: none; }
+.lx-toast { pointer-events: auto; display: flex; align-items: center; gap: 6px; padding: 6px 6px 6px 14px; border-radius: var(--r-lg); font-size: 13px; font-weight: 500; min-height: 44px; }
+@media (max-width: 1100px) { .lx-panes { grid-template-columns: minmax(0, 1fr); } }
 """
 
 spec = {
@@ -372,7 +566,9 @@ spec = {
   update: update,
   view: view,
   style: STYLE,
+  design: ui.design({seed: "#4f46e5", material: "tonal", density: "compact"}),
   theme: (m) => if m.dark then "dark" else "light",
+  subscriptions: (m) => if m.toasts.count() == 0 then [] else [ui.every(1000, "tick")],
 }
 
 fn main(port: Int = 8080, open: Bool = false, window: Bool = false) = ui.app({...spec, port: port, open: open, window: if window then {width: 1260, height: 820} else false})

@@ -73,7 +73,7 @@ export fn badge(s, tone = "neutral") = el("span", {class: "badge {tone}"}, [text
 
 # --- Containers. -------------------------------------------------------------------------
 
-export fn card(title, children) = el("section", {class: "card"}, [el("h2", {}, [text(title)])].concat(children))
+export fn card(title, children) = el("section", {class: "card mat-card"}, [el("h2", {}, [text(title)])].concat(children))
 export fn stat(name, value) = el("div", {class: "stat"}, [el("span", {class: "stat-name"}, [text(name)]), el("span", {class: "stat-value"}, [text(value)])])
 
 # --- Buttons. ----------------------------------------------------------------------------
@@ -166,7 +166,7 @@ export fn progress(label, value, max = 1.0) = el("div", {class: "progress", role
 # toast rises in, fades out, and the others glide into place. Dismissing sends `{msg, value:
 # "<id>"}`; the app removes it (a timer in `subscriptions` can expire them).
 export fn toasts(items, dismiss) = el("div", {class: "toasts", role: "status", aria: {live: "polite"}}, items.map((t) =>
-  el("div", {key: "toast-{t.id}", class: "toast {t.get("tone") ?? "neutral"}", enter: "rise", exit: "fade", layout: true}, [
+  el("div", {key: "toast-{t.id}", class: "toast mat-overlay {t.get("tone") ?? "neutral"}", enter: "rise", exit: "fade", layout: true}, [
     el("span", {class: "toast-text"}, [text(t.text)]),
     icon_button("✕", "Dismiss", dismiss, "{t.id}"),
 ])))
@@ -202,7 +202,7 @@ export fn menu(id, caption, open, toggle, items) = do {
   trigger = el("button", {id: "{id}-button", class: "btn default", click: toggle,
     aria: {haspopup: "menu", expanded: open, controls: if open then "{id}-menu" else missing},
     attrs: {type: "button"}}, [text(caption), el("span", {class: "caret", aria: {hidden: true}}, [text("▾")])])
-  list = if not open then [] else [el("div", {key: "{id}-menu", id: "{id}-menu", role: "menu", class: "menu-list", enter: "pop", exit: "fade", aria: {labelledby: "{id}-button"}},
+  list = if not open then [] else [el("div", {key: "{id}-menu", id: "{id}-menu", role: "menu", class: "menu-list mat-overlay", enter: "pop", exit: "fade", aria: {labelledby: "{id}-button"}},
     range(0, items.count()).map((i) => el("button", {role: "menuitem", class: "menu-item", click: items[i].msg, value: items[i].get("value"),
       attrs: {type: "button", tabindex: "-1", autofocus: i == 0}}, [text(items[i].label)])))]
   el("div", {class: "menu", dismiss: if open then toggle else missing}, [trigger].concat(list))
@@ -212,7 +212,7 @@ export fn menu(id, caption, open, toggle, items) = do {
 # inert, and gives focus back to whatever opened it. Escape, a press on the backdrop or the
 # close button send `close`; the app sets `open` to false.
 export fn dialog(id, open, title, children, close, actions = []) = el("dialog", {
-  id: id, class: "dialog", dismiss: close, aria: {labelledby: "{id}-title"},
+  id: id, class: "dialog mat-overlay", dismiss: close, aria: {labelledby: "{id}-title"},
   attrs: {"data-modal": "true", "data-open": if open then "true" else "false"},
   }, [
     el("header", {class: "dialog-head"}, [el("h2", {id: "{id}-title"}, [text(title)]), icon_button("✕", "Close", close)]),
@@ -491,6 +491,302 @@ fn local_host(rt, req) = do {
 }
 fn set_cookie(rt) = "{rt.cookie}={rt.token}; HttpOnly; SameSite=Strict; Path=/"
 
+# --- Colour. --------------------------------------------------------------------------------
+#
+# The design system's colours are COMPUTED, not chosen: one seed colour becomes every role of
+# a light and a dark palette, in OKLCH — the colour space where equal steps of lightness look
+# equal, so a palette built by lightness reads the same at any hue. Each colour is fitted to
+# what an sRGB screen can show by losing chroma only (lightness and hue are what the eye holds
+# on to), and each text colour is moved in lightness just far enough to reach its WCAG ratio
+# on every surface it can sit on. So contrast is a property the engine PROVES for any seed —
+# `ui.contrast_report(design)` lists every pair it checked — not one a designer hopes for.
+
+HEXD = "0123456789abcdef".chars()
+
+fn cube(x) = x * x * x
+
+fn lab_to_linear(lab) = do {
+  l = cube(lab[0] + 0.3963377774 * lab[1] + 0.2158037573 * lab[2])
+  m = cube(lab[0] - 0.1055613458 * lab[1] - 0.0638541728 * lab[2])
+  s = cube(lab[0] - 0.0894841775 * lab[1] - 1.291485548 * lab[2])
+  [4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s, -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s, -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s]
+}
+fn lch_to_linear(c) = lab_to_linear([c.l, c.c * cos(c.h * pi / 180.0), c.c * sin(c.h * pi / 180.0)])
+fn in_gamut(rgb) = rgb.filter((v) => v < -0.00001 or v > 1.00001).count() == 0
+
+# The most chroma this lightness and hue can show on an sRGB screen, up to the colour's own.
+fn fit(c) = if in_gamut(lch_to_linear(c)) then c else do {
+  lohi = range(0, 14).reduce([0.0, c.c], (lh, i) => do {
+    mid = (lh[0] + lh[1]) / 2.0
+    if in_gamut(lch_to_linear({...c, c: mid})) then [mid, lh[1]] else [lh[0], mid]
+  })
+  {...c, c: lohi[0]}
+}
+
+fn encode(v) = do {
+  x = clamp(v, 0.0, 1.0)
+  if x <= 0.0031308 then 12.92 * x else 1.055 * x ** (1.0 / 2.4) - 0.055
+}
+fn decode(v) = if v <= 0.04045 then v / 12.92 else ((v + 0.055) / 1.055) ** 2.4
+
+# A colour as the 8-bit channels a screen shows, and as CSS.
+fn bytes_of(c) = lch_to_linear(fit(c)).map((v) => clamp(round(encode(v) * 255.0), 0, 255))
+fn hex2(n) = "{HEXD[floor(n / 16)]}{HEXD[n % 16]}"
+export fn hex_of(c) = do {
+  b = bytes_of(c)
+  "#{hex2(b[0])}{hex2(b[1])}{hex2(b[2])}"
+}
+fn rgba_of(c, a) = do {
+  b = bytes_of(c)
+  "rgba({b[0]}, {b[1]}, {b[2]}, {a})"
+}
+
+# `#rrggbb` as OKLCH: `{l, c, h}`.
+export fn parse_hex(s) = do {
+  t = "{s}".trim().lower()
+  h = if t.starts_with("#") then t.drop(1) else t
+  ok = if h.count() == 6 and h.re_match("^[0-9a-f]+$") then true else raise("`{s}` is not a #rrggbb colour", "a seed is six hex digits, like \"#4f46e5\"; or give `hue:` (0 to 359) instead.")
+  rgb = [0, 2, 4].map((i) => decode(to_int(h.drop(i).take(2), 16) / 255.0))
+  l = cbrt(0.4122214708 * rgb[0] + 0.5363325363 * rgb[1] + 0.0514459929 * rgb[2])
+  m = cbrt(0.2119034982 * rgb[0] + 0.6806995451 * rgb[1] + 0.1073969566 * rgb[2])
+  q = cbrt(0.0883024619 * rgb[0] + 0.2817188376 * rgb[1] + 0.6299787005 * rgb[2])
+  lab = [0.2104542553 * l + 0.793617785 * m - 0.0040720468 * q, 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * q, 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * q]
+  hue = atan2(lab[2], lab[1]) * 180.0 / pi
+  {l: lab[0], c: sqrt(lab[1] * lab[1] + lab[2] * lab[2]), h: if hue < 0.0 then hue + 360.0 else hue}
+}
+
+# WCAG 2 contrast between two colours as the screen shows them (8-bit, after gamut fitting).
+fn luminance_of(b) = do {
+  v = b.map((x) => decode(x / 255.0))
+  0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2]
+}
+fn ratio_of(a, b) = do {
+  x = luminance_of(a)
+  y = luminance_of(b)
+  (max(x, y) + 0.05) / (min(x, y) + 0.05)
+}
+export fn contrast(fg, bg) = ratio_of(bytes_of(fg), bytes_of(bg))
+
+# `fg` moved in lightness, away from `bg`, just far enough to read on it at `need`:1 — a
+# bisection between where it is and black (or white), so at most twelve contrast checks.
+fn legible(fg, bg, need) = if contrast(fg, bg) >= need then fg else do {
+  far = if fg.l >= bg.l then 1.0 else 0.0
+  lohi = range(0, 12).reduce([fg.l, far], (lh, i) => do {
+    mid = (lh[0] + lh[1]) / 2.0
+    if contrast({...fg, l: mid}, bg) >= need then [lh[0], mid] else [mid, lh[1]]
+  })
+  {...fg, l: lohi[1]}
+}
+
+fn lch(l, c, h) = {l: l, c: c, h: h}
+WHITE = lch(1.0, 0.0, 0.0)
+
+# A translucent tint (8-bit channels) over what is under it, as the compositor blends it.
+fn over(t, a, u) = [0, 1, 2].map((i) => round(a * t[i] + (1.0 - a) * u[i]))
+
+# --- Designs. -------------------------------------------------------------------------------
+#
+# `ui.design({seed: "#4f46e5", material: "hybrid", shape: "soft", density: "comfortable"})` —
+# or `hue:` (0 to 359) instead of `seed:` — is a whole look: both palettes, the material, the
+# corner shapes and the spacing. Give it to an app as `design:`; `ui.scoped(design, node)`
+# gives one part of a view its own (a dark sidebar, a branded card, a live preview).
+#
+# MATERIALS. `tonal` is solid, colour-layered surfaces. `glass` is translucent, blurred
+# surfaces over a colourful backdrop the design generates from the seed. `hybrid` keeps the
+# content solid and readable and makes only the frame glass: toolbars and sidebars
+# (`.mat-frame`), menus, dialogs and toasts. Glass is opaque enough to keep text at 4.5:1 over
+# the brightest and darkest part of its own backdrop — the alpha is solved, not guessed.
+#
+# EFFECTS. Blur is the one costly thing here, so it is used only where it shows, and turned
+# off where it would stutter: without GPU compositing (the client checks), under the
+# platform's "reduce transparency", or when an app says `effects: "light"`. Then glass is
+# drawn as a solid surface of the same role, which is also what high contrast needs.
+
+# The status hues stay put whatever the accent: red means danger in every design.
+fn status_role(dark, hue, chroma, soft_c) = do {
+  soft = if dark then lch(0.29, soft_c * 1.4, hue) else lch(0.955, soft_c, hue)
+  base = if dark then lch(0.78, chroma * 0.8, hue) else lch(0.5, chroma, hue)
+  ground = if dark then lch(0.2, 0.016, hue) else WHITE
+  {soft: soft, fg: legible(legible(base, soft, 4.5), ground, 4.5)}
+}
+
+# Every colour role of one mode, as OKLCH.
+fn roles(dark, h, c0) = do {
+  bg = if dark then lch(0.16, 0.014, h) else lch(0.975, 0.01, h)
+  surface = if dark then lch(0.2, 0.016, h) else lch(0.997, 0.003, h)
+  surface2 = if dark then lch(0.24, 0.018, h) else lch(0.962, 0.013, h)
+  surface3 = if dark then lch(0.28, 0.02, h) else lch(0.935, 0.018, h)
+  fg = legible(if dark then lch(0.95, 0.01, h) else lch(0.2, 0.02, h), surface3, 7.0)
+  muted = legible(if dark then lch(0.77, 0.022, h) else lch(0.48, 0.028, h), surface3, 4.5)
+  accent0 = if dark then lch(0.76, min(c0, 0.16), h) else lch(0.53, c0, h)
+  accent = if dark then legible(accent0, surface3, 3.0) else legible(legible(accent0, WHITE, 4.5), surface3, 3.0)
+  soft = if dark then lch(0.34, min(c0, 0.1), h) else lch(0.925, min(c0, 0.08) * 0.85, h)
+  danger = status_role(dark, 27.0, 0.19, 0.03)
+  success = status_role(dark, 150.0, 0.13, 0.04)
+  warning = status_role(dark, 75.0, 0.12, 0.05)
+  {
+    bg: bg, surface: surface, surface_2: surface2, surface_3: surface3, fg: fg, muted: muted,
+    line: if dark then lch(0.31, 0.02, h) else lch(0.905, 0.014, h),
+    line_strong: legible(if dark then lch(0.5, 0.02, h) else lch(0.72, 0.02, h), surface, 3.0),
+    accent: accent,
+    accent_fg: if dark then legible(lch(0.2, 0.05, h), accent, 4.5) else WHITE,
+    accent_soft: soft,
+    accent_text: legible(legible(if dark then lch(0.85, 0.1, h) else lch(0.45, c0 * 0.9, h), soft, 4.5), surface3, 4.5),
+    danger: danger.fg, danger_soft: danger.soft, success: success.fg, success_soft: success.soft, warning: warning.fg, warning_soft: warning.soft,
+    charts: [0.0, 140.0, 60.0, 200.0, 290.0].map((d) => legible(if dark then lch(0.74, 0.14, h + d) else lch(0.58, 0.16, h + d), surface, 3.0)).concat([muted]),
+    # The backdrop glass sits on: three soft fields of the accent and its neighbours.
+    blobs: if dark then [lch(0.42, min(c0, 0.17), h), lch(0.42, 0.13, h + 70.0), lch(0.4, 0.16, h - 70.0)] else [lch(0.76, min(c0, 0.18), h), lch(0.84, 0.13, h + 70.0), lch(0.74, 0.17, h - 70.0)],
+  }
+}
+
+# The pairs a component draws one on the other, and the ratio each must reach: 4.5:1 for
+# text, 3:1 for the parts of a control (WCAG 2.2 1.4.3 and 1.4.11).
+PAIRS = [
+  ["fg", "bg", 4.5], ["fg", "surface", 4.5], ["fg", "surface_2", 4.5], ["fg", "surface_3", 4.5],
+  ["muted", "bg", 4.5], ["muted", "surface", 4.5], ["muted", "surface_2", 4.5],
+  ["accent_text", "accent_soft", 4.5], ["accent_text", "surface", 4.5], ["accent_text", "bg", 4.5],
+  ["accent_fg", "accent", 4.5], ["accent", "surface", 3.0], ["accent", "bg", 3.0], ["line_strong", "surface", 3.0],
+  ["danger", "danger_soft", 4.5], ["danger", "surface", 4.5], ["surface", "danger", 4.5],
+  ["success", "success_soft", 4.5], ["warning", "warning_soft", 4.5], ["bg", "fg", 4.5],
+]
+
+# How opaque a glass of `tint` must be for `texts` to keep 4.5:1 over every part of its
+# backdrop: the least alpha, from `least` in steps of 0.05, found by bisection (more opaque
+# only ever helps, so the answer is a threshold).
+fn glass_alpha(tint, under, texts, least) = do {
+  t = bytes_of(tint)
+  us = under.map(bytes_of)
+  ts = texts.map(bytes_of)
+  reads = (a) => us.filter((u) => do {
+    mixed = over(t, a, u)
+    ts.filter((x) => ratio_of(x, mixed) < 4.5).count() > 0
+  }).count() == 0
+  n = floor((0.96 - least) / 0.05)
+  if reads(least) then least else do {
+    lohi = range(0, 5).reduce([0, n], (lh, i) => if lh[1] - lh[0] <= 1 then lh else do {
+      mid = floor((lh[0] + lh[1]) / 2)
+      if reads(least + mid * 0.05) then [lh[0], mid] else [mid, lh[1]]
+    })
+    if reads(least + lohi[1] * 0.05) then least + lohi[1] * 0.05 else 0.96
+  }
+}
+
+# Two dicts as one, the second winning.
+fn merge(a, b) = b.items().reduce(a, (acc, kv) => acc.insert(kv[0], kv[1]))
+
+fn r3(x) = round(x * 1000.0) / 1000.0
+
+# The material's tokens for one mode: how cards, overlays (menus, dialogs, toasts) and the
+# frame are drawn, each with the solid surface it falls back to.
+fn material_tokens(material, dark, r, h) = do {
+  under = r.blobs.concat([r.bg])
+  texts = [r.fg, r.muted]
+  glass_tint = if dark then r.surface else WHITE
+  solve = (least) => if material == "tonal" then 1.0 else r3(glass_alpha(glass_tint, under, texts, least))
+  frame_a = solve(if dark then 0.45 else 0.4)
+  overlay_a = solve(if dark then 0.6 else 0.62)
+  card_a = if material == "glass" then solve(if dark then 0.42 else 0.45) else 1.0
+  glass = (a) => rgba_of(glass_tint, a)
+  edge = if dark then "rgba(255, 255, 255, 0.1)" else "rgba(255, 255, 255, 0.65)"
+  mesh = (soft) => "radial-gradient(60% 55% at 10% 12%, {rgba_of(r.blobs[0], soft)} 0, transparent 70%), radial-gradient(55% 50% at 92% 8%, {rgba_of(r.blobs[1], soft)} 0, transparent 70%), radial-gradient(65% 60% at 80% 95%, {rgba_of(r.blobs[2], soft)} 0, transparent 70%), {hex_of(r.bg)}"
+  blur = (px) => "blur({px}px) saturate(1.7)"
+  solid = {card: hex_of(r.surface), overlay: hex_of(r.surface), frame: hex_of(r.surface_2)}
+  base = {
+    "card-solid": solid.card, "overlay-solid": solid.overlay, "frame-solid": solid.frame,
+    "glass-edge": if material == "tonal" then "transparent" else edge,
+  }
+  looks = match material {
+    "glass" => {"page": mesh(1.0), "card-bg": glass(card_a), "card-line": edge, "card-blur": blur(20), "overlay-bg": glass(overlay_a), "overlay-line": edge, "overlay-blur": blur(28), "frame-bg": glass(frame_a), "frame-line": edge, "frame-blur": blur(28)},
+    "hybrid" => {"page": mesh(0.7), "card-bg": solid.card, "card-line": hex_of(r.line), "card-blur": "none", "overlay-bg": glass(overlay_a), "overlay-line": edge, "overlay-blur": blur(28), "frame-bg": glass(frame_a), "frame-line": edge, "frame-blur": blur(28)},
+    _ => {"page": hex_of(r.bg), "card-bg": solid.card, "card-line": hex_of(r.line), "card-blur": "none", "overlay-bg": solid.overlay, "overlay-line": hex_of(r.line), "overlay-blur": "none", "frame-bg": solid.frame, "frame-line": hex_of(r.line), "frame-blur": "none"},
+  }
+  merge(base, looks)
+}
+
+# One mode's colour tokens as CSS custom property values.
+fn colour_tokens(dark, r, h) = do {
+  ink = if dark then lch(0.05, 0.01, h) else lch(0.25, 0.05, h)
+  hover_ink = if dark then WHITE else r.fg
+  {
+    "bg": hex_of(r.bg), "surface": hex_of(r.surface), "surface-2": hex_of(r.surface_2), "surface-3": hex_of(r.surface_3),
+    "fg": hex_of(r.fg), "muted": hex_of(r.muted), "line": hex_of(r.line), "line-strong": hex_of(r.line_strong),
+    "accent": hex_of(r.accent), "accent-fg": hex_of(r.accent_fg), "accent-soft": hex_of(r.accent_soft), "accent-text": hex_of(r.accent_text),
+    "danger": hex_of(r.danger), "danger-soft": hex_of(r.danger_soft), "success": hex_of(r.success), "success-soft": hex_of(r.success_soft),
+    "warning": hex_of(r.warning), "warning-soft": hex_of(r.warning_soft), "focus": hex_of(r.accent),
+    "chart-1": hex_of(r.charts[0]), "chart-2": hex_of(r.charts[1]), "chart-3": hex_of(r.charts[2]),
+    "chart-4": hex_of(r.charts[3]), "chart-5": hex_of(r.charts[4]), "chart-6": hex_of(r.charts[5]),
+    "hover": rgba_of(hover_ink, if dark then 0.07 else 0.05), "press": rgba_of(hover_ink, if dark then 0.12 else 0.09),
+    "accent-glow": rgba_of(r.accent, 0.45), "scrim": rgba_of(ink, if dark then 0.6 else 0.35),
+    "scroll-thumb": rgba_of(r.muted, 0.45), "scroll-thumb-hover": rgba_of(r.muted, 0.75),
+    "e-1": "0 1px 2px {rgba_of(ink, if dark then 0.5 else 0.06)}, 0 1px 3px {rgba_of(ink, if dark then 0.3 else 0.08)}",
+    "e-2": "0 1px 2px {rgba_of(ink, if dark then 0.5 else 0.05)}, 0 8px 24px -4px {rgba_of(ink, if dark then 0.45 else 0.1)}",
+    "e-3": "0 6px 16px -4px {rgba_of(ink, if dark then 0.5 else 0.12)}, 0 24px 56px -12px {rgba_of(ink, if dark then 0.6 else 0.22)}",
+  }
+}
+
+SHAPES = {
+  sharp: {"r-sm": "3px", "r-md": "5px", "r-lg": "8px", "r-xl": "10px", "r-btn": "5px", "r-field": "5px", "r-chip": "4px"},
+  soft: {"r-sm": "6px", "r-md": "10px", "r-lg": "14px", "r-xl": "20px", "r-btn": "10px", "r-field": "10px", "r-chip": "8px"},
+  round: {"r-sm": "8px", "r-md": "14px", "r-lg": "20px", "r-xl": "28px", "r-btn": "999px", "r-field": "14px", "r-chip": "999px"},
+}
+DENSITIES = {
+  comfortable: {"s-1": "4px", "s-2": "8px", "s-3": "12px", "s-4": "16px", "s-5": "24px", "s-6": "32px", "s-7": "48px", "ctl-h": "38px", "row": "36px"},
+  compact: {"s-1": "3px", "s-2": "6px", "s-3": "9px", "s-4": "12px", "s-5": "18px", "s-6": "24px", "s-7": "36px", "ctl-h": "32px", "row": "30px"},
+}
+MATERIALS = ["tonal", "glass", "hybrid"]
+
+# A design: `seed` ("#rrggbb") or `hue` (0 to 359), `material` (tonal | glass | hybrid),
+# `shape` (sharp | soft | round), `density` (comfortable | compact), `effects` (auto | full |
+# light: whether blur is used — auto decides from the machine).
+export fn design(opts = {}) = do {
+  o = opts ?? {}
+  seed = if not o.get("seed").is_missing() then parse_hex(o.seed) else lch(0.53, 0.2, (o.get("hue") ?? 277) * 1.0)
+  material = o.get("material") ?? "hybrid"
+  shape = o.get("shape") ?? "soft"
+  density = o.get("density") ?? "comfortable"
+  effects = o.get("effects") ?? "auto"
+  checked = if MATERIALS.contains(material) and not SHAPES.get(shape).is_missing() and not DENSITIES.get(density).is_missing() and ["auto", "full", "light"].contains(effects) then true else raise("a design's material is tonal, glass or hybrid; its shape sharp, soft or round; its density comfortable or compact; its effects auto, full or light", "`ui.design({{hue: 160, material: \"glass\", shape: \"round\"}})`")
+  h = seed.h
+  c0 = clamp(seed.c, 0.04, 0.24)
+  light = roles(false, h, c0)
+  dark = roles(true, h, c0)
+  form = merge(SHAPES.get(shape), DENSITIES.get(density))
+  {
+    hue: h, material: material, shape: shape, density: density, effects: effects,
+    light: merge(merge(colour_tokens(false, light, h), material_tokens(material, false, light, h)), form),
+    dark: merge(merge(colour_tokens(true, dark, h), material_tokens(material, true, dark, h)), form),
+    roles: {light: light, dark: dark},
+  }
+}
+
+# Every pair the design's palettes were checked on, in both modes: `{mode, fg, bg, ratio,
+# needs, ok}`. All of them are `ok` by construction; this is how a test proves it.
+export fn contrast_report(d) = ["light", "dark"].flat_map((mode) => PAIRS.map((p) => do {
+  r = d.roles.get(mode)
+  k = contrast(r.get(p[0]), r.get(p[1]))
+  {mode: mode, fg: p[0], bg: p[1], ratio: round(k * 100.0) / 100.0, needs: p[2], ok: k >= p[2]}
+}))
+
+fn decls(tokens, prefix) = tokens.keys().map((k) => "--{prefix}{k}: {tokens.get(k)};").join(" ")
+
+# The stylesheet a design sets on the page: both modes' tokens.
+fn design_css(d) = ":root {{ {decls(d.light, "")} }} :root[data-theme=\"dark\"] {{ {decls(d.dark, "")} }}"
+
+# A part of a view in its own design: both modes' tokens travel on the node (as `--l-*` and
+# `--d-*`) and the stylesheet picks the mode's set, so the scope follows the page's light or
+# dark like everything else — and changes live, like any other attribute.
+export fn scoped(d, node, class = "") = el("div", {class: "hx-scope m-{d.material} {class}", attrs: {"data-effects": if d.effects == "auto" then missing else d.effects, "style": "{decls(d.light, "l-")} {decls(d.dark, "d-")}"}}, [node])
+
+# The rules that map a scope's `--l-*` / `--d-*` onto the tokens components read.
+fn scope_css(d) = do {
+  names = d.light.keys()
+  light = names.map((k) => "--{k}: var(--l-{k});").join(" ")
+  dark = names.map((k) => "--{k}: var(--d-{k});").join(" ")
+  ".hx-scope {{ {light} }} :root[data-theme=\"dark\"] .hx-scope {{ {dark} }}"
+}
+
+DEFAULT_DESIGN = design({seed: "#4f46e5", material: "hybrid"})
+
 # --- The design system: tokens and component styles. ------------------------------------
 #
 # Every colour, space, size, radius, shadow and duration is a token (a CSS custom property),
@@ -502,39 +798,53 @@ fn set_cookie(rt) = "{rt.cookie}={rt.token}; HttpOnly; SameSite=Strict; Path=/"
 
 THEME = """
 :root {
-  --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px; --s-5: 24px; --s-6: 32px; --s-7: 48px;
   --t-xs: 12px; --t-sm: 13px; --t-md: 15px; --t-lg: 18px; --t-xl: 22px; --t-2xl: 28px;
-  --r-sm: 6px; --r-md: 10px; --r-lg: 14px; --r-full: 999px;
-  --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --r-full: 999px;
+  --font: "Inter var", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, "JetBrains Mono", SFMono-Regular, Menlo, Consolas, monospace;
   --dur-1: 120ms; --dur-2: 200ms; --dur-3: 320ms;
   --ease: cubic-bezier(.2, 0, 0, 1);
-  --bg: #f6f7f9; --surface: #ffffff; --surface-2: #f0f2f5; --fg: #14161a; --muted: #586174;
-  --line: #e1e4ea; --line-strong: #b9c0cc; --accent: #4f46e5; --accent-fg: #ffffff;
-  --accent-soft: #e6e8ff; --accent-text: #3f37c9; --danger: #b42318; --danger-soft: #fdecea;
-  --success: #146c2e; --success-soft: #e6f4ea; --warning: #8a5300; --warning-soft: #fdf3e1;
-  --focus: #4f46e5;
-  --e-1: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.08);
-  --e-2: 0 1px 2px rgba(16,24,40,.06), 0 8px 24px rgba(16,24,40,.08);
-  --e-3: 0 4px 12px rgba(16,24,40,.10), 0 24px 48px rgba(16,24,40,.16);
-  --chart-1: #4f46e5; --chart-2: #0e9384; --chart-3: #dc6803; --chart-4: #c11574; --chart-5: #2e90fa; --chart-6: #667085;
-  --card: var(--surface); --shadow: var(--e-2);
   color-scheme: light;
 }
-:root[data-theme="dark"] {
-  --bg: #0d0f14; --surface: #161a22; --surface-2: #1e232d; --fg: #e8eaf0; --muted: #a0a8b8;
-  --line: #2a303c; --line-strong: #4a5363; --accent: #8b87ff; --accent-fg: #0d0f14;
-  --accent-soft: #262a52; --accent-text: #aeabff; --danger: #ff8a80; --danger-soft: #3a1c1c;
-  --success: #6fdc8c; --success-soft: #16301f; --warning: #f5c26b; --warning-soft: #33280f;
-  --focus: #aeabff;
-  --e-1: 0 1px 2px rgba(0,0,0,.4); --e-2: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
-  --e-3: 0 8px 24px rgba(0,0,0,.5), 0 24px 64px rgba(0,0,0,.5);
-  --chart-1: #8b87ff; --chart-2: #3cc9b5; --chart-3: #f79b4b; --chart-4: #f06bb5; --chart-5: #6cb4ff; --chart-6: #a0a8b8;
-  color-scheme: dark;
-}
+:root[data-theme="dark"] { color-scheme: dark; }
 * { box-sizing: border-box; }
-html, body { margin: 0; background: var(--bg); color: var(--fg); font: var(--t-md)/1.5 var(--font);
-  transition: background-color var(--dur-3) ease, color var(--dur-3) ease; }
+html, body { margin: 0; color: var(--fg); font: var(--t-md)/1.5 var(--font); }
+html { background: var(--bg); -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; font-feature-settings: "cv11", "ss01"; }
+body { background: var(--page); background-attachment: fixed; min-height: 100vh; }
+
+/* Scrollbars: thin, rounded, in the design's colours, on a clear track; they show while
+   something scrolls or is pointed at and fade back otherwise, like an overlay scrollbar. */
+::-webkit-scrollbar { width: 14px; height: 14px; background: transparent; }
+::-webkit-scrollbar-thumb { border: 4px solid transparent; background-clip: padding-box; border-radius: 999px;
+  background-color: var(--scroll-thumb); min-height: 40px; }
+::-webkit-scrollbar-thumb:hover, ::-webkit-scrollbar-thumb:active { border-width: 3px; background-color: var(--scroll-thumb-hover); }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+:not(:hover):not(.hx-scrolling)::-webkit-scrollbar-thumb { background-color: transparent; }
+@supports not selector(::-webkit-scrollbar) { * { scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) transparent; } }
+
+/* Materials. A surface takes its look from the design's tokens: `mat-card` (content),
+   `mat-overlay` (menus, dialogs, toasts) and `mat-frame` (toolbars, sidebars). Where blur
+   would stutter or is unwanted, each falls back to the solid surface of its role. */
+.mat-card { background: var(--card-bg); border: 1px solid var(--card-line); -webkit-backdrop-filter: var(--card-blur); backdrop-filter: var(--card-blur); }
+.mat-overlay { background: var(--overlay-bg); border: 1px solid var(--overlay-line); -webkit-backdrop-filter: var(--overlay-blur); backdrop-filter: var(--overlay-blur);
+  box-shadow: var(--e-3), inset 0 1px 0 var(--glass-edge); }
+.mat-frame { background: var(--frame-bg); -webkit-backdrop-filter: var(--frame-blur); backdrop-filter: var(--frame-blur); }
+:root[data-perf="light"] .mat-card, [data-effects="light"] .mat-card, :root[data-effects="light"] .mat-card { background: var(--card-solid); -webkit-backdrop-filter: none; backdrop-filter: none; }
+:root[data-perf="light"] .mat-overlay, [data-effects="light"] .mat-overlay, :root[data-effects="light"] .mat-overlay { background: var(--overlay-solid); -webkit-backdrop-filter: none; backdrop-filter: none; }
+:root[data-perf="light"] .mat-frame, [data-effects="light"] .mat-frame, :root[data-effects="light"] .mat-frame { background: var(--frame-solid); -webkit-backdrop-filter: none; backdrop-filter: none; }
+:root[data-perf="light"] [data-effects="full"] .mat-card { background: var(--card-bg); -webkit-backdrop-filter: var(--card-blur); backdrop-filter: var(--card-blur); }
+:root[data-perf="light"] [data-effects="full"] .mat-overlay { background: var(--overlay-bg); -webkit-backdrop-filter: var(--overlay-blur); backdrop-filter: var(--overlay-blur); }
+:root[data-perf="light"] [data-effects="full"] .mat-frame { background: var(--frame-bg); -webkit-backdrop-filter: var(--frame-blur); backdrop-filter: var(--frame-blur); }
+@media (prefers-reduced-transparency: reduce) {
+  .mat-card { background: var(--card-solid) !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+  .mat-overlay { background: var(--overlay-solid) !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+  .mat-frame { background: var(--frame-solid) !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+}
+@media (prefers-contrast: more) {
+  .mat-card, .mat-overlay { background: var(--surface) !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; border-color: var(--line-strong) !important; }
+  .mat-frame { background: var(--surface-2) !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+}
+.hx-scope { color: var(--fg); }
 #root { max-width: 1120px; margin: 0 auto; padding: var(--s-6) var(--s-5) var(--s-7); }
 h1 { font-size: var(--t-2xl); letter-spacing: -0.02em; line-height: 1.2; margin: 0 0 var(--s-1); }
 h2 { font-size: var(--t-sm); font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 var(--s-3); }
@@ -555,8 +865,8 @@ h2 { font-size: var(--t-sm); font-weight: 600; text-transform: uppercase; letter
 .spacer { flex: 1; }
 .divider { border: 0; border-top: 1px solid var(--line); margin: var(--s-2) 0; width: 100%; }
 
-.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); padding: var(--s-4) var(--s-5);
-  box-shadow: var(--e-2); transition: background-color var(--dur-3) ease, border-color var(--dur-3) ease; min-width: 0;
+.card { border-radius: var(--r-lg); padding: var(--s-4) var(--s-5);
+  box-shadow: var(--e-2), inset 0 1px 0 var(--glass-edge); min-width: 0;
   display: flex; flex-direction: column; gap: var(--s-3); }
 .card > h2 { margin: 0; }
 .stat { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
@@ -572,15 +882,15 @@ h2 { font-size: var(--t-sm); font-weight: 600; text-transform: uppercase; letter
 
 .btn { appearance: none; display: inline-flex; align-items: center; justify-content: center; gap: var(--s-2);
   border: 1px solid var(--line-strong); background: var(--surface); color: var(--fg); font: 500 var(--t-md)/1 var(--font);
-  min-height: 36px; padding: 0 var(--s-4); border-radius: var(--r-md); cursor: pointer; box-shadow: var(--e-1);
+  min-height: var(--ctl-h); padding: 0 var(--s-4); border-radius: var(--r-btn); cursor: pointer; box-shadow: var(--e-1);
   transition: transform var(--dur-1) var(--ease), background-color var(--dur-2) ease, border-color var(--dur-2) ease, box-shadow var(--dur-2) ease; }
-.btn:hover { background: var(--surface-2); }
+.btn:hover { background: linear-gradient(var(--hover), var(--hover)), var(--surface); }
 .btn:active { transform: scale(.97); }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
-.btn.primary:hover { filter: brightness(1.06); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); box-shadow: 0 4px 14px -6px var(--accent-glow); }
+.btn.primary:hover { background: linear-gradient(var(--hover), var(--hover)), var(--accent); }
 .btn.danger { background: var(--danger); border-color: var(--danger); color: var(--surface); }
 .btn.ghost { background: transparent; border-color: transparent; box-shadow: none; }
-.btn.ghost:hover { background: var(--surface-2); }
+.btn.ghost:hover { background: var(--hover); }
 .btn.icon { min-height: 32px; width: 32px; padding: 0; color: var(--muted); }
 .btn[disabled] { opacity: .5; cursor: not-allowed; transform: none; }
 .caret { font-size: var(--t-xs); color: var(--muted); }
@@ -593,7 +903,7 @@ h2 { font-size: var(--t-sm); font-weight: 600; text-transform: uppercase; letter
 .hint, .error { margin: 0; font-size: var(--t-sm); }
 .error { color: var(--danger); font-weight: 500; }
 .input { font: var(--t-md)/1.4 var(--font); color: var(--fg); background: var(--surface); border: 1px solid var(--line-strong);
-  border-radius: var(--r-md); padding: 8px var(--s-3); min-height: 38px; width: 100%;
+  border-radius: var(--r-field); padding: 8px var(--s-3); min-height: var(--ctl-h); width: 100%;
   transition: border-color var(--dur-2) ease, box-shadow var(--dur-2) ease; }
 .input:focus-visible { outline: none; border-color: var(--focus); box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 30%, transparent); }
 .field.invalid .input { border-color: var(--danger); }
@@ -618,8 +928,8 @@ select.input { appearance: none; padding-right: 32px; background-image: linear-g
 .progress-bar { display: block; height: 100%; background: var(--accent); transform-origin: left;
   transition: transform calc(var(--spring-gentle-ms) * 1ms) var(--spring-gentle); }
 .toasts { position: fixed; right: var(--s-5); bottom: var(--s-5); display: flex; flex-direction: column; gap: var(--s-2); z-index: 50; width: min(360px, calc(100vw - 32px)); }
-.toast { display: flex; align-items: center; gap: var(--s-3); background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--line-strong);
-  border-radius: var(--r-md); padding: var(--s-2) var(--s-2) var(--s-2) var(--s-4); box-shadow: var(--e-3); }
+.toast { display: flex; align-items: center; gap: var(--s-3); border-left: 4px solid var(--line-strong);
+  border-radius: var(--r-md); padding: var(--s-2) var(--s-2) var(--s-2) var(--s-4); }
 .toast-text { flex: 1; }
 .toast.success { border-left-color: var(--success); } .toast.warning { border-left-color: var(--warning); }
 .toast.danger { border-left-color: var(--danger); } .toast.accent { border-left-color: var(--accent); }
@@ -638,14 +948,13 @@ select.input { appearance: none; padding-right: 32px; background-image: linear-g
 .tabpanel:not([hidden]) { animation: hx-rise calc(var(--spring-gentle-ms) * 1ms) var(--spring-gentle); }
 .menu { position: relative; display: inline-block; }
 .menu-list { position: absolute; top: calc(100% + 6px); left: 0; min-width: 200px; z-index: 30; display: flex; flex-direction: column;
-  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-md); box-shadow: var(--e-3); padding: var(--s-1); transform-origin: top left; }
+  border-radius: var(--r-md); padding: var(--s-1); transform-origin: top left; }
 .menu-item { appearance: none; background: none; border: 0; text-align: left; font: var(--t-md) var(--font); color: var(--fg);
   padding: var(--s-2) var(--s-3); border-radius: var(--r-sm); cursor: pointer; }
 .menu-item:hover, .menu-item:focus-visible { background: var(--accent-soft); color: var(--accent-text); outline: none; }
-.dialog { border: 1px solid var(--line); border-radius: var(--r-lg); padding: 0; width: min(520px, calc(100vw - 32px));
-  background: var(--surface); color: var(--fg); box-shadow: var(--e-3); }
+.dialog { border-radius: var(--r-xl); padding: 0; width: min(520px, calc(100vw - 32px)); color: var(--fg); }
 .dialog[open] { animation: hx-pop calc(var(--spring-snappy-ms) * 1ms) var(--spring-snappy); }
-.dialog::backdrop { background: rgba(10, 12, 18, .45); backdrop-filter: blur(2px); }
+.dialog::backdrop { background: rgba(10, 12, 18, .4); }
 .dialog[open]::backdrop { animation: hx-fade var(--dur-3) ease; }
 .dialog-head { display: flex; align-items: center; justify-content: space-between; padding: var(--s-3) var(--s-3) 0 var(--s-5); }
 .dialog-head h2 { margin: 0; font-size: var(--t-lg); text-transform: none; letter-spacing: 0; color: var(--fg); }
@@ -692,6 +1001,20 @@ select.input { appearance: none; padding-right: 32px; background-image: linear-g
 CLIENT = """
 (() => {
   const root = document.getElementById('root');
+  // The machine's performance tier. Without GPU compositing (a software rasteriser), blur and
+  // large translucent layers cost a frame each; the design's glass then draws as solid
+  // surfaces (`data-perf="light"` in the stylesheet). Asked once, before the first frame.
+  (() => {
+    let light = false;
+    try {
+      const gl = document.createElement('canvas').getContext('webgl');
+      const info = gl && gl.getExtension('WEBGL_debug_renderer_info');
+      const r = info ? String(gl.getParameter(info.UNMASKED_RENDERER_WEBGL)) : '';
+      light = !gl || /swiftshader|llvmpipe|softpipe|software/i.test(r);
+    } catch (_) { light = true; }
+    if ((navigator.hardwareConcurrency || 4) <= 2) light = true;
+    document.documentElement.dataset.perf = light ? 'light' : 'full';
+  })();
   const SVG = 'http://www.w3.org/2000/svg';
   const still = matchMedia('(prefers-reduced-motion: reduce)');
   const css = getComputedStyle(document.documentElement);
@@ -940,6 +1263,14 @@ CLIENT = """
     e.preventDefault();
     post({ msg: f.dataset.submit, value: Object.fromEntries(new FormData(f)) }, false);
   });
+  // A scroller shows its scrollbar while it moves and for a moment after.
+  const quiet = new WeakMap();
+  document.addEventListener('scroll', (e) => {
+    const s = e.target instanceof Element ? e.target : document.documentElement;
+    s.classList.add('hx-scrolling');
+    clearTimeout(quiet.get(s));
+    quiet.set(s, setTimeout(() => s.classList.remove('hx-scrolling'), 900));
+  }, { capture: true, passive: true });
   document.addEventListener('scroll', (e) => {
     const t = e.target instanceof Element && e.target.closest('[data-scroll]');
     if (t) post({ msg: t.dataset.scroll, value: Math.round(t.scrollTop) }, true);
@@ -995,13 +1326,19 @@ CLIENT = """
 """
 
 # The whole stylesheet: the motion tokens, the design system, and the app's own `style`.
-fn css_of(spec) = ":root {{ {motion_tokens()} }}{THEME}{spec.get("style") ?? ""}"
+fn design_of(spec) = spec.get("design") ?? DEFAULT_DESIGN
+fn css_of(spec) = do {
+  d = design_of(spec)
+  ":root {{ {motion_tokens()} }}{design_css(d)}{scope_css(d)}{THEME}{spec.get("style") ?? ""}"
+}
 
 fn page(spec, rt, model) = do {
   title = html_escape("{spec.title}")
   body = render((spec.view)(model))
   theme = theme_of(spec, model)
-  "<!doctype html><html lang=\"en\" data-theme=\"{theme}\" data-client=\"{rt.client}\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{title}</title><style id=\"hx-style\">{rt.css}</style></head><body><main id=\"root\">{body}</main><script>{CLIENT}</script></body></html>"
+  effects = design_of(spec).effects
+  fx = if effects == "auto" then "" else " data-effects=\"{effects}\""
+  "<!doctype html><html lang=\"en\" data-theme=\"{theme}\"{fx} data-client=\"{rt.client}\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{title}</title><style id=\"hx-style\">{rt.css}</style></head><body><main id=\"root\">{body}</main><script>{CLIENT}</script></body></html>"
 }
 fn theme_of(spec, model) = if spec.get("theme").is_missing() then "light" else do {
   t = try (spec.theme)(model)
