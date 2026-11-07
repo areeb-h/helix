@@ -90,6 +90,14 @@
   no display), and `std.ui` falls back to the browser — so the same app runs everywhere. A
   program that never asks for a window never touches the windowing system.
 
+### Fixed
+
+- **A window that cannot open now falls back to the browser.** `open_window` answered `true`
+  as soon as `DISPLAY` or `WAYLAND_DISPLAY` was set, and the app ended when the window failed.
+  With a variable that names no running server (an `ssh` session, a stopped X server, a
+  container) the app now checks that the display really opens, answers `false`, and serves
+  in the browser as it would with no display at all.
+
 ## v0.13.0 — 2026-11-07
 
 ### Added

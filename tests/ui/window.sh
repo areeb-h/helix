@@ -4,7 +4,8 @@
 #   bash tests/ui/window.sh [path/to/helix-built-with-desktop] [out-dir]
 #
 # Checks what only a real window can show, on the binary a `--features desktop` build makes:
-#   1. `--window` with NO display falls back to the browser and the app still serves;
+#   1. `--window` with NO display — or a DISPLAY nothing answers on — falls back to the browser
+#      and the app still serves;
 #   2. under Xvfb + a window manager, `--window` opens a window titled with the app, at its size;
 #   3. the window's close button (WM_DELETE_WINDOW, as a person clicks it) ends the app and
 #      frees its port;
@@ -42,6 +43,19 @@ for _ in $(seq 50); do grep -q 'token=' "$work/nodisp.log" && break; sleep 0.1; 
 tok=$(grep -o 'token=[0-9a-f]*' "$work/nodisp.log" | head -1 | cut -d= -f2)
 code=$(curl -s -o /dev/null -w '%{http_code}' -H "Cookie: helix_app_18960=$tok" http://127.0.0.1:18960/)
 [ "$code" = 200 ] && ok "serves with no display (200)" || bad "no-display run did not serve ($code)"
+kill $pid 2>/dev/null; wait $pid 2>/dev/null
+
+echo "— a DISPLAY with no server behind it: --window still falls back and serves"
+# The variable is set, so the app asks for a window; nothing answers on :87. This used to end
+# the app ("Failed to initialize gtk backend") — the window toolkit panics, and a release build
+# aborts on a panic. The display is now tried first, and a window it cannot open is a `false`.
+DISPLAY=:87 "$HELIX" run examples/apps/gallery.helix --port 18963 --window >"$work/dead.log" 2>&1 &
+pid=$!
+for _ in $(seq 50); do grep -q 'token=' "$work/dead.log" && break; sleep 0.1; done
+tok=$(grep -o 'token=[0-9a-f]*' "$work/dead.log" | head -1 | cut -d= -f2)
+sleep 1
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "Cookie: helix_app_18963=$tok" http://127.0.0.1:18963/)
+[ "$code" = 200 ] && kill -0 $pid 2>/dev/null && ok "serves with a dead DISPLAY (200)" || { bad "a dead DISPLAY ended or broke the app ($code)"; cat "$work/dead.log"; }
 kill $pid 2>/dev/null; wait $pid 2>/dev/null
 
 echo "— a window on a virtual display"

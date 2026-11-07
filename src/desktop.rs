@@ -92,6 +92,7 @@ mod imp {
     use std::collections::HashMap;
     use std::process::ExitCode;
     use std::sync::mpsc::{Sender, channel};
+    use std::time::Duration;
     use std::sync::{Mutex, OnceLock};
 
     use tao::event::{Event, WindowEvent};
@@ -99,8 +100,10 @@ mod imp {
     use tao::window::WindowBuilder;
     use wry::{NewWindowResponse, WebViewBuilder};
 
+    /// `reply` is answered `true` once the window is on screen, `false` if none could open —
+    /// so `open_window` reports what happened, and the app falls back to the browser.
     pub enum Msg {
-        Open { url: String, title: String, w: f64, h: f64 },
+        Open { url: String, title: String, w: f64, h: f64, reply: Sender<bool> },
         Done(bool),
     }
 
@@ -125,12 +128,32 @@ mod imp {
         if !has_display() {
             return false;
         }
-        match LINE.get().and_then(|l| l.lock().ok()) {
-            Some(tx) => {
-                WINDOWED.store(true, std::sync::atomic::Ordering::SeqCst);
-                tx.send(Msg::Open { url, title, w, h }).is_ok()
-            }
-            None => false,
+        let Some(tx) = LINE.get().and_then(|l| l.lock().ok()).map(|l| l.clone()) else { return false };
+        let (reply, answer) = channel();
+        if tx.send(Msg::Open { url, title, w, h, reply }).is_err() {
+            return false;
+        }
+        // The main thread answers once the window exists or could not be made. A first start can
+        // spend seconds building caches, so this waits; if it waits very long, the window is
+        // still coming — a browser tab as well would be the wrong answer.
+        let opened = answer.recv_timeout(Duration::from_secs(20)).unwrap_or(true);
+        if opened {
+            WINDOWED.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        opened
+    }
+
+    /// Whether the windowing system can actually be reached — a `DISPLAY` that names no
+    /// running server, or a Wayland socket nobody listens on, is caught here, where it is an
+    /// answer, instead of inside tao, where it is a panic.
+    fn display_opens() -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            gtk::init().is_ok()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            true
         }
     }
 
@@ -158,10 +181,19 @@ mod imp {
                     return ExitCode::FAILURE;
                 }
             };
-            // Until the program asks for a window, the main thread only waits.
-            let first = match rx.recv() {
-                Ok(Msg::Open { url, title, w, h }) => (url, title, w, h),
-                Ok(Msg::Done(_)) | Err(_) => return worker.join().unwrap_or(ExitCode::FAILURE),
+            // Until the program asks for a window, the main thread only waits. A request this
+            // machine cannot serve — no display after all — is answered `false`, and the thread
+            // goes back to waiting: the program carries on in the browser.
+            let first = loop {
+                match rx.recv() {
+                    Ok(Msg::Open { url, title, w, h, reply }) => {
+                        if display_opens() {
+                            break (url, title, w, h, reply);
+                        }
+                        let _ = reply.send(false);
+                    }
+                    Ok(Msg::Done(_)) | Err(_) => return worker.join().unwrap_or(ExitCode::FAILURE),
+                }
             };
             // It asked: the event loop lives here from now on, and everything else the program
             // says arrives through it.
@@ -177,8 +209,9 @@ mod imp {
             let mut windows: HashMap<tao::window::WindowId, (tao::window::Window, wry::WebView)> = HashMap::new();
             let open = |target: &tao::event_loop::EventLoopWindowTarget<Msg>,
                         windows: &mut HashMap<tao::window::WindowId, (tao::window::Window, wry::WebView)>,
-                        (url, title, w, h): (String, String, f64, f64)| {
-                let Some(origin) = super::local_origin(&url) else { return };
+                        (url, title, w, h): (String, String, f64, f64)|
+             -> bool {
+                let Some(origin) = super::local_origin(&url) else { return false };
                 let window = match WindowBuilder::new()
                     .with_title(title)
                     .with_inner_size(tao::dpi::LogicalSize::new(w, h))
@@ -187,7 +220,7 @@ mod imp {
                     Ok(w) => w,
                     Err(e) => {
                         eprintln!("error: could not open a window: {e}");
-                        return;
+                        return false;
                     }
                 };
                 let home = origin.clone();
@@ -204,7 +237,7 @@ mod imp {
                         Some(vbox) => builder.build_gtk(vbox),
                         None => {
                             eprintln!("error: this window has no container for a web view");
-                            return;
+                            return false;
                         }
                     }
                 };
@@ -213,18 +246,24 @@ mod imp {
                 match view {
                     Ok(v) => {
                         windows.insert(window.id(), (window, v));
+                        true
                     }
-                    Err(e) => eprintln!("error: could not create the window's web view: {e}"),
+                    Err(e) => {
+                        eprintln!("error: could not create the window's web view: {e}");
+                        false
+                    }
                 }
             };
             let mut pending = Some(first);
             event_loop.run(move |event, target, control_flow| {
                 *control_flow = ControlFlow::Wait;
-                if let Some(first) = pending.take() {
-                    open(target, &mut windows, first);
+                if let Some((url, title, w, h, reply)) = pending.take() {
+                    let _ = reply.send(open(target, &mut windows, (url, title, w, h)));
                 }
                 match event {
-                    Event::UserEvent(Msg::Open { url, title, w, h }) => open(target, &mut windows, (url, title, w, h)),
+                    Event::UserEvent(Msg::Open { url, title, w, h, reply }) => {
+                        let _ = reply.send(open(target, &mut windows, (url, title, w, h)));
+                    }
                     // The program ended: so does the app, window and all.
                     Event::UserEvent(Msg::Done(ok)) => std::process::exit(if ok { 0 } else { 1 }),
                     // Closing an app's window ends the app, as it does everywhere else.
