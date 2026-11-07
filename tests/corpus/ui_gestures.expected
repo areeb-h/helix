@@ -1,0 +1,24 @@
+exit: 0
+--- stdout ---
+[true, true, true, true, true]
+[250, 160, 400, 220, 220, 251]
+true
+[true, true, true, true, true, true]
+cab
+bca
+abc
+abc
+abc
+abc
+abc
+["x", "z", "y"]
+[true, false, true]
+1
+[true, true, 1, 1, 1, true]
+[false, 1, true]
+<ul class="tree" id="t" role="tree" aria-label="Empty"></ul>
+[false, true, true, true]
+["<span class="spinner md" role="progressbar" aria-label="Syncing"></span>", "<div class="progress indeterminate" role="progressbar" aria-label="Indexing"><span class="progress-bar"></span></div>"]
+[true, true]
+[true, true]
+--- stderr ---

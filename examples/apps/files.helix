@@ -164,7 +164,7 @@ fn preview_of(m) = do {
       else if e.kind == "link" then {kind: "note", text: "A symbolic link. Files never follows links, so nothing in this folder can lead it outside its root."}
       else if e.kind == "dir" then do {
         r = try read_dir(path)
-        {kind: "folder", text: if r.ok then "{r.value.count()} items" else "Can't be read"}
+        {kind: "folder", text: if r.ok then (if r.value.count() == 1 then "1 item" else "{r.value.count()} items") else "Can't be read"}
       }
       else if e.kind != "file" then {kind: "note", text: "A special file (a device, socket or pipe). It is not opened."}
       else if e.cat == "image" and e.size <= IMAGE_LIMIT then do {

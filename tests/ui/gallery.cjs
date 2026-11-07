@@ -140,7 +140,7 @@ async function session(browser, url, motion) {
   await post(() => p.click('#notify'));
   check(await p.evaluate(() => document.getElementById('notify').checked) === false, 'the switch toggles');
   await post(() => p.fill('.slider', '80'));
-  check(await p.evaluate(() => document.querySelector('.progress').getAttribute('aria-valuenow')) === '80', 'the slider drives the progress bar');
+  check(await p.evaluate(() => document.querySelector('.progress:not(.indeterminate)').getAttribute('aria-valuenow')) === '80', 'the slider drives the progress bar');
   await axe('preferences tab');
   await post(() => p.click('#settings-tab-account'));
 
@@ -281,20 +281,20 @@ async function session(browser, url, motion) {
 
   // A sortable list: a row dragged by its grip lands where it was let go; a nudge changes
   // nothing and leaves nothing out of place; Alt+↑ moves the focused row.
-  const order = () => p.evaluate(() => [...document.querySelectorAll('#tasks .li-title')].map((e) => e.textContent).join(' | '));
-  const first = await order();
-  const step = await p.evaluate(() => { const r = [...document.querySelectorAll('#tasks > [data-key]')].map((e) => e.getBoundingClientRect()); return r[1].top - r[0].top; });
-  await answered(() => drag('#tasks > [data-key="design"] .drag-handle', 0, step * 2 + 12));
-  check(await order() === 'Build the gestures | Test on a phone | Design the sheet | Ship it', `a row dragged down two places lands there (${first} → ${await order()})`);
+  const tasks = () => p.evaluate(() => [...document.querySelectorAll('#tasks .li-title')].map((e) => e.textContent).join(' | '));
+  const first_order = await tasks();
+  const rowStep = await p.evaluate(() => { const r = [...document.querySelectorAll('#tasks > [data-key]')].map((e) => e.getBoundingClientRect()); return r[1].top - r[0].top; });
+  await answered(() => drag('#tasks > [data-key="design"] .drag-handle', 0, rowStep * 2 + 12));
+  check(await tasks() === 'Build the gestures | Test on a phone | Design the sheet | Ship it', `a row dragged down two places lands there (${first_order} → ${await tasks()})`);
   check(await p.evaluate(() => [...document.querySelectorAll('#tasks > [data-key]')].every((e) => !e.style.translate && !e.classList.contains('hx-dragged'))), 'and every row is back in the flow');
-  const before = await order();
+  const unmoved = await tasks();
   await drag('#tasks > [data-key="build"] .drag-handle', 0, 10);
   await settle();
-  check(await order() === before, 'a nudge does not reorder');
+  check(await tasks() === unmoved, 'a nudge does not reorder');
   check(await p.evaluate(() => getComputedStyle(document.querySelector('#tasks > [data-key="build"]')).translate === 'none'), 'and the row springs back to its place');
   await p.focus('#tasks > [data-key="ship"] .drag-handle');
   await answered(() => p.keyboard.press('Alt+ArrowUp'));
-  check(await order() === 'Build the gestures | Test on a phone | Ship it | Design the sheet', 'Alt+↑ moves the focused row up');
+  check(await tasks() === 'Build the gestures | Test on a phone | Ship it | Design the sheet', 'Alt+↑ moves the focused row up');
   check(await p.evaluate(() => document.activeElement.closest('[data-key]').dataset.key) === 'ship', 'and focus stays on it');
   await axe('after reordering');
 
@@ -325,13 +325,13 @@ async function session(browser, url, motion) {
 
   // A toast thrown sideways is dismissed; one nudged springs back.
   await post(() => p.click('[data-click="toast"]'));
-  const toasts = () => p.evaluate(() => [...document.querySelectorAll('.toast')].filter((t) => !t.__gone).length);
-  const t0 = await toasts();
+  const shown_toasts = () => p.evaluate(() => [...document.querySelectorAll('.toast')].filter((t) => !t.__gone).length);
+  const t0 = await shown_toasts();
   await drag('.toast:last-child', 24, 0, 300);
   await settle();
-  check(await toasts() === t0, 'a toast nudged sideways stays');
+  check(await shown_toasts() === t0, 'a toast nudged sideways stays');
   await answered(() => drag('.toast:last-child', 220, 0, 120));
-  check(await toasts() === t0 - 1, 'a toast thrown sideways is dismissed');
+  check(await shown_toasts() === t0 - 1, 'a toast thrown sideways is dismissed');
 
   // A sheet pulled down by its grabber closes; a short pull springs back.
   await post(() => p.click('[data-click="open-sheet"]'));

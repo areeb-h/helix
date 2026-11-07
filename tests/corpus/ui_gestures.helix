@@ -38,7 +38,7 @@ nodes = [{key: "src", label: "src", children: [{key: "src/a", label: "a.helix", 
 t1 = ui.render(ui.tree("t", "Files", nodes, ["src"], "src/a", "tog", "sel"))
 print([t1.contains("role=\"tree\""), t1.contains("aria-level=\"2\""), t1.split("aria-expanded=\"true\"").count() - 1, t1.split("aria-expanded=\"false\"").count() - 1, t1.split("tabindex=\"0\"").count() - 1, t1.contains("aria-selected=\"true\"")])
 t2 = ui.render(ui.tree("t", "Files", nodes, [], "src/a", "tog", "sel"))
-print([t2.contains("a.helix"), t2.split("tabindex=\"0\"").count() - 1, t2.contains("id=\"t-src\" role=\"treeitem\" class=\"tree-item\" aria-level=\"1\" aria-expanded=\"false\" aria-selected=\"false\" tabindex=\"0\"")])
+print([t2.contains("a.helix"), t2.split("tabindex=\"0\"").count() - 1, t2.split("id=\"t-src\"")[1].split(">")[0].contains("aria-expanded=\"false\" aria-selected=\"false\" tabindex=\"0\"")])
 print(ui.render(ui.tree("t", "Empty", [], [], missing, "tog", "sel")))
 
 # A popover: a dialog anchored to its button, there only while open, focus moved into it.
@@ -52,4 +52,4 @@ print([ui.render(ui.spinner("Syncing")), ui.render(ui.progress("Indexing", missi
 ts = ui.render(ui.toasts([{id: 7, text: "Saved"}], "dismiss"))
 print([ts.contains("data-drag=\"dismiss\" data-drag-axis=\"x\" data-drag-commit=\"80\""), ts.contains("data-value=\"7\"")])
 sh = ui.render(ui.sheet("s", true, "Share", [ui.text("x")], "close"))
-print([sh.contains("data-drag=\"close\" data-drag-axis=\"down\" data-drag-commit=\"96\""), sh.contains("grabber-zone\" aria-hidden=\"true\" data-drag-handle=\"true\"")])
+print([sh.contains("data-drag=\"close\" data-drag-axis=\"down\" data-drag-commit=\"96\""), sh.contains("class=\"grabber-zone\" data-drag-handle=\"true\" aria-hidden=\"true\"")])

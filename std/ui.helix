@@ -320,9 +320,9 @@ export fn toasts(items, dismiss) = el("div", {class: "toasts", role: "status", a
   act = t.get("action")
   el("div", {key: "toast-{t.id}", class: "toast mat-overlay {t.get("tone") ?? "neutral"}", enter: "rise", exit: "fade", layout: true,
     drag: dismiss, drag_axis: "x", drag_commit: 80, value: "{t.id}"}, present([
-    el("span", {class: "toast-text"}, [text(t.text)]),
-    if act.is_missing() then missing else el("button", {class: "btn ghost toast-action", click: act.msg, value: act.get("value"), attrs: {type: "button"}}, [text(act.label)]),
-    icon_button("close", "Dismiss", dismiss, "{t.id}"),
+      el("span", {class: "toast-text"}, [text(t.text)]),
+      if act.is_missing() then missing else el("button", {class: "btn ghost toast-action", click: act.msg, value: act.get("value"), attrs: {type: "button"}}, [text(act.label)]),
+      icon_button("close", "Dismiss", dismiss, "{t.id}"),
   ]))
 }))
 
@@ -596,7 +596,7 @@ export fn sortable(id, label, items, msg) = el("div", {class: "sortable-wrap"}, 
       if it.get("leading").is_missing() then missing else el("span", {class: "li-lead"}, [it.leading]),
       el("span", {class: "two-line"}, present([el("span", {class: "li-title"}, [text(it.title)]), if it.get("subtitle").is_missing() then missing else el("span", {class: "meta"}, [text(it.subtitle)])])),
       el("button", {class: "btn ghost icon drag-handle", handle: true, aria: {label: "Move {it.title}", describedby: "{id}-how"}, attrs: {type: "button"}}, [icon("grip")]),
-    ]))]))),
+  ]))]))),
   el("span", {id: "{id}-how", class: "sr-only"}, [text("Drag to reorder, or press Alt with the up and down arrows.")]),
 ])
 # `items` with one moved as `mv` (`{key, from, to}`) says. A move that does not fit the list —
@@ -642,12 +642,12 @@ fn tree_items(id, nodes, open, selected, focus_key, toggle, select, level) = nod
   el("li", {key: "{id}-{n.key}", id: "{id}-{id_part(n.key)}", role: "treeitem", class: "tree-item",
     aria: {level: "{level}", expanded: if can then shown else missing, selected: on},
     attrs: {tabindex: if n.key == focus_key then "0" else "-1"}}, present([
-    el("div", {class: if on then "tree-row on" else "tree-row", click: select, value: "{n.key}", style: {padding_left: "{(level - 1) * 16 + 4}px"}}, [
-      if can then el("span", {class: "tree-twisty", click: toggle, value: "{n.key}", aria: {hidden: true}}, [icon("chevron_right", "xs")]) else el("span", {class: "tree-twisty none", aria: {hidden: true}}, []),
-      icon(n.get("icon") ?? (if can then "folder" else "doc"), "sm"),
-      el("span", {class: "tree-label"}, [text(n.label)]),
-    ]),
-    if shown and kids.count() > 0 then el("ul", {role: "group", class: "tree-group"}, tree_items(id, kids, open, selected, focus_key, toggle, select, level + 1)) else missing,
+      el("div", {class: if on then "tree-row on" else "tree-row", click: select, value: "{n.key}", style: {padding_left: "{(level - 1) * 16 + 4}px"}}, [
+        if can then el("span", {class: "tree-twisty", click: toggle, value: "{n.key}", aria: {hidden: true}}, [icon("chevron_right", "xs")]) else el("span", {class: "tree-twisty none", aria: {hidden: true}}, []),
+        icon(n.get("icon") ?? (if can then "folder" else "doc"), "sm"),
+        el("span", {class: "tree-label"}, [text(n.label)]),
+      ]),
+      if shown and kids.count() > 0 then el("ul", {role: "group", class: "tree-group"}, tree_items(id, kids, open, selected, focus_key, toggle, select, level + 1)) else missing,
   ]))
 })
 
@@ -2095,7 +2095,9 @@ CLIENT = """
   // given back to the node now carrying the same key or id — or, for a menu that closed under
   // the focus, to the button that controls it.
   const ident = (n) => n && n.getAttribute && (n.getAttribute('data-key') || n.id || null);
-  const byIdent = (k) => root.querySelector('[data-key="' + CSS.escape(k) + '"]') || document.getElementById(k);
+  // The node now carrying a key or id — never one that is on its way out.
+  const staying = (n) => n && !n.closest('[aria-hidden="true"]') && !n.inert ? n : null;
+  const byIdent = (k) => staying(Array.from(root.querySelectorAll('[data-key="' + CSS.escape(k) + '"]')).find((n) => staying(n))) || staying(document.getElementById(k));
   function note() {
     const a = document.activeElement;
     const inside = a && a !== document.body && root.contains(a);
