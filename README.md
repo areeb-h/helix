@@ -372,7 +372,9 @@ fn update(n, e) = if e.msg == "inc" then n + 1 else n
 ui.app({title: "Counter", init: 0, update: update, view: view})   # prints a link to open
 ```
 
-See `examples/apps/gallery.helix` for every component.
+See `examples/apps/gallery.helix` for every component, and `examples/apps/files.helix` for a
+whole app: a file manager that stays inside its root folder, never follows a link, and only
+changes anything when started with `--write`.
 
 ### Cryptography
 Native, audited-crate-backed primitives, misuse-resistant by construction: `sha256`,

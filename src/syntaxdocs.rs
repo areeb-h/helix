@@ -263,7 +263,7 @@ pub static SYNTAX: &[SyntaxDoc] = &[
                 `textarea`, `select`, `checkbox`, `toggle`, `slider`, `form` with `required`/`min_length`/`pattern`, \
                 `tabs`, `menu`, `dialog`, `sheet`, `toasts` (with an action), `tooltip`, `progress`, `ring`, `skeleton`, \
                 `badge`, `segmented`, `chips`, `radio_group`, `stepper`, `search_field`, `list`/`list_item`, `avatar`, \
-                `stat_tile`, `breadcrumbs`, `icon`, `fab`, `shell`/`rail`/`toolbar`, `data_table` (a DataFrame, \
+                `stat_tile`, `breadcrumbs`, `icon`, `fab`, `shell`/`rail`/`toolbar`, `context_menu`, `command_palette`, `data_table` (a DataFrame, \
                 virtualised), `line_chart`/`scatter_chart`/`bar_chart`; timers with `every(ms, msg)` in \
                 `subscriptions`. Accessible by construction, light and dark, motion run by the GPU. A DESIGN is \
                 `ui.design({seed: \"#4f46e5\", material: \"hybrid\" | \"glass\" | \"tonal\", shape, density})` given as \

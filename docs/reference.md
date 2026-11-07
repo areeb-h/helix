@@ -609,6 +609,16 @@ Whether a file or directory exists at the path.
 >>> file_exists("results.csv")
 ```
 
+### `file_info(path)`
+
+What a path is, without following it: {name, kind, size, modified}.
+
+**Note:** `kind` is "dir", "file", "link" or "other", read with lstat: a SYMBOLIC LINK IS REPORTED AS A LINK, not as what it points to, so a program that keeps to one directory can see a name leads elsewhere before it follows it (`file_exists` and `file_size` follow links). `size` is the entry's own length in bytes; `modified` is seconds since the Unix epoch, comparable with `now()`, or missing where the platform keeps none. Raises for a path that does not exist. Pairs with `read_dir` to list a folder with its details. Keywords: stat, lstat, metadata, directory, folder, symlink, modified, mtime, size, is dir, file manager.
+
+```
+>>> file_info("data").kind
+```
+
 ### `file_size(path)`
 
 The file's length in BYTES, from metadata alone.
@@ -2051,7 +2061,7 @@ Build an app: model, update and view in Helix, rendered in a browser — compone
 
 `import std.ui`
 
-**Note:** THE APP LIBRARY (ADR 0055), compiled into `helix`, so it imports from any directory. An app is `ui.app({title, init, update: (model, event) => model, view: (model) => tree})`; an event is `{msg, value}`. Components: `column`/`row`/`cluster`/`grid`, `card`, `button`, `text_input`, `textarea`, `select`, `checkbox`, `toggle`, `slider`, `form` with `required`/`min_length`/`pattern`, `tabs`, `menu`, `dialog`, `sheet`, `toasts` (with an action), `tooltip`, `progress`, `ring`, `skeleton`, `badge`, `segmented`, `chips`, `radio_group`, `stepper`, `search_field`, `list`/`list_item`, `avatar`, `stat_tile`, `breadcrumbs`, `icon`, `fab`, `shell`/`rail`/`toolbar`, `data_table` (a DataFrame, virtualised), `line_chart`/`scatter_chart`/`bar_chart`; timers with `every(ms, msg)` in `subscriptions`. Accessible by construction, light and dark, motion run by the GPU. A DESIGN is `ui.design({seed: "#4f46e5", material: "hybrid" | "glass" | "tonal", shape, density})` given as `design:` (ADR 0056): colours computed in OKLCH with contrast proven (`ui.contrast_report`), concentric corners (`ui.geometry`), spring motion and shared elements (`share:`). `ui.replay(spec, events)` returns every screen as HTML — testable without a browser, the same on all three engines. `helix run app.helix` prints a link (add `--open`, or `window: true` in a `--features desktop` build for a native window); `helix run --watch app.helix` reloads on save with the model kept, and keeps the running app when a save does not check; see `examples/apps/gallery.helix`. A `std/ui.helix` on `HELIX_PATH` overrides the built-in copy. Keywords: std.ui, gui, ui, interface, window, desktop, web, dashboard, component, widget, button, form, chart, plot, interactive, elm, model view update.
+**Note:** THE APP LIBRARY (ADR 0055), compiled into `helix`, so it imports from any directory. An app is `ui.app({title, init, update: (model, event) => model, view: (model) => tree})`; an event is `{msg, value}`. Components: `column`/`row`/`cluster`/`grid`, `card`, `button`, `text_input`, `textarea`, `select`, `checkbox`, `toggle`, `slider`, `form` with `required`/`min_length`/`pattern`, `tabs`, `menu`, `dialog`, `sheet`, `toasts` (with an action), `tooltip`, `progress`, `ring`, `skeleton`, `badge`, `segmented`, `chips`, `radio_group`, `stepper`, `search_field`, `list`/`list_item`, `avatar`, `stat_tile`, `breadcrumbs`, `icon`, `fab`, `shell`/`rail`/`toolbar`, `context_menu`, `command_palette`, `data_table` (a DataFrame, virtualised), `line_chart`/`scatter_chart`/`bar_chart`; timers with `every(ms, msg)` in `subscriptions`. Accessible by construction, light and dark, motion run by the GPU. A DESIGN is `ui.design({seed: "#4f46e5", material: "hybrid" | "glass" | "tonal", shape, density})` given as `design:` (ADR 0056): colours computed in OKLCH with contrast proven (`ui.contrast_report`), concentric corners (`ui.geometry`), spring motion and shared elements (`share:`). `ui.replay(spec, events)` returns every screen as HTML — testable without a browser, the same on all three engines. `helix run app.helix` prints a link (add `--open`, or `window: true` in a `--features desktop` build for a native window); `helix run --watch app.helix` reloads on save with the model kept, and keeps the running app when a save does not check; see `examples/apps/gallery.helix`. A `std/ui.helix` on `HELIX_PATH` overrides the built-in copy. Keywords: std.ui, gui, ui, interface, window, desktop, web, dashboard, component, widget, button, form, chart, plot, interactive, elm, model view update.
 
 ```
 >>> print(view_html({tag: "b", props: {class: "note"}, children: [{tag: "#text", text: "hi"}]}))

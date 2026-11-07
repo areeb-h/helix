@@ -98,6 +98,10 @@ jobs:
           npx playwright install --with-deps chromium
       - name: Drive the gallery
         run: node tests/ui/gallery.cjs --helix target/gate/helix --out target/ui
+      # The file manager: keyboard, double click, a real right click, the command palette,
+      # a link that must not be followed, the Trash and Undo, and axe in light and dark.
+      - name: Drive the file manager
+        run: node tests/ui/files.cjs --helix target/gate/helix --out target/ui
       - name: Upload the screenshots
         if: always()
         uses: actions/upload-artifact@v4

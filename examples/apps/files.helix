@@ -1,0 +1,558 @@
+# Files — a file manager, in Helix, on std.ui.
+#
+#   helix run examples/apps/files.helix                      # browse this directory, read-only
+#   helix run examples/apps/files.helix --root ~/Documents --write --window
+#
+# What it is allowed to do is the point of it:
+#
+# - IT STAYS IN ITS ROOT. Every path it touches is the root plus names it listed itself; a name
+#   with a `/`, `..`, `.` or nothing at all is refused before anything is built from it. It
+#   never follows a symbolic link: `file_info` reads links as links (lstat), a link is shown as
+#   a link, and it is neither opened, previewed nor entered — so nothing inside the root can lead
+#   the app out of it. Every folder on the path is checked to still be a folder each time it is
+#   listed.
+# - IT ONLY READS unless started with `--write`. Read-only, the actions that change anything
+#   are not offered at all. With `--write` it can make folders, rename, and move things to a
+#   Trash inside the root (`.trash`) — never delete: moving to the Trash is undone with Undo or
+#   from the Trash. A rename or move never replaces something already there.
+# - ITS AUTHORITY IS HELIX'S. Under `HELIX_CAP=enforce` it needs `HELIX_ALLOW_FS=read` (or
+#   `all` for `--write`); an action the sandbox refuses is reported, not fatal.
+# - A file's content is shown as text or as an image, never as a page: text is escaped by the
+#   renderer, and an image is an <img> (in which an SVG's script does not run).
+#
+# Keys: ↑ ↓ Home End to move, Enter to open, Backspace or Alt+↑ to go up, Alt+← Alt+→ for back
+# and forward, / to search, ⌘K or Ctrl+K for the command palette, Ctrl+H for hidden files —
+# and with --write, F2 to rename and Delete to move to the Trash. Right-click for a menu.
+
+import std.ui
+
+# --- Paths: the root plus names this app listed itself. -------------------------------------
+
+fn valid_name(n) = do {
+  s = "{n}"
+  s != "" and s != "." and s != ".." and not s.contains("/") and not s.contains("\\") and s.count() <= 255
+}
+fn join(root, names) = names.reduce(root, (p, n) => "{p}/{n}")
+fn here(m) = join(m.root, m.path)
+
+# Whether every folder on `names` is still a folder (not a link to somewhere else).
+fn still_inside(root, names) = range(1, names.count() + 1).filter((k) => do {
+  r = try file_info(join(root, names.take(k)))
+  not (r.ok and r.value.kind == "dir")
+}).count() == 0
+
+# --- Kinds of file. ---------------------------------------------------------------------------
+
+IMAGE = ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "avif"]
+TABLE = ["csv", "tsv", "parquet", "xlsx", "xls", "ods"]
+CODE = ["helix", "rs", "py", "js", "ts", "tsx", "jsx", "json", "toml", "yaml", "yml", "sh", "c", "h", "cpp", "go", "java", "rb", "css", "html", "xml", "sql", "lock", "mjs", "cjs"]
+DOC = ["md", "txt", "pdf", "doc", "docx", "rtf", "odt", "log", "csv~"]
+ARCHIVE = ["zip", "gz", "tar", "tgz", "xz", "bz2", "7z", "zst"]
+AUDIO = ["mp3", "wav", "flac", "ogg", "m4a"]
+VIDEO = ["mp4", "mov", "mkv", "webm", "avi"]
+TEXTUAL = CODE.concat(["md", "txt", "log", "csv", "tsv", "ini", "cfg", "conf", "env", "gitignore", "expected"])
+
+fn ext_of(name) = do {
+  parts = "{name}".lower().split(".")
+  if parts.count() < 2 or (parts.count() == 2 and parts[0] == "") then "" else parts.last()
+}
+fn category(e) = if e.kind == "dir" then "folder" else if e.kind == "link" then "link" else if e.kind != "file" then "other" else do {
+  x = e.ext
+  if IMAGE.contains(x) then "image" else if TABLE.contains(x) then "table" else if CODE.contains(x) then "code"
+    else if ARCHIVE.contains(x) then "archive" else if AUDIO.contains(x) then "audio" else if VIDEO.contains(x) then "video" else "doc"
+}
+ICON_OF = {folder: "folder", link: "link", image: "image", table: "table", code: "code", archive: "archive", audio: "music", video: "film", doc: "doc", other: "doc"}
+fn kind_label(e) = match e.cat {
+  "folder" => "Folder",
+  "link" => "Symbolic link",
+  "other" => "Special file",
+  _ => if e.ext == "" then "File" else "{e.ext.upper()} {match e.cat {"image" => "image", "table" => "table", "code" => "source", "archive" => "archive", "audio" => "audio", "video" => "video", _ => "document"}}",
+}
+
+# --- Sizes and dates, for people. -------------------------------------------------------------
+
+fn size_label(e) = if e.kind == "dir" then "—" else do {
+  b = e.size
+  if b < 1024 then "{b} B" else if b < 1048576 then "{b / 1024.0:.0f} KB" else if b < 1073741824 then "{b / 1048576.0:.1f} MB" else "{b / 1073741824.0:.1f} GB"
+}
+MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+# A civil date from days since 1970-01-01 (Howard Hinnant's algorithm), in UTC.
+fn ymd(days) = do {
+  z = days + 719468
+  era = floor(z / 146097)
+  doe = z - era * 146097
+  yoe = floor((doe - floor(doe / 1460) + floor(doe / 36524) - floor(doe / 146096)) / 365)
+  doy = doe - (365 * yoe + floor(yoe / 4) - floor(yoe / 100))
+  mp = floor((5 * doy + 2) / 153)
+  m = if mp < 10 then mp + 3 else mp - 9
+  {y: yoe + era * 400 + (if m <= 2 then 1 else 0), m: m, d: doy - floor((153 * mp + 2) / 5) + 1}
+}
+fn when(t, at) = if t.is_missing() then "—" else do {
+  ago = at - t
+  if ago < 60.0 then "Just now" else if ago < 3600.0 then "{floor(ago / 60.0)} min ago" else if ago < 86400.0 then "{floor(ago / 3600.0)} h ago" else if ago < 172800.0 then "Yesterday" else do {
+    d = ymd(floor(t / 86400.0))
+    today = ymd(floor(at / 86400.0))
+    if d.y == today.y then "{MONTHS[d.m - 1]} {d.d}" else "{MONTHS[d.m - 1]} {d.d}, {d.y}"
+  }
+}
+
+# --- Reading a folder. ------------------------------------------------------------------------
+
+fn entry_of(path) = do {
+  r = try file_info(path)
+  if not r.ok then missing else do {
+    f = r.value
+    e = {name: f.name, kind: f.kind, size: f.size, modified: f.modified, ext: if f.kind == "file" then ext_of(f.name) else ""}
+    {...e, cat: category(e)}
+  }
+}
+fn list_folder(root, names) = if not still_inside(root, names) then {entries: [], error: "This folder is no longer here."} else do {
+  r = try read_dir(join(root, names))
+  if not r.ok then {entries: [], error: "This folder can't be read: {r.error}"} else {entries: r.value.map(entry_of).filter((e) => not e.is_missing() and valid_name(e.name)), error: ""}
+}
+
+fn order(m, es) = do {
+  key = match m.sort {
+    "date" => (e) => -(e.modified ?? 0.0),
+    "size" => (e) => -e.size * 1.0,
+    "kind" => (e) => "{e.cat} {e.name.lower()}",
+    _ => (e) => e.name.lower(),
+  }
+  dirs = es.filter((e) => e.kind == "dir").sort_by(key)
+  rest = es.filter((e) => e.kind != "dir").sort_by(key)
+  all = dirs.concat(rest)
+  if m.desc then all.reverse() else all
+}
+fn visible(m) = do {
+  q = m.query.trim().lower()
+  order(m, m.entries.filter((e) => (m.hidden or not e.name.starts_with(".")) and (q == "" or e.name.lower().contains(q))))
+}
+fn selected(m) = m.entries.filter((e) => e.name == m.sel).first()
+# A name from the page is only ever one this app listed: anything else — `..`, a path, a name
+# that is no longer here — leaves the selection as it was.
+fn listed(m, name) = valid_name(name) and m.entries.filter((e) => e.name == "{name}").count() > 0
+fn pick(m, name) = if listed(m, name) then with_preview({...m, sel: "{name}", ctx: missing}) else {...m, ctx: missing}
+
+# --- Previews: text, a table, an image, or what a folder holds. -------------------------------
+
+TEXT_LIMIT = 24576
+IMAGE_LIMIT = 4194304
+fn decode(b) = range(0, 4).reduce(missing, (got, k) => if not got.is_missing() then got else do {
+  r = try b.take(b.count() - k).to_string()
+  if r.ok then r.value else missing
+})
+fn preview_of(m) = do {
+  e = selected(m)
+  if e.is_missing() then {kind: "none"} else do {
+    path = join(here(m), [e.name])
+    if e.kind == "link" then {kind: "note", text: "A symbolic link. Files never follows links, so nothing in this folder can lead it outside its root."}
+      else if e.kind == "dir" then do {
+        r = try read_dir(path)
+        {kind: "folder", text: if r.ok then "{r.value.count()} items" else "Can't be read"}
+      }
+      else if e.kind != "file" then {kind: "note", text: "A special file (a device, socket or pipe). It is not opened."}
+      else if e.cat == "image" and e.size <= IMAGE_LIMIT then do {
+        r = try read_bytes(path)
+        mime = if e.ext == "svg" then "image/svg+xml" else if e.ext == "jpg" then "image/jpeg" else "image/{e.ext}"
+        if r.ok then {kind: "image", src: "data:{mime};base64,{r.value.to_base64()}"} else {kind: "note", text: "Can't be read: {r.error}"}
+      }
+      else if e.ext == "csv" and e.size <= 2097152 then do {
+        r = try read_csv(path)
+        if r.ok then {kind: "table", df: r.value.head(200), rows: r.value.count()} else text_preview(path, e)
+      }
+      else if TEXTUAL.contains(e.ext) or e.size <= 4096 then text_preview(path, e)
+      else {kind: "note", text: "No preview for this kind of file."}
+  }
+}
+fn text_preview(path, e) = do {
+  r = try read_bytes_at(path, 0, TEXT_LIMIT)
+  t = if r.ok then decode(r.value) else missing
+  if t.is_missing() then {kind: "note", text: "Not text, or not UTF-8 — no preview."} else {kind: "text", text: t, cut: e.size > TEXT_LIMIT}
+}
+
+# --- The model. -------------------------------------------------------------------------------
+
+fn go(m, names, record = true) = do {
+  l = list_folder(m.root, names)
+  n = {...m, path: names, entries: l.entries, error: l.error, query: "", ctx: missing,
+    back: if record and names != m.path then m.back.concat([m.path]).drop(max(m.back.count() - 49, 0)) else m.back,
+    fwd: if record and names != m.path then [] else m.fwd,
+    recent: if names.count() == 0 then m.recent else [names].concat(m.recent.filter((r) => r != names)).take(8)}
+  v = visible(n)
+  with_preview({...n, sel: if v.count() == 0 then "" else v[0].name})
+}
+fn with_preview(m) = {...m, preview: preview_of(m)}
+fn reload(m) = do {
+  keep = m.sel
+  n = go(m, m.path, false)
+  if n.entries.filter((e) => e.name == keep).count() > 0 then with_preview({...n, sel: keep}) else n
+}
+
+fn select_step(m, k) = do {
+  v = visible(m)
+  if v.count() == 0 then m else do {
+    i = v.map((e) => e.name).index_of(m.sel) ?? -1
+    j = match k { "first" => 0, "last" => v.count() - 1, _ => clamp(i + k, 0, v.count() - 1) }
+    with_preview({...m, sel: v[j].name, ctx: missing})
+  }
+}
+fn open_entry(m, name) = do {
+  e = m.entries.filter((x) => x.name == name).first()
+  if e.is_missing() or not listed(m, name) then m
+    else if e.kind == "dir" then go(m, m.path.concat([name]))
+    else with_preview({...m, sel: name})
+}
+fn up(m) = if m.path.count() == 0 then m else do {
+  leaving = m.path.last()
+  n = go(m, m.path.take(m.path.count() - 1))
+  with_preview({...n, sel: leaving})
+}
+
+fn toast(m, text, tone = "neutral", action = missing) = do {
+  t = if action.is_missing() then {id: m.next, text: text, tone: tone, born: missing} else {id: m.next, text: text, tone: tone, action: action, born: missing}
+  all = m.toasts.concat([t])
+  {...m, toasts: all.drop(max(all.count() - 3, 0)), next: m.next + 1}
+}
+
+# --- Changing things (only with --write). -------------------------------------------------------
+
+TRASH = ".trash"
+fn attempt(m, what, f) = do {
+  r = try f()
+  if r.ok then r.value else toast(m, "Couldn't {what}: {r.error}", "danger")
+}
+fn new_folder(m, name) = if not m.write then m else if not valid_name(name) then {...m, dialog: {...m.dialog, error: "A name can't be empty, “.” or “..”, or contain “/”."}} else do {
+  path = join(here(m), [name])
+  if file_exists(path) then {...m, dialog: {...m.dialog, error: "“{name}” already exists here."}} else attempt({...m, dialog: missing}, "make the folder", () => do {
+    made = mkdir(path)
+    with_preview({...reload({...m, dialog: missing}), sel: name})
+  })
+}
+fn rename_to(m, name) = if not m.write then m else if not valid_name(name) then {...m, dialog: {...m.dialog, error: "A name can't be empty, “.” or “..”, or contain “/”."}} else do {
+  from = m.dialog.target
+  if not listed(m, from) then {...m, dialog: missing} else if name == from then {...m, dialog: missing} else do {
+    to = join(here(m), [name])
+    if file_exists(to) then {...m, dialog: {...m.dialog, error: "“{name}” already exists here."}} else attempt({...m, dialog: missing}, "rename", () => do {
+      moved = rename(join(here(m), [from]), to)
+      with_preview({...reload({...m, dialog: missing}), sel: name})
+    })
+  }
+}
+fn to_trash(m, name) = if not m.write or not listed(m, name) or (m.path.count() == 0 and name == TRASH) then m else do {
+  stored = "{round(now() * 1000.0)}-{name}"
+  attempt(m, "move to the Trash", () => do {
+    made = mkdir(join(m.root, [TRASH]))
+    moved = rename(join(here(m), [name]), join(m.root, [TRASH, stored]))
+    n = reload({...m, trash: [{stored: stored, name: name, from: m.path}].concat(m.trash)})
+    toast(n, "Moved “{name}” to the Trash", "neutral", {label: "Undo", msg: "restore", value: stored})
+  })
+}
+fn restore(m, stored) = do {
+  t = m.trash.filter((x) => x.stored == stored).first()
+  if t.is_missing() or not m.write then m else do {
+    to = join(join(m.root, t.from), [t.name])
+    if file_exists(to) then toast(m, "“{t.name}” can't go back: something has its name now.", "warning") else attempt(m, "restore", () => do {
+      moved = rename(join(m.root, [TRASH, stored]), to)
+      n = reload({...m, trash: m.trash.filter((x) => x.stored != stored), toasts: m.toasts.filter((x) => x.get("action").is_missing() or x.action.value != stored)})
+      toast(n, "Put “{t.name}” back", "success")
+    })
+  }
+}
+
+# --- Commands, for the palette and the keys. --------------------------------------------------
+
+fn commands(m) = [
+  {label: "Go to the top folder", value: "cmd:home", icon: "home"},
+  {label: "Go up a folder", value: "cmd:up", icon: "arrow_up", hint: "Backspace"},
+  {label: if m.hidden then "Hide hidden files" else "Show hidden files", value: "cmd:hidden", icon: "eye", hint: "Ctrl+H"},
+  {label: "Sort by name", value: "cmd:sort:name", icon: "sort"}, {label: "Sort by date modified", value: "cmd:sort:date", icon: "sort"},
+  {label: "Sort by size", value: "cmd:sort:size", icon: "sort"}, {label: "Sort by kind", value: "cmd:sort:kind", icon: "sort"},
+  {label: if m.view == "list" then "View as icons" else "View as a list", value: "cmd:view", icon: if m.view == "list" then "grid" else "list"},
+  {label: if m.dark then "Light appearance" else "Dark appearance", value: "cmd:theme", icon: if m.dark then "sun" else "moon"},
+].concat(if m.write then [{label: "New folder", value: "cmd:new", icon: "plus"}, {label: "Open the Trash", value: "cmd:trash", icon: "trash"}] else [])
+  .concat(visible(m).filter((e) => e.kind == "dir").take(30).map((e) => {label: e.name, value: "dir:{e.name}", icon: "folder", hint: "Folder"}))
+  .concat(m.recent.map((r) => {label: r.join("/"), value: "recent:{r.join("/")}", icon: "clock", hint: "Recent"}))
+
+fn run_command(m, v) = do {
+  n = {...m, palette: {...m.palette, open: false}, ctx: missing}
+  if v.starts_with("dir:") then open_entry(n, v.drop(4))
+    else if v.starts_with("recent:") then do {
+      names = v.drop(7).split("/").filter((x) => x != "")
+      if names.filter((x) => not valid_name(x)).count() > 0 then n else go(n, names)
+    }
+    else if v.starts_with("cmd:sort:") then with_preview({...n, sort: v.drop(9), desc: if n.sort == v.drop(9) then not n.desc else false})
+    else match v {
+      "cmd:home" => go(n, []),
+      "cmd:up" => up(n),
+      "cmd:hidden" => with_preview({...n, hidden: not n.hidden}),
+      "cmd:view" => {...n, view: if n.view == "list" then "grid" else "list"},
+      "cmd:theme" => {...n, dark: not n.dark},
+      "cmd:new" => if n.write then {...n, dialog: {kind: "new", target: "", error: missing}} else n,
+      "cmd:trash" => if n.write then go(n, [TRASH]) else n,
+      "cmd:rename" => if n.write and listed(n, n.sel) then {...n, dialog: {kind: "rename", target: n.sel, error: missing}} else n,
+      "cmd:delete" => to_trash(n, n.sel),
+      "cmd:open" => open_entry(n, n.sel),
+      "cmd:copy" => toast(n, "Copied the path", "success"),
+      _ => n,
+    }
+}
+
+fn on_key(m, k) = match k {
+  "ArrowDown" => select_step(m, 1),
+  "ArrowUp" => select_step(m, -1),
+  "Home" => select_step(m, "first"),
+  "End" => select_step(m, "last"),
+  "Enter" => open_entry(m, m.sel),
+  "Backspace" => up(m),
+  "Alt+ArrowUp" => up(m),
+  "Alt+ArrowLeft" => if m.back.count() == 0 then m else do {
+    to = m.back.last()
+    n = go({...m, back: m.back.take(m.back.count() - 1), fwd: [m.path].concat(m.fwd)}, to, false)
+    n
+  },
+  "Alt+ArrowRight" => if m.fwd.count() == 0 then m else go({...m, back: m.back.concat([m.path]), fwd: m.fwd.drop(1)}, m.fwd[0], false),
+  "Ctrl+K" => {...m, palette: {open: true, query: "", sel: 0}},
+  "Ctrl+H" => with_preview({...m, hidden: not m.hidden}),
+  "/" => {...m, focus: m.focus + 1},
+  "F2" => run_command(m, "cmd:rename"),
+  "Delete" => to_trash(m, m.sel),
+  "Escape" => {...m, ctx: missing, query: ""},
+  _ => m,
+}
+
+fn palette_key(m, k) = do {
+  shown = ui.palette_matches(m.palette.query, commands(m))
+  match k {
+    "ArrowDown" => {...m, palette: {...m.palette, sel: min(m.palette.sel + 1, max(shown.count() - 1, 0))}},
+    "ArrowUp" => {...m, palette: {...m.palette, sel: max(m.palette.sel - 1, 0)}},
+    "Enter" => if shown.count() == 0 then m else run_command(m, shown[clamp(m.palette.sel, 0, shown.count() - 1)].value),
+    "Escape" => {...m, palette: {...m.palette, open: false}},
+    _ => m,
+  }
+}
+
+fn update(m, e) = match e.msg {
+  "sel" => pick(m, e.value),
+  "open" => open_entry(m, e.value),
+  "crumb" => go(m, m.path.take(clamp(to_int(e.value), 0, m.path.count()))),
+  "nav" => match e.value { "home" => go(m, []), "trash" => if m.write then go(m, [TRASH]) else m, _ => m },
+  "back" => on_key(m, "Alt+ArrowLeft"),
+  "forward" => on_key(m, "Alt+ArrowRight"),
+  "up" => up(m),
+  "query" => do {
+    n = {...m, query: e.value}
+    v = visible(n)
+    with_preview(if v.filter((x) => x.name == n.sel).count() > 0 or v.count() == 0 then n else {...n, sel: v[0].name})
+  },
+  "view" => {...m, view: e.value},
+  "key" => on_key(m, e.value),
+  "menu" => {...m, menu: not m.menu},
+  "cmd" => run_command({...m, menu: false}, e.value),
+  "ctx" => do {
+    n = pick(m, e.value.value ?? m.sel)
+    {...n, ctx: if listed(n, n.sel) then {x: clamp(to_int("{round(e.value.x ?? 0)}"), 0, 10000), y: clamp(to_int("{round(e.value.y ?? 0)}"), 0, 10000)} else missing}
+  },
+  "close-ctx" => {...m, ctx: missing},
+  "palette" => {...m, palette: {open: true, query: "", sel: 0}},
+  "palette-query" => {...m, palette: {...m.palette, query: e.value ?? "", sel: 0}},
+  "palette-key" => palette_key(m, e.value),
+  "palette-pick" => run_command(m, e.value),
+  "palette-close" => {...m, palette: {...m.palette, open: false}},
+  "dialog-close" => {...m, dialog: missing},
+  "dialog-submit" => do {
+    name = "{e.value.get("dialog-name") ?? ""}".trim()
+    if m.dialog.is_missing() then m else if m.dialog.kind == "new" then new_folder(m, name) else rename_to(m, name)
+  },
+  "restore" => restore(m, e.value),
+  "undo-last" => if m.trash.count() == 0 then m else restore(m, m.trash[0].stored),
+  "dismiss" => {...m, toasts: m.toasts.filter((t) => "{t.id}" != e.value)},
+  "tick" => {...m, toasts: m.toasts.map((t) => if t.born.is_missing() then {...t, born: e.value} else t).filter((t) => e.value - t.born < 5.0)},
+  "scroll" => {...m, offset: e.value},
+  _ => m,
+}
+
+# --- The view. ----------------------------------------------------------------------------------
+
+KEYS = "ArrowUp ArrowDown Home End Enter Backspace Alt+ArrowUp Alt+ArrowLeft Alt+ArrowRight Ctrl+K Ctrl+H / F2 Delete Escape"
+
+fn root_name(m) = do {
+  parts = m.root.split("/").filter((p) => p != "" and p != ".")
+  if parts.count() == 0 then (if m.root.starts_with("/") then "/" else "This folder") else parts.last()
+}
+
+fn row(m, e, at) = ui.list_item(e.name, subtitle: "{when(e.modified, at)} · {kind_label(e)}", leading: ui.el("span", {class: "c-{e.cat}"}, [ui.icon(ICON_OF.get(e.cat))]), trailing: size_label(e),
+  selected: m.sel == e.name, click: "sel", value: e.name, key: "e-{e.name}",
+  extra: {dblclick: "open", contextmenu: "ctx", reveal: m.sel == e.name})
+
+fn tile(m, e) = ui.el("button", {class: if m.sel == e.name then "tile on" else "tile", click: "sel", dblclick: "open", contextmenu: "ctx", value: e.name, key: "t-{e.name}", reveal: m.sel == e.name, attrs: {type: "button", title: e.name}}, [
+  ui.el("span", {class: "tile-ic c-{e.cat}"}, [ui.icon(ICON_OF.get(e.cat), "lg")]),
+  ui.el("span", {class: "tile-name"}, [ui.text(e.name)]),
+])
+
+fn listing(m) = do {
+  v = visible(m)
+  at = now()
+  hidden_n = m.entries.filter((e) => e.name.starts_with(".")).count()
+  ui.column([
+    ui.breadcrumbs([["0", root_name(m)]].concat(range(0, m.path.count()).map((i) => ["{i + 1}", m.path[i]])), "crumb"),
+    ui.el("div", {class: "title-row"}, [
+      ui.el("h1", {class: "screen-title"}, [ui.text(if m.path.count() == 0 then root_name(m) else m.path.last())]),
+      ui.el("span", {class: "meta"}, [ui.text("{v.count()} items{if m.hidden or hidden_n == 0 then "" else ", {hidden_n} hidden"}{if m.query == "" then "" else " matching “{m.query}”"}")]),
+    ]),
+    if m.error != "" then ui.empty_state("lock", "Can't open this folder", m.error)
+      else if v.count() == 0 then ui.empty_state(if m.query == "" then "folder" else "search", if m.query == "" then "Nothing here" else "No matches", if m.query == "" then "This folder is empty." else "Nothing here is called “{m.query}”.")
+      else if m.view == "grid" then ui.el("div", {class: "tiles", role: "listbox", aria: {label: "Files"}}, v.map((e) => tile(m, e)))
+      else ui.list(v.map((e) => row(m, e, at)), label: "Files"),
+    ], gap: 3)
+}
+
+fn inspector(m) = do {
+  e = selected(m)
+  p = m.preview
+  if e.is_missing() then ui.el("section", {class: "inspector card mat-card", role: "region", aria: {label: "Details"}}, [ui.empty_state("eye", "Nothing selected", "Choose a file to see it here.")]) else
+    ui.el("section", {class: "inspector card mat-card", role: "region", aria: {label: "Details"}}, [
+      match p.kind {
+        "image" => ui.el("div", {class: "pv-image inset"}, [ui.el("img", {attrs: {src: p.src, alt: "Preview of {e.name}"}}, [])]),
+        "text" => ui.el("pre", {class: "pv-text inset", attrs: {tabindex: "0"}, aria: {label: "Contents of {e.name}"}}, [ui.text(if p.cut then "{p.text}\n…" else p.text)]),
+        "table" => ui.data_table("pv-table", p.df, m.offset, "scroll", "Contents of {e.name}", height: 240, row_height: 32),
+        _ => ui.el("div", {class: "pv-icon inset c-{e.cat}"}, [ui.icon(ICON_OF.get(e.cat), "lg"), if p.kind == "folder" or p.kind == "note" then ui.el("span", {class: "meta"}, [ui.text(p.text)]) else ui.text("")]),
+      },
+      ui.el("h2", {class: "pv-name"}, [ui.text(e.name)]),
+      ui.el("dl", {class: "facts"}, [
+        ["Kind", kind_label(e)], ["Size", if e.kind == "dir" then (if p.kind == "folder" then p.text else "—") else "{size_label(e)} ({e.size} bytes)"],
+        ["Modified", when(e.modified, now())], ["Where", "/{m.path.join("/")}"],
+        ].flat_map((f) => [ui.el("dt", {}, [ui.text(f[0])]), ui.el("dd", {}, [ui.text(f[1])])])),
+      ui.cluster(present([
+        if e.kind == "dir" then ui.button("Open", "open", variant: "primary", value: e.name, icon: "folder") else missing,
+        ui.el("button", {class: "btn outline", copy: join(here(m), [e.name]), click: "cmd", value: "cmd:copy", attrs: {type: "button"}}, [ui.icon("copy", "sm"), ui.text("Copy path")]),
+        if m.write then ui.button("Rename", "cmd", variant: "ghost", value: "cmd:rename", icon: "pen") else missing,
+        ]), gap: 2),
+    ])
+}
+fn present(xs) = xs.filter((x) => not x.is_missing())
+
+fn toolbar(m) = ui.toolbar(present([
+  [
+    ui.el("button", {class: "btn ghost icon", click: "back", aria: {label: "Back"}, attrs: {type: "button", title: "Back (Alt+←)", disabled: m.back.count() == 0}}, [ui.icon("arrow_left")]),
+    ui.el("button", {class: "btn ghost icon", click: "forward", aria: {label: "Forward"}, attrs: {type: "button", title: "Forward (Alt+→)", disabled: m.fwd.count() == 0}}, [ui.icon("arrow_right")]),
+    ui.el("button", {class: "btn ghost icon", click: "up", aria: {label: "Enclosing folder"}, attrs: {type: "button", title: "Up (Backspace)", disabled: m.path.count() == 0}}, [ui.icon("arrow_up")]),
+  ],
+  ui.el("div", {class: "search", key: "search-{m.focus}"}, [
+    ui.icon("search", "sm"),
+    ui.el("input", {class: "search-input", input: "query", aria: {label: "Search this folder"}, attrs: {type: "search", value: m.query, placeholder: "Search this folder", autocomplete: "off", autofocus: m.focus > 0}}, []),
+    ui.kbd("/"),
+  ]),
+  [
+    ui.segmented("view", "View", m.view, [["list", "List"], ["grid", "Icons"]], "view", size: "sm"),
+    if m.write then ui.icon_button("plus", "New folder", "cmd", "cmd:new") else ui.el("span", {class: "badge", attrs: {title: "Started without --write: nothing can be changed"}}, [ui.icon("lock", "xs"), ui.text(" Read-only")]),
+    ui.icon_button("⌘", "Command palette (Ctrl+K)", "palette"),
+  ],
+  ]), label: "Folder")
+
+fn rail(m) = ui.rail("Places", [["home", "Home", "home"]].concat(if m.write then [["trash", "Trash", "trash"]] else []), if m.path == [TRASH] then "trash" else "home", "nav",
+  top: ui.el("div", {class: "logo"}, [ui.icon("folder")]),
+  bottom: ui.icon_button(if m.dark then "sun" else "moon", if m.dark then "Light appearance" else "Dark appearance", "cmd", "cmd:theme"))
+
+fn context_items(m) = do {
+  e = selected(m)
+  dir = not e.is_missing() and e.kind == "dir"
+  [{label: if dir then "Open" else "Show", msg: "cmd", value: "cmd:open", icon: if dir then "folder" else "eye", shortcut: "Enter"}, {label: "Copy path", msg: "cmd", value: "cmd:copy", icon: "copy"}]
+    .concat(if m.write then [{separator: true, label: "", msg: ""}, {label: "Rename…", msg: "cmd", value: "cmd:rename", icon: "pen", shortcut: "F2"}, {label: "Move to the Trash", msg: "cmd", value: "cmd:delete", icon: "trash", danger: true, shortcut: "Del"}] else [])
+}
+
+fn dialog(m) = do {
+  d = m.dialog
+  open = not d.is_missing()
+  kind = if open then d.kind else "new"
+  ui.dialog("name-dialog", open, if kind == "new" then "New folder" else "Rename “{if open then d.target else ""}”", [
+    ui.form("dialog-submit", [
+      ui.text_input("dialog-name", "Name", if open and kind == "rename" then d.target else "", "noop", error: if open then d.error else missing, placeholder: "Untitled folder"),
+      ui.cluster([ui.submit_button(if kind == "new" then "Create" else "Rename"), ui.button("Cancel", "dialog-close", variant: "ghost")], gap: 2),
+    ]),
+    ], "dialog-close")
+}
+
+fn view(m) = ui.el("div", {class: "files", keydown: "key", shortcuts: KEYS}, [
+  ui.shell(rail(m), toolbar(m), ui.el("div", {class: "files-body"}, [listing(m), inspector(m)]), label: "Files"),
+  ui.context_menu("ctx", m.ctx, context_items(m), "close-ctx"),
+  ui.command_palette("palette", m.palette.open, m.palette.query, commands(m), m.palette.sel, "palette-query", "palette-key", "palette-pick", "palette-close", placeholder: "Go to a folder, or run a command"),
+  dialog(m),
+  ui.toasts(m.toasts.map((t) => if t.get("action").is_missing() then {id: t.id, text: t.text, tone: t.tone} else {id: t.id, text: t.text, tone: t.tone, action: t.action}), "dismiss"),
+])
+
+STYLE = """
+#root { max-width: none; padding: 0; height: 100vh; }
+.files { height: 100vh; }
+.files .shell { height: 100vh; }
+.logo { width: 38px; height: 38px; border-radius: max(4px, calc(var(--r-window) - 12px)); display: grid; place-items: center; margin-bottom: 10px;
+  background: var(--accent); color: var(--accent-fg); box-shadow: 0 6px 16px -6px var(--accent-glow); }
+.files-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s-4); align-items: start; }
+@container (min-width: 860px) { .files-body { grid-template-columns: minmax(0, 1fr) 320px; } }
+@container (max-width: 859px) { .inspector { display: none; } }
+.title-row { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s-3); }
+.screen-title { font: var(--type-title-1); letter-spacing: var(--track-title-1); margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inspector { position: sticky; top: calc(var(--ctl-h) + var(--inset) * 3); gap: var(--s-3); }
+.inset { border-radius: var(--r-in-card); background: var(--surface-2); overflow: hidden; }
+.pv-image { display: grid; place-items: center; min-height: 160px; max-height: 260px;
+  background: repeating-conic-gradient(var(--surface-2) 0 25%, var(--surface-3) 0 50%) 0 0 / 16px 16px; }
+.pv-image img { max-width: 100%; max-height: 260px; object-fit: contain; display: block; }
+.pv-text { margin: 0; padding: var(--s-3); max-height: 280px; overflow: auto; font: 12px/1.55 var(--mono); white-space: pre-wrap; word-break: break-word; color: var(--fg); }
+.pv-icon { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; min-height: 140px; padding: var(--s-4); color: var(--muted); text-align: center; }
+.pv-icon .ic.lg { width: 44px; height: 44px; }
+.pv-name { font: var(--type-title-3); letter-spacing: var(--track-title-3); color: var(--fg); margin: 0; word-break: break-word; }
+.facts { display: grid; grid-template-columns: auto 1fr; gap: 6px var(--s-3); margin: 0; font: var(--type-footnote); }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.list .li-lead { background: transparent; }
+.list .li-lead > span { display: grid; place-items: center; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: var(--s-2); }
+.tile { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: var(--s-3) var(--s-2); border: 0; border-radius: var(--r-card); background: transparent;
+  color: inherit; font: inherit; cursor: pointer; min-width: 0; transition: background-color var(--fx-fast); }
+.tile:hover { background: var(--hover); }
+.tile.on { background: var(--accent-soft); }
+.tile-ic { width: 64px; height: 64px; display: grid; place-items: center; border-radius: var(--r-in-card); }
+.tile-ic .ic.lg { width: 40px; height: 40px; }
+.tile-name { font: var(--type-footnote); text-align: center; max-width: 100%; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-word; }
+.tile.on .tile-name { color: var(--accent-text); font-weight: 600; }
+.c-folder { color: var(--accent); } .c-image { color: var(--chart-4); } .c-table { color: var(--success); } .c-code { color: var(--chart-2); }
+.c-archive, .c-audio, .c-video { color: var(--warning); } .c-link { color: var(--muted); }
+.toolbar .badge { gap: 4px; }
+"""
+
+fn spec_of(root, write, material) = {
+  title: "Files",
+  init: go({
+    root: root, write: write, path: [], entries: [], error: "", sel: "", query: "", view: "list", sort: "name", desc: false, hidden: false,
+    back: [], fwd: [], recent: [], ctx: missing, menu: false, palette: {open: false, query: "", sel: 0}, dialog: missing,
+    toasts: [], next: 1, trash: [], preview: {kind: "none"}, offset: 0, focus: 0, dark: false,
+    }, [], false),
+  update: update,
+  view: view,
+  style: STYLE,
+  design: ui.design({seed: "#2563eb", material: material}),
+  theme: (m) => if m.dark then "dark" else "light",
+  subscriptions: (m) => if m.toasts.count() == 0 then [] else [ui.every(1000, "tick")],
+}
+
+# A scripted session for `--replay`, run against whatever --root is: every attempt to leave the
+# root, then (with --write) a folder made, renamed, moved to the Trash and brought back. One
+# screen per event; the CLI test builds the folder and checks both the screens and the disk.
+SESSION = [
+  {msg: "open", value: "Notes"}, {msg: "key", value: "Backspace"},
+  {msg: "open", value: ".."}, {msg: "open", value: "../outside"}, {msg: "sel", value: "../outside/keep.txt"},
+  {msg: "open", value: "link-out"}, {msg: "palette-pick", value: "recent:../../outside"}, {msg: "palette-pick", value: "dir:.."},
+  {msg: "crumb", value: "-3"}, {msg: "restore", value: "../outside/keep.txt"},
+  {msg: "cmd", value: "cmd:new"}, {msg: "dialog-submit", value: {"dialog-name": "../escape"}}, {msg: "dialog-submit", value: {"dialog-name": "Drafts"}},
+  {msg: "sel", value: "Drafts"}, {msg: "cmd", value: "cmd:rename"}, {msg: "dialog-submit", value: {"dialog-name": "Notes"}}, {msg: "dialog-submit", value: {"dialog-name": "Drafts 2027"}},
+  {msg: "sel", value: "Drafts 2027"}, {msg: "key", value: "Delete"}, {msg: "undo-last", value: missing},
+  {msg: "sel", value: "link-out"}, {msg: "key", value: "Enter"}, {msg: "key", value: "Ctrl+H"},
+]
+
+## A file manager confined to one folder. Read-only unless --write; never follows links.
+fn main(root: String = ".", write: Bool = false, material: String = "hybrid", port: Int = 8090, open: Bool = false, window: Bool = false, replay: Bool = false) = do {
+  r = if root.ends_with("/") and root.count() > 1 then root.take(root.count() - 1) else root
+  info = try file_info(r)
+  if not info.ok or info.value.kind != "dir" then raise("`{root}` is not a folder", "give --root a folder that exists (links are not followed).")
+    else if replay then ui.replay(spec_of(r, write, material), SESSION).map((html) => print(html))
+    else ui.app({...spec_of(r, write, material), port: port, open: open, window: if window then {width: 1180, height: 760} else false})
+}
