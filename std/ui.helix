@@ -186,11 +186,12 @@ fn field(id, label, control, hint, error) = do {
   ])
 }
 
+# A field with no value yet (`missing`) is empty, not the word "missing".
 export fn text_input(id, label, value, msg, hint = missing, error = missing, kind = "text", placeholder = missing) =
-  field(id, label, el("input", {class: "input", input: msg, attrs: {type: kind, name: id, value: "{value}", placeholder: placeholder}}, []), hint, error)
+  field(id, label, el("input", {class: "input", input: msg, attrs: {type: kind, name: id, value: "{value ?? ""}", placeholder: placeholder}}, []), hint, error)
 
 export fn textarea(id, label, value, msg, rows = 4, hint = missing, error = missing) =
-  field(id, label, el("textarea", {class: "input", input: msg, attrs: {name: id, rows: "{rows}"}}, [text(value)]), hint, error)
+  field(id, label, el("textarea", {class: "input", input: msg, attrs: {name: id, rows: "{rows}"}}, [text(value ?? "")]), hint, error)
 
 # `options` is a list of values, or of [value, caption] pairs.
 export fn select(id, label, value, options, msg, hint = missing, error = missing) = do {
@@ -262,7 +263,7 @@ export fn stepper(id, label, value, msg, lo = 0, hi = 99, step = 1) = el("div", 
 # A search box with its icon, and the shortcut that reaches it shown at its end.
 export fn search_field(id, label, value, msg, placeholder = "Search", shortcut = missing) = el("label", {class: "search"}, present([
   icon("search", "sm"),
-  el("input", {id: id, class: "search-input", input: msg, aria: {label: label}, attrs: {type: "search", name: id, value: "{value}", placeholder: placeholder, autocomplete: "off"}}, []),
+  el("input", {id: id, class: "search-input", input: msg, aria: {label: label}, attrs: {type: "search", name: id, value: "{value ?? ""}", placeholder: placeholder, autocomplete: "off"}}, []),
   if shortcut.is_missing() then missing else kbd(shortcut),
 ]))
 
@@ -283,13 +284,18 @@ export fn check(value, rules) = rules.reduce(missing, (err, rule) => if err.is_m
 # --- Feedback. ---------------------------------------------------------------------------
 
 # `value` from 0 to `max`. The bar scales on the compositor.
-export fn progress(label, value, max = 1.0) = el("div", {class: "progress", role: "progressbar", aria: {label: label, valuemin: "0", valuemax: "{max}", valuenow: "{value}"}}, [
-  el("span", {class: "progress-bar", style: {transform: "scaleX({clamp(value / max, 0.0, 1.0):.4f})"}}, []),
-])
+export fn progress(label, value, max = 1.0) = do {
+  q = if max == 0 then 0.0 else value / max
+  f = if is_finite(q) then clamp(q, 0.0, 1.0) else 0.0
+  el("div", {class: "progress", role: "progressbar", aria: {label: label, valuemin: "0", valuemax: "{max}", valuenow: "{value}"}}, [
+    el("span", {class: "progress-bar", style: {transform: "scaleX({f:.4f})"}}, []),
+  ])
+}
 
 # A ring that fills to `value` of `max` — compact progress, read as a percentage.
 export fn ring(label, value, max = 100.0, size = 44) = do {
-  f = clamp(value / max, 0.0, 1.0)
+  q = if max == 0 then 0.0 else value / max
+  f = if is_finite(q) then clamp(q, 0.0, 1.0) else 0.0
   c = 2.0 * pi * 15.0
   el("svg", {class: "ring", role: "img", aria: {label: "{label}: {round(f * 100.0)}%"}, style: {width: "{size}px", height: "{size}px"}, attrs: {viewBox: "0 0 36 36"}}, [
     el("circle", {class: "ring-track", attrs: {cx: "18", cy: "18", r: "15"}}, []),
@@ -325,18 +331,22 @@ export fn tooltip(id, tip, child) = do {
 
 # --- Navigation and overlays. ------------------------------------------------------------
 
+# An id made from a value: ARIA's id lists are separated by spaces, so a value with a space
+# (or anything else an id should not hold) is spelled out, and two values never share an id.
+fn id_part(v) = "{v}".chars().map((c) => if c.re_match("^[A-Za-z0-9-]$") then c else "_{ord(c)}_").join("")
+
 # Tabs: `items` is `[{id, label, content}]`. Every panel is rendered and the unselected ones are
 # `hidden`, so each tab's `aria-controls` names a real element. Arrow keys, Home and End move
 # between tabs and select them; only the selected tab is in the Tab order.
 export fn tabs(id, selected, items, msg, label = missing) = el("div", {class: "tabs"}, [
   el("div", {class: "tabbar", role: "tablist", aria: {label: label}}, items.map((t) => el("button", {
-    id: "{id}-tab-{t.id}", role: "tab", class: "tab", click: msg, value: t.id,
-    aria: {selected: t.id == selected, controls: "{id}-panel-{t.id}"},
+    id: "{id}-tab-{id_part(t.id)}", role: "tab", class: "tab", click: msg, value: t.id,
+    aria: {selected: t.id == selected, controls: "{id}-panel-{id_part(t.id)}"},
     attrs: {type: "button", tabindex: if t.id == selected then "0" else "-1"},
     }, [text(t.label)]))),
   ].concat(items.map((t) => el("div", {
-    key: "{id}-panel-{t.id}", id: "{id}-panel-{t.id}", role: "tabpanel", class: "tabpanel",
-    aria: {labelledby: "{id}-tab-{t.id}"}, attrs: {tabindex: "0", hidden: t.id != selected},
+    key: "{id}-panel-{id_part(t.id)}", id: "{id}-panel-{id_part(t.id)}", role: "tabpanel", class: "tabpanel",
+    aria: {labelledby: "{id}-tab-{id_part(t.id)}"}, attrs: {tabindex: "0", hidden: t.id != selected},
     }, [t.content]))))
 
 # A menu button. `items` is `[{label, msg, value?}]`. Open, it takes focus to its first item;
@@ -372,7 +382,7 @@ export fn dialog(id, open, title, children, close, actions = []) = el("dialog", 
 # A sheet: a panel that rises from the bottom over a dimmed scrim, for a task that belongs to
 # what is on screen (share, filter, details). Escape, the scrim or the close button send
 # `close`. Its corners are concentric with the window's, and its controls with it.
-export fn sheet(id, open, title, children, close, actions = []) = if not open then el("div", {key: "{id}-layer", class: "sheet-layer closed"}, []) else el("div", {key: "{id}-layer", class: "sheet-layer", exit: "fade"}, [
+export fn sheet(id, open, title, children, close, actions = []) = if not open then el("div", {key: "{id}-layer-closed", class: "sheet-layer closed"}, []) else el("div", {key: "{id}-layer", class: "sheet-layer", exit: "fade"}, [
   el("div", {class: "scrim", click: close, enter: "fade", aria: {hidden: true}}, []),
   el("section", {id: id, class: "sheet mat-overlay", role: "dialog", dismiss: close, enter: "sheet", aria: {labelledby: "{id}-title", modal: true}}, [
     el("div", {class: "grabber", aria: {hidden: true}}, []),
@@ -384,17 +394,20 @@ export fn sheet(id, open, title, children, close, actions = []) = if not open th
 # A context menu: the menu a right click opens, where the pointer was (`at` is `{x, y}`, or
 # missing when closed). It is a `menu` — arrows, Home, End, Escape — and it is kept on screen
 # by the client however close to an edge it opened. `items` are `menu`'s.
-export fn context_menu(id, at, items, close) = if at.is_missing() then el("div", {key: "{id}-ctx", class: "ctx-closed"}, []) else
-  el("div", {key: "{id}-ctx", id: id, role: "menu", class: "menu-list context-menu mat-overlay", enter: "pop", exit: "fade", dismiss: close, aria: {label: "Actions"},
-    style: {left: "{at.x}px", top: "{at.y}px"}}, range(0, items.count()).map((i) => do {
-      it = items[i]
-      if it.get("separator") ?? false then el("div", {class: "menu-sep", role: "separator"}, []) else
-        el("button", {role: "menuitem", class: if it.get("danger") ?? false then "menu-item danger" else "menu-item", click: it.msg, value: it.get("value"),
-          attrs: {type: "button", tabindex: "-1", autofocus: i == 0, disabled: it.get("disabled") ?? false}}, present([
-            if it.get("icon").is_missing() then missing else glyph(it.icon, "sm"), el("span", {class: "spacer-text"}, [text(it.label)]),
-            if it.get("shortcut").is_missing() then missing else el("span", {class: "menu-kbd"}, [text(it.shortcut)]),
-        ]))
-  }))
+export fn context_menu(id, at, items, close) = if at.is_missing() then el("div", {key: "{id}-ctx-closed", class: "ctx-closed"}, []) else
+  do {
+    first = range(0, items.count()).filter((i) => not (items[i].get("separator") ?? false) and not (items[i].get("disabled") ?? false)).first() ?? -1
+    el("div", {key: "{id}-ctx", id: id, role: "menu", class: "menu-list context-menu mat-overlay", enter: "pop", exit: "fade", dismiss: close, aria: {label: "Actions"},
+      style: {left: "{at.x}px", top: "{at.y}px"}}, range(0, items.count()).map((i) => do {
+        it = items[i]
+        if it.get("separator") ?? false then el("div", {class: "menu-sep", role: "separator"}, []) else
+          el("button", {role: "menuitem", class: if it.get("danger") ?? false then "menu-item danger" else "menu-item", click: it.msg, value: it.get("value"),
+            attrs: {type: "button", tabindex: "-1", autofocus: i == first, disabled: it.get("disabled") ?? false}}, present([
+              if it.get("icon").is_missing() then missing else glyph(it.icon, "sm"), el("span", {class: "spacer-text"}, [text(it.label)]),
+              if it.get("shortcut").is_missing() then missing else el("span", {class: "menu-kbd"}, [text(it.shortcut)]),
+          ]))
+    }))
+  }
 
 # Which of `items` (`[{label, …}]`) a typed query matches, best first: an exact prefix, then a
 # word starting with it, then the letters in order anywhere ("nf" finds "New folder").
@@ -418,7 +431,7 @@ fn in_order(q, l) = q.chars().reduce(0, (from, c) => if from < 0 then -1 else do
 # `selected` (an index into those) marked. Typing sends `query`; the arrows and Enter send
 # `nav` with the key ("ArrowDown", "Enter"); a click sends `pick` with the item's value; Escape
 # or a press outside sends `close`. The app keeps the query and the selection.
-export fn command_palette(id, open, query, items, selected, query_msg, nav, pick, close, placeholder = "Type a command or search") = if not open then el("div", {key: "{id}-palette", class: "palette-layer closed"}, []) else do {
+export fn command_palette(id, open, query, items, selected, query_msg, nav, pick, close, placeholder = "Type a command or search") = if not open then el("div", {key: "{id}-palette-closed", class: "palette-layer closed"}, []) else do {
   shown = palette_matches(query, items).take(50)
   sel = if shown.count() == 0 then -1 else clamp(selected, 0, shown.count() - 1)
   el("div", {key: "{id}-palette", class: "palette-layer", exit: "fade"}, [
@@ -427,7 +440,7 @@ export fn command_palette(id, open, query, items, selected, query_msg, nav, pick
       el("div", {class: "palette-search", keydown: nav, shortcuts: "ArrowUp ArrowDown Enter Escape"}, [
         icon("search", "sm"),
         el("input", {id: "{id}-input", class: "palette-input", input: query_msg, role: "combobox",
-          aria: {label: placeholder, expanded: true, controls: "{id}-list", activedescendant: if sel < 0 then missing else "{id}-opt-{sel}", autocomplete: "list"},
+          aria: {label: placeholder, expanded: shown.count() > 0, controls: if shown.count() == 0 then missing else "{id}-list", activedescendant: if sel < 0 then missing else "{id}-opt-{sel}", autocomplete: "list"},
           attrs: {type: "text", value: "{query}", placeholder: placeholder, autocomplete: "off", spellcheck: "false", autofocus: true}}, []),
         kbd("esc"),
       ]),
@@ -488,7 +501,8 @@ export fn stat_tile(label, value, delta = missing, trend = "up", series = missin
   if delta.is_missing() then missing else el("span", {class: "delta {trend}"}, [text(delta)]),
   if series.is_missing() then missing else sparkline(series, "{label} trend"),
 ]))
-export fn sparkline(values, label) = do {
+export fn sparkline(values, label) = if values.filter((v) => is_finite(v)).count() == 0 then el("svg", {class: "spark", role: "img", aria: {label: "{label} (no data)"}, attrs: {viewBox: "0 0 100 30", preserveAspectRatio: "none"}}, []) else do {
+  values = values.map((v) => if is_finite(v) then v else missing).drop_missing()
   n = values.count()
   lo = values.min()
   hi = values.max()
@@ -554,7 +568,9 @@ export fn rail(label, items, selected, msg, top = missing, bottom = missing) = e
 export fn data_table(id, df, offset, scroll, label, height = 360, row_height = 36) = do {
   n = df.count()
   # Before the first scroll report the offset may not be a number yet: that is the top.
-  offset = if type_of(offset) == "Int" or type_of(offset) == "Float" then offset else 0
+  # It is the page's report, so it is only trusted to be a number, and one within the table.
+  row_height = max(row_height, 1)
+  offset = if (type_of(offset) == "Int" or type_of(offset) == "Float") and is_finite(offset) then clamp(offset, 0, n * row_height) else 0
   cols = df.columns()
   numeric = df.schema().filter((c) => c.type == "Int" or c.type == "Float").map((c) => c.name)
   # The window is clamped to the data. The offset is the browser's last report, and after the
@@ -576,7 +592,7 @@ export fn data_table(id, df, offset, scroll, label, height = 360, row_height = 3
 }
 
 fn fmt_cell(v) = match type_of(v) {
-  "Float" => if abs(v) >= 1000.0 then "{v:.1f}" else "{v:.3f}",
+  "Float" => if is_nan(v) then "NaN" else if not is_finite(v) then (if v > 0.0 then "∞" else "−∞") else if abs(v) >= 1000.0 then "{v:.1f}" else "{v:.3f}",
   "Missing" => "—",
   _ => "{v}",
 }
@@ -586,12 +602,15 @@ fn fmt_cell(v) = match type_of(v) {
 # A timer: every `ms` milliseconds the app receives `{msg, value}`, the value being the wall
 # clock (`now()`). An app lists its timers as a function of the model, so a timer exists only
 # while the model asks for it — a stopwatch that is stopped has none, and nothing polls.
-export fn every(ms, msg) = {every: ms, msg: msg}
+export fn every(ms, msg) = if not ((type_of(ms) == "Int" or type_of(ms) == "Float") and is_finite(ms) and ms > 0) then raise("a timer's period is a positive number of milliseconds, not {ms}", "`ui.every(1000, \"tick\")`") else if type_of(msg) != "String" then raise("a timer's message is a string, not {type_of(msg)}", "`ui.every(1000, \"tick\")`") else {every: ms, msg: msg}
 
+# No timer is faster than this, so a period of 0 cannot spin the loop.
+FASTEST_MS = 10
+fn timer_ok(x) = type_of(x) == "Record" and (type_of(x.get("every")) == "Int" or type_of(x.get("every")) == "Float") and is_finite(x.every) and type_of(x.get("msg")) == "String"
 fn subs_of(spec, model) = if spec.get("subscriptions").is_missing() then [] else do {
   s = try (spec.subscriptions)(model)
-  if s.ok then s.value else do {
-    logged = elog("subscriptions failed: {s.error}; no timers until the model changes")
+  if s.ok and type_of(s.value) == "Array" then s.value.filter(timer_ok).map((x) => {every: max(x.every, FASTEST_MS), msg: x.msg}) else do {
+    logged = elog(if s.ok then "subscriptions returned {type_of(s.value)}, not a list of `ui.every(…)`; no timers until the model changes" else "subscriptions failed: {s.error}; no timers until the model changes")
     []
   }
 }
@@ -735,7 +754,14 @@ MB = 30.0
 
 # The range a chart's axis covers. No data is a chart too — before the first result arrives
 # it is the normal state — so an empty series draws an empty frame rather than raising.
-fn extent(vs) = if vs.count() == 0 then {lo: 0.0, hi: 1.0, empty: true} else {lo: vs.min() * 1.0, hi: vs.max() * 1.0, empty: false}
+# A value that is not a finite number (NaN, ∞ — a division by zero upstream) is not drawn and
+# never sets the axis.
+fn finite(vs) = vs.filter((v) => type_of(v) != "Missing" and is_finite(v))
+fn drawable(v) = type_of(v) != "Missing" and is_finite(v)
+fn extent(vs0) = do {
+  vs = finite(vs0)
+  if vs.count() == 0 then {lo: 0.0, hi: 1.0, empty: true} else {lo: vs.min() * 1.0, hi: vs.max() * 1.0, empty: false}
+}
 fn no_data(label) = el("text", {class: "axis-label", attrs: {x: "{CW / 2.0}", y: "{CH / 2.0}", "text-anchor": "middle"}}, [text("No data")])
 
 fn px(ax, v) = ML + (v - ax.lo) / (ax.hi - ax.lo) * (CW - ML - MR)
@@ -759,7 +785,7 @@ export fn line_chart(label, series) = do {
   ay = axis(ey.lo, ey.hi, 5)
   lines = range(0, series.count()).map((k) => do {
     s = series[k]
-    pts = range(0, s.xs.count()).map((i) => "{px(ax, s.xs[i]):.1f},{py(ay, s.ys[i]):.1f}")
+    pts = range(0, s.xs.count()).filter((i) => drawable(s.xs[i]) and drawable(s.ys[i])).map((i) => "{px(ax, s.xs[i]):.1f},{py(ay, s.ys[i]):.1f}")
     path = if pts.count() == 0 then "M0,0" else "M{pts.join(" L")}"
     el("path", {key: "line-{s.name}", class: "series s{k % 6 + 1}", style: {d: "path(\"{path}\")"}, attrs: {d: path}}, [])
   })
@@ -774,7 +800,7 @@ export fn scatter_chart(label, xs, ys) = do {
   ey = extent(ys)
   ax = axis(ex.lo, ex.hi, 6)
   ay = axis(ey.lo, ey.hi, 5)
-  dots = range(0, xs.count()).map((i) => el("circle", {key: "p{i}", class: "dot s1", style: {cx: "{px(ax, xs[i]):.1f}px", cy: "{py(ay, ys[i]):.1f}px"}, attrs: {r: "4"}}, []))
+  dots = range(0, xs.count()).filter((i) => drawable(xs[i]) and drawable(ys[i])).map((i) => el("circle", {key: "p{i}", class: "dot s1", style: {cx: "{px(ax, xs[i]):.1f}px", cy: "{py(ay, ys[i]):.1f}px"}, attrs: {r: "4"}}, []))
   chart_frame(label, ax, ay, dots, missing, empty: ex.empty)
 }
 
@@ -786,7 +812,7 @@ export fn bar_chart(label, labels, values) = do {
   slot = (CW - ML - MR) / max(labels.count(), 1)
   base = py(ay, 0.0)
   bars = range(0, labels.count()).map((i) => do {
-    top = py(ay, values[i])
+    top = if drawable(values[i]) then py(ay, values[i]) else base
     h = abs(base - top)
     y = min(base, top)
     el("rect", {key: "bar-{labels[i]}", class: "bar s1", style: {y: "{y:.1f}px", height: "{h:.1f}px"}, enter: "grow", attrs: {x: "{ML + i * slot + slot * 0.18:.1f}", y: "{y:.1f}", width: "{slot * 0.64:.1f}", height: "{h:.1f}", rx: "4"}}, [
@@ -824,7 +850,12 @@ export fn open_url(url) = do {
 #   - another local process does not have it — the port alone is no longer enough;
 #   - a web page elsewhere cannot send it — SameSite=Strict keeps a cross-site POST cookieless,
 #     and a page that rebinds its DNS to 127.0.0.1 is a different origin with no cookie at all;
-#   - the `Host` header must also name this machine, which refuses a rebound request outright.
+#   - the `Host` header must also name this machine, which refuses a rebound request outright;
+#   - a request that changes something (a POST) must come from the app's own page. A cookie is
+#     scoped by host, not port, and every port of 127.0.0.1 is the same SITE, so SameSite lets
+#     a page served from ANY other local port send the cookie along. A browser names where a
+#     POST came from (`Origin`, and `Sec-Fetch-Site`): one from another origin is refused. A
+#     client that is not a browser sends neither, and has no cookie unless it holds the token.
 #
 # A cookie is scoped by host, not port, so its name carries the port: two apps side by side do
 # not overwrite each other's sessions. Tokens are compared by their HMAC under a second secret,
@@ -850,6 +881,11 @@ fn cookie_token(rt, req) = do {
 fn local_host(rt, req) = do {
   h = req.headers.get("host")
   if h.is_missing() then false else ["127.0.0.1:{rt.port}", "localhost:{rt.port}", "[::1]:{rt.port}"].contains(h)
+}
+fn same_origin(req) = do {
+  o = req.headers.get("origin")
+  site = req.headers.get("sec-fetch-site")
+  (o.is_missing() or o == "http://{req.headers.get("host")}") and (site.is_missing() or site == "same-origin")
 }
 fn set_cookie(rt) = "{rt.cookie}={rt.token}; HttpOnly; SameSite=Strict; Path=/"
 
@@ -1193,7 +1229,9 @@ export fn design(opts = {}) = do {
   density = o.get("density") ?? "comfortable"
   effects = o.get("effects") ?? "auto"
   checked = if MATERIALS.contains(material) and not SHAPE_BASE.get(shape).is_missing() and not SPACING.get(density).is_missing() and ["auto", "full", "light"].contains(effects) then true else raise("a design's material is tonal, glass or hybrid; its shape sharp, soft or round; its density comfortable or compact; its effects auto, full or light", "`ui.design({{hue: 160, material: \"glass\", shape: \"round\"}})`")
-  h = seed.h
+  # A grey seed has no hue — what `atan2` gives for it is rounding noise (an olive, for most
+  # greys) — so it gets a graphite one: the cool, nearly neutral grey of Apple's graphite accent.
+  h = if seed.c < 0.01 then 250.0 else seed.h
   c0 = clamp(seed.c, 0.04, 0.24)
   light = roles(false, h, c0)
   dark = roles(true, h, c0)
@@ -1591,7 +1629,7 @@ button.li:active { background: var(--press); }
 /* The app's frame: a rail, and a toolbar floating over content that scrolls beneath it. */
 .shell { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr); height: 100%; min-height: 0; }
 .shell-main { position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column; container-type: inline-size; }
-.shell-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; outline: none;
+.shell-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; outline: none; scroll-padding-top: calc(var(--ctl-h) + var(--inset) * 3);
   padding: calc(var(--ctl-h) + var(--inset) * 3) var(--pad-card) calc(var(--s-7) + 40px); }
 .toolbar { position: absolute; top: var(--inset); left: var(--inset); right: var(--inset); z-index: 5; display: flex; align-items: center; gap: 8px; pointer-events: none; }
 .tb-item { pointer-events: auto; display: flex; align-items: center; gap: 2px; padding: 3px; flex: none; border-radius: var(--r-in-window);
@@ -1707,8 +1745,14 @@ CLIENT = """
   const kid = (p, i) => live(p)[i];
   function at(path) { let n = root.firstChild; for (const i of path) n = kid(n, i); return n; }
   const owned = (n) => n === document.activeElement;   // a focused control owns its value (D6)
+  // ...while the person is editing it. A value the app sends that is not what the field last
+  // sent, with nothing from the field still on its way, is the app's answer — a search cleared
+  // by Escape — and the field shows it. (Before, the attribute then matched the app's tree, so
+  // the value was never sent again and the field stayed wrong.)
+  const answered = (n, v) => v !== n.value && v !== n.__sent && !busy(n.dataset.input || n.dataset.change);
   function setAttr(n, k, v) {
     n.setAttribute(k, v);
+    if (k === 'value' && (n.tagName === 'INPUT' || n.tagName === 'SELECT') && owned(n) && answered(n, v)) { n.value = v; return; }
     if (owned(n)) return;
     if (k === 'value' && (n.tagName === 'INPUT' || n.tagName === 'SELECT')) n.value = v;
     else if (k === 'checked' && n.tagName === 'INPUT') n.checked = true;
@@ -1816,9 +1860,10 @@ CLIENT = """
       if (Math.abs(d[0]) < 0.5 && Math.abs(d[1]) < 0.5) { motions.delete(e); continue; }
       const axes = d.map((dist, i) => {
         if (Math.abs(dist) < 0.5) return null;
-        // The velocity of the offset, as a fraction of the new distance per second; the offset
-        // shrinks toward zero, so moving toward the target is negative velocity.
-        return { from: dist, ...curve(sp, -v[i] / dist) };
+        // The offset's velocity as a fraction of the new distance per second: the curve is the
+        // offset over the distance, so this is its starting slope (negative when it is already
+        // closing in on the target).
+        return { from: dist, ...curve(sp, v[i] / dist) };
       });
       const anims = [];
       if (axes[0]) anims.push(e.animate([{ transform: `translateX(${d[0]}px)` }, { transform: 'translateX(0)' }], { duration: axes[0].ms, easing: axes[0].easing, composite: 'add' }));
@@ -1836,12 +1881,18 @@ CLIENT = """
     for (const e of root.querySelectorAll('[data-share]')) if (!e.__gone) m.set(e.dataset.share, e.getBoundingClientRect());
     return m.size ? m : null;
   }
+  // Where the layout puts a node, untouched by its animations (offsets ignore transforms).
+  const layoutOf = (e) => (e instanceof HTMLElement && e.offsetParent ? [e.offsetLeft, e.offsetTop, e.offsetWidth, e.offsetHeight].join(' ') : null);
   function sharedTo(m) {
     if (!m) return;
     for (const e of root.querySelectorAll('[data-share]')) {
       const a = m.get(e.dataset.share);
       if (!a || e.__gone) continue;
       const prev = motions.get(e);
+      // Still morphing toward the same place: a frame that changed something else leaves it be,
+      // rather than starting it over from rest.
+      const here = layoutOf(e);
+      if (prev && prev.lay && prev.lay === here && prev.anims.some((an) => an.playState === 'running')) continue;
       if (prev) for (const an of prev.anims) an.cancel();
       const b = e.getBoundingClientRect();
       if (!b.width || !b.height) continue;
@@ -1849,7 +1900,7 @@ CLIENT = """
       if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5 && Math.abs(sx - 1) < 0.01 && Math.abs(sy - 1) < 0.01) continue;
       const c = curve(springOf('spatial'), 0);
       const an = e.animate([{ transformOrigin: '0 0', transform: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})` }, { transformOrigin: '0 0', transform: 'none' }], { duration: c.ms, easing: c.easing });
-      motions.set(e, { t0: performance.now(), axes: [null, null], anims: [an] });
+      motions.set(e, { t0: performance.now(), axes: [null, null], anims: [an], lay: here });
     }
   }
 
@@ -1865,6 +1916,7 @@ CLIENT = """
     const k = inside ? ident(a) : null;
     let ctl = null;
     for (let p = inside ? a : null; p && p !== root; p = p.parentElement) {
+      if (p.__opener && p.__opener.isConnected) { ctl = p.__opener; break; }
       if (p.id) { const c = root.querySelector('[aria-controls="' + CSS.escape(p.id) + '"]'); if (c) { ctl = c; break; } }
     }
     let sel = null;
@@ -1873,21 +1925,23 @@ CLIENT = """
     for (const n of root.querySelectorAll('[data-key], [data-scroll]')) if (n.scrollTop || n.scrollLeft) scrolls.push([n, ident(n), n.scrollTop, n.scrollLeft]);
     return { a, inside, k, ctl, sel, scrolls, x: window.scrollX, y: window.scrollY };
   }
-  function restore(s) {
+  function restore(s, whole) {
     const lost = s.inside && (!root.contains(s.a) || s.a.closest('[aria-hidden="true"]'));
     if (lost) {
-      const n = (s.k && byIdent(s.k)) || (s.ctl && s.ctl.isConnected ? s.ctl : null);
+      const same = s.k && byIdent(s.k);
+      const n = same || (s.ctl && s.ctl.isConnected ? s.ctl : null);
       if (n) {
-        if (n.tagName === s.a.tagName && 'value' in n && 'value' in s.a) n.value = s.a.value;
+        if (same && n.tagName === s.a.tagName && 'value' in n && 'value' in s.a) n.value = s.a.value;
         n.focus({ preventScroll: true });
         try { if (s.sel && n.setSelectionRange) n.setSelectionRange(s.sel[0], s.sel[1], s.sel[2]); } catch (_) {}
       }
     }
     for (const [old, k, top, left] of s.scrolls) {
-      const n = old.isConnected ? old : (k && byIdent(k));
+      if (old.isConnected) continue;
+      const n = k && byIdent(k);
       if (n && (n.scrollTop !== top || n.scrollLeft !== left)) { n.scrollTop = top; n.scrollLeft = left; }
     }
-    if (window.scrollX !== s.x || window.scrollY !== s.y) window.scrollTo(s.x, s.y);
+    if (whole && (window.scrollX !== s.x || window.scrollY !== s.y)) window.scrollTo(s.x, s.y);
   }
 
   // --- Applying a frame.
@@ -1900,12 +1954,18 @@ CLIENT = """
     for (const o of ops) {
       if (o.op === 'replace') {
         if (o.path.length === 0) root.replaceChildren(build(o.node, null));
-        else { const n = at(o.path); const b = build(o.node, nsOf(n.parentNode)); n.replaceWith(b); arrived.push(b); }
+        else {
+          // A node with an exit is not cut away when another takes its place (a sheet
+          // closing to its placeholder): the new one goes in, and the old one leaves.
+          const n = at(o.path), p = n.parentNode, b = build(o.node, nsOf(p));
+          if (n instanceof Element && n.dataset.exit && !still.matches) { p.insertBefore(b, n); leave(p, n); } else n.replaceWith(b);
+          arrived.push(b);
+        }
       } else if (o.op === 'text') {
         const t = at(o.path);
         t.nodeValue = o.text;
         const p = t.parentNode;
-        if (p && p.tagName === 'TEXTAREA' && !owned(p)) p.value = o.text;
+        if (p && p.tagName === 'TEXTAREA' && (!owned(p) || answered(p, o.text))) p.value = o.text;
       } else if (o.op === 'attrs') {
         const n = at(o.path);
         for (const k of o.remove) removeAttr(n, k);
@@ -1926,15 +1986,20 @@ CLIENT = """
       }
     }
     for (const n of arrived) enter(n);
-    if (saved) restore(saved);
+    if (saved) restore(saved, ops.some((o) => o.op === 'replace' && o.path.length === 0));
     flipTo(moving);
     sharedTo(sharing);
     reveal();
-    for (const n of arrived) if (n instanceof Element) place(n);
+    place(root);
     // A newly shown menu (or anything marked `autofocus`) takes focus to its first item.
     for (const n of arrived) {
       const f = n instanceof Element && (n.matches('[autofocus]') ? n : n.querySelector('[autofocus]'));
-      if (f) { f.focus({ preventScroll: true }); break; }
+      if (f) {
+        const from = document.activeElement;
+        if (from && from !== document.body && !n.contains(from)) n.__opener = from;
+        f.focus({ preventScroll: true });
+        break;
+      }
     }
     syncDialogs();
   }
@@ -2002,7 +2067,8 @@ CLIENT = """
     // paint per display refresh, never several per refresh.
     es.onmessage = (e) => {
       pending.push(JSON.parse(e.data));
-      if (!scheduled) { scheduled = true; requestAnimationFrame(drain); }
+      if (document.hidden) drain();
+      else if (!scheduled) { scheduled = true; requestAnimationFrame(drain); }
     };
     es.onerror = () => { es.close(); setTimeout(connect, delay); delay = Math.min(delay * 2, 2000); };
   }
@@ -2013,12 +2079,13 @@ CLIENT = """
   // never dropped. Only the last: typing that follows a submit must reach `update` after it,
   // and merging into an earlier waiting event would move it ahead.
   const queue = [];
-  let inflight = false;
+  let inflight = null;
+  const busy = (msg) => !!msg && ((inflight && inflight.msg === msg) || queue.some((q) => q.ev.msg === msg));
   function flush() {
     if (inflight || queue.length === 0) return;
     const ev = queue.shift().ev;
-    inflight = true;
-    fetch('/event', { method: 'POST', body: JSON.stringify(ev) }).finally(() => { inflight = false; flush(); });
+    inflight = ev;
+    fetch('/event', { method: 'POST', body: JSON.stringify(ev) }).finally(() => { inflight = null; flush(); });
   }
   function post(ev, continuous) {
     const last = queue[queue.length - 1];
@@ -2056,11 +2123,11 @@ CLIENT = """
   });
   document.addEventListener('input', (e) => {
     const t = e.target.closest('[data-input]');
-    if (t) post({ msg: t.dataset.input, value: valueOf(t) }, true);
+    if (t) { t.__sent = String(t.value); post({ msg: t.dataset.input, value: valueOf(t) }, true); }
   });
   document.addEventListener('change', (e) => {
     const t = e.target.closest('[data-change]');
-    if (t) post({ msg: t.dataset.change, value: valueOf(t) }, false);
+    if (t) { t.__sent = String(t.value); post({ msg: t.dataset.change, value: valueOf(t) }, false); }
   });
   document.addEventListener('submit', (e) => {
     const f = e.target.closest('[data-submit]');
@@ -2106,8 +2173,10 @@ CLIENT = """
   // A key as a chord: "Ctrl+K", "Shift+ArrowDown", "Enter", "/". A printed character carries
   // Shift already ("?" rather than "Shift+/"), so Shift is named only on keys that print none.
   function chord(e) {
-    const k = e.key === ' ' ? 'Space' : e.key.length === 1 ? e.key.toUpperCase() : e.key;
-    const m = [(e.ctrlKey || e.metaKey) && 'Ctrl', e.altKey && 'Alt', e.shiftKey && (e.key.length > 1 || e.key === ' ') && 'Shift'].filter(Boolean);
+    const held = e.ctrlKey || e.metaKey || e.altKey;
+    const code = /^(Key[A-Z]|Digit[0-9])$/.test(e.code || '') ? e.code.slice(-1) : null;
+    const k = e.key === ' ' ? 'Space' : held && code ? code : e.key.length === 1 ? e.key.toUpperCase() : e.key;
+    const m = [(e.ctrlKey || e.metaKey) && 'Ctrl', e.altKey && 'Alt', e.shiftKey && (held || e.key.length > 1 || e.key === ' ') && 'Shift'].filter(Boolean);
     return [...m, k].join('+');
   }
   const editable = (t) => t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName);
@@ -2126,14 +2195,29 @@ CLIENT = """
       if (top && (top.dataset.shortcuts || '').split(' ').includes(c)) scope = top;
     }
     if (!scope) return false;
-    const d = t.closest && t.closest('dialog');
+    const d = t.closest && t.closest('dialog, [role="dialog"][aria-modal="true"]');
     if (d && !d.contains(scope)) return false;
     e.preventDefault();
     post({ msg: scope.dataset.keydown, value: c }, false);
     return true;
   }
+  // Tab stays inside an open modal that is not a <dialog> (the platform's does this itself).
+  const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  function trap(e) {
+    const m = Array.from(root.querySelectorAll('[role="dialog"][aria-modal="true"]')).filter((x) => x.tagName !== 'DIALOG' && !x.__gone).pop();
+    if (!m) return false;
+    const f = Array.from(m.querySelectorAll(FOCUSABLE)).filter((x) => x.getClientRects().length);
+    if (!f.length) return false;
+    const a = document.activeElement, i = f.indexOf(a);
+    const j = !m.contains(a) ? 0 : e.shiftKey ? (i <= 0 ? f.length - 1 : null) : (i === f.length - 1 ? 0 : null);
+    if (j === null) return false;
+    e.preventDefault();
+    f[j].focus();
+    return true;
+  }
   document.addEventListener('keydown', (e) => {
     const t = e.target;
+    if (e.key === 'Tab' && !e.ctrlKey && !e.altKey && !e.metaKey && trap(e)) return;
     if (!e.isComposing && shortcut(e)) return;
     if (e.key === 'Escape') {
       const d = t.closest && t.closest('[data-dismiss]');
@@ -2144,7 +2228,7 @@ CLIENT = """
     if (!group) return;
     const role = group.getAttribute('role');
     const tablist = role === 'tablist', radios = role === 'radiogroup';
-    const items = Array.from(group.querySelectorAll(tablist ? '[role="tab"]' : radios ? '[role="radio"]' : '[role="menuitem"]'));
+    const items = Array.from(group.querySelectorAll(tablist ? '[role="tab"]' : radios ? '[role="radio"]' : '[role="menuitem"]')).filter((x) => !x.disabled && x.getAttribute('aria-disabled') !== 'true');
     const i = items.indexOf(t);
     if (i < 0) return;
     const prev = tablist ? 'ArrowLeft' : 'ArrowUp', next = tablist ? 'ArrowRight' : 'ArrowDown';
@@ -2164,15 +2248,21 @@ CLIENT = """
 # The whole stylesheet: the motion tokens, the design system, and the app's own `style`.
 # An app's design: `design:` in its spec, a design or a function of the model — so an app can
 # change its whole look live (a theme picker); the page restyles when the design changes.
-fn design_of(spec, model) = do {
+# A function that raises, or returns something that is not a design, keeps the look the page
+# has (`last`) and says why: one bad model must not restyle the app, or end it.
+fn design_of(spec, model, last) = do {
   d = spec.get("design")
   if d.is_missing() then default_design() else if type_of(d) == "Function" then do {
     r = try d(model)
-    if r.ok then r.value else default_design()
-  } else d
+    if r.ok and is_design(r.value) then r.value else do {
+      logged = elog(if r.ok then "design returned {type_of(r.value)}, which is not a `ui.design(…)`; the last design is kept" else "design failed: {r.error}; the last design is kept")
+      last ?? default_design()
+    }
+  } else if is_design(d) then d else raise("`design:` is a `ui.design(…)`, or a function of the model that returns one", "`design: ui.design({{seed: \"#0f766e\"}})`")
 }
+fn is_design(d) = type_of(d) == "Record" and ["light", "dark", "effects", "material"].filter((k) => d.get(k).is_missing()).count() == 0
 fn css_with(spec, d) = ":root {{ {motion_tokens()} }}{design_css(d)}{scope_css(d)}{THEME}{spec.get("style") ?? ""}"
-fn css_of(spec, model) = css_with(spec, design_of(spec, model))
+fn css_of(spec, model) = css_with(spec, design_of(spec, model, missing))
 
 fn page(spec, rt, model) = do {
   title = html_escape("{spec.title}")
@@ -2200,7 +2290,7 @@ fn handle(spec, st, c) = do {
 # the request must carry the cookie — or, on the one link the app printed, the token itself.
 fn guard(spec, st, c, req) = do {
   rt = st.rt
-  if not local_host(rt, req) then refuse(st, c, 421, "this app answers only on 127.0.0.1") else if same_token(rt, cookie_token(rt, req)) then (if rt.dev and req.path.starts_with("/__dev/") then dev_route(spec, st, c, req) else route(spec, st, c, req)) else if req.method == "GET" and same_token(rt, query_token(req.query)) then do {
+  if not local_host(rt, req) then refuse(st, c, 421, "this app answers only on 127.0.0.1") else if req.method != "GET" and not same_origin(req) then refuse(st, c, 403, "this app takes changes only from its own page") else if same_token(rt, cookie_token(rt, req)) then (if rt.dev and req.path.starts_with("/__dev/") then dev_route(spec, st, c, req) else route(spec, st, c, req)) else if req.method == "GET" and same_token(rt, query_token(req.query)) then do {
     sent = c.respond({status: 303, headers: {"Set-Cookie": set_cookie(rt), "Location": "/", "Cache-Control": "no-store"}})
     {...st, keep: st.keep.concat([c])}
   } else refuse(st, c, 403, "open the link this app printed when it started; it carries the session")
@@ -2275,7 +2365,7 @@ fn serve(l, spec, rt, model, tree, conns, streams, timers) = do {
   theme = theme_of(spec, ticked)
   ops = if changed then view_diff(tree, next) else []
   # A design that changed restyles every page: the new stylesheet rides on the frame.
-  d_now = if changed and type_of(spec.get("design")) == "Function" then design_of(spec, ticked) else st.rt.design
+  d_now = if changed and type_of(spec.get("design")) == "Function" then design_of(spec, ticked, st.rt.design) else st.rt.design
   restyled = changed and d_now != st.rt.design
   rt2 = if restyled then {...st.rt, design: d_now, css: css_with(spec, d_now)} else st.rt
   kept = if ops.count() == 0 and not restyled then streams else do {
@@ -2344,7 +2434,7 @@ export fn app(spec) = do {
   l = listen(port)
   generation = dev_generation()
   reload = if generation.is_missing() then false else generation > 1
-  d0 = design_of(spec, spec.init)
+  d0 = design_of(spec, spec.init, missing)
   rt = {...session(port), dev: not generation.is_missing(), design: d0, css: css_with(spec, d0), title: "{spec.title}", client: sha256(CLIENT)}
   url = "http://127.0.0.1:{port}/?token={rt.token}"
   # Under `--watch` the supervisor reads this line and shows the link once, on the first start.

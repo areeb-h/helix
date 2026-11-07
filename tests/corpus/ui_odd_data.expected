@@ -1,0 +1,26 @@
+exit: 0
+--- stdout ---
+[true, true, true, true]
+data_table offset NaN: draws
+data_table offset 1e30: draws
+data_table row height 0: draws
+line_chart with NaN and ∞: draws
+scatter_chart with NaN: draws
+bar_chart with ∞: draws
+2
+bar_chart all NaN: draws
+sparkline []: draws
+sparkline [NaN]: draws
+stat_tile with an empty series: draws
+true
+ring 0 of 0: draws
+true
+progress 0 of 0: draws
+[false, false, false]
+[true, true, true]
+[1, "#5a6e83"]
+every(0): raises: a timer's period is a positive number of milliseconds, not 0
+every("x"): raises: a timer's period is a positive number of milliseconds, not x
+every(1000, 5): raises: a timer's message is a string, not Int
+{every: 250, msg: "tick"}
+--- stderr ---

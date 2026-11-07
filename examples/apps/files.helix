@@ -30,7 +30,7 @@ import std.ui
 
 fn valid_name(n) = do {
   s = "{n}"
-  s != "" and s != "." and s != ".." and not s.contains("/") and not s.contains("\\") and s.count() <= 255
+  s != "" and s != "." and s != ".." and not s.contains("/") and not s.contains("\\") and s.to_bytes().count() <= 255
 }
 fn join(root, names) = names.reduce(root, (p, n) => "{p}/{n}")
 fn here(m) = join(m.root, m.path)
@@ -40,6 +40,17 @@ fn still_inside(root, names) = range(1, names.count() + 1).filter((k) => do {
   r = try file_info(join(root, names.take(k)))
   not (r.ok and r.value.kind == "dir")
 }).count() == 0
+
+# What is at `path` NOW, read as itself (a link is a link): a listing is a moment ago, and
+# what it saw may since have been swapped for a link to somewhere else. So every read and
+# every change asks again, just before it acts, and acts only on what it expected to find.
+fn kind_now(path) = do {
+  r = try file_info(path)
+  if r.ok then r.value.kind else "none"
+}
+# Whether a name is taken — by anything, a link that leads nowhere included (`file_exists`
+# follows links, so it would call a dangling one free, and a rename would replace it).
+fn taken(path) = kind_now(path) != "none"
 
 # --- Kinds of file. ---------------------------------------------------------------------------
 
@@ -71,9 +82,12 @@ fn kind_label(e) = match e.cat {
 
 # --- Sizes and dates, for people. -------------------------------------------------------------
 
+# The unit is chosen after rounding, so 1,048,575 bytes is "1.0 MB", not "1024 KB".
 fn size_label(e) = if e.kind == "dir" then "—" else do {
   b = e.size
-  if b < 1024 then "{b} B" else if b < 1048576 then "{b / 1024.0:.0f} KB" else if b < 1073741824 then "{b / 1048576.0:.1f} MB" else "{b / 1073741824.0:.1f} GB"
+  kb = round(b / 1024.0)
+  mb = round(b / 1048576.0 * 10.0) / 10.0
+  if b < 1024 then "{b} B" else if kb < 1024 then "{kb} KB" else if mb < 1024.0 then "{mb:.1f} MB" else "{b / 1073741824.0:.1f} GB"
 }
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 # A civil date from days since 1970-01-01 (Howard Hinnant's algorithm), in UTC.
@@ -145,7 +159,9 @@ fn preview_of(m) = do {
   e = selected(m)
   if e.is_missing() then {kind: "none"} else do {
     path = join(here(m), [e.name])
-    if e.kind == "link" then {kind: "note", text: "A symbolic link. Files never follows links, so nothing in this folder can lead it outside its root."}
+    now_is = if still_inside(m.root, m.path) then kind_now(path) else "gone"
+    if now_is != e.kind and e.kind != "link" then {kind: "note", text: "This has changed since the folder was read. Reload to see it."}
+      else if e.kind == "link" then {kind: "note", text: "A symbolic link. Files never follows links, so nothing in this folder can lead it outside its root."}
       else if e.kind == "dir" then do {
         r = try read_dir(path)
         {kind: "folder", text: if r.ok then "{r.value.count()} items" else "Can't be read"}
@@ -221,27 +237,49 @@ fn attempt(m, what, f) = do {
   r = try f()
   if r.ok then r.value else toast(m, "Couldn't {what}: {r.error}", "danger")
 }
-fn new_folder(m, name) = if not m.write then m else if not valid_name(name) then {...m, dialog: {...m.dialog, error: "A name can't be empty, “.” or “..”, or contain “/”."}} else do {
+# Every change first checks that the folder it is in is still inside the root — the listing
+# it was offered from may be stale — and gives up, saying so, if not.
+fn moved_away(m) = toast({...m, dialog: missing}, "This folder has changed since it was read. Nothing was changed.", "warning")
+fn new_folder(m, name) = if not m.write then m else if not valid_name(name) then {...m, dialog: {...m.dialog, error: "A name can't be empty, “.” or “..”, or contain “/”."}} else if m.error != "" or not still_inside(m.root, m.path) then moved_away(m) else do {
   path = join(here(m), [name])
-  if file_exists(path) then {...m, dialog: {...m.dialog, error: "“{name}” already exists here."}} else attempt({...m, dialog: missing}, "make the folder", () => do {
+  if taken(path) then {...m, dialog: {...m.dialog, error: "“{name}” already exists here."}} else attempt({...m, dialog: missing}, "make the folder", () => do {
     made = mkdir(path)
     with_preview({...reload({...m, dialog: missing}), sel: name})
   })
 }
 fn rename_to(m, name) = if not m.write then m else if not valid_name(name) then {...m, dialog: {...m.dialog, error: "A name can't be empty, “.” or “..”, or contain “/”."}} else do {
   from = m.dialog.target
-  if not listed(m, from) then {...m, dialog: missing} else if name == from then {...m, dialog: missing} else do {
+  if not listed(m, from) then {...m, dialog: missing} else if name == from then {...m, dialog: missing} else if not still_inside(m.root, m.path) or not taken(join(here(m), [from])) then moved_away(m) else do {
     to = join(here(m), [name])
-    if file_exists(to) then {...m, dialog: {...m.dialog, error: "“{name}” already exists here."}} else attempt({...m, dialog: missing}, "rename", () => do {
+    if taken(to) then {...m, dialog: {...m.dialog, error: "“{name}” already exists here."}} else attempt({...m, dialog: missing}, "rename", () => do {
       moved = rename(join(here(m), [from]), to)
       with_preview({...reload({...m, dialog: missing}), sel: name})
     })
   }
 }
-fn to_trash(m, name) = if not m.write or not listed(m, name) or (m.path.count() == 0 and name == TRASH) then m else do {
-  stored = "{round(now() * 1000.0)}-{name}"
+# The Trash is a folder inside the root, or nothing yet — never a link: a `.trash` that is a
+# link would carry everything moved to it out of the root.
+fn trash_ready(m) = do {
+  t = join(m.root, [TRASH])
+  k = kind_now(t)
+  made = if k == "none" then mkdir(t) else missing
+  kind_now(t) == "dir"
+}
+# A name in the Trash no other item has: the time, a count, and the name (shortened if the
+# three would be longer than a file name may be).
+fn fit_bytes(name, room) = do {
+  k = range(0, name.count() + 1).filter((n) => name.take(n).to_bytes().count() <= room).last()
+  name.take(k)
+}
+fn trash_name(m, name) = do {
+  head = "{round(now() * 1000.0)}-{m.next}-"
+  "{head}{fit_bytes(name, 255 - head.to_bytes().count())}"
+}
+fn to_trash(m, name) = if not m.write or not listed(m, name) or (m.path.count() == 0 and name == TRASH) then m else if not still_inside(m.root, m.path) or not taken(join(here(m), [name])) then moved_away(m) else do {
+  stored = trash_name(m, name)
   attempt(m, "move to the Trash", () => do {
-    made = mkdir(join(m.root, [TRASH]))
+    ok = if trash_ready(m) then true else raise("the Trash (`.trash`) is not a folder")
+    ok2 = if taken(join(m.root, [TRASH, stored])) then raise("the Trash already holds “{stored}”") else true
     moved = rename(join(here(m), [name]), join(m.root, [TRASH, stored]))
     n = reload({...m, trash: [{stored: stored, name: name, from: m.path}].concat(m.trash)})
     toast(n, "Moved “{name}” to the Trash", "neutral", {label: "Undo", msg: "restore", value: stored})
@@ -249,9 +287,9 @@ fn to_trash(m, name) = if not m.write or not listed(m, name) or (m.path.count() 
 }
 fn restore(m, stored) = do {
   t = m.trash.filter((x) => x.stored == stored).first()
-  if t.is_missing() or not m.write then m else do {
+  if t.is_missing() or not m.write then m else if not still_inside(m.root, t.from) or kind_now(join(m.root, [TRASH])) != "dir" or not taken(join(m.root, [TRASH, stored])) then toast(m, "“{t.name}” can't go back: the folder it came from has changed.", "warning") else do {
     to = join(join(m.root, t.from), [t.name])
-    if file_exists(to) then toast(m, "“{t.name}” can't go back: something has its name now.", "warning") else attempt(m, "restore", () => do {
+    if taken(to) then toast(m, "“{t.name}” can't go back: something has its name now.", "warning") else attempt(m, "restore", () => do {
       moved = rename(join(m.root, [TRASH, stored]), to)
       n = reload({...m, trash: m.trash.filter((x) => x.stored != stored), toasts: m.toasts.filter((x) => x.get("action").is_missing() or x.action.value != stored)})
       toast(n, "Put “{t.name}” back", "success")
@@ -278,7 +316,7 @@ fn run_command(m, v) = do {
   if v.starts_with("dir:") then open_entry(n, v.drop(4))
     else if v.starts_with("recent:") then do {
       names = v.drop(7).split("/").filter((x) => x != "")
-      if names.filter((x) => not valid_name(x)).count() > 0 then n else go(n, names)
+      if not m.recent.contains(names) or (names.count() > 0 and names[0] == TRASH and not m.write) then n else go(n, names)
     }
     else if v.starts_with("cmd:sort:") then with_preview({...n, sort: v.drop(9), desc: if n.sort == v.drop(9) then not n.desc else false})
     else match v {
@@ -456,7 +494,9 @@ fn rail(m) = ui.rail("Places", [["home", "Home", "home"]].concat(if m.write then
 fn context_items(m) = do {
   e = selected(m)
   dir = not e.is_missing() and e.kind == "dir"
-  [{label: if dir then "Open" else "Show", msg: "cmd", value: "cmd:open", icon: if dir then "folder" else "eye", shortcut: "Enter"}, {label: "Copy path", msg: "cmd", value: "cmd:copy", icon: "copy"}]
+  link = not e.is_missing() and e.kind == "link"
+  # A link is never followed, so it cannot be opened: the item is there, and disabled.
+  [{label: if dir or link then "Open" else "Show", msg: "cmd", value: "cmd:open", icon: if dir then "folder" else "eye", shortcut: "Enter", disabled: link}, {label: "Copy path", msg: "cmd", value: "cmd:copy", icon: "copy"}]
     .concat(if m.write then [{separator: true, label: "", msg: ""}, {label: "Rename…", msg: "cmd", value: "cmd:rename", icon: "pen", shortcut: "F2"}, {label: "Move to the Trash", msg: "cmd", value: "cmd:delete", icon: "trash", danger: true, shortcut: "Del"}] else [])
 }
 

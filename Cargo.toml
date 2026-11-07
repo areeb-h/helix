@@ -159,6 +159,10 @@ ureq = { version = "2", optional = true }
 # native window. Not default: it links WebKitGTK on Linux, which the static musl build cannot.
 wry = { version = "0.57", optional = true }
 tao = { version = "0.37", optional = true }
+# GTK itself, so the main thread can ask whether a display can be opened BEFORE tao tries:
+# tao panics when it cannot, and a release build aborts on a panic, so the answer has to come
+# first. Already in the tree (wry and tao depend on this exact version); it adds no crate.
+gtk = { version = "0.18", optional = true }
 # TLS for the PostgreSQL client (ADR 0044). Every one of these is ALREADY
 # compiled into a default build as a `ureq` transitive dependency, so making
 # them direct costs zero crates and zero build time — what it buys is that
@@ -290,7 +294,7 @@ managed = ["http"]
 db = ["dep:rusqlite"]
 # An app in its own native window instead of a browser tab (ADR 0055 Phase 4, src/desktop.rs).
 # Off by default: on Linux it links WebKitGTK and GTK, which the static artifact cannot carry.
-desktop = ["dep:wry", "dep:tao"]
+desktop = ["dep:wry", "dep:tao", "dep:gtk"]
 # PostgreSQL over its wire protocol, hand-rolled. ADDS NO DEPENDENCIES: SCRAM-SHA-256
 # needs sha2 + hmac + base64 + OsRng and TLS needs rustls, every one of which is already
 # in the tree for another reason, so this feature is code and nothing else. `libpq` would
