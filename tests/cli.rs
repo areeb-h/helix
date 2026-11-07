@@ -4583,6 +4583,127 @@ fn the_component_gallery_replays_identically_on_every_engine() {
     has(15, "<input id=\"dark\" role=\"switch\" data-change=\"theme\" type=\"checkbox\" name=\"dark\" checked=\"\">");
 }
 
+/// Hot reload (ADR 0055): `helix run --watch` restarts an app when a file it loads changes
+/// and still checks, keeping its model and session. Clicked to 2, the view is edited and a
+/// field added to `init`: the page shows the new view, the count is still 2 (with the new
+/// field filled from `init`), and the old cookie still works. A save that does not check is
+/// reported and the running app kept. Killing the supervisor ends the app too. Before this,
+/// `run --watch` was read as a script named `--watch`.
+#[test]
+fn an_app_hot_reloads_with_its_state() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpStream;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    const PORT: u16 = 18473;
+    let dir = std::env::temp_dir().join(format!("helix_hot_reload_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let app = dir.join("counter.helix");
+    let v1 = format!(
+        "import std.ui\n\
+         fn view(m) = ui.column([ui.heading(\"Count: {{m.n}}\"), ui.button(\"+\", \"inc\")])\n\
+         fn update(m, e) = if e.msg == \"inc\" then {{...m, n: m.n + 1}} else m\n\
+         ui.app({{title: \"Counter\", init: {{n: 0}}, update: update, view: view, port: {PORT}}})\n"
+    );
+    std::fs::write(&app, &v1).unwrap();
+
+    let mut sup = Command::new(env!("CARGO_BIN_EXE_helix"))
+        .args(["run", "--watch", app.to_str().unwrap()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start the supervisor");
+    let log = Arc::new(Mutex::new(String::new()));
+    let sink = log.clone();
+    let err = sup.stderr.take().unwrap();
+    std::thread::spawn(move || {
+        for line in BufReader::new(err).lines().map_while(Result::ok) {
+            sink.lock().unwrap().push_str(&(line + "\n"));
+        }
+    });
+    let wait_for = |what: &str, n: usize| {
+        let end = Instant::now() + Duration::from_secs(20);
+        while log.lock().unwrap().matches(what).count() < n {
+            assert!(Instant::now() < end, "never saw {what:?} ×{n}:\n{}", log.lock().unwrap());
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    wait_for("token=", 1);
+    let token = {
+        let l = log.lock().unwrap();
+        l.split("token=").nth(1).unwrap().split_whitespace().next().unwrap().to_string()
+    };
+    let ask = |raw: String| -> String {
+        let end = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(mut s) = TcpStream::connect(("127.0.0.1", PORT)) {
+                s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+                s.write_all(raw.as_bytes()).unwrap();
+                let mut out = String::new();
+                let _ = s.read_to_string(&mut out);
+                if !out.is_empty() {
+                    return out;
+                }
+            }
+            assert!(Instant::now() < end, "the app never answered");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let cookie = format!("Cookie: helix_app_{PORT}={token}\r\n");
+    let host = format!("Host: 127.0.0.1:{PORT}\r\n");
+    let heading = || {
+        let page = ask(format!("GET / HTTP/1.0\r\n{host}{cookie}\r\n"));
+        page.split("<h1>").nth(1).and_then(|h| h.split("</h1>").next()).unwrap_or("").to_string()
+    };
+    let inc = || {
+        let body = r#"{"msg":"inc","value":null}"#;
+        let r = ask(format!("POST /event HTTP/1.0\r\n{host}{cookie}Content-Length: {}\r\n\r\n{body}", body.len()));
+        assert!(r.starts_with("HTTP/1.1 204"), "{r}");
+    };
+    inc();
+    inc();
+    assert_eq!(heading(), "Count: 2");
+
+    // Edit the view and add a field: the count survives, the new field is filled from init.
+    let v2 = v1
+        .replace("ui.heading(\"Count: {m.n}\")", "ui.heading(\"Total: {m.n} {m.unit}\")")
+        .replace("init: {n: 0}", "init: {n: 0, unit: \"clicks\"}");
+    std::fs::write(&app, &v2).unwrap();
+    wait_for("reloaded", 1);
+    let end = Instant::now() + Duration::from_secs(10);
+    while heading() != "Total: 2 clicks" {
+        assert!(Instant::now() < end, "after the reload the page shows {:?}", heading());
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // A save that does not check is reported, and the running app keeps its state.
+    std::fs::write(&app, v2.replace("fn update(m, e) = ", "fn update(m, e) = oops + ")).unwrap();
+    wait_for("does not check", 1);
+    assert!(log.lock().unwrap().contains("`oops` is not defined"));
+    inc();
+    assert_eq!(heading(), "Total: 3 clicks");
+
+    // Killing the supervisor ends the app: nothing is left holding the port.
+    let _ = sup.kill();
+    let _ = sup.wait();
+    let end = Instant::now() + Duration::from_secs(5);
+    while TcpStream::connect(("127.0.0.1", PORT)).is_ok() {
+        assert!(Instant::now() < end, "the app outlived its supervisor");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Outside `helix run --watch`, the hot-reload builtins are inert: no session, nothing kept.
+#[test]
+fn dev_builtins_are_inert_in_an_ordinary_run() {
+    let (out, err, code) = run(&["eval", "print(dev_session())\nprint(dev_keep({n: 1}))"], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out, "missing\nfalse\n");
+}
+
 /// An app answers only the person who started it (ADR 0055 Phase 1). A localhost port is
 /// reachable by every local process, and by any web page through DNS rebinding — so before
 /// the session, `curl 127.0.0.1:PORT/event` could drive the app. Now: no token is 403, a

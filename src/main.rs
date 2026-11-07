@@ -114,6 +114,7 @@ mod serve;
 mod simd;
 mod stats;
 mod view;
+mod devwatch;
 mod strfmt;
 mod suggest;
 mod symbol;
@@ -380,6 +381,14 @@ fn run() -> ExitCode {
             ExitCode::SUCCESS
         }
         // `helix run <script>` — the explicit form.
+        // `helix run --watch <script>` — rerun on save, keeping an app's state (ADR 0055).
+        Some("run") if args.get(2).map(String::as_str) == Some("--watch") => match args.get(3) {
+            Some(path) => run_watch(path, &args[4..]),
+            None => {
+                eprintln!("error: `helix run --watch` needs a script path, e.g. `helix run --watch app.helix`");
+                ExitCode::FAILURE
+            }
+        },
         Some("run") => match args.get(2) {
             Some(path) => run_file_with_args(path, &args[3..]),
             None => {
@@ -2058,6 +2067,7 @@ fn print_help() {
          USAGE:\n    \
          helix <script>           run a script (shorthand; `.helix` optional)\n    \
          helix run <script>       run a script (`.helix` optional: `helix run main`)\n    \
+         helix run --watch <app>  rerun on save, keeping an app's state (hot reload)\n    \
          helix eval \"<code>\"       run a one-liner\n    \
          helix check <script>…    type-check without running (`--json` for tools)\n    \
          helix effects <script>   what each function reaches (authority + reproducibility)\n    \
@@ -2128,6 +2138,40 @@ fn resolve_script(path: &str) -> Result<std::path::PathBuf, String> {
     ))
 }
 
+/// `helix run --watch <script> [args…]`: rerun the program whenever a file it loads changes
+/// and still checks, keeping an app's model and session (`devwatch`).
+fn run_watch(path: &str, argv: &[String]) -> ExitCode {
+    let script = match resolve_script(path) {
+        Ok(p) => p,
+        Err(msg) => {
+            eprint!("{msg}");
+            return ExitCode::FAILURE;
+        }
+    };
+    // The check runs on its own big-stack thread, as every front-end pass does.
+    let check = |p: &std::path::Path| -> devwatch::Check {
+        let p = p.to_path_buf();
+        std::thread::scope(|s| {
+            let worker = std::thread::Builder::new().stack_size(serve::eval_stack_size()).spawn_scoped(s, move || {
+                match check_file_structured(&p) {
+                    Ok(loaded) => Ok(loaded
+                        .spans
+                        .iter()
+                        .filter(|sp| !sp.filename.starts_with(module::EMBED_ROOT))
+                        .map(|sp| std::path::PathBuf::from(&sp.filename))
+                        .collect()),
+                    Err(d) => Err(d.rendered),
+                }
+            });
+            match worker {
+                Ok(h) => h.join().unwrap_or_else(|_| Err("error: the checker stopped unexpectedly\n".to_string())),
+                Err(e) => Err(format!("error: could not allocate the checker's stack: {e}\n")),
+            }
+        })
+    };
+    devwatch::run_watch(&script, argv, &check)
+}
+
 /// `helix run <script> [args…]` — the script's own command line is `argv` (ADR 0037 D1).
 fn run_file_with_args(path: &str, argv: &[String]) -> ExitCode {
     let path = &match resolve_script(path) {
@@ -2140,6 +2184,8 @@ fn run_file_with_args(path: &str, argv: &[String]) -> ExitCode {
     // Record how to re-run this entry file, so a sharded `listen(port, shards)` can
     // launch identical worker interpreters that re-load the same program.
     serve::set_rerun(serve::Rerun::File(std::path::PathBuf::from(path)));
+    // A child of `helix run --watch` ends with its supervisor (no-op otherwise).
+    devwatch::exit_with_supervisor();
     let argv: Vec<String> = argv.to_vec();
     let tool = std::path::Path::new(path)
         .file_stem()

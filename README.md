@@ -349,6 +349,8 @@ More in [`examples/`](examples/), the full [stdlib reference](docs/reference.md)
 - **Components accessible by construction**: forms with validation, tabs, menus, dialogs,
   toasts, tooltips, charts and a virtualised DataFrame table, in light and dark — checked with
   axe-core in CI. Each run serves on localhost behind a session token.
+- **Hot reload**: `helix run --watch app.helix` shows each save in the open page with the
+  app's state kept; a save that does not type-check is reported and the app keeps running.
 - **Testable without a browser**: `ui.replay(spec, events)` returns every screen as HTML, the
   same on all three engines. The library is compiled into `helix`, so a 10-line app runs from
   any directory:
@@ -422,7 +424,7 @@ tests of the same one. Details in [docs/execution-engine.md](docs/execution-engi
 
 ## Status & roadmap
 
-A mature implementation, **not a prototype**: **1,055 tests** (618 library + 402 CLI + 3
+A mature implementation, **not a prototype**: **1,057 tests** (618 library + 404 CLI + 3
 native-df + 32 dual-engine differential), plus 165 programs run under both DataFrame backends
 and a whole-tree type-check over 106 files — zero compiler warnings, with a differential oracle and a VM/tree-walker
 parity gate on every change. Phase status (full plan in

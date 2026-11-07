@@ -496,6 +496,13 @@ mod tests {
             // A fresh cookie jar is an empty in-memory value; it touches no network or
             // filesystem until it is threaded into a request, which IS gated (`Net`).
             "cookie_jar",
+            // Hot reload's two halves (`helix run --watch`). They read and write ONE file, and
+            // the PATH IS THE SUPERVISOR'S — set in `HELIX_DEV_STATE` by `helix run --watch`,
+            // never an argument — so a program cannot point them at anything it chooses; and
+            // in any other run they touch nothing at all. Gating them as `fs` would demand
+            // full filesystem authority of every app under `HELIX_CAP=enforce` in exchange
+            // for authority over a file no program can name.
+            "dev_session", "dev_keep",
         ];
         for b in crate::registry::BUILTINS {
             if b.pure || effect_of(b.path).gated() {

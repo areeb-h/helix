@@ -24,6 +24,7 @@ helix test --engines <dir> # …and re-runs each on all three engines, failing o
                           #   disagreement. Nothing else can check this; use it in CI
 helix eval "print(1 + 2)" # one-liner
 helix run tool.helix --n 3 # a script's own args bind to its `fn main` (ADR 0037)
+helix run --watch app.helix # hot reload: rerun on save if it checks, keeping an app's state
 helix run tool.helix --help # generated from `fn main` + its `##` doc; does NOT run it
 helix fmt file.helix      # token-stream formatter; provably cannot change a program
 ```
