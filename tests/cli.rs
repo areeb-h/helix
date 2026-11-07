@@ -4686,16 +4686,36 @@ fn an_app_hot_reloads_with_its_state() {
         let l = log.lock().unwrap();
         l.split("token=").nth(1).unwrap().split_whitespace().next().unwrap().to_string()
     };
+    // A reply is complete when its headers and `Content-Length` bytes of body have arrived.
+    // The app keeps connections open, so reading to EOF would wait out the read timeout on
+    // every request — 5 s each, which made this test take 40 s and left the 10 s budget for a
+    // reload only two attempts.
     let ask = |raw: String| -> String {
         let end = Instant::now() + Duration::from_secs(10);
         loop {
             if let Ok(mut s) = TcpStream::connect(("127.0.0.1", PORT)) {
                 s.set_read_timeout(Some(Duration::from_secs(5))).ok();
                 s.write_all(raw.as_bytes()).unwrap();
-                let mut out = String::new();
-                let _ = s.read_to_string(&mut out);
-                if !out.is_empty() {
-                    return out;
+                let mut buf: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let text = String::from_utf8_lossy(&buf).to_string();
+                    if let Some(at) = text.find("\r\n\r\n") {
+                        let len = text[..at]
+                            .lines()
+                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                            .unwrap_or(0);
+                        if buf.len() >= at + 4 + len {
+                            break;
+                        }
+                    }
+                    match s.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                if !buf.is_empty() {
+                    return String::from_utf8_lossy(&buf).to_string();
                 }
             }
             assert!(Instant::now() < end, "the app never answered");

@@ -1154,7 +1154,9 @@ fn scope_css(d) = do {
   ".hx-scope {{ {light} }} :root[data-theme=\"dark\"] .hx-scope {{ {dark} }}"
 }
 
-DEFAULT_DESIGN = design({seed: "#4f46e5", material: "hybrid"})
+# Built when an app starts, not when the module loads: a program that imports `std.ui` only
+# for its components or `view_html` never pays for a design it does not use.
+fn default_design() = design({seed: "#4f46e5", material: "hybrid"})
 
 # --- The design system: tokens and component styles. ------------------------------------
 #
@@ -1994,9 +1996,9 @@ CLIENT = """
 # change its whole look live (a theme picker); the page restyles when the design changes.
 fn design_of(spec, model) = do {
   d = spec.get("design")
-  if d.is_missing() then DEFAULT_DESIGN else if type_of(d) == "Function" then do {
+  if d.is_missing() then default_design() else if type_of(d) == "Function" then do {
     r = try d(model)
-    if r.ok then r.value else DEFAULT_DESIGN
+    if r.ok then r.value else default_design()
   } else d
 }
 fn css_with(spec, d) = ":root {{ {motion_tokens()} }}{design_css(d)}{scope_css(d)}{THEME}{spec.get("style") ?? ""}"
@@ -2103,7 +2105,7 @@ fn serve(l, spec, rt, model, tree, conns, streams, timers) = do {
   theme = theme_of(spec, ticked)
   ops = if changed then view_diff(tree, next) else []
   # A design that changed restyles every page: the new stylesheet rides on the frame.
-  d_now = if changed then design_of(spec, ticked) else st.rt.design
+  d_now = if changed and type_of(spec.get("design")) == "Function" then design_of(spec, ticked) else st.rt.design
   restyled = changed and d_now != st.rt.design
   rt2 = if restyled then {...st.rt, design: d_now, css: css_with(spec, d_now)} else st.rt
   kept = if ops.count() == 0 and not restyled then streams else do {
