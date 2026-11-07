@@ -47,6 +47,10 @@ if [ -n "$wid" ]; then
   geo=$(xdotool getwindowgeometry "$wid" | grep Geometry | awk '{print $2}')
   [ "$geo" = "1100x760" ] && ok "at the default size ($geo)" || bad "window size is $geo, not 1100x760"
   import -window root "$OUT/desktop-window.png" 2>/dev/null && ok "screenshot: $OUT/desktop-window.png"
+  # WebKit draws page content in separate processes; if they never started, the window maps
+  # but stays blank and its event loop waits on them. Say which, so a failure names its cause.
+  procs=$(ps -eo comm | grep -c '^WebKit' || true)
+  [ "$procs" -ge 2 ] && ok "WebKit's page processes are running ($procs)" || bad "WebKit's page processes did not start ($procs) — is its sandbox allowed to run?"
   # The close button, as a window manager delivers it (WM_DELETE_WINDOW). The app may still be
   # busy loading its page on a slow machine, so it has up to 20 s to act on it.
   # By the window's own id, retried: on a slow machine the window manager can still be

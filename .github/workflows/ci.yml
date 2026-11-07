@@ -129,6 +129,13 @@ jobs:
           # A fresh runner has no font cache; GTK and WebKit would build it on their first start,
           # on the main thread, before the window can appear.
           fc-cache -f
+          # WebKitGTK runs page content in a SANDBOXED process (bubblewrap), which needs
+          # unprivileged user namespaces. Ubuntu 24.04 runners restrict those through AppArmor,
+          # so the sandboxed process never starts and the web view waits for it forever — a
+          # window that maps but never draws or closes. Allowing user namespaces lets WebKit's
+          # sandbox work; the alternative (WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS) would test
+          # a configuration no user should ship.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - name: clippy (desktop)
         run: cargo clippy --profile gate --features postgres,desktop --all-targets -- -D warnings
       - name: Build with a window
