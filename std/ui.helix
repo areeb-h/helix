@@ -23,8 +23,8 @@
 # the project, or on `HELIX_PATH` — is used instead, which is how to pin or patch a copy.
 #
 # Optional spec fields: `style` (CSS added to the design system), `theme` (model ->
-# "light"/"dark"), `subscriptions` (model -> a list of `every(ms, msg)`), and `open` (true opens
-# a browser). An event is `{msg, value}`: a click sends its `value` prop (or missing), a text
+# "light"/"dark"), `subscriptions` (model -> a list of `every(ms, msg)`), `open` (true opens a
+# browser), and `window` (true, or `{width, height}`: a native window, in a `desktop` build). An event is `{msg, value}`: a click sends its `value` prop (or missing), a text
 # field its text, a checkbox or switch a Bool, a select the chosen value, a form its fields as a
 # record, a scroller its scroll offset.
 #
@@ -1165,7 +1165,16 @@ export fn app(spec) = do {
   url = "http://127.0.0.1:{port}/?token={rt.token}"
   # Under `--watch` the supervisor reads this line and shows the link once, on the first start.
   logged = elog("{spec.title} on {url}")
-  opened = if reload or spec.get("open").is_missing() then false else if spec.open then open_url(url) else false
+  # `window: true` (or `{width, height}`) shows the app in a native window (ADR 0055 Phase 4)
+  # where this build and machine can; otherwise it opens in the browser, as `open: true` does.
+  # Under `--watch` a reload is a new process, so a window would close and reopen on every
+  # save: a watched app opens in the browser, once.
+  win = spec.get("window")
+  windowed = if win.is_missing() then false else if type_of(win) == "Bool" then win else true
+  size = if type_of(win) == "Record" then win else {}
+  in_window = if windowed and generation.is_missing() then open_window(url, "{spec.title}", size.get("width") ?? 1100, size.get("height") ?? 760) else false
+  wants_open = if spec.get("open").is_missing() then false else spec.open
+  opened = if in_window or reload then false else if windowed or wants_open then open_url(url) else false
   serve(l, spec, rt, spec.init, (spec.view)(spec.init), [], [], schedule([], subs_of(spec, spec.init), clock_monotonic()))
 }
 

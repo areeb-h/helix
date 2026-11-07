@@ -351,6 +351,9 @@ More in [`examples/`](examples/), the full [stdlib reference](docs/reference.md)
   axe-core in CI. Each run serves on localhost behind a session token.
 - **Hot reload**: `helix run --watch app.helix` shows each save in the open page with the
   app's state kept; a save that does not type-check is reported and the app keeps running.
+- **A native window** (built with `--features desktop`): `ui.app({…, window: true})` shows the
+  app in its own window on the platform's web view instead of a browser tab — and only the
+  app's own page, nothing it could be navigated away to.
 - **Testable without a browser**: `ui.replay(spec, events)` returns every screen as HTML, the
   same on all three engines. The library is compiled into `helix`, so a 10-line app runs from
   any directory:
@@ -424,9 +427,9 @@ tests of the same one. Details in [docs/execution-engine.md](docs/execution-engi
 
 ## Status & roadmap
 
-A mature implementation, **not a prototype**: **1,060 tests** (620 library + 405 CLI + 3
-native-df + 32 dual-engine differential), plus 167 programs run under both DataFrame backends
-and a whole-tree type-check over 106 files — zero compiler warnings, with a differential oracle and a VM/tree-walker
+A mature implementation, **not a prototype**: **1,062 tests** (621 library + 406 CLI + 3
+native-df + 32 dual-engine differential), plus 168 programs run under both DataFrame backends
+and a whole-tree type-check over 107 files — zero compiler warnings, with a differential oracle and a VM/tree-walker
 parity gate on every change. Phase status (full plan in
 [docs/ROADMAP.md](docs/ROADMAP.md)):
 

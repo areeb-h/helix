@@ -1160,6 +1160,14 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         notes: "WHAT AN APP SENDS INSTEAD OF A PAGE (ADR 0055). A full-page morph of a 2,000-node view took 11.6 ms in Chromium — most of a frame — while a diff touches only what changed, so a running transition is patched rather than restarted. Operations, applied in order: `text` (a text node's new text), `attrs` (`set` pairs and `remove` names on one element), `replace` (a node rebuilt), `insert` / `remove` (a child at an index under `path`) and `move` (`from` → `to`). A `path` is child indices from the root. Children diff BY KEY when every child on both sides has a unique `key`, so a reordered list moves its nodes; otherwise by position. A node in an operation is in wire form: a string for text, `[tag, [[name, value], ...], [children]]` for an element. Keywords: ui, app, view, diff, patch, virtual dom, reconcile, keyed, update.",
     },
     DocEntry {
+        name: "open_window",
+        sig: "open_window(url, title?, width?, height?)",
+        doc: "Show this app's own page in a native window; true if one opened, false where none can.",
+        example: "open_window(\"http://127.0.0.1:8080/\", \"My app\", 1100, 760)",
+        example_out: "",
+        notes: "ADR 0055 PHASE 4: the platform's web view (WebView2, WKWebView, WebKitGTK) in a native window, instead of a browser tab. `std.ui` calls it for `ui.app({…, window: true})`. ONLY the app's own `http://127.0.0.1:<port>` origin: any other URL is refused, navigation away from it is refused inside the window, and pages cannot open more windows — a frame around what the app serves, not a browser. Closing the window ends the program. Answers false in a build without `--features desktop` or on a machine with no display, so the caller can open the browser instead (`open_url`). Keywords: window, desktop, native, gui, app, webview.",
+    },
+    DocEntry {
         name: "dev_generation",
         sig: "dev_generation()",
         doc: "Under `helix run --watch`, which start of the program this is (1 for the first); otherwise missing.",

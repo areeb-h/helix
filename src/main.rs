@@ -115,6 +115,7 @@ mod simd;
 mod stats;
 mod view;
 mod devwatch;
+mod desktop;
 mod strfmt;
 mod suggest;
 mod symbol;
@@ -336,7 +337,7 @@ fn run() -> ExitCode {
     // command line entirely (the args belong to the user's program, not to `helix`).
     // A plain `helix` binary has no overlay, so this returns `None` and the CLI runs.
     if let Some(emb) = bundle::embedded() {
-        return run_on_big_stack(move || run_embedded(emb));
+        return desktop::run_main(serve::eval_stack_size(), move || run_embedded(emb));
     }
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(|s| s.as_str()) {
@@ -2193,7 +2194,9 @@ fn run_file_with_args(path: &str, argv: &[String]) -> ExitCode {
         .unwrap_or_else(|| "tool".to_string());
     // The whole pipeline runs on the big stack (see `run_on_big_stack`) so the
     // front-end's AST recursion can't overflow before the depth guard fires.
-    run_on_big_stack(move || match run_file_capture_args(Entry::File(std::path::Path::new(path)), &argv, &tool) {
+    // `desktop::run_main` is `run_on_big_stack` that also keeps the main thread for a window, in
+    // case the program asks for one (`open_window`, ADR 0055 Phase 4).
+    desktop::run_main(serve::eval_stack_size(), move || match run_file_capture_args(Entry::File(std::path::Path::new(path)), &argv, &tool) {
         Ok(()) => ExitCode::SUCCESS,
         Err(rendered) => {
             eprint!("{}", rendered);

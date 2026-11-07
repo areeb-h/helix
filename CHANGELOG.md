@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Added
+
+- **An app in its own native window** (ADR 0055 Phase 4, built with `--features desktop`).
+  `ui.app({…, window: true})` — or `helix run examples/apps/gallery.helix --window` — shows the
+  app on the platform's web view (WebKitGTK, WebView2, WKWebView) in a native window instead
+  of a browser tab; closing it ends the app. A window shows only the app's own
+  `http://127.0.0.1` page: any other URL is refused, navigation away is refused inside it, and
+  pages cannot open more windows. `open_window(url, title, width, height)` exists in every
+  build and answers false where no window can open (a build without `desktop`, a machine with
+  no display), and `std.ui` falls back to the browser — so the same app runs everywhere. A
+  program that never asks for a window never touches the windowing system.
+
 ## v0.13.0 — 2026-11-07
 
 ### Added
