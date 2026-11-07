@@ -323,15 +323,17 @@ async function session(browser, url, motion) {
   await answered(() => p.keyboard.press('Escape'));
   check(await p.evaluate(() => !document.getElementById('view-options-pop') && document.activeElement.id === 'view-options-button'), 'Escape closes it and gives focus back');
 
-  // A toast thrown sideways is dismissed; one nudged springs back.
+  // A toast thrown sideways is dismissed; one nudged springs back. Followed by its key: other
+  // toasts expire on their own timer meanwhile, so a count would be a race.
   await post(() => p.click('[data-click="toast"]'));
-  const shown_toasts = () => p.evaluate(() => [...document.querySelectorAll('.toast')].filter((t) => !t.__gone).length);
-  const t0 = await shown_toasts();
-  await drag('.toast:last-child', 24, 0, 300);
+  const newest = await p.evaluate(() => [...document.querySelectorAll('.toast')].filter((t) => !t.__gone).pop().dataset.key);
+  const here = (k) => p.evaluate((k) => { const t = document.querySelector(`[data-key="${k}"]`); return !!t && !t.__gone; }, newest);
+  await drag(`[data-key="${newest}"]`, 24, 0, 300);
   await settle();
-  check(await shown_toasts() === t0, 'a toast nudged sideways stays');
-  await answered(() => drag('.toast:last-child', 220, 0, 120));
-  check(await shown_toasts() === t0 - 1, 'a toast thrown sideways is dismissed');
+  check(await here(newest), 'a toast nudged sideways stays');
+  check(await p.evaluate((k) => getComputedStyle(document.querySelector(`[data-key="${k}"]`)).translate === 'none', newest), 'and springs back into place');
+  await answered(() => drag(`[data-key="${newest}"]`, 220, 0, 120));
+  check(!(await here(newest)), 'a toast thrown sideways is dismissed');
 
   // A sheet pulled down by its grabber closes; a short pull springs back.
   await post(() => p.click('[data-click="open-sheet"]'));
