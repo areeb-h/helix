@@ -4638,6 +4638,139 @@ fn the_file_manager_stays_in_its_root_and_changes_only_what_it_should() {
     let _ = fs::remove_dir_all(&base);
 }
 
+/// The file manager acts on what is on the disk NOW, not on what its listing saw. Each attack
+/// changes the folder between the listing and the action — what another program, or a file
+/// the user unpacked, could do — and the app must neither read, make nor move anything
+/// outside its root, nor replace anything:
+///
+/// - a listed file swapped for a link to a file outside, then selected (it would be previewed);
+/// - a rename onto a link that leads nowhere (`file_exists` follows links, so it looked free);
+/// - two files with one name moved to the Trash in the same millisecond (one was destroyed);
+/// - a folder swapped for a link after something in it went to the Trash, then Undo;
+/// - a folder made in a folder that has become a link;
+/// - a `.trash` that is a link to outside;
+/// - the palette's recent folders asked for a folder it never visited.
+#[test]
+fn the_file_manager_asks_the_disk_again_before_it_acts() {
+    use std::fs;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpStream;
+    use std::os::unix::fs::symlink;
+    use std::time::Duration;
+
+    const PORT: u16 = 18733;
+    let base = std::env::temp_dir().join(format!("helix_files_live_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    let (root, outside) = (base.join("root"), base.join("outside"));
+    for d in ["z", "A"] {
+        fs::create_dir_all(root.join(d)).unwrap();
+    }
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("passwd"), "TOPSECRET").unwrap();
+    fs::write(root.join("a.txt"), "ROOT").unwrap();
+    fs::write(root.join("b.txt"), "B").unwrap();
+    fs::write(root.join("notes.txt"), "notes").unwrap();
+    fs::write(root.join("z/a.txt"), "SUB").unwrap();
+    fs::write(root.join("A/x.txt"), "X").unwrap();
+    symlink("/nonexistent/helix-test", root.join("dangling")).unwrap();
+
+    struct App(std::process::Child);
+    impl Drop for App {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut app = App(Command::new(env!("CARGO_BIN_EXE_helix"))
+        .args(["run", "examples/apps/files.helix", "--root", root.to_str().unwrap(), "--write", "--port", &PORT.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap());
+    let mut banner = String::new();
+    BufReader::new(app.0.stderr.take().unwrap()).read_line(&mut banner).unwrap();
+    let token = banner.split("token=").nth(1).map(|t| t.trim().to_string()).unwrap_or_default();
+    assert_eq!(token.len(), 64, "the app should print its link: {banner}");
+    let ask = |raw: String| -> String {
+        let mut s = TcpStream::connect(("127.0.0.1", PORT)).expect("the app has stopped");
+        s.set_read_timeout(Some(Duration::from_secs(10))).ok();
+        s.write_all(raw.as_bytes()).unwrap();
+        let mut out = String::new();
+        let _ = s.read_to_string(&mut out);
+        out
+    };
+    let cookie = format!("Cookie: helix_app_{PORT}={token}\r\n");
+    let post = |msg: &str, value: &str| {
+        let body = format!("{{\"msg\":\"{msg}\",\"value\":{value}}}");
+        let r = ask(format!("POST /event HTTP/1.0\r\nHost: 127.0.0.1:{PORT}\r\n{cookie}Content-Length: {}\r\n\r\n{body}", body.len()));
+        assert!(r.starts_with("HTTP/1.1 204"), "{body}: {r}");
+    };
+    let page = || ask(format!("GET / HTTP/1.0\r\nHost: 127.0.0.1:{PORT}\r\n{cookie}\r\n"));
+    let names = |d: &std::path::Path| {
+        let mut v: Vec<String> = fs::read_dir(d).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        v.sort();
+        v
+    };
+    assert!(page().contains("notes.txt"), "the root is listed");
+
+    // A listed file becomes a link to a file outside; selecting it must not show that file.
+    fs::remove_file(root.join("notes.txt")).unwrap();
+    symlink("../outside/passwd", root.join("notes.txt")).unwrap();
+    post("sel", "\"notes.txt\"");
+    assert!(!page().contains("TOPSECRET"), "a file outside the root was previewed through a swapped link");
+
+    // A rename onto a link that leads nowhere is refused, and the link is left as it was.
+    post("sel", "\"a.txt\"");
+    post("cmd", "\"cmd:rename\"");
+    post("dialog-submit", "{\"dialog-name\":\"dangling\"}");
+    assert!(fs::symlink_metadata(root.join("dangling")).unwrap().file_type().is_symlink(), "a rename replaced a dangling link");
+    assert!(page().contains("“dangling” already exists here."));
+    post("dialog-close", "null");
+
+    // Two files called `a.txt`, one in the root and one in `z`, to the Trash one after the other.
+    post("sel", "\"a.txt\"");
+    post("key", "\"Delete\"");
+    post("open", "\"z\"");
+    post("sel", "\"a.txt\"");
+    post("key", "\"Delete\"");
+    let trashed = names(&root.join(".trash"));
+    assert_eq!(trashed.len(), 2, "one of two same-named files was lost in the Trash: {trashed:?}");
+    let mut held: Vec<String> = trashed.iter().map(|n| fs::read_to_string(root.join(".trash").join(n)).unwrap()).collect();
+    held.sort();
+    assert_eq!(held, ["ROOT", "SUB"]);
+
+    // Something in `A` goes to the Trash; `A` becomes a link to outside; Undo must not follow it.
+    post("crumb", "\"0\"");
+    post("open", "\"A\"");
+    post("sel", "\"x.txt\"");
+    post("key", "\"Delete\"");
+    post("crumb", "\"0\"");
+    fs::rename(root.join("A"), root.join("A.real")).unwrap();
+    symlink("../outside", root.join("A")).unwrap();
+    post("undo-last", "null");
+    // Into the folder that is now a link — refused — and a new folder there must not be made.
+    post("open", "\"A\"");
+    post("cmd", "\"cmd:new\"");
+    post("dialog-submit", "{\"dialog-name\":\"made-by-files\"}");
+    assert_eq!(names(&outside), ["passwd"], "something was put outside the root");
+
+    // A `.trash` that is a link to outside is not used.
+    post("crumb", "\"0\"");
+    fs::rename(root.join(".trash"), root.join("trash-was")).unwrap();
+    symlink("../outside", root.join(".trash")).unwrap();
+    post("sel", "\"b.txt\"");
+    post("key", "\"Delete\"");
+    assert!(root.join("b.txt").exists(), "b.txt left the root for a Trash that is a link");
+    assert_eq!(names(&outside), ["passwd"], "the Trash led outside the root");
+
+    // The palette's recent folders are the folders it went to, nothing else.
+    post("palette-pick", "\"recent:trash-was\"");
+    assert!(page().contains("<h1 class=\"screen-title\">root</h1>"), "a folder never visited was opened from Recent");
+
+    drop(app);
+    let _ = fs::remove_dir_all(&base);
+}
+
 /// The design lab (ADR 0056): three designs of one app, computed in Helix — palettes, glass
 /// opacities, concentric radii — and replayed identically on every engine. The screens pin
 /// what the engine promises in markup: a design's tokens travel on its scope, a round shape
