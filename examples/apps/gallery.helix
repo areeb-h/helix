@@ -2,6 +2,7 @@
 #
 #   helix run examples/apps/gallery.helix             # then open the link it prints
 #   helix run examples/apps/gallery.helix --open      # …or let it open your browser
+#   helix run examples/apps/gallery.helix --window    # …or its own window (a `desktop` build)
 #   helix run examples/apps/gallery.helix --replay    # a scripted session, as HTML
 #
 # It is also the design system's test bench: `tests/ui/gallery.mjs` drives it in Chromium,
@@ -226,4 +227,4 @@ SESSION = [
   {msg: "theme", value: missing},
 ]
 
-fn main(port: Int = 8080, open: Bool = false, replay: Bool = false) = if replay then ui.replay(spec, SESSION).map((html) => print(html)) else ui.app({...spec, port: port, open: open})
+fn main(port: Int = 8080, open: Bool = false, window: Bool = false, replay: Bool = false) = if replay then ui.replay(spec, SESSION).map((html) => print(html)) else ui.app({...spec, port: port, open: open, window: window})

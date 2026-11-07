@@ -501,6 +501,11 @@ mod tests {
             // `now()` of reloading. The model and session cross reloads on the app's own
             // authenticated HTTP (`src/devwatch.rs`), under the `net` it already holds.
             "dev_generation",
+            // A native window that shows ONLY the app's own `http://127.0.0.1:<port>` page:
+            // any other URL is refused before anything opens, navigation away from that origin
+            // is refused inside the window, and pages cannot open more windows. It reaches
+            // nothing the app's `listen` (net) does not already serve — a frame, not a browser.
+            "open_window",
         ];
         for b in crate::registry::BUILTINS {
             if b.pure || effect_of(b.path).gated() {

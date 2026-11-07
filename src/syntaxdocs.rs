@@ -265,7 +265,8 @@ pub static SYNTAX: &[SyntaxDoc] = &[
                 virtualised), `line_chart`/`scatter_chart`/`bar_chart`; timers with `every(ms, msg)` in \
                 `subscriptions`. Accessible by construction, light and dark, motion run by the GPU. \
                 `ui.replay(spec, events)` returns every screen as HTML — testable without a browser, the same \
-                on all three engines. `helix run app.helix` prints a link (add `--open`); `helix run --watch app.helix` reloads on save with the \
+                on all three engines. `helix run app.helix` prints a link (add `--open`, or `window: true` in a `--features desktop` build for a native \
+                window); `helix run --watch app.helix` reloads on save with the \
                 model kept, and keeps the running app when a save does not check; see \
                 `examples/apps/gallery.helix`. A `std/ui.helix` on `HELIX_PATH` overrides the built-in copy. \
                 Keywords: std.ui, gui, ui, interface, window, desktop, web, dashboard, component, widget, button, form, \

@@ -155,6 +155,10 @@ numpy = { version = "0.28", optional = true }
 # (ADR 0010), behind the `managed` feature so the pure core stays dependency-free.
 # rustls (not OpenSSL) keeps the binary self-contained; sha2 is the trust boundary.
 ureq = { version = "2", optional = true }
+# Native app windows (`--features desktop`, ADR 0055 Phase 4): the platform's own web view in a
+# native window. Not default: it links WebKitGTK on Linux, which the static musl build cannot.
+wry = { version = "0.57", optional = true }
+tao = { version = "0.37", optional = true }
 # TLS for the PostgreSQL client (ADR 0044). Every one of these is ALREADY
 # compiled into a default build as a `ureq` transitive dependency, so making
 # them direct costs zero crates and zero build time — what it buys is that
@@ -284,6 +288,9 @@ managed = ["http"]
 # The previous comment here claimed `db` implied `dataframes`; the feature list
 # never said so, and saying it would have pinned queries to polars.
 db = ["dep:rusqlite"]
+# An app in its own native window instead of a browser tab (ADR 0055 Phase 4, src/desktop.rs).
+# Off by default: on Linux it links WebKitGTK and GTK, which the static artifact cannot carry.
+desktop = ["dep:wry", "dep:tao"]
 # PostgreSQL over its wire protocol, hand-rolled. ADDS NO DEPENDENCIES: SCRAM-SHA-256
 # needs sha2 + hmac + base64 + OsRng and TLS needs rustls, every one of which is already
 # in the tree for another reason, so this feature is code and nothing else. `libpq` would

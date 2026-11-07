@@ -1580,6 +1580,16 @@ Under `helix run --watch`, which start of the program this is (1 for the first);
 missing
 ```
 
+### `open_window(url, title?, width?, height?)`
+
+Show this app's own page in a native window; true if one opened, false where none can.
+
+**Note:** ADR 0055 PHASE 4: the platform's web view (WebView2, WKWebView, WebKitGTK) in a native window, instead of a browser tab. `std.ui` calls it for `ui.app({…, window: true})`. ONLY the app's own `http://127.0.0.1:<port>` origin: any other URL is refused, navigation away from it is refused inside the window, and pages cannot open more windows — a frame around what the app serves, not a browser. Closing the window ends the program. Answers false in a build without `--features desktop` or on a machine with no display, so the caller can open the browser instead (`open_url`). Keywords: window, desktop, native, gui, app, webview.
+
+```
+>>> open_window("http://127.0.0.1:8080/", "My app", 1100, 760)
+```
+
 ### `view_diff(old, new)`
 
 The patch operations that turn the rendered view `old` into `new`; `old` missing is a first frame.
@@ -2041,7 +2051,7 @@ Build an app: model, update and view in Helix, rendered in a browser — compone
 
 `import std.ui`
 
-**Note:** THE APP LIBRARY (ADR 0055), compiled into `helix`, so it imports from any directory. An app is `ui.app({title, init, update: (model, event) => model, view: (model) => tree})`; an event is `{msg, value}`. Components: `column`/`row`/`cluster`/`grid`, `card`, `button`, `text_input`, `textarea`, `select`, `checkbox`, `toggle`, `slider`, `form` with `required`/`min_length`/`pattern`, `tabs`, `menu`, `dialog`, `toasts`, `tooltip`, `progress`, `badge`, `data_table` (a DataFrame, virtualised), `line_chart`/`scatter_chart`/`bar_chart`; timers with `every(ms, msg)` in `subscriptions`. Accessible by construction, light and dark, motion run by the GPU. `ui.replay(spec, events)` returns every screen as HTML — testable without a browser, the same on all three engines. `helix run app.helix` prints a link (add `--open`); `helix run --watch app.helix` reloads on save with the model kept, and keeps the running app when a save does not check; see `examples/apps/gallery.helix`. A `std/ui.helix` on `HELIX_PATH` overrides the built-in copy. Keywords: std.ui, gui, ui, interface, window, desktop, web, dashboard, component, widget, button, form, chart, plot, interactive, elm, model view update.
+**Note:** THE APP LIBRARY (ADR 0055), compiled into `helix`, so it imports from any directory. An app is `ui.app({title, init, update: (model, event) => model, view: (model) => tree})`; an event is `{msg, value}`. Components: `column`/`row`/`cluster`/`grid`, `card`, `button`, `text_input`, `textarea`, `select`, `checkbox`, `toggle`, `slider`, `form` with `required`/`min_length`/`pattern`, `tabs`, `menu`, `dialog`, `toasts`, `tooltip`, `progress`, `badge`, `data_table` (a DataFrame, virtualised), `line_chart`/`scatter_chart`/`bar_chart`; timers with `every(ms, msg)` in `subscriptions`. Accessible by construction, light and dark, motion run by the GPU. `ui.replay(spec, events)` returns every screen as HTML — testable without a browser, the same on all three engines. `helix run app.helix` prints a link (add `--open`, or `window: true` in a `--features desktop` build for a native window); `helix run --watch app.helix` reloads on save with the model kept, and keeps the running app when a save does not check; see `examples/apps/gallery.helix`. A `std/ui.helix` on `HELIX_PATH` overrides the built-in copy. Keywords: std.ui, gui, ui, interface, window, desktop, web, dashboard, component, widget, button, form, chart, plot, interactive, elm, model view update.
 
 ```
 >>> print(view_html({tag: "b", props: {class: "note"}, children: [{tag: "#text", text: "hi"}]}))

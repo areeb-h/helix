@@ -10,7 +10,7 @@ name: ci
 # the two ever disagree, the local gate is the one people actually run, so this file
 # follows it.
 #
-# ALL SEVEN JOBS BLOCK (the seventh, `ui`, drives the app gallery in Chromium). Three
+# ALL EIGHT JOBS BLOCK (`ui` drives the app gallery in Chromium; `desktop`, a native window). Three
 # shipped advisory — clippy on 9 warnings, MSRV unverified, `cargo audit` on 6 advisories
 # — each with a written condition for promotion, because asserting an unchecked claim as
 # a gate is how a badge starts lying. Those conditions have been met: the clippy warnings
@@ -103,6 +103,52 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ui-gallery-screenshots
+          path: target/ui/*.png
+          if-no-files-found: ignore
+
+  # A native app window (ADR 0055 Phase 4): the `desktop` feature links WebKitGTK, so it is
+  # built and linted here, on its own, and `tests/ui/window.sh` drives a real window on a
+  # virtual display — it opens at its size, its close button ends the app, a program that ends
+  # takes the window with it, and with no display the app falls back to the browser.
+  desktop:
+    name: desktop window (WebKitGTK, Xvfb)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: helix-desktop
+      - name: Install WebKitGTK, a virtual display and a window manager
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev xvfb openbox xdotool wmctrl x11-utils imagemagick dbus-daemon gdb
+          # A fresh runner has no font cache; GTK and WebKit would build it on their first start,
+          # on the main thread, before the window can appear.
+          fc-cache -f
+          # WebKitGTK runs page content in a SANDBOXED process (bubblewrap), which needs
+          # unprivileged user namespaces. Ubuntu 24.04 runners restrict those through AppArmor,
+          # so the sandboxed process never starts and the web view waits for it forever — a
+          # window that maps but never draws or closes. Allowing user namespaces lets WebKit's
+          # sandbox work; the alternative (WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS) would test
+          # a configuration no user should ship.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          # The runner's own session bus, for the record: the test runs each window in a fresh one.
+          echo "bus=${DBUS_SESSION_BUS_ADDRESS:-unset} runtime=${XDG_RUNTIME_DIR:-unset}"; ls -l "${XDG_RUNTIME_DIR:-/nonexistent}" 2>&1 | head -5
+      - name: clippy (desktop)
+        run: cargo clippy --profile gate --features postgres,desktop --all-targets -- -D warnings
+      - name: Build with a window
+        run: cargo build --profile gate --features postgres,desktop --bin helix
+      - name: Drive a window
+        run: bash tests/ui/window.sh target/gate/helix target/ui
+      - name: Upload the window screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-window-screenshot
           path: target/ui/*.png
           if-no-files-found: ignore
 
