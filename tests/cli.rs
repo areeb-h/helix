@@ -4724,6 +4724,89 @@ fn dev_generation_is_missing_in_an_ordinary_run() {
     assert_eq!(out, "missing\n");
 }
 
+/// One bad request or one failing view must not end an app. A body that is not an event
+/// record used to raise out of `parse_json` and stop the server for everyone using it; a view
+/// that raised did the same. Now the bad body is a 400, and the event that broke the view is
+/// undone — the model goes back to what the screen shows — while the app keeps serving.
+#[test]
+fn an_app_survives_bad_events_and_a_failing_view() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    const PORT: u16 = 18474;
+    let dir = std::env::temp_dir().join(format!("helix_robust_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let app = dir.join("app.helix");
+    std::fs::write(
+        &app,
+        format!(
+            "import std.ui\n\
+             fn view(m) = ui.heading(\"{{[10, 20, 30][m.i]}}\")\n\
+             fn update(m, e) = if e.msg == \"next\" then {{...m, i: m.i + 1}} else m\n\
+             ui.app({{title: \"T\", init: {{i: 0}}, update: update, view: view, port: {PORT}}})\n"
+        ),
+    )
+    .unwrap();
+    struct Running(std::process::Child);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut run = Running(
+        Command::new(env!("CARGO_BIN_EXE_helix"))
+            .args(["run", app.to_str().unwrap()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut lines = BufReader::new(run.0.stderr.take().unwrap()).lines();
+    let banner = lines.next().unwrap().unwrap();
+    let token = banner.split("token=").nth(1).unwrap().trim().to_string();
+    let ask = |raw: String| -> String {
+        let mut s = TcpStream::connect(("127.0.0.1", PORT)).expect("the app has stopped");
+        s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        s.write_all(raw.as_bytes()).unwrap();
+        let mut out = String::new();
+        let _ = s.read_to_string(&mut out);
+        out
+    };
+    let cookie = format!("Cookie: helix_app_{PORT}={token}\r\n");
+    let post = |body: &str| {
+        ask(format!(
+            "POST /event HTTP/1.0\r\nHost: 127.0.0.1:{PORT}\r\n{cookie}Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        ))
+    };
+    let heading = || {
+        let page = ask(format!("GET / HTTP/1.0\r\nHost: 127.0.0.1:{PORT}\r\n{cookie}\r\n"));
+        page.split("<h1>").nth(1).and_then(|h| h.split("</h1>").next()).unwrap_or("").to_string()
+    };
+    for bad in ["not json", "5", "[1, 2]"] {
+        let r = post(bad);
+        assert!(r.starts_with("HTTP/1.1 400"), "{bad:?}: {r}");
+    }
+    assert_eq!(heading(), "10", "the app survives bodies that are not events");
+    let next = r#"{"msg":"next","value":null}"#;
+    post(next);
+    post(next);
+    assert_eq!(heading(), "30");
+    // The third `next` makes the view index past the end: undone, logged, still serving.
+    post(next);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(heading(), "30", "a failing view leaves the last good screen");
+    post(next);
+    assert_eq!(heading(), "30");
+    let logged = lines.next().unwrap().unwrap();
+    assert!(logged.starts_with("view failed: index 3 is out of bounds"), "{logged}");
+    drop(run);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// An app answers only the person who started it (ADR 0055 Phase 1). A localhost port is
 /// reachable by every local process, and by any web page through DNS rebinding — so before
 /// the session, `curl 127.0.0.1:PORT/event` could drive the app. Now: no token is 403, a

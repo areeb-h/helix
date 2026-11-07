@@ -228,10 +228,16 @@ export fn dialog(id, open, title, children, close, actions = []) = el("dialog", 
 # table's. Screen readers get `aria-rowcount` and each row's `aria-rowindex`.
 export fn data_table(id, df, offset, scroll, label, height = 360, row_height = 36) = do {
   n = df.count()
+  # Before the first scroll report the offset may not be a number yet: that is the top.
+  offset = if type_of(offset) == "Int" or type_of(offset) == "Float" then offset else 0
   cols = df.columns()
   numeric = df.schema().filter((c) => c.type == "Int" or c.type == "Float").map((c) => c.name)
-  first = max(0, floor(offset / row_height) - 6)
-  shown = max(0, min(n - first, ceil(height / row_height) + 12))
+  # The window is clamped to the data. The offset is the browser's last report, and after the
+  # data shrinks it can lie far past the end: the window then holds the last rows that exist,
+  # rather than none.
+  window = ceil(height / row_height) + 12
+  first = max(0, min(floor(offset / row_height) - 6, n - window))
+  shown = max(0, min(n - first, window))
   rows = if shown == 0 then [] else df.slice(first, shown).records()
   cell = (r, c) => el("td", {class: if numeric.contains(c) then "num" else "txt"}, [text(fmt_cell(r.get(c)))])
   body = range(0, rows.count()).map((i) => el("tr", {key: "r{first + i}", attrs: {"aria-rowindex": "{first + i + 2}"}}, cols.map((c) => cell(rows[i], c))))
@@ -257,7 +263,13 @@ fn fmt_cell(v) = match type_of(v) {
 # while the model asks for it — a stopwatch that is stopped has none, and nothing polls.
 export fn every(ms, msg) = {every: ms, msg: msg}
 
-fn subs_of(spec, model) = if spec.get("subscriptions").is_missing() then [] else (spec.subscriptions)(model)
+fn subs_of(spec, model) = if spec.get("subscriptions").is_missing() then [] else do {
+  s = try (spec.subscriptions)(model)
+  if s.ok then s.value else do {
+    logged = elog("subscriptions failed: {s.error}; no timers until the model changes")
+    []
+  }
+}
 
 # Bring the running timers in line with what the model asks for now. A timer that is still
 # wanted keeps its next due time (so re-rendering does not reset it); a new one is due one
@@ -285,10 +297,15 @@ fn sleep_ms(timers, t) = if timers.count() == 0 then 1000 else clamp(round((time
 # Helix does the physics once per declaration, the GPU does every frame. Unit mass,
 # stiffness k, damping c; the response of x'' + c·x' + k·x = k from rest is sampled until
 # it settles within 0.1%. Answers `{ms, easing}`.
+#
+# Both must be positive: with no stiffness there is no spring (the curve is NaN, which a
+# browser silently ignores), and with no damping it never settles. A spring so lightly damped
+# that it would ring for more than 4 s is cut at 4 s — no interface waits that long.
 export fn spring_curve(stiffness, damping) = do {
+  checked = if stiffness > 0.0 and damping > 0.0 then true else raise("a spring needs a positive stiffness and damping, got {stiffness} and {damping}", "`spring(prop, 170.0, 26.0)` is a gentle settle; the design system's presets are `motion(prop, \"snappy\" | \"gentle\" | \"bouncy\")`.")
   w0 = sqrt(stiffness)
   zeta = damping / (2.0 * w0)
-  settle = log(1000.0) / max(zeta * w0, 0.001)
+  settle = min(log(1000.0) / (zeta * w0), 4.0)
   wd = w0 * sqrt(max(1.0 - zeta * zeta, 0.000001))
   x = (t) => 1.0 - exp(-zeta * w0 * t) * (cos(wd * t) + (zeta * w0 / wd) * sin(wd * t))
   # The last sample is exactly 1: the curve ends where the property does, with no snap.
@@ -354,48 +371,57 @@ MR = 16.0
 MT = 14.0
 MB = 30.0
 
+# The range a chart's axis covers. No data is a chart too — before the first result arrives
+# it is the normal state — so an empty series draws an empty frame rather than raising.
+fn extent(vs) = if vs.count() == 0 then {lo: 0.0, hi: 1.0, empty: true} else {lo: vs.min() * 1.0, hi: vs.max() * 1.0, empty: false}
+fn no_data(label) = el("text", {class: "axis-label", attrs: {x: "{CW / 2.0}", y: "{CH / 2.0}", "text-anchor": "middle"}}, [text("No data")])
+
 fn px(ax, v) = ML + (v - ax.lo) / (ax.hi - ax.lo) * (CW - ML - MR)
 fn py(ay, v) = CH - MB - (v - ay.lo) / (ay.hi - ay.lo) * (CH - MT - MB)
 
-fn chart_frame(label, ax, ay, body, xlabels) = do {
+fn chart_frame(label, ax, ay, body, xlabels, empty = false) = do {
   ygrid = ay.ticks.map((t) => el("g", {class: "tick"}, [
     el("line", {class: "gridline", attrs: {x1: "{ML}", x2: "{CW - MR}", y1: "{py(ay, t):.1f}", y2: "{py(ay, t):.1f}"}}, []),
     el("text", {class: "axis-label", attrs: {x: "{ML - 8.0}", y: "{py(ay, t) + 4.0:.1f}", "text-anchor": "end"}}, [text(fmt_tick(t, ay.step))]),
   ]))
   xticks = if xlabels.is_missing() then ax.ticks.map((t) => el("text", {class: "axis-label", attrs: {x: "{px(ax, t):.1f}", y: "{CH - 10.0}", "text-anchor": "middle"}}, [text(fmt_tick(t, ax.step))])) else xlabels
-  el("svg", {class: "chart", role: "img", aria: {label: label}, attrs: {viewBox: "0 0 {CW} {CH}"}}, [el("title", {}, [text(label)])].concat(ygrid).concat(xticks).concat(body))
+  said = if empty then "{label} (no data)" else label
+  el("svg", {class: "chart", role: "img", aria: {label: said}, attrs: {viewBox: "0 0 {CW} {CH}"}}, [el("title", {}, [text(said)])].concat(ygrid).concat(xticks).concat(body).concat(if empty then [no_data(label)] else []))
 }
 
 # Lines: `series` is `[{name, xs, ys}]`, drawn in the palette's order with a legend.
 export fn line_chart(label, series) = do {
-  allx = series.map((s) => s.xs).reduce([], (a, b) => a.concat(b))
-  ally = series.map((s) => s.ys).reduce([], (a, b) => a.concat(b))
-  ax = axis(allx.min(), allx.max(), 6)
-  ay = axis(ally.min(), ally.max(), 5)
+  ex = extent(series.map((s) => s.xs).reduce([], (a, b) => a.concat(b)))
+  ey = extent(series.map((s) => s.ys).reduce([], (a, b) => a.concat(b)))
+  ax = axis(ex.lo, ex.hi, 6)
+  ay = axis(ey.lo, ey.hi, 5)
   lines = range(0, series.count()).map((k) => do {
     s = series[k]
     pts = range(0, s.xs.count()).map((i) => "{px(ax, s.xs[i]):.1f},{py(ay, s.ys[i]):.1f}")
-    path = "M{pts.join(" L")}"
+    path = if pts.count() == 0 then "M0,0" else "M{pts.join(" L")}"
     el("path", {key: "line-{s.name}", class: "series s{k % 6 + 1}", style: {d: "path(\"{path}\")"}, attrs: {d: path}}, [])
   })
   n = series.count()
   legend = el("g", {class: "legend"}, range(0, n).map((k) => el("text", {class: "legend-item s{k % 6 + 1}", attrs: {x: "{CW - MR - (n - 1 - k) * 110.0}", y: "{MT + 4.0}", "text-anchor": "end"}}, [text("● {series[k].name}")])))
-  chart_frame(label, ax, ay, lines.concat([legend]), missing)
+  chart_frame(label, ax, ay, lines.concat([legend]), missing, empty: ex.empty)
 }
 
 # Points: keyed by index, so new data moves them rather than redrawing them.
 export fn scatter_chart(label, xs, ys) = do {
-  ax = axis(xs.min(), xs.max(), 6)
-  ay = axis(ys.min(), ys.max(), 5)
+  ex = extent(xs)
+  ey = extent(ys)
+  ax = axis(ex.lo, ex.hi, 6)
+  ay = axis(ey.lo, ey.hi, 5)
   dots = range(0, xs.count()).map((i) => el("circle", {key: "p{i}", class: "dot s1", style: {cx: "{px(ax, xs[i]):.1f}px", cy: "{py(ay, ys[i]):.1f}px"}, attrs: {r: "4"}}, []))
-  chart_frame(label, ax, ay, dots, missing)
+  chart_frame(label, ax, ay, dots, missing, empty: ex.empty)
 }
 
 # Bars: one per label, scaled from the baseline on the compositor.
 export fn bar_chart(label, labels, values) = do {
-  ay = axis(min(0.0, values.min()), max(0.0, values.max()), 5)
-  ax = {lo: 0.0, hi: labels.count() * 1.0, step: 1.0, ticks: []}
-  slot = (CW - ML - MR) / labels.count()
+  ev = extent(values)
+  ay = axis(min(0.0, ev.lo), max(0.0, ev.hi), 5)
+  ax = {lo: 0.0, hi: max(labels.count(), 1) * 1.0, step: 1.0, ticks: []}
+  slot = (CW - ML - MR) / max(labels.count(), 1)
   base = py(ay, 0.0)
   bars = range(0, labels.count()).map((i) => do {
     top = py(ay, values[i])
@@ -406,7 +432,7 @@ export fn bar_chart(label, labels, values) = do {
     ])
   })
   names = range(0, labels.count()).map((i) => el("text", {class: "axis-label", attrs: {x: "{ML + (i + 0.5) * slot:.1f}", y: "{CH - 10.0}", "text-anchor": "middle"}}, [text(labels[i])]))
-  chart_frame(label, ax, ay, bars, names)
+  chart_frame(label, ax, ay, bars, names, empty: ev.empty)
 }
 
 # --- Rendering. -----------------------------------------------------------------------------
@@ -873,8 +899,10 @@ CLIENT = """
   }
   connect();
   // Events go out one request at a time, in order. A CONTINUOUS one — typing, dragging,
-  // scrolling — replaces the same message still waiting, so the app sees where the person is,
-  // not every step on the way; a discrete one (a click, a choice) is never dropped.
+  // scrolling — replaces the same message when it is the LAST one waiting, so the app sees
+  // where the person is, not every step on the way; a discrete one (a click, a choice) is
+  // never dropped. Only the last: typing that follows a submit must reach `update` after it,
+  // and merging into an earlier waiting event would move it ahead.
   const queue = [];
   let inflight = false;
   function flush() {
@@ -884,14 +912,15 @@ CLIENT = """
     fetch('/event', { method: 'POST', body: JSON.stringify(ev) }).finally(() => { inflight = false; flush(); });
   }
   function post(ev, continuous) {
-    if (continuous) {
-      const same = queue.find((q) => q.continuous && q.ev.msg === ev.msg);
-      if (same) { same.ev = ev; return; }
-    }
+    const last = queue[queue.length - 1];
+    if (continuous && last && last.continuous && last.ev.msg === ev.msg) { last.ev = ev; return; }
     queue.push({ ev, continuous });
     flush();
   }
-  const valueOf = (t) => (t.type === 'checkbox' ? t.checked : t.type === 'range' || t.type === 'number' ? Number(t.value) : t.value);
+  // A number field that is empty (or half-typed, like `1e`) sends null — `missing` in Helix —
+  // never the 0 that `Number('')` would make of it.
+  const num = (s) => { const n = Number(s); return s.trim() === '' || !Number.isFinite(n) ? null : n; };
+  const valueOf = (t) => (t.type === 'checkbox' ? t.checked : t.type === 'range' || t.type === 'number' ? num(t.value) : t.value);
 
   document.addEventListener('click', (e) => {
     const t = e.target.closest('[data-click]');
@@ -974,7 +1003,10 @@ fn page(spec, rt, model) = do {
   theme = theme_of(spec, model)
   "<!doctype html><html lang=\"en\" data-theme=\"{theme}\" data-client=\"{rt.client}\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{title}</title><style id=\"hx-style\">{rt.css}</style></head><body><main id=\"root\">{body}</main><script>{CLIENT}</script></body></html>"
 }
-fn theme_of(spec, model) = if spec.get("theme").is_missing() then "light" else (spec.theme)(model)
+fn theme_of(spec, model) = if spec.get("theme").is_missing() then "light" else do {
+  t = try (spec.theme)(model)
+  if t.ok then t.value else "light"
+}
 
 # --- The loop. ----------------------------------------------------------------------------
 
@@ -1010,9 +1042,14 @@ fn route(spec, st, c, req) = match "{req.method} {req.path}" {
     {...st, streams: st.streams.concat([c])}
   },
   "POST /event" => do {
-    ev = req.body.parse_json()
-    sent = c.respond({status: 204, text: ""})
-    {...st, model: step(spec, st.model, ev), keep: st.keep.concat([c]), changed: true}
+    # A body that is not an event record is refused, not raised: one bad request — a stale tab,
+    # an extension, a proxy — must not end the app for everyone using it.
+    parsed = try req.body.parse_json()
+    ev = if parsed.ok then parsed.value else missing
+    if type_of(ev) != "Record" then refuse(st, c, 400, "an event is a JSON record {{msg, value}}") else do {
+      sent = c.respond({status: 204, text: ""})
+      {...st, model: step(spec, st.model, ev), keep: st.keep.concat([c]), changed: true}
+    }
   },
   _ => refuse(st, c, 404, "not found"),
 }
@@ -1047,8 +1084,15 @@ fn serve(l, spec, rt, model, tree, conns, streams, timers) = do {
   t = clock_monotonic()
   due = timers.filter((x) => x.due <= t)
   ticked = due.reduce(st.model, (m, x) => step(spec, m, {msg: x.msg, value: now()}))
-  changed = st.changed or due.count() > 0
-  next = if changed then (spec.view)(ticked) else tree
+  changed_now = st.changed or due.count() > 0
+  # A view that raises must not end the app either. The events of this round are undone — the
+  # model goes back to what the screen shows — and the error is logged; the screen stays
+  # consistent with the model, and the next event starts from there.
+  drawn = if changed_now then try (spec.view)(ticked) else {ok: true, value: tree}
+  logged_view = if drawn.ok then false else elog("view failed: {drawn.error}; the events that led to it were undone")
+  ticked = if drawn.ok then ticked else model
+  changed = changed_now and drawn.ok
+  next = if changed then drawn.value else tree
   theme = theme_of(spec, ticked)
   ops = if changed then view_diff(tree, next) else []
   kept = if ops.count() == 0 then streams else do {

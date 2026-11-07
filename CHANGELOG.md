@@ -62,6 +62,35 @@
 
 ### Fixed
 
+- **A view cannot inject markup or script (security).** A view is often built from what a
+  person typed, so the renderer now stops injection for every app: a tag or attribute name
+  must be a plain name (a tag of `img src=x onerror=…` was written into the page as a live
+  element, and an attribute dict's keys could be anything); `<script>`, `<iframe>`,
+  `<object>`, `<embed>`, `<base>`, `<meta>` and `<link>` are refused, as are inline `on…`
+  handlers, `srcdoc`, and SVG animation of `href`; and a `href`/`src`/`action`/… that runs
+  script when followed — `javascript:`, however it is spelled or spaced, `vbscript:`, or a
+  `data:` document to navigate to — is replaced by `about:blank#blocked`, because a URL is
+  usually data and one bad link must not take the view down.
+- **One bad request or one failing view no longer stops an app.** A `POST /event` body that
+  was not an event record raised out of `parse_json` and ended the server for everyone; now it
+  is a 400. A view that raised did the same; now the events of that round are undone, so the
+  model goes back to what the screen shows, and the error is logged. A `theme` or
+  `subscriptions` function that raises falls back to light and no timers.
+- **Typing after Submit could reach `update` before it.** While a request was in flight, the
+  client merged a new keystroke into ANY waiting event of the same field, which moved it ahead
+  of a submit queued after it — the submit saw text typed later. It now merges only into the
+  last waiting event.
+- **A virtualised table could show no rows.** The window started at the scroll offset the
+  browser last reported, which after the data shrank could lie far past the end: a 5-row table
+  at 180,000 px rendered nothing. The window is clamped to the data; an offset that is not a
+  number yet means the top.
+- **Charts with no data raised**, and stopped an app whose first screen had no results yet.
+  They now draw an empty frame that says "No data" (and is announced so).
+- **A spring with no stiffness or no damping** made a `NaN` easing curve, which browsers
+  silently ignore, or asked for a 2-hour transition; it is now refused with an explanation, and a
+  very lightly damped spring is cut at 4 s.
+- **An empty number field sent 0.** `Number('')` is 0, so clearing a field read as zero; it
+  now sends `missing`.
 - **A patch that replaced the focused input's subtree dropped focus and the text being
   typed.** The client now restores focus, caret, a focused field's text and keyed scroll
   positions across such a frame.

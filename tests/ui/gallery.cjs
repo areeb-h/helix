@@ -143,6 +143,36 @@ async function session(browser, url, motion) {
   await axe('preferences tab');
   await post(() => p.click('#settings-tab-account'));
 
+  // Events reach `update` in the order they happened. While one request is in flight, typing
+  // is merged into the event still waiting — but only into the LAST one: typing after a submit
+  // must arrive after it. (Merging into any waiting `name` event once moved "C", typed after
+  // Submit, ahead of it, so the submit saw "ABC".) The first post is held to build the queue.
+  const sent = [];
+  let release;
+  const held = new Promise((r) => { release = r; });
+  let holding = true;
+  await p.route('**/event', async (route) => {
+    sent.push(JSON.parse(route.request().postData()));
+    if (holding) { holding = false; await held; }
+    await route.continue();
+  });
+  await p.click('#name');
+  await p.keyboard.type('A');
+  await p.keyboard.type('B');
+  await p.click('button[type=submit]');
+  await p.focus('#name');
+  await p.keyboard.type('C');
+  release();
+  const until = Date.now() + 3000;
+  while (sent.length < 4 && Date.now() < until) await p.waitForTimeout(50);
+  await p.waitForTimeout(200);
+  await p.unroute('**/event');
+  const order = sent.map((e) => (e.msg === 'name' ? `name:${e.value}` : e.msg)).join(' ');
+  check(order === 'name:A name:AB submit name:ABC', `typing after Submit arrives after it (${order})`);
+  await frame();
+  await settle();
+  await post(() => p.click('[data-click="reset"]'));
+
   // Toasts: a live region; each arrives, and leaves when dismissed.
   await post(() => p.click('[data-click="toast"].primary'));
   await post(() => p.click('[data-click="toast"].primary'));
