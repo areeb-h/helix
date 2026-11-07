@@ -164,12 +164,11 @@ fn app(m, p) = ui.shell(
     top: ui.el("div", {class: "logo"}, [ui.icon("cloud")]), bottom: ui.avatar(PEOPLE[0])),
   ui.toolbar([
     ui.search_field("{p}-search", "Search files", m.query, "query", placeholder: "Search", shortcut: "⌘K"),
-    ui.icon_button("bell", "Notifications", "star"),
-    ui.menu("{p}-more", "More", m.menu == p, "menu", [
+    [ui.icon_button("bell", "Notifications", "star"), ui.menu("{p}-more", "More", m.menu == p, "menu", [
       {label: "Share…", msg: "sheet", icon: "share"},
       {label: "Add to starred", msg: "star", icon: "star"},
       {label: "Move to trash", msg: "trash", icon: "trash", danger: true},
-      ], icon: "more", align: "end"),
+      ], icon: "more", align: "end")],
   ]),
   match m.tab { "controls" => controls_tab(m, p), "activity" => activity_tab(m, p), _ => files_tab(m, p) },
 )

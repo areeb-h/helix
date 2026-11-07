@@ -5,7 +5,7 @@ exit: 0
 21.00
 pairs checked: 1440, failing: 0
 extreme seeds failing: 0
-["rgba(255, 255, 255, 0.6)", "rgba(255, 255, 255, 0.62)", "rgba(16, 24, 20, 0.45)"]
+["rgba(255, 255, 255, 0.45)", "rgba(255, 255, 255, 0.62)", "rgba(16, 24, 20, 0.45)"]
 ["#008053", "#ffffff", "#2fcf8d", "#001c0f"]
 sharp/comfortable: card 8.0 row 4.0 item 4.0 sheet 12.0 ctl 4.0 concentric true
 sharp/compact: card 8.0 row 4.0 item 4.0 sheet 12.0 ctl 4.0 concentric true

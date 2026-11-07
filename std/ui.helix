@@ -57,7 +57,9 @@ export fn column(children, gap = 4) = el("div", {class: "col gap-{gap}"}, childr
 export fn row(children, gap = 4) = el("div", {class: "row gap-{gap}"}, children)
 export fn cluster(children, gap = 2) = el("div", {class: "cluster gap-{gap}"}, children)
 # Children laid out in as many columns of at least `min` pixels as fit.
-export fn grid(children, min = 260, gap = 4) = el("div", {class: "grid gap-{gap}", style: {grid_template_columns: "repeat(auto-fill, minmax(min({min}px, 100%), 1fr))"}}, children)
+# (`auto-fit`: a row with fewer children than fit stretches them across the width, rather
+# than leaving empty columns beside them.)
+export fn grid(children, min = 260, gap = 4) = el("div", {class: "grid gap-{gap}", style: {grid_template_columns: "repeat(auto-fit, minmax(min({min}px, 100%), 1fr))"}}, children)
 export fn spacer() = el("div", {class: "spacer"}, [])
 export fn divider() = el("hr", {class: "divider"}, [])
 
@@ -446,7 +448,10 @@ export fn shell(rail_node, toolbar_node, content, label = "Content") = el("div",
     el("main", {class: "shell-scroll", attrs: {tabindex: "-1"}, aria: {label: label}}, [content]),
   ]),
 ])
-export fn toolbar(children, label = "Toolbar") = el("header", {class: "toolbar mat-frame", aria: {label: label}}, children)
+# A toolbar's items float as separate glass capsules (macOS's toolbar), not one bar: a child
+# is one item, and a list of children is one group sharing a capsule (a cluster of buttons).
+export fn toolbar(children, label = "Toolbar") = el("header", {class: "toolbar", aria: {label: label}}, children.map((c) =>
+  if type_of(c) == "Array" then el("div", {class: "tb-item tb-group mat-frame"}, c) else el("div", {class: "tb-item mat-frame"}, [c])))
 # `items` is `[[value, caption, icon], …]`; the selected one is marked as the current page.
 export fn rail(label, items, selected, msg, top = missing, bottom = missing) = el("nav", {class: "rail mat-frame", aria: {label: label}}, present([
   top,
@@ -484,7 +489,7 @@ export fn data_table(id, df, offset, scroll, label, height = 360, row_height = 3
   cell = (r, c) => el("td", {class: if numeric.contains(c) then "num" else "txt"}, [text(fmt_cell(r.get(c)))])
   body = range(0, rows.count()).map((i) => el("tr", {key: "r{first + i}", attrs: {"aria-rowindex": "{first + i + 2}"}}, cols.map((c) => cell(rows[i], c))))
   pad = (k, px) => el("tr", {key: k, class: "pad", aria: {hidden: true}, style: {height: "{px}px"}}, [el("td", {attrs: {colspan: "{cols.count()}"}}, [])])
-  el("div", {id: id, class: "table-wrap", role: "region", scroll: scroll, aria: {label: label}, style: {height: "{height}px", __row: "{row_height}px"}, attrs: {tabindex: "0"}}, [
+  el("div", {id: id, class: "table-wrap mat-card", role: "region", scroll: scroll, aria: {label: label}, style: {height: "{height}px", __row: "{row_height}px"}, attrs: {tabindex: "0"}}, [
     el("table", {class: "table", attrs: {"aria-rowcount": "{n + 1}"}}, [
       el("thead", {}, [el("tr", {attrs: {"aria-rowindex": "1"}}, cols.map((c) => el("th", {class: if numeric.contains(c) then "num" else "txt", attrs: {scope: "col"}}, [text(c)])))]),
       el("tbody", {}, [pad("top", first * row_height)].concat(body).concat([pad("bottom", (n - first - shown) * row_height)])),
@@ -909,7 +914,9 @@ fn roles(dark, h, c0) = do {
     danger: danger.fg, danger_soft: danger.soft, success: success.fg, success_soft: success.soft, warning: warning.fg, warning_soft: warning.soft,
     charts: [0.0, 140.0, 60.0, 200.0, 290.0].map((d) => legible(if dark then lch(0.74, 0.14, h + d) else lch(0.58, 0.16, h + d), surface, 3.0)).concat([muted]),
     # The backdrop glass sits on: three soft fields of the accent and its neighbours.
-    blobs: if dark then [lch(0.42, min(c0, 0.17), h), lch(0.42, 0.13, h + 70.0), lch(0.4, 0.16, h - 70.0)] else [lch(0.76, min(c0, 0.18), h), lch(0.84, 0.13, h + 70.0), lch(0.74, 0.17, h - 70.0)],
+    # Neighbouring hues only (±40°), so the fields blend rather than clash, and deep and calm
+    # in the dark.
+    blobs: if dark then [lch(0.4, min(c0, 0.15), h), lch(0.35, min(c0, 0.12), h + 40.0), lch(0.33, min(c0, 0.13), h - 40.0)] else [lch(0.8, min(c0, 0.15), h), lch(0.87, min(c0, 0.1), h + 45.0), lch(0.79, min(c0, 0.13), h - 45.0)],
   }
 }
 
@@ -964,7 +971,7 @@ fn material_tokens(material, dark, r, h) = do {
   edge = if dark then "rgba(255, 255, 255, 0.1)" else "rgba(255, 255, 255, 0.65)"
   # Liquid glass catches the light: a soft specular wash from the top edge, over the tint.
   sheen = if dark then "linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0) 45%)" else "linear-gradient(180deg, rgba(255, 255, 255, 0.4), rgba(255, 255, 255, 0) 45%)"
-  mesh = (soft) => "radial-gradient(60% 55% at 10% 12%, {rgba_of(r.blobs[0], soft)} 0, transparent 70%), radial-gradient(55% 50% at 92% 8%, {rgba_of(r.blobs[1], soft)} 0, transparent 70%), radial-gradient(65% 60% at 80% 95%, {rgba_of(r.blobs[2], soft)} 0, transparent 70%), {hex_of(r.bg)}"
+  mesh = (soft) => "radial-gradient(75% 65% at 5% 0%, {rgba_of(r.blobs[0], soft)} 0, transparent 75%), radial-gradient(70% 60% at 100% 15%, {rgba_of(r.blobs[1], soft)} 0, transparent 75%), radial-gradient(80% 70% at 75% 100%, {rgba_of(r.blobs[2], soft)} 0, transparent 75%), radial-gradient(60% 50% at 15% 95%, {rgba_of(r.blobs[1], soft * 0.6)} 0, transparent 75%), {hex_of(r.bg)}"
   blur = (px) => "blur({px}px) saturate(1.7)"
   solid = {card: hex_of(r.surface), overlay: hex_of(r.surface), frame: hex_of(r.surface_2)}
   base = {
@@ -1272,7 +1279,7 @@ select.input { appearance: none; padding-right: 32px; background-image: linear-g
 .search { display: flex; align-items: center; gap: 8px; height: var(--ctl-h); padding: 0 6px 0 calc(var(--ctl-h) * .3); min-width: 0;
   border-radius: var(--r-field); background: var(--surface-2); color: var(--muted); border: 1px solid transparent; transition: border-color var(--fx-fast), box-shadow var(--fx); }
 .search:focus-within { border-color: var(--focus); box-shadow: 0 0 0 4px color-mix(in srgb, var(--focus) 24%, transparent); }
-.search-input { flex: 1; min-width: 0; border: 0; background: transparent; color: var(--fg); font: var(--t-md) var(--font); height: 100%; outline: none; }
+.search-input { flex: 1; min-width: 0; width: 0; border: 0; background: transparent; color: var(--fg); font: var(--t-md) var(--font); height: 100%; outline: none; }
 .search-input::-webkit-search-cancel-button { -webkit-appearance: none; }
 .kbd { font: 600 var(--t-xs)/1 var(--font); padding: 3px 6px; border-radius: 6px; background: var(--surface); color: var(--muted); border: 1px solid var(--line); box-shadow: 0 1px 0 var(--line); }
 
@@ -1443,12 +1450,15 @@ button.li:active { background: var(--press); }
 .shell-main { position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column; container-type: inline-size; }
 .shell-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; outline: none;
   padding: calc(var(--ctl-h) + var(--inset) * 3) var(--pad-card) calc(var(--s-7) + 40px); }
-.toolbar { position: absolute; top: var(--inset); left: var(--inset); right: var(--inset); z-index: 5; display: flex; align-items: center; gap: 6px;
-  padding: 4px; border-radius: var(--r-in-window); box-shadow: var(--e-2), inset 0 1px 0 var(--glass-edge); border: 1px solid var(--frame-line); }
-.toolbar .search { flex: 1; }
-.toolbar .btn { height: calc(var(--ctl-h) - 2px); }
-.toolbar .btn.icon { width: calc(var(--ctl-h) - 2px); border-radius: max(var(--floor, 4px), calc(var(--r-in-window) - 4px)); }
-.toolbar .search { border-radius: max(4px, calc(var(--r-in-window) - 4px)); height: calc(var(--ctl-h) - 2px); }
+.toolbar { position: absolute; top: var(--inset); left: var(--inset); right: var(--inset); z-index: 5; display: flex; align-items: center; gap: 8px; pointer-events: none; }
+.tb-item { pointer-events: auto; display: flex; align-items: center; gap: 2px; padding: 3px; flex: none; border-radius: var(--r-in-window);
+  border: 1px solid var(--frame-line); box-shadow: var(--e-2), inset 0 1px 0 var(--glass-edge); }
+.tb-item:has(.search) { flex: 1 1 0; min-width: 0; max-width: 440px; }
+.tb-item:last-child { margin-left: auto; }
+.tb-item:first-child { margin-left: 0; }
+.tb-item .search { flex: 1; min-width: 0; background: transparent; border-color: transparent; }
+@container (max-width: 420px) { .tb-item .kbd { display: none; } }
+.tb-item .btn.icon, .tb-item .menu > .btn.icon { width: var(--ctl-h); height: var(--ctl-h); border-radius: max(4px, calc(var(--r-in-window) - 3px)); box-shadow: none; }
 :root:not([data-perf="light"]) .shell-scroll, :root [data-effects="full"] .shell-scroll { -webkit-mask-image: linear-gradient(to bottom, rgba(0, 0, 0, .35), #000 calc(var(--ctl-h) + var(--inset) * 2.5)); mask-image: linear-gradient(to bottom, rgba(0, 0, 0, .35), #000 calc(var(--ctl-h) + var(--inset) * 2.5)); }
 [data-effects="light"] .shell-scroll { -webkit-mask-image: none; mask-image: none; }
 .rail { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 76px; padding: var(--s-3) 0; border-right: 1px solid var(--frame-line); }
@@ -1462,10 +1472,17 @@ button.li:active { background: var(--press); }
 .rail-item.on .ic { color: var(--accent-text); }
 .rail-label { font-size: 11px; font-weight: 600; }
 
-.table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: var(--r-card); background: var(--surface); overscroll-behavior: contain; }
+.table-wrap { overflow: auto; border-radius: var(--r-card); overscroll-behavior: contain; box-shadow: var(--e-1), inset 0 1px 0 var(--glass-edge); }
 .table { border-collapse: separate; border-spacing: 0; width: 100%; font-variant-numeric: tabular-nums; font-size: var(--t-sm); }
-.table th { position: sticky; top: 0; z-index: 1; background: var(--surface-2); text-align: left; font-weight: 600; height: var(--row);
+/* The header is the table's own surface, not a band of another colour: rows scroll beneath it
+   (blurred, on glass), and it meets the scrollbar's gutter without a seam. */
+.table th { position: sticky; top: 0; z-index: 1; background: var(--card-bg); -webkit-backdrop-filter: var(--card-blur); backdrop-filter: var(--card-blur);
+  text-align: left; font-weight: 650; font-size: var(--t-xs); letter-spacing: .02em; text-transform: capitalize; height: var(--row);
   padding: 0 var(--s-3); border-bottom: 1px solid var(--line); white-space: nowrap; color: var(--muted); }
+:root[data-perf="light"] .table th, [data-effects="light"] .table th { background: var(--card-solid); -webkit-backdrop-filter: none; backdrop-filter: none; }
+:root[data-perf="light"] [data-effects="full"] .table th { background: var(--card-bg); -webkit-backdrop-filter: var(--card-blur); backdrop-filter: var(--card-blur); }
+.table th:first-child, .table td:first-child { padding-left: var(--pad-card); }
+.table th:last-child, .table td:last-child { padding-right: var(--pad-card); }
 .table td { height: var(--row); padding: 0 var(--s-3); border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
 .table .num { text-align: right; }
 .table tr.pad td { padding: 0; border: 0; height: inherit; }
