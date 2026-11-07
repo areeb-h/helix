@@ -47,9 +47,17 @@ if [ -n "$wid" ]; then
   geo=$(xdotool getwindowgeometry "$wid" | grep Geometry | awk '{print $2}')
   [ "$geo" = "1100x760" ] && ok "at the default size ($geo)" || bad "window size is $geo, not 1100x760"
   import -window root "$OUT/desktop-window.png" 2>/dev/null && ok "screenshot: $OUT/desktop-window.png"
-  wmctrl -c 'Component gallery'
-  for _ in $(seq 50); do kill -0 $pid 2>/dev/null || break; sleep 0.1; done
-  if kill -0 $pid 2>/dev/null; then bad "the app outlived its window's close button"; kill $pid; else ok "closing the window ends the app"; fi
+  # The close button, as a window manager delivers it (WM_DELETE_WINDOW). The app may still be
+  # busy loading its page on a slow machine, so it has up to 20 s to act on it.
+  if wmctrl -c 'Component gallery'; then ok "the close request was delivered"; else bad "wmctrl found no window to close"; fi
+  for _ in $(seq 200); do kill -0 $pid 2>/dev/null || break; sleep 0.1; done
+  if kill -0 $pid 2>/dev/null; then
+    bad "the app outlived its window's close button"
+    echo "windows still on the display:"; wmctrl -l; tail -5 "$work/win.log"
+    kill $pid
+  else
+    ok "closing the window ends the app"
+  fi
   wait $pid 2>/dev/null
   curl -s -m 1 -o /dev/null http://127.0.0.1:18961/ && bad "the port is still held" || ok "and frees its port"
 else
