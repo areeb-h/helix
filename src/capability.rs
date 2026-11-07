@@ -496,6 +496,11 @@ mod tests {
             // A fresh cookie jar is an empty in-memory value; it touches no network or
             // filesystem until it is threaded into a request, which IS gated (`Net`).
             "cookie_jar",
+            // Hot reload (`helix run --watch`): reads ONE fixed variable, a small integer that
+            // is not a secret, and answers it. No file, no socket, no process — it is the
+            // `now()` of reloading. The model and session cross reloads on the app's own
+            // authenticated HTTP (`src/devwatch.rs`), under the `net` it already holds.
+            "dev_generation",
         ];
         for b in crate::registry::BUILTINS {
             if b.pure || effect_of(b.path).gated() {

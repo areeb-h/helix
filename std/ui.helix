@@ -441,12 +441,16 @@ export fn open_url(url) = do {
 # A cookie is scoped by host, not port, so its name carries the port: two apps side by side do
 # not overwrite each other's sessions. Tokens are compared by their HMAC under a second secret,
 # which keeps the comparison from leaking, through its timing, how much of a guess was right.
+#
+# `macs` is a LIST because hot reload hands a running session over (see "Hot reload"): a
+# restarted app is told, by a caller already holding its own token, to also accept the one the
+# open browser has. Nothing else ever adds to it.
 fn session(port) = do {
   key = aes_keygen()
   token = aes_keygen()
-  {port: port, token: token, key: key, mac: hmac_sha256(key, token), cookie: "helix_app_{port}"}
+  {port: port, token: token, key: key, macs: [hmac_sha256(key, token)], cookie: "helix_app_{port}"}
 }
-fn same_token(rt, s) = if s.is_missing() then false else hmac_sha256(rt.key, s) == rt.mac
+fn same_token(rt, s) = if type_of(s) != "String" then false else rt.macs.contains(hmac_sha256(rt.key, s))
 fn query_token(q) = do {
   hits = "{q}".split("&").filter((p) => p.starts_with("token="))
   if hits.count() == 0 then missing else url_decode_lenient(hits[0].drop(6))
@@ -846,16 +850,28 @@ CLIENT = """
     }
   }
 
-  // --- The wire. A frame is patch operations and the theme.
-  let version = 0;
-  const es = new EventSource('/events');
-  es.onmessage = (e) => {
-    const d = JSON.parse(e.data);
-    apply(d.ops);
-    document.documentElement.dataset.theme = d.theme || 'light';
-    version += 1;
-    document.documentElement.dataset.version = version;
-  };
+  // --- The wire. A frame is patch operations and the theme; a subscriber's first frame also
+  // carries the stylesheet, the title and the client's hash, which is how a hot reload's new
+  // styles arrive. The stream is reconnected at once when it drops — after a reload the app
+  // is back within a fraction of a second, and the browser's own retry waits seconds.
+  let version = 0, delay = 100;
+  const built = document.documentElement.dataset.client;
+  function connect() {
+    const es = new EventSource('/events');
+    es.onopen = () => { delay = 100; };
+    es.onmessage = (e) => {
+      const d = JSON.parse(e.data);
+      if (d.client && d.client !== built) { location.reload(); return; }
+      if (d.css != null) { const st = document.getElementById('hx-style'); if (st && st.textContent !== d.css) st.textContent = d.css; }
+      if (d.title != null && document.title !== d.title) document.title = d.title;
+      apply(d.ops);
+      document.documentElement.dataset.theme = d.theme || 'light';
+      version += 1;
+      document.documentElement.dataset.version = version;
+    };
+    es.onerror = () => { es.close(); setTimeout(connect, delay); delay = Math.min(delay * 2, 2000); };
+  }
+  connect();
   // Events go out one request at a time, in order. A CONTINUOUS one — typing, dragging,
   // scrolling — replaces the same message still waiting, so the app sees where the person is,
   // not every step on the way; a discrete one (a click, a choice) is never dropped.
@@ -949,30 +965,35 @@ CLIENT = """
 })();
 """
 
-fn page(spec, model) = do {
+# The whole stylesheet: the motion tokens, the design system, and the app's own `style`.
+fn css_of(spec) = ":root {{ {motion_tokens()} }}{THEME}{spec.get("style") ?? ""}"
+
+fn page(spec, rt, model) = do {
   title = html_escape("{spec.title}")
   body = render((spec.view)(model))
   theme = theme_of(spec, model)
-  extra = spec.get("style") ?? ""
-  "<!doctype html><html lang=\"en\" data-theme=\"{theme}\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{title}</title><style>:root {{ {motion_tokens()} }}{THEME}{extra}</style></head><body><main id=\"root\">{body}</main><script>{CLIENT}</script></body></html>"
+  "<!doctype html><html lang=\"en\" data-theme=\"{theme}\" data-client=\"{rt.client}\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{title}</title><style id=\"hx-style\">{rt.css}</style></head><body><main id=\"root\">{body}</main><script>{CLIENT}</script></body></html>"
 }
 fn theme_of(spec, model) = if spec.get("theme").is_missing() then "light" else (spec.theme)(model)
 
 # --- The loop. ----------------------------------------------------------------------------
 
-# One step of the fold for one connection: the model, the connections still open, and the
-# SSE streams to push to. A request is a page load, a subscription, or an event.
-fn handle(spec, rt, st, c) = do {
+# One step of the fold for one connection: the model, the session, the connections still
+# open, and the SSE streams to push to. A request is a page load, a subscription, or an event.
+fn handle(spec, st, c) = do {
   req = c.poll_request()
-  if req.is_missing() then (if c.is_open() then {...st, keep: st.keep.concat([c])} else st) else guard(spec, rt, st, c, req)
+  if req.is_missing() then (if c.is_open() then {...st, keep: st.keep.concat([c])} else st) else guard(spec, st, c, req)
 }
 
 # Every route is behind the session (see "The session"): the Host must be this machine, and
 # the request must carry the cookie — or, on the one link the app printed, the token itself.
-fn guard(spec, rt, st, c, req) = if not local_host(rt, req) then refuse(st, c, 421, "this app answers only on 127.0.0.1") else if same_token(rt, cookie_token(rt, req)) then route(spec, st, c, req) else if req.method == "GET" and same_token(rt, query_token(req.query)) then do {
-  sent = c.respond({status: 303, headers: {"Set-Cookie": set_cookie(rt), "Location": "/", "Cache-Control": "no-store"}})
-  {...st, keep: st.keep.concat([c])}
-} else refuse(st, c, 403, "open the link this app printed when it started; it carries the session")
+fn guard(spec, st, c, req) = do {
+  rt = st.rt
+  if not local_host(rt, req) then refuse(st, c, 421, "this app answers only on 127.0.0.1") else if same_token(rt, cookie_token(rt, req)) then (if rt.dev and req.path.starts_with("/__dev/") then dev_route(spec, st, c, req) else route(spec, st, c, req)) else if req.method == "GET" and same_token(rt, query_token(req.query)) then do {
+    sent = c.respond({status: 303, headers: {"Set-Cookie": set_cookie(rt), "Location": "/", "Cache-Control": "no-store"}})
+    {...st, keep: st.keep.concat([c])}
+  } else refuse(st, c, 403, "open the link this app printed when it started; it carries the session")
+}
 
 fn refuse(st, c, status, why) = do {
   sent = c.respond({status: status, text: why})
@@ -981,7 +1002,7 @@ fn refuse(st, c, status, why) = do {
 
 fn route(spec, st, c, req) = match "{req.method} {req.path}" {
   "GET /" => do {
-    sent = c.respond({status: 200, html: page(spec, st.model)})
+    sent = c.respond({status: 200, html: page(spec, st.rt, st.model)})
     {...st, keep: st.keep.concat([c])}
   },
   "GET /events" => do {
@@ -993,10 +1014,7 @@ fn route(spec, st, c, req) = match "{req.method} {req.path}" {
     sent = c.respond({status: 204, text: ""})
     {...st, model: step(spec, st.model, ev), keep: st.keep.concat([c]), changed: true}
   },
-  _ => do {
-    sent = c.respond({status: 404, text: "not found"})
-    {...st, keep: st.keep.concat([c])}
-  },
+  _ => refuse(st, c, 404, "not found"),
 }
 
 # One event through `update`. An update that raises is logged and the model kept: one bad
@@ -1013,6 +1031,11 @@ fn step(spec, model, ev) = do {
 # JSON, because an SSE `data:` line cannot carry raw newlines.
 fn frame(ops, theme) = {ops: ops, theme: theme}.to_json()
 
+# A subscriber's FIRST frame carries the whole page around the view too — the stylesheet, the
+# title, and which client built it — because after a hot reload all three may have changed
+# and the page was loaded by the program before. A client older than this runtime reloads.
+fn first_frame(ops, theme, rt) = {ops: ops, theme: theme, css: rt.css, title: rt.title, client: rt.client}.to_json()
+
 # `tree` is the view every current subscriber is showing. A change sends them its diff — and
 # nothing at all when the diff is empty, as a timer whose `update` changed nothing leaves it; a
 # client that has just subscribed gets the whole tree instead (`view_diff(missing, tree)`).
@@ -1020,7 +1043,7 @@ fn serve(l, spec, rt, model, tree, conns, streams, timers) = do {
   ready = l.wait(conns, sleep_ms(timers, clock_monotonic()))
   fresh = l.accept_poll()
   live = if fresh.is_missing() then conns else conns.concat([fresh])
-  st = live.reduce({model: model, keep: [], streams: [], changed: false}, (s, c) => handle(spec, rt, s, c))
+  st = live.reduce({model: model, rt: rt, keep: [], streams: [], changed: false}, (s, c) => handle(spec, s, c))
   t = clock_monotonic()
   due = timers.filter((x) => x.due <= t)
   ticked = due.reduce(st.model, (m, x) => step(spec, m, {msg: x.msg, value: now()}))
@@ -1033,20 +1056,72 @@ fn serve(l, spec, rt, model, tree, conns, streams, timers) = do {
     streams.filter((s) => s.send(f))
   }
   first = if st.streams.count() == 0 then [] else do {
-    f = frame(view_diff(missing, next), theme)
+    f = first_frame(view_diff(missing, next), theme, st.rt)
     st.streams.filter((s) => s.send(f))
   }
   later = schedule(timers.map((x) => if x.due <= t then advance(x, t) else x), subs_of(spec, ticked), t)
-  serve(l, spec, rt, ticked, next, st.keep, kept.concat(first), later)
+  serve(l, spec, st.rt, ticked, next, st.keep, kept.concat(first), later)
+}
+
+# --- Hot reload. ---------------------------------------------------------------------------
+#
+# `helix run --watch app.helix` restarts the program when a file it loads changes and still
+# checks (a broken save is reported and the running app kept). The model and the session cross
+# over WITHOUT any authority the app does not already have — no file, no secret in the
+# environment — on the app's own authenticated HTTP:
+#
+#   - The supervisor learns each start's link from its stderr, a pipe only the two share.
+#   - Before a restart it asks the running app `GET /__dev/model` with that start's token.
+#   - It then tells the new start, with ITS token, `POST /__dev/adopt {token, model}`: accept
+#     the token the open browser holds, and take this model. A caller can only hand over a
+#     session it could already use, so nothing is gained that was not already held.
+#
+# The `/__dev/` routes exist only when `dev_generation()` says this is a `--watch` run; in any
+# other run they are a 404 like any unknown path. The model is restored OVER the new `init`,
+# so a field the new code added gets its initial value; if the new view cannot draw it, the
+# app keeps `init` and says why.
+fn dev_route(spec, st, c, req) = match "{req.method} {req.path}" {
+  "GET /__dev/model" => do {
+    json = try st.model.to_json()
+    sent = if json.ok then c.respond({status: 200, text: json.value}) else c.respond({status: 409, text: "this model is not JSON, so it cannot cross a reload"})
+    {...st, keep: st.keep.concat([c])}
+  },
+  "POST /__dev/adopt" => do {
+    a = try req.body.parse_json()
+    token = if a.ok then a.value.get("token") else missing
+    valid = if type_of(token) == "String" then token.re_match("""^[0-9a-f]{64}$""") else false
+    rt = st.rt
+    sent = c.respond({status: if valid then 204 else 400, text: ""})
+    if not valid then {...st, keep: st.keep.concat([c])} else {
+      ...st,
+      rt: {...rt, macs: rt.macs.concat([hmac_sha256(rt.key, token)])},
+      model: adopt(spec, a.value.get("model")),
+      keep: st.keep.concat([c]),
+      changed: true,
+    }
+  },
+  _ => refuse(st, c, 404, "not found"),
+}
+
+fn adopt(spec, kept) = if kept.is_missing() then spec.init else do {
+  merged = if type_of(spec.init) == "Record" and type_of(kept) == "Record" then {...spec.init, ...kept} else kept
+  fits = try (spec.view)(merged)
+  if fits.ok then merged else do {
+    logged = elog("hot reload: the kept model does not fit the new view ({fits.error}); starting from init")
+    spec.init
+  }
 }
 
 export fn app(spec) = do {
   port = if spec.get("port").is_missing() then 8080 else spec.port
   l = listen(port)
-  rt = session(port)
+  generation = dev_generation()
+  reload = if generation.is_missing() then false else generation > 1
+  rt = {...session(port), dev: not generation.is_missing(), css: css_of(spec), title: "{spec.title}", client: sha256(CLIENT)}
   url = "http://127.0.0.1:{port}/?token={rt.token}"
+  # Under `--watch` the supervisor reads this line and shows the link once, on the first start.
   logged = elog("{spec.title} on {url}")
-  opened = if spec.get("open").is_missing() then false else if spec.open then open_url(url) else false
+  opened = if reload or spec.get("open").is_missing() then false else if spec.open then open_url(url) else false
   serve(l, spec, rt, spec.init, (spec.view)(spec.init), [], [], schedule([], subs_of(spec, spec.init), clock_monotonic()))
 }
 

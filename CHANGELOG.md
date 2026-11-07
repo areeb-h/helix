@@ -4,6 +4,19 @@
 
 ### Added
 
+- **Hot reload: `helix run --watch app.helix`.** Save a file and the open app shows the new
+  code with its state kept: the model, the session, the page (no browser reload — in our
+  Chromium run the edit was on screen 267 ms after the save, CSS included). The supervisor
+  watches every file the program loads, and CHECKS the program before reloading: a save that
+  does not check prints its error and the running app carries on. The model is restored over
+  the new `init`, so a field added since is filled in; if the new view cannot draw it, the
+  app starts from `init` and says why. The handover needs no authority the app does not
+  already hold — no file, no secret in the environment: the model and session cross on the
+  app's own authenticated HTTP, on routes that exist only under `--watch` (a 404 otherwise).
+  `dev_generation()` tells a program which start it is (missing outside `--watch`). A
+  supervisor that is killed takes its app with it,
+  so the port is never left held.
+
 - **`import std.ui` works from any directory: the app library is compiled into `helix`.** It
   was `examples/apps/ui.helix`, which only a file beside it could import, so an installed
   Helix could not build an app at all. It is now `std/ui.helix`, embedded in the binary as

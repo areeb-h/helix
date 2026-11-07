@@ -1569,6 +1569,17 @@ Pause the program for ms milliseconds (wall clock; fractional ms honoured).
 
 ## ui
 
+### `dev_generation()`
+
+Under `helix run --watch`, which start of the program this is (1 for the first); otherwise missing.
+
+**Note:** HOT RELOAD (ADR 0055). `helix run --watch app.helix` restarts the program when a file it loads changes and still checks. `std.ui` asks this so a reload does not open another browser tab, and to enable the routes the supervisor hands the model and session over on — the app's own authenticated HTTP, so a reload needs no authority the app does not already have. It reads one fixed, non-secret number; no file, socket or secret. Keywords: hot reload, watch, live reload, dev, restart.
+
+```
+>>> dev_generation()
+missing
+```
+
 ### `view_diff(old, new)`
 
 The patch operations that turn the rendered view `old` into `new`; `old` missing is a first frame.
@@ -1700,6 +1711,15 @@ Extra roots searched for a non-local import.
 - **Unset:** unset — only the entry's project and the install-relative stdlib are searched
 
 **Note:** Searched BEFORE the install-relative standard-library locations, so a directory here shadows a stdlib module of the same path — which is how a local copy is tested, and how one is shadowed by accident. Keywords: import, module, search, library, include, resolve.
+
+### `HELIX_DEV_GENERATION`
+
+Hot reload: which start of the app this is — 1, then one more per reload.
+
+- **Values:** a positive integer, set by `helix run --watch`
+- **Unset:** 1
+
+**Note:** Set by `helix run --watch` and read by `dev_generation()`. An app opens the browser on generation 1 only, and serves the routes the supervisor hands its model and session over on only when this is set. It carries no secret: the session token never goes through the environment, which other processes of the same user can read. Keywords: hot reload, reload count, watch.
 
 ### `HELIX_THREADS`
 
@@ -2021,7 +2041,7 @@ Build an app: model, update and view in Helix, rendered in a browser — compone
 
 `import std.ui`
 
-**Note:** THE APP LIBRARY (ADR 0055), compiled into `helix`, so it imports from any directory. An app is `ui.app({title, init, update: (model, event) => model, view: (model) => tree})`; an event is `{msg, value}`. Components: `column`/`row`/`cluster`/`grid`, `card`, `button`, `text_input`, `textarea`, `select`, `checkbox`, `toggle`, `slider`, `form` with `required`/`min_length`/`pattern`, `tabs`, `menu`, `dialog`, `toasts`, `tooltip`, `progress`, `badge`, `data_table` (a DataFrame, virtualised), `line_chart`/`scatter_chart`/`bar_chart`; timers with `every(ms, msg)` in `subscriptions`. Accessible by construction, light and dark, motion run by the GPU. `ui.replay(spec, events)` returns every screen as HTML — testable without a browser, the same on all three engines. `helix run app.helix` prints a link (add `--open`); see `examples/apps/gallery.helix`. A `std/ui.helix` on `HELIX_PATH` overrides the built-in copy. Keywords: std.ui, gui, ui, interface, window, desktop, web, dashboard, component, widget, button, form, chart, plot, interactive, elm, model view update.
+**Note:** THE APP LIBRARY (ADR 0055), compiled into `helix`, so it imports from any directory. An app is `ui.app({title, init, update: (model, event) => model, view: (model) => tree})`; an event is `{msg, value}`. Components: `column`/`row`/`cluster`/`grid`, `card`, `button`, `text_input`, `textarea`, `select`, `checkbox`, `toggle`, `slider`, `form` with `required`/`min_length`/`pattern`, `tabs`, `menu`, `dialog`, `toasts`, `tooltip`, `progress`, `badge`, `data_table` (a DataFrame, virtualised), `line_chart`/`scatter_chart`/`bar_chart`; timers with `every(ms, msg)` in `subscriptions`. Accessible by construction, light and dark, motion run by the GPU. `ui.replay(spec, events)` returns every screen as HTML — testable without a browser, the same on all three engines. `helix run app.helix` prints a link (add `--open`); `helix run --watch app.helix` reloads on save with the model kept, and keeps the running app when a save does not check; see `examples/apps/gallery.helix`. A `std/ui.helix` on `HELIX_PATH` overrides the built-in copy. Keywords: std.ui, gui, ui, interface, window, desktop, web, dashboard, component, widget, button, form, chart, plot, interactive, elm, model view update.
 
 ```
 >>> print(view_html({tag: "b", props: {class: "note"}, children: [{tag: "#text", text: "hi"}]}))

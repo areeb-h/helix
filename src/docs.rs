@@ -1160,6 +1160,14 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         notes: "WHAT AN APP SENDS INSTEAD OF A PAGE (ADR 0055). A full-page morph of a 2,000-node view took 11.6 ms in Chromium — most of a frame — while a diff touches only what changed, so a running transition is patched rather than restarted. Operations, applied in order: `text` (a text node's new text), `attrs` (`set` pairs and `remove` names on one element), `replace` (a node rebuilt), `insert` / `remove` (a child at an index under `path`) and `move` (`from` → `to`). A `path` is child indices from the root. Children diff BY KEY when every child on both sides has a unique `key`, so a reordered list moves its nodes; otherwise by position. A node in an operation is in wire form: a string for text, `[tag, [[name, value], ...], [children]]` for an element. Keywords: ui, app, view, diff, patch, virtual dom, reconcile, keyed, update.",
     },
     DocEntry {
+        name: "dev_generation",
+        sig: "dev_generation()",
+        doc: "Under `helix run --watch`, which start of the program this is (1 for the first); otherwise missing.",
+        example: "dev_generation()",
+        example_out: "missing",
+        notes: "HOT RELOAD (ADR 0055). `helix run --watch app.helix` restarts the program when a file it loads changes and still checks. `std.ui` asks this so a reload does not open another browser tab, and to enable the routes the supervisor hands the model and session over on — the app's own authenticated HTTP, so a reload needs no authority the app does not already have. It reads one fixed, non-secret number; no file, socket or secret. Keywords: hot reload, watch, live reload, dev, restart.",
+    },
+    DocEntry {
         name: "read_bytes",
         sig: "read_bytes(path)",
         doc: "The whole file as Bytes, with no UTF-8 requirement.",

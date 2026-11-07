@@ -127,6 +127,13 @@ pub static ENV: &[EnvDoc] = &[
         notes: "Searched BEFORE the install-relative standard-library locations, so a directory here shadows a stdlib module of the same path — which is how a local copy is tested, and how one is shadowed by accident. Keywords: import, module, search, library, include, resolve.",
     },
     EnvDoc {
+        name: "HELIX_DEV_GENERATION",
+        values: "a positive integer, set by `helix run --watch`",
+        default: "1",
+        doc: "Hot reload: which start of the app this is — 1, then one more per reload.",
+        notes: "Set by `helix run --watch` and read by `dev_generation()`. An app opens the browser on generation 1 only, and serves the routes the supervisor hands its model and session over on only when this is set. It carries no secret: the session token never goes through the environment, which other processes of the same user can read. Keywords: hot reload, reload count, watch.",
+    },
+    EnvDoc {
         name: "HELIX_THREADS",
         values: "a positive integer; `1` runs fully serial",
         default: "unset — one worker per core",

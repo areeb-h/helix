@@ -386,6 +386,13 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         // `Bytes` is RUNTIME-TYPED, like `Dict` and `Net`: the checker sees `Unknown`, so
         // its methods are resolved when they run. Arity and argument types are still
         // checked here, which is where most mistakes actually are.
+        // Hot reload (`helix run --watch`): which start this is, or `missing` — so `Unknown`.
+        "dev_generation" => {
+            if !args.is_empty() {
+                return Err(arity_err(name, 0, 0, args.len(), line, col));
+            }
+            Ok(Type::Unknown)
+        }
         "view_html" | "view_diff" => {
             let want = if name == "view_html" { 1 } else { 2 };
             if args.len() != want {
