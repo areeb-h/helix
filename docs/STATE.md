@@ -10,6 +10,15 @@ Last updated: 2026-11-06.
 
 ## Released
 
+- **v0.13.0** — tag `v0.13.0`, published 2026-11-07. The apps preview (ADR 0055): `import
+  std.ui` is compiled into `helix`, so an app is three values — `init`, `update`, `view` —
+  in a file anywhere. Views render and diff in Rust and patch the page in place; motion is
+  declared and run by the compositor; each run serves on 127.0.0.1 behind a session token. A
+  component library and design system, accessible by construction and checked with axe-core
+  in CI, light and dark. Hot reload (`helix run --watch`) keeps an app's state across saves
+  and needs no authority the app does not already hold. The renderer refuses markup
+  injection — non-name tags and attributes, `<script>`, inline handlers — and makes
+  `javascript:` links inert; one malformed request or one failing view no longer stops an app.
 - **v0.12.0** — tag `v0.12.0`, published 2026-11-06. Helix against answers it did not compute:
   twenty of NIST's Statistical Reference Datasets, every statistic scored in correct digits
   beside the exact-arithmetic ceiling, and failing CI if one falls a digit short
