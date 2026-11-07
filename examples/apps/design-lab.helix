@@ -1,0 +1,378 @@
+# Design lab — three directions for the next design system, side by side, live.
+#
+#   helix run examples/apps/design-lab.helix --window
+#
+# The same small file browser drawn three ways: A is glass (translucent, blurred surfaces over
+# a colourful backdrop), B is Material-style tonal (colour roles from one seed, state layers,
+# pill shapes), C is a hybrid (tonal content inside a glass frame). Every colour is derived
+# from ONE accent hue in OKLCH, so dragging the hue re-themes all three at once and keeps
+# their contrast steady. "Reduce transparency" shows the fallback glass needs: the same
+# surfaces, solid.
+#
+# A prototype for choosing a direction, not the engine: the tokens here are hand-written CSS
+# that the theme engine would generate.
+
+import std.ui
+
+init = {hue: 265, dark: false, solid: false, sel: 0, nav: "home", chip: "all", sync: true, menu: ""}
+
+fn update(m, e) = match e.msg {
+  "hue" => if e.value.is_missing() then m else {...m, hue: e.value},
+  "dark" => {...m, dark: e.value},
+  "solid" => {...m, solid: e.value},
+  "sel" => {...m, sel: to_int(e.value), menu: ""},
+  "nav" => {...m, nav: e.value},
+  "chip" => {...m, chip: e.value},
+  "sync" => {...m, sync: e.value},
+  "menu" => {...m, menu: if m.menu == e.value then "" else e.value},
+  "close-menu" => {...m, menu: ""},
+  _ => m,
+}
+
+# --- Icons: 24-unit strokes, drawn in the current text colour. ---------------------------
+
+ICONS = {
+  home: ["M4 10.5 12 4l8 6.5V19a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z"],
+  recent: ["M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z", "M12 7.5V12l3 2"],
+  star: ["M12 3.5l2.6 5.3 5.9.9-4.25 4.15 1 5.85L12 16.9l-5.25 2.8 1-5.85L3.5 9.7l5.9-.9z"],
+  trash: ["M4 7h16", "M9.5 7V4.5h5V7", "M6.5 7l.9 12.5a1 1 0 0 0 1 .9h7.2a1 1 0 0 0 1-.9L17.5 7"],
+  folder: ["M3.5 7a1.5 1.5 0 0 1 1.5-1.5h4.2l2 2H19a1.5 1.5 0 0 1 1.5 1.5v8.5A1.5 1.5 0 0 1 19 19H5a1.5 1.5 0 0 1-1.5-1.5z"],
+  image: ["M5 4.5h14A1.5 1.5 0 0 1 20.5 6v12a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 18V6A1.5 1.5 0 0 1 5 4.5z", "M9 8.2a1.8 1.8 0 1 0 0 3.6 1.8 1.8 0 0 0 0-3.6z", "M20.5 15.5l-5-5-9.5 9"],
+  doc: ["M7 3.5h7l4.5 4.5v11a1.5 1.5 0 0 1-1.5 1.5H7A1.5 1.5 0 0 1 5.5 19V5A1.5 1.5 0 0 1 7 3.5z", "M13.5 3.5V8.5h5", "M8.5 13h7", "M8.5 16.5h5"],
+  sheet: ["M5 4.5h14A1.5 1.5 0 0 1 20.5 6v12a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 18V6A1.5 1.5 0 0 1 5 4.5z", "M3.5 10h17", "M3.5 15h17", "M10 4.5v15"],
+  search: ["M10.5 4a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13z", "M20 20l-4.6-4.6"],
+  more: ["M12 6.5h.01", "M12 12h.01", "M12 17.5h.01"],
+  plus: ["M12 5v14", "M5 12h14"],
+  cloud: ["M7.5 18.5a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18.4 9.1 4.25 4.25 0 0 1 17.5 18.5z"],
+  check: ["M5 12.5l4.5 4.5L19 7.5"],
+}
+
+fn icon(name, cls = "ic") = ui.el("svg", {class: cls, aria: {hidden: true}, attrs: {viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": "1.8", "stroke-linecap": "round", "stroke-linejoin": "round"}},
+  ICONS.get(name).map((d) => ui.el("path", {attrs: {d: d}}, [])))
+
+# --- The shared content. ------------------------------------------------------------------
+
+FILES = [
+  {name: "Q3 report.pdf", icon: "doc", meta: "Today, 09:41", size: "2.4 MB", tint: 0},
+  {name: "Launch hero.png", icon: "image", meta: "Yesterday", size: "840 KB", tint: 1},
+  {name: "Budget 2027.csv", icon: "sheet", meta: "Mon", size: "96 KB", tint: 2},
+  {name: "Designs", icon: "folder", meta: "14 items", size: "—", tint: 3},
+  {name: "Meeting notes.md", icon: "doc", meta: "Oct 28", size: "4 KB", tint: 0},
+]
+NAV = [["home", "Home"], ["recent", "Recent"], ["star", "Starred"], ["trash", "Trash"]]
+CHIPS = [["all", "All"], ["image", "Images"], ["doc", "Documents"]]
+
+fn rail(m) = ui.el("nav", {class: "rail glassy", aria: {label: "Places"}}, [
+  ui.el("div", {class: "logo"}, [icon("cloud")]),
+  ].concat(NAV.map((n) => ui.el("button", {class: if m.nav == n[0] then "nav on" else "nav", click: "nav", value: n[0], aria: {current: if m.nav == n[0] then "page" else missing}, attrs: {type: "button"}}, [
+    ui.el("span", {class: "pill"}, [icon(n[0])]),
+    ui.el("span", {class: "nav-label"}, [ui.text(n[1])]),
+]))))
+
+fn toolbar(pane) = ui.el("header", {class: "bar glassy"}, [
+  ui.el("div", {class: "search"}, [icon("search"), ui.el("span", {}, [ui.text("Search files")])]),
+  ui.el("button", {class: "ibtn", click: "menu", value: pane, aria: {label: "More", expanded: false}, attrs: {type: "button"}}, [icon("more")]),
+])
+
+fn chips(m) = ui.el("div", {class: "chips"}, CHIPS.map((c) => ui.el("button", {class: if m.chip == c[0] then "chip on" else "chip", click: "chip", value: c[0], aria: {pressed: m.chip == c[0]}, attrs: {type: "button"}}, [
+  if m.chip == c[0] then icon("check", "ic sm") else missing,
+  ui.text(c[1]),
+  ].filter((x) => not x.is_missing()))))
+
+fn rows(m) = ui.el("div", {class: "list"}, range(0, FILES.count()).map((i) => do {
+  f = FILES[i]
+  ui.el("button", {class: if m.sel == i then "item on" else "item", click: "sel", value: "{i}", key: "f{i}", attrs: {type: "button"}}, [
+    ui.el("span", {class: "badge-ic t{f.tint}"}, [icon(f.icon)]),
+    ui.el("span", {class: "item-text"}, [ui.el("span", {class: "item-name"}, [ui.text(f.name)]), ui.el("span", {class: "item-meta"}, [ui.text(f.meta)])]),
+    ui.el("span", {class: "item-size"}, [ui.text(f.size)]),
+  ])
+}))
+
+fn panel(m) = ui.el("section", {class: "panel"}, [
+  ui.el("div", {class: "panel-head"}, [
+    ui.el("div", {}, [ui.el("div", {class: "panel-title"}, [ui.text("Cloud sync")]), ui.el("div", {class: "item-meta"}, [ui.text("31.6 of 50 GB used")])]),
+    ui.el("label", {class: "sw"}, [
+      ui.el("input", {role: "switch", change: "sync", aria: {label: "Cloud sync"}, attrs: {type: "checkbox", checked: m.sync}}, []),
+      ui.el("span", {class: "track", aria: {hidden: true}}, [ui.el("span", {class: "thumb"}, [])]),
+    ]),
+  ]),
+  ui.el("div", {class: "meter", aria: {hidden: true}}, [ui.el("span", {style: {width: "63%"}}, [])]),
+  ui.el("div", {class: "actions"}, [
+    ui.el("button", {class: "b-filled", attrs: {type: "button"}}, [ui.text("Upgrade")]),
+    ui.el("button", {class: "b-tonal", attrs: {type: "button"}}, [ui.text("Manage")]),
+  ]),
+])
+
+fn menu(m, pane) = if m.menu != pane then missing else ui.el("div", {class: "menu glassy", role: "menu", enter: "pop", dismiss: "close-menu", key: "menu-{pane}"}, [
+  ["Rename", "doc"], ["Add to starred", "star"], ["Move to trash", "trash"],
+  ].map((it) => ui.el("button", {class: "menu-item", role: "menuitem", click: "close-menu", attrs: {type: "button", tabindex: "-1"}}, [icon(it[1]), ui.text(it[0])])))
+
+fn frame_of(m, pane) = ui.el("div", {class: "win"}, [
+  rail(m),
+  ui.el("main", {class: "content"}, [
+    toolbar(pane),
+    ui.el("div", {class: "scroll"}, [
+      ui.el("div", {class: "title-row"}, [ui.el("h2", {class: "title"}, [ui.text("Projects")]), ui.el("span", {class: "item-meta"}, [ui.text("5 items")])]),
+      chips(m),
+      rows(m),
+      panel(m),
+    ]),
+    ui.el("button", {class: "fab", aria: {label: "New"}, attrs: {type: "button"}}, [icon("plus")]),
+    menu(m, pane),
+    ].filter((x) => not x.is_missing())),
+])
+
+PANES = [
+  {id: "glass", letter: "A", name: "Glass", blurb: "Translucent, blurred surfaces over a vivid backdrop. Depth from light, not shadow."},
+  {id: "tonal", letter: "B", name: "Material tonal", blurb: "Colour roles from one seed. Tonal surfaces, state layers, pill shapes, a FAB."},
+  {id: "hybrid", letter: "C", name: "Hybrid", blurb: "Tonal, solid content for reading; glass only on the frame: rail, toolbar, menus."},
+]
+
+fn pane(m, p) = ui.el("figure", {class: "pane m-{p.id}{if m.solid then " solid" else ""}", key: p.id}, [
+  ui.el("figcaption", {class: "cap"}, [
+    ui.el("span", {class: "letter"}, [ui.text(p.letter)]),
+    ui.el("span", {}, [ui.el("strong", {}, [ui.text(p.name)]), ui.el("span", {class: "blurb"}, [ui.text(p.blurb)])]),
+  ]),
+  ui.el("div", {class: "stage"}, [frame_of(m, p.id)]),
+])
+
+fn controls(m) = ui.el("header", {class: "lab-top"}, [
+  ui.el("div", {}, [ui.el("h1", {}, [ui.text("Design lab")]), ui.el("p", {class: "lab-sub"}, [ui.text("One accent hue, three directions. Everything is live: click, toggle, open the ⋯ menu.")])]),
+  ui.el("div", {class: "lab-controls"}, [
+    ui.el("label", {class: "hue"}, [
+      ui.el("span", {}, [ui.text("Accent hue {m.hue}°")]),
+      ui.el("input", {class: "hue-slider", input: "hue", aria: {label: "Accent hue"}, attrs: {type: "range", min: "0", max: "359", step: "1", value: "{m.hue}"}}, []),
+    ]),
+    ui.toggle("dark", "Dark", m.dark, "dark"),
+    ui.toggle("solid", "Reduce transparency", m.solid, "solid"),
+  ]),
+])
+
+fn view(m) = ui.el("div", {class: "lab", attrs: {style: "--h: {m.hue}"}}, [
+  controls(m),
+  ui.el("div", {class: "panes"}, PANES.map((p) => pane(m, p))),
+])
+
+STYLE = """
+#root { max-width: none; padding: 18px 22px 22px; }
+.lab { display: flex; flex-direction: column; gap: 16px; }
+.lab-top { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; flex-wrap: wrap; }
+.lab-top h1 { font-size: 22px; margin: 0; }
+.lab-sub { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+.lab-controls { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
+.hue { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.hue-slider { -webkit-appearance: none; appearance: none; width: 220px; height: 12px; border-radius: 99px; outline-offset: 3px;
+  background: linear-gradient(90deg, oklch(.65 .19 0), oklch(.65 .19 60), oklch(.65 .19 120), oklch(.65 .19 180), oklch(.65 .19 240), oklch(.65 .19 300), oklch(.65 .19 359)); }
+.hue-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 20px; height: 20px; border-radius: 50%; background: #fff; border: 2px solid rgba(0,0,0,.25); box-shadow: 0 1px 4px rgba(0,0,0,.3); }
+.panes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.pane { margin: 0; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.cap { display: flex; gap: 10px; align-items: flex-start; font-size: 13px; min-height: 40px; }
+.cap strong { display: block; font-size: 14px; }
+.blurb { color: var(--muted); font-size: 12px; line-height: 1.35; display: block; }
+.letter { flex: none; width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center; font-weight: 700; font-size: 13px;
+  background: var(--fg); color: var(--bg); }
+
+/* --- One stage: a backdrop and a window on it. Colour tokens per direction follow. --- */
+.stage { position: relative; height: 610px; border-radius: 22px; padding: 18px; overflow: hidden; isolation: isolate; }
+.win { position: relative; height: 100%; display: grid; grid-template-columns: 76px 1fr; overflow: hidden;
+  border-radius: var(--win-r); background: var(--win-bg); box-shadow: var(--win-shadow); border: 1px solid var(--win-line); color: var(--on); }
+.ic { width: 20px; height: 20px; flex: none; }
+.ic.sm { width: 16px; height: 16px; }
+button { font: inherit; color: inherit; }
+
+.rail { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 14px 0; }
+.logo { width: 38px; height: 38px; border-radius: 12px; display: grid; place-items: center; margin-bottom: 10px; background: var(--pri); color: var(--on-pri); box-shadow: var(--glow); }
+.nav { display: flex; flex-direction: column; align-items: center; gap: 3px; background: none; border: 0; padding: 4px 0; cursor: pointer; color: var(--on-2); width: 100%; }
+.nav .pill { width: 52px; height: 30px; border-radius: 99px; display: grid; place-items: center; transition: background-color var(--dur-2) ease, color var(--dur-2) ease; }
+.nav-label { font-size: 11px; font-weight: 500; }
+.nav:hover .pill { background: var(--hover); }
+.nav.on { color: var(--on); }
+.nav.on .pill { background: var(--pri-c); color: var(--on-pri-c); }
+
+.content { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.bar { display: flex; gap: 8px; align-items: center; padding: 12px 12px 10px; }
+.search { flex: 1; display: flex; gap: 8px; align-items: center; height: 40px; padding: 0 14px; border-radius: 99px; background: var(--field); color: var(--on-2); font-size: 13px; border: 1px solid var(--field-line); }
+.ibtn { width: 40px; height: 40px; border-radius: 50%; border: 0; background: none; display: grid; place-items: center; cursor: pointer; }
+.ibtn:hover { background: var(--hover); }
+.scroll { flex: 1; overflow: auto; padding: 4px 14px 80px; display: flex; flex-direction: column; gap: 12px; }
+.title-row { display: flex; align-items: baseline; justify-content: space-between; }
+.title { margin: 0; font-size: 20px; font-weight: 650; letter-spacing: -.01em; text-transform: none; color: var(--on); }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip { display: inline-flex; align-items: center; gap: 4px; height: 30px; padding: 0 12px; border-radius: var(--chip-r); border: 1px solid var(--outline); background: transparent; font-size: 12.5px; font-weight: 500; cursor: pointer; color: var(--on-2);
+  transition: background-color var(--dur-2) ease, border-color var(--dur-2) ease; }
+.chip:hover { background: var(--hover); }
+.chip.on { background: var(--pri-c); color: var(--on-pri-c); border-color: transparent; }
+.list { display: flex; flex-direction: column; gap: var(--item-gap); background: var(--list-bg); border-radius: var(--card-r); padding: var(--list-pad); border: 1px solid var(--list-line); }
+.item { display: flex; align-items: center; gap: 11px; padding: 8px 10px; border-radius: var(--item-r); border: 0; background: transparent; text-align: left; cursor: pointer; position: relative;
+  transition: background-color var(--dur-2) ease, transform var(--spring-snappy-ms) var(--spring-snappy); }
+.item:hover { background: var(--hover); }
+.item:active { transform: scale(.985); }
+.item.on { background: var(--sel); }
+.badge-ic { width: 36px; height: 36px; border-radius: 11px; display: grid; place-items: center; flex: none; }
+.badge-ic.t0 { background: oklch(var(--tint-l) var(--tint-c) var(--h)); color: oklch(var(--tint-on) .14 var(--h)); }
+.badge-ic.t1 { background: oklch(var(--tint-l) var(--tint-c) calc(var(--h) + 90)); color: oklch(var(--tint-on) .14 calc(var(--h) + 90)); }
+.badge-ic.t2 { background: oklch(var(--tint-l) var(--tint-c) calc(var(--h) + 180)); color: oklch(var(--tint-on) .14 calc(var(--h) + 180)); }
+.badge-ic.t3 { background: oklch(var(--tint-l) var(--tint-c) calc(var(--h) - 60)); color: oklch(var(--tint-on) .14 calc(var(--h) - 60)); }
+.item-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.item-name { font-size: 13.5px; font-weight: 550; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.item-meta { font-size: 12px; color: var(--on-2); }
+.item-size { font-size: 12px; color: var(--on-2); font-variant-numeric: tabular-nums; }
+.panel { background: var(--card-bg); border-radius: var(--card-r); padding: 14px; display: flex; flex-direction: column; gap: 12px; border: 1px solid var(--list-line); }
+.panel-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.panel-title { font-weight: 600; font-size: 14px; }
+.meter { height: 8px; border-radius: 99px; background: var(--track); overflow: hidden; }
+.meter > span { display: block; height: 100%; border-radius: inherit; background: var(--meter); }
+.actions { display: flex; gap: 8px; }
+.b-filled, .b-tonal { height: 38px; padding: 0 18px; border-radius: var(--btn-r); border: 0; font-weight: 600; font-size: 13px; cursor: pointer; position: relative; overflow: hidden;
+  transition: transform var(--spring-snappy-ms) var(--spring-snappy), box-shadow var(--dur-2) ease, filter var(--dur-2) ease; }
+.b-filled { background: var(--btn-bg); color: var(--on-pri); box-shadow: var(--glow); }
+.b-tonal { background: var(--pri-c); color: var(--on-pri-c); }
+.b-filled::after, .b-tonal::after { content: ""; position: absolute; inset: 0; background: currentColor; opacity: 0; transition: opacity var(--dur-1) ease; }
+.b-filled:hover::after, .b-tonal:hover::after { opacity: .08; }
+.b-filled:active::after, .b-tonal:active::after { opacity: .14; }
+.b-filled:active, .b-tonal:active { transform: scale(.97); }
+.fab { position: absolute; right: 16px; bottom: 16px; width: 54px; height: 54px; border-radius: var(--fab-r); border: 0; display: grid; place-items: center; cursor: pointer;
+  background: var(--fab-bg); color: var(--fab-on); box-shadow: var(--fab-shadow); transition: transform var(--spring-bouncy-ms) var(--spring-bouncy); }
+.fab:hover { transform: translateY(-2px) scale(1.04); }
+.fab:active { transform: scale(.95); }
+.sw { position: relative; display: inline-flex; cursor: pointer; }
+.sw input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
+.sw .track { width: 46px; height: 28px; border-radius: 99px; background: var(--track); border: 2px solid var(--outline); display: flex; align-items: center; padding: 0 4px;
+  transition: background-color var(--dur-2) ease, border-color var(--dur-2) ease; }
+.sw .thumb { width: 16px; height: 16px; border-radius: 50%; background: var(--on-2); transition: transform var(--spring-bouncy-ms) var(--spring-bouncy), width var(--dur-2) ease, background-color var(--dur-2) ease; }
+.sw input:checked + .track { background: var(--pri); border-color: var(--pri); }
+.sw input:checked + .track .thumb { transform: translateX(16px) scale(1.25); background: var(--on-pri); }
+.sw input:focus-visible + .track { outline: 2px solid var(--pri); outline-offset: 2px; }
+.menu { position: absolute; top: 54px; right: 12px; width: 200px; padding: 6px; border-radius: var(--menu-r); display: flex; flex-direction: column; z-index: 5;
+  background: var(--menu-bg); box-shadow: var(--menu-shadow); border: 1px solid var(--win-line); transform-origin: top right; }
+.menu-item { display: flex; gap: 10px; align-items: center; height: 38px; padding: 0 10px; border: 0; background: none; border-radius: calc(var(--menu-r) - 6px); font-size: 13px; cursor: pointer; text-align: left; }
+.menu-item:hover, .menu-item:focus-visible { background: var(--hover); outline: none; }
+.menu-item .ic { width: 18px; height: 18px; color: var(--on-2); }
+
+/* --- A. Glass. ----------------------------------------------------------------------- */
+.m-glass .stage { background:
+  radial-gradient(60% 50% at 12% 18%, oklch(.74 .19 var(--h)) 0, transparent 70%),
+  radial-gradient(55% 45% at 92% 12%, oklch(.82 .15 calc(var(--h) + 70)) 0, transparent 70%),
+  radial-gradient(60% 55% at 78% 92%, oklch(.72 .19 calc(var(--h) - 70)) 0, transparent 70%),
+  radial-gradient(50% 40% at 20% 85%, oklch(.85 .12 calc(var(--h) + 150)) 0, transparent 70%),
+  oklch(.9 .05 var(--h)); }
+.m-glass {
+  --on: oklch(.2 .03 var(--h)); --on-2: oklch(.36 .04 var(--h)); --outline: oklch(1 0 0 / .55);
+  --pri: oklch(.55 .22 var(--h)); --on-pri: #fff; --pri-c: oklch(1 0 0 / .62); --on-pri-c: oklch(.38 .18 var(--h));
+  --win-r: 26px; --win-bg: oklch(1 0 0 / .26); --win-line: oklch(1 0 0 / .55);
+  --win-shadow: 0 30px 60px -20px oklch(.3 .1 var(--h) / .45), inset 0 1px 0 oklch(1 0 0 / .7);
+  --hover: oklch(1 0 0 / .35); --sel: oklch(1 0 0 / .6); --field: oklch(1 0 0 / .45); --field-line: oklch(1 0 0 / .6);
+  --list-bg: oklch(1 0 0 / .3); --list-line: oklch(1 0 0 / .5); --card-bg: oklch(1 0 0 / .4); --list-pad: 6px; --item-gap: 2px;
+  --card-r: 20px; --item-r: 14px; --chip-r: 99px; --btn-r: 99px; --menu-r: 18px; --fab-r: 50%;
+  --btn-bg: linear-gradient(135deg, oklch(.6 .22 var(--h)), oklch(.58 .22 calc(var(--h) + 40)));
+  --glow: 0 6px 18px -4px oklch(.55 .22 var(--h) / .6);
+  --fab-bg: linear-gradient(135deg, oklch(.62 .21 var(--h)), oklch(.6 .22 calc(var(--h) + 40))); --fab-on: #fff; --fab-shadow: 0 12px 28px -6px oklch(.5 .22 var(--h) / .7);
+  --track: oklch(1 0 0 / .45); --meter: linear-gradient(90deg, oklch(.6 .22 var(--h)), oklch(.7 .18 calc(var(--h) + 60)));
+  --menu-bg: oklch(1 0 0 / .55); --menu-shadow: 0 20px 40px -10px oklch(.3 .1 var(--h) / .4);
+  --tint-l: .97; --tint-c: .04; --tint-on: .5;
+}
+.m-glass .win, .m-glass .menu, .m-hybrid .glassy, .m-hybrid .menu { -webkit-backdrop-filter: blur(28px) saturate(1.7); backdrop-filter: blur(28px) saturate(1.7); }
+.m-glass .list, .m-glass .panel { -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); }
+
+/* --- B. Material tonal. ---------------------------------------------------------------- */
+.m-tonal .stage { background: oklch(.93 .025 var(--h)); }
+.m-tonal {
+  --on: oklch(.22 .02 var(--h)); --on-2: oklch(.42 .03 var(--h)); --outline: oklch(.74 .025 var(--h));
+  --pri: oklch(.5 .19 var(--h)); --on-pri: #fff; --pri-c: oklch(.9 .07 var(--h)); --on-pri-c: oklch(.3 .13 var(--h));
+  --win-r: 28px; --win-bg: oklch(.985 .008 var(--h)); --win-line: transparent; --win-shadow: 0 1px 3px oklch(.2 .05 var(--h) / .15), 0 8px 24px -8px oklch(.2 .05 var(--h) / .2);
+  --hover: oklch(.5 .1 var(--h) / .08); --sel: oklch(.92 .045 var(--h)); --field: oklch(.94 .02 var(--h)); --field-line: transparent;
+  --list-bg: oklch(.96 .014 var(--h)); --list-line: transparent; --card-bg: oklch(.95 .02 var(--h)); --list-pad: 6px; --item-gap: 2px;
+  --card-r: 20px; --item-r: 14px; --chip-r: 8px; --btn-r: 99px; --menu-r: 14px; --fab-r: 16px;
+  --btn-bg: var(--pri); --glow: none;
+  --fab-bg: oklch(.88 .08 var(--h)); --fab-on: oklch(.28 .13 var(--h)); --fab-shadow: 0 3px 8px oklch(.2 .05 var(--h) / .25);
+  --track: oklch(.9 .02 var(--h)); --meter: var(--pri);
+  --menu-bg: oklch(.95 .02 var(--h)); --menu-shadow: 0 6px 18px oklch(.2 .05 var(--h) / .22);
+  --tint-l: .92; --tint-c: .06; --tint-on: .42;
+}
+.m-tonal .rail { background: oklch(.955 .016 var(--h)); }
+
+/* --- C. Hybrid: tonal content, glass frame. ------------------------------------------- */
+.m-hybrid .stage { background:
+  radial-gradient(70% 60% at 0% 0%, oklch(.8 .13 var(--h)) 0, transparent 70%),
+  radial-gradient(60% 60% at 100% 100%, oklch(.84 .1 calc(var(--h) + 60)) 0, transparent 70%),
+  oklch(.93 .03 var(--h)); }
+.m-hybrid {
+  --on: oklch(.22 .02 var(--h)); --on-2: oklch(.42 .03 var(--h)); --outline: oklch(.76 .025 var(--h));
+  --pri: oklch(.52 .2 var(--h)); --on-pri: #fff; --pri-c: oklch(.9 .07 var(--h)); --on-pri-c: oklch(.3 .14 var(--h));
+  --win-r: 24px; --win-bg: oklch(1 0 0 / .35); --win-line: oklch(1 0 0 / .6); --win-shadow: 0 24px 50px -18px oklch(.3 .1 var(--h) / .4), inset 0 1px 0 oklch(1 0 0 / .7);
+  --hover: oklch(.5 .1 var(--h) / .08); --sel: oklch(.92 .05 var(--h)); --field: oklch(1 0 0 / .6); --field-line: oklch(1 0 0 / .7);
+  --list-bg: oklch(.99 .005 var(--h)); --list-line: oklch(.9 .02 var(--h)); --card-bg: oklch(.97 .015 var(--h)); --list-pad: 6px; --item-gap: 2px;
+  --card-r: 18px; --item-r: 12px; --chip-r: 99px; --btn-r: 12px; --menu-r: 16px; --fab-r: 18px;
+  --btn-bg: var(--pri); --glow: 0 4px 14px -4px oklch(.52 .2 var(--h) / .55);
+  --fab-bg: var(--pri); --fab-on: #fff; --fab-shadow: 0 10px 24px -6px oklch(.5 .2 var(--h) / .6);
+  --track: oklch(.9 .02 var(--h)); --meter: var(--pri);
+  --menu-bg: oklch(1 0 0 / .6); --menu-shadow: 0 18px 40px -12px oklch(.3 .1 var(--h) / .4);
+  --tint-l: .93; --tint-c: .06; --tint-on: .45;
+}
+.m-hybrid .content { background: oklch(.985 .006 var(--h) / .92); border-left: 1px solid oklch(1 0 0 / .5); }
+.m-hybrid .bar { background: oklch(1 0 0 / .4); border-bottom: 1px solid oklch(.9 .02 var(--h) / .6); }
+
+/* --- Dark. ------------------------------------------------------------------------------ */
+:root[data-theme="dark"] .m-glass .stage { background:
+  radial-gradient(60% 50% at 12% 18%, oklch(.45 .17 var(--h)) 0, transparent 70%),
+  radial-gradient(55% 45% at 92% 12%, oklch(.45 .14 calc(var(--h) + 70)) 0, transparent 70%),
+  radial-gradient(60% 55% at 78% 92%, oklch(.42 .17 calc(var(--h) - 70)) 0, transparent 70%),
+  oklch(.18 .03 var(--h)); }
+:root[data-theme="dark"] .m-glass {
+  --on: oklch(.96 .01 var(--h)); --on-2: oklch(.8 .03 var(--h)); --outline: oklch(1 0 0 / .18);
+  --pri: oklch(.72 .17 var(--h)); --on-pri: oklch(.18 .05 var(--h)); --pri-c: oklch(1 0 0 / .16); --on-pri-c: oklch(.95 .03 var(--h));
+  --win-bg: oklch(.2 .02 var(--h) / .4); --win-line: oklch(1 0 0 / .14); --win-shadow: 0 30px 60px -20px oklch(0 0 0 / .7), inset 0 1px 0 oklch(1 0 0 / .12);
+  --hover: oklch(1 0 0 / .08); --sel: oklch(1 0 0 / .14); --field: oklch(1 0 0 / .08); --field-line: oklch(1 0 0 / .12);
+  --list-bg: oklch(1 0 0 / .05); --list-line: oklch(1 0 0 / .1); --card-bg: oklch(1 0 0 / .07);
+  --btn-bg: linear-gradient(135deg, oklch(.74 .16 var(--h)), oklch(.72 .16 calc(var(--h) + 40)));
+  --fab-bg: linear-gradient(135deg, oklch(.74 .16 var(--h)), oklch(.72 .16 calc(var(--h) + 40))); --fab-on: oklch(.18 .05 var(--h));
+  --track: oklch(1 0 0 / .12); --menu-bg: oklch(.25 .02 var(--h) / .6); --tint-l: .32; --tint-c: .06; --tint-on: .85;
+}
+:root[data-theme="dark"] .m-tonal .stage { background: oklch(.13 .015 var(--h)); }
+:root[data-theme="dark"] .m-tonal {
+  --on: oklch(.93 .01 var(--h)); --on-2: oklch(.76 .025 var(--h)); --outline: oklch(.45 .02 var(--h));
+  --pri: oklch(.8 .12 var(--h)); --on-pri: oklch(.25 .1 var(--h)); --pri-c: oklch(.36 .1 var(--h)); --on-pri-c: oklch(.92 .05 var(--h));
+  --win-bg: oklch(.18 .012 var(--h)); --win-shadow: 0 8px 24px -8px oklch(0 0 0 / .6);
+  --hover: oklch(.9 .05 var(--h) / .08); --sel: oklch(.3 .05 var(--h)); --field: oklch(.24 .015 var(--h));
+  --list-bg: oklch(.21 .014 var(--h)); --card-bg: oklch(.23 .018 var(--h));
+  --fab-bg: oklch(.38 .1 var(--h)); --fab-on: oklch(.92 .05 var(--h));
+  --track: oklch(.28 .015 var(--h)); --menu-bg: oklch(.25 .016 var(--h)); --tint-l: .32; --tint-c: .07; --tint-on: .85;
+}
+:root[data-theme="dark"] .m-tonal .rail { background: oklch(.2 .014 var(--h)); }
+:root[data-theme="dark"] .m-hybrid .stage { background:
+  radial-gradient(70% 60% at 0% 0%, oklch(.4 .14 var(--h)) 0, transparent 70%),
+  radial-gradient(60% 60% at 100% 100%, oklch(.38 .1 calc(var(--h) + 60)) 0, transparent 70%),
+  oklch(.16 .02 var(--h)); }
+:root[data-theme="dark"] .m-hybrid {
+  --on: oklch(.94 .01 var(--h)); --on-2: oklch(.77 .025 var(--h)); --outline: oklch(.45 .02 var(--h));
+  --pri: oklch(.76 .15 var(--h)); --on-pri: oklch(.2 .06 var(--h)); --pri-c: oklch(.36 .1 var(--h)); --on-pri-c: oklch(.93 .04 var(--h));
+  --win-bg: oklch(.2 .02 var(--h) / .45); --win-line: oklch(1 0 0 / .12); --win-shadow: 0 24px 50px -18px oklch(0 0 0 / .7), inset 0 1px 0 oklch(1 0 0 / .1);
+  --hover: oklch(.9 .05 var(--h) / .08); --sel: oklch(.32 .06 var(--h)); --field: oklch(1 0 0 / .08); --field-line: oklch(1 0 0 / .12);
+  --list-bg: oklch(.2 .012 var(--h)); --list-line: oklch(.28 .015 var(--h)); --card-bg: oklch(.22 .016 var(--h));
+  --fab-on: oklch(.2 .06 var(--h)); --track: oklch(.3 .015 var(--h)); --menu-bg: oklch(.24 .02 var(--h) / .65); --tint-l: .32; --tint-c: .07; --tint-on: .85;
+}
+:root[data-theme="dark"] .m-hybrid .content { background: oklch(.17 .012 var(--h) / .92); border-left-color: oklch(1 0 0 / .08); }
+:root[data-theme="dark"] .m-hybrid .bar { background: oklch(1 0 0 / .04); border-bottom-color: oklch(1 0 0 / .08); }
+
+/* --- Reduce transparency: glass falls back to solid surfaces of the same colour role. --- */
+.solid .win, .solid .menu, .solid .glassy, .solid .list, .solid .panel { -webkit-backdrop-filter: none !important; backdrop-filter: none !important; }
+.solid.m-glass { --win-bg: oklch(.97 .015 var(--h)); --menu-bg: oklch(.97 .015 var(--h)); --list-bg: oklch(.99 .006 var(--h)); --card-bg: oklch(.95 .02 var(--h));
+  --sel: oklch(.9 .05 var(--h)); --pri-c: oklch(.9 .06 var(--h)); --field: oklch(.94 .02 var(--h)); --hover: oklch(.5 .1 var(--h) / .08); }
+.solid.m-hybrid { --win-bg: oklch(.96 .018 var(--h)); --menu-bg: oklch(.97 .015 var(--h)); --field: oklch(.94 .02 var(--h)); }
+:root[data-theme="dark"] .solid.m-glass { --win-bg: oklch(.2 .02 var(--h)); --menu-bg: oklch(.24 .02 var(--h)); --list-bg: oklch(.23 .015 var(--h)); --card-bg: oklch(.25 .02 var(--h));
+  --sel: oklch(.32 .06 var(--h)); --pri-c: oklch(.36 .1 var(--h)); --field: oklch(.26 .015 var(--h)); --hover: oklch(.9 .05 var(--h) / .08); }
+:root[data-theme="dark"] .solid.m-hybrid { --win-bg: oklch(.2 .02 var(--h)); --menu-bg: oklch(.24 .02 var(--h)); --field: oklch(.26 .015 var(--h)); }
+
+@media (max-width: 1100px) { .panes { grid-template-columns: 1fr; } }
+"""
+
+spec = {
+  title: "Design lab",
+  init: init,
+  update: update,
+  view: view,
+  style: STYLE,
+  theme: (m) => if m.dark then "dark" else "light",
+}
+
+fn main(port: Int = 8080, open: Bool = false, window: Bool = false) = ui.app({...spec, port: port, open: open, window: if window then {width: 1260, height: 820} else false})
