@@ -1,0 +1,55 @@
+# Gestures and structure (std.ui): what each component promises in its markup, and what the
+# helpers do with what the page sends. The dragging itself is the page's; here is everything
+# the app decides, which replays without a browser and agrees on all three engines.
+import std.ui
+
+fn has(node, s) = ui.render(node).contains(s)
+
+# A split view: the divider is a focusable separator that says where it is and which way it
+# moves, and the size is kept in bounds however it arrives.
+sv = ui.split_view(ui.text("left"), ui.text("right"), 900, "side", min: 160, max: 400)
+print([has(sv, "role=\"separator\""), has(sv, "data-resize=\"side\""), has(sv, "aria-valuenow=\"400\""), has(sv, "aria-orientation=\"vertical\""), has(sv, "flex-basis: 400px")])
+print([ui.resized(250, 160, 400), ui.resized(12, 160, 400), ui.resized(1.0e9, 160, 400), ui.resized("wide", 160, 400, 220), ui.resized(0.0 / 0.0, 160, 400, 220), ui.resized(250.6, 160, 400)])
+print(has(ui.split_view(ui.text("a"), ui.text("b"), 200, "h", axis: "y"), "aria-orientation=\"horizontal\""))
+
+# A sortable list: the container names the message, each row is keyed and has a labelled grip,
+# and the keyboard's way is described to a screen reader.
+items = [{key: "a", title: "Alpha"}, {key: "b", title: "Beta"}, {key: "c", title: "Gamma"}]
+st = ui.render(ui.sortable("tasks", "Tasks", items, "order"))
+print([st.contains("data-reorder=\"order\""), st.contains("data-key=\"b\""), st.contains("aria-label=\"Move Beta\""), st.contains("data-drag-handle=\"true\""), st.contains("aria-describedby=\"tasks-how\""), st.contains("id=\"tasks-how\"")])
+
+# Applying a move: only one that fits the list as it is.
+keys = (xs) => xs.map((x) => x.key).join("")
+print(keys(ui.reordered(items, {key: "c", from: 2, to: 0})))
+print(keys(ui.reordered(items, {key: "a", from: 0, to: 2})))
+print(keys(ui.reordered(items, {key: "a", from: 1, to: 0})))
+print(keys(ui.reordered(items, {key: "a", from: 0, to: 9})))
+print(keys(ui.reordered(items, {key: "a", from: -1, to: 0})))
+print(keys(ui.reordered(items, "c to the top")))
+print(keys(ui.reordered(items, {key: "a", from: "0", to: 1})))
+print(ui.reordered(["x", "y", "z"], {key: "z", from: 2, to: 1}, (k) => k))
+
+# A disclosure is always in the page; closed, its body is inert.
+print([has(ui.disclosure("d", "More", false, "t", [ui.text("x")]), "inert=\"\""), has(ui.disclosure("d", "More", true, "t", [ui.text("x")]), "inert"), has(ui.disclosure("d", "More", true, "t", [ui.text("x")]), "aria-expanded=\"true\" aria-controls=\"d-body\"")])
+print(ui.render(ui.accordion([{id: "a", title: "A", content: ui.text("1")}, {id: "b", title: "B", content: ui.text("2")}], ["b"], "t")).split("disclosure open").count() - 1)
+
+# A tree: levels, expanded states, selection, and one row in the Tab order.
+nodes = [{key: "src", label: "src", children: [{key: "src/a", label: "a.helix", icon: "code"}]}, {key: "doc", label: "doc", expandable: true}, {key: "README", label: "README"}]
+t1 = ui.render(ui.tree("t", "Files", nodes, ["src"], "src/a", "tog", "sel"))
+print([t1.contains("role=\"tree\""), t1.contains("aria-level=\"2\""), t1.split("aria-expanded=\"true\"").count() - 1, t1.split("aria-expanded=\"false\"").count() - 1, t1.split("tabindex=\"0\"").count() - 1, t1.contains("aria-selected=\"true\"")])
+t2 = ui.render(ui.tree("t", "Files", nodes, [], "src/a", "tog", "sel"))
+print([t2.contains("a.helix"), t2.split("tabindex=\"0\"").count() - 1, t2.contains("id=\"t-src\" role=\"treeitem\" class=\"tree-item\" aria-level=\"1\" aria-expanded=\"false\" aria-selected=\"false\" tabindex=\"0\"")])
+print(ui.render(ui.tree("t", "Empty", [], [], missing, "tog", "sel")))
+
+# A popover: a dialog anchored to its button, there only while open, focus moved into it.
+print([has(ui.popover("p", "Filter", false, "pop", ui.text("x")), "role=\"dialog\""), has(ui.popover("p", "Filter", true, "pop", ui.text("x")), "role=\"dialog\""), has(ui.popover("p", "Filter", true, "pop", ui.text("x")), "aria-haspopup=\"dialog\" aria-expanded=\"true\" aria-controls=\"p-pop\""), has(ui.popover("p", "Filter", true, "pop", ui.text("x")), "autofocus")])
+
+# Work under way: a spinner and a bar with no value are progress bars with no value.
+print([ui.render(ui.spinner("Syncing")), ui.render(ui.progress("Indexing", missing))])
+
+# Swipes: a toast thrown sideways sends what its close button sends; a sheet pulled down by its
+# grabber sends its close.
+ts = ui.render(ui.toasts([{id: 7, text: "Saved"}], "dismiss"))
+print([ts.contains("data-drag=\"dismiss\" data-drag-axis=\"x\" data-drag-commit=\"80\""), ts.contains("data-value=\"7\"")])
+sh = ui.render(ui.sheet("s", true, "Share", [ui.text("x")], "close"))
+print([sh.contains("data-drag=\"close\" data-drag-axis=\"down\" data-drag-commit=\"96\""), sh.contains("grabber-zone\" aria-hidden=\"true\" data-drag-handle=\"true\"")])

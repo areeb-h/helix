@@ -51,6 +51,18 @@ fn counts(seed) = do {
 PEOPLE = ["Ada Lovelace", "Grace Hopper", "Linus Torvalds", "Margaret Hamilton", "Alan Turing", "Barbara Liskov"]
 ITEMS = [["Q3 report.pdf", "doc", "2.4 MB"], ["Launch hero.png", "image", "840 KB"], ["Budget.csv", "table", "96 KB"], ["Designs", "folder", "14 items"]]
 
+# A small project, for the tree.
+TREE = [
+  {key: "src", label: "src", children: [
+    {key: "src/ui", label: "ui", children: [{key: "src/ui/button.helix", label: "button.helix", icon: "code"}, {key: "src/ui/sheet.helix", label: "sheet.helix", icon: "code"}]},
+    {key: "src/app.helix", label: "app.helix", icon: "code"},
+  ]},
+  {key: "docs", label: "docs", children: [{key: "docs/guide.md", label: "Guide.md", icon: "doc"}, {key: "docs/logo.png", label: "logo.png", icon: "image"}]},
+  {key: "README.md", label: "README.md", icon: "doc"},
+]
+TASKS = {design: "Design the sheet", build: "Build the gestures", test: "Test on a phone", ship: "Ship it"}
+fn toggled(xs, x) = if xs.contains(x) then xs.filter((y) => y != x) else xs.concat([x])
+
 fn design_for(m) = ui.design({seed: m.accent, material: m.material, shape: m.shape})
 
 init0 = {
@@ -65,6 +77,7 @@ init0 = {
   offset: 0,
   seed: 1,
   last: "nothing yet",
+  split: 240, order: ["design", "build", "test", "ship"], open: ["src"], file: "src/app.helix", sections: ["motion"], pop: false, dense: false,
 }
 init = {...init0, design: design_for(init0)}
 
@@ -118,6 +131,13 @@ fn update(m, e) = match e.msg {
   "dismiss" => {...m, toasts: m.toasts.filter((t) => "{t.id}" != e.value)},
   "scroll" => {...m, offset: e.value},
   "reshuffle" => {...m, seed: m.seed + 1},
+  "split" => {...m, split: ui.resized(e.value, 160, 420, m.split)},
+  "order" => {...m, order: ui.reordered(m.order, e.value, (k) => k)},
+  "tree-toggle" => {...m, open: toggled(m.open, e.value)},
+  "tree-select" => {...m, file: e.value},
+  "section" => {...m, sections: toggled(m.sections, e.value)},
+  "pop" => {...m, pop: not m.pop},
+  "dense" => {...m, dense: e.value},
   # Toasts expire five seconds after the first tick that sees them.
   "tick" => {...m, toasts: m.toasts.map((t) => if t.born.is_missing() then {...t, born: e.value} else t).filter((t) => e.value - t.born < 5.0)},
   _ => m,
@@ -227,10 +247,29 @@ fn lists(m) = ui.card("Lists, sheets and summaries", [
     ], "close-sheet", actions: [ui.button("Cancel", "close-sheet", variant: "ghost"), ui.button("Send", "close-sheet", variant: "primary")]),
 ])
 
+fn gestures(m) = ui.card("Gestures and structure", [
+  ui.paragraph("Drag the divider, a task's grip, a toast sideways or the share sheet's grabber down. Each follows the pointer on the page and springs to where the app puts it, at the speed it was let go."),
+  ui.el("div", {class: "split-demo inset-box"}, [ui.split_view(
+    ui.tree("files-tree", "Project", TREE, m.open, m.file, "tree-toggle", "tree-select"),
+    ui.accordion([
+      {id: "motion", title: "Motion", subtitle: "springs", content: ui.paragraph("Every movement is a spring that carries its velocity, on the compositor.")},
+      {id: "gestures", title: "Gestures", content: ui.paragraph("A drag is the page's; the outcome is the app's, decided in `update`.")},
+      {id: "access", title: "Accessibility", content: ui.paragraph("Every gesture has a keyboard path: the divider's arrows, Alt with ↑ ↓ on a task, the tree's arrows.")},
+      ], m.sections, "section"),
+    m.split, "split", min: 160, max: 420, label: "Resize the project pane")]),
+  ui.el("p", {class: "meta"}, [ui.text("Selected: {m.file} · pane {m.split} px")]),
+  ui.sortable("tasks", "Tasks, in order", m.order.map((k) => {key: k, title: TASKS.get(k), subtitle: "#{m.order.index_of(k) + 1}"}), "order"),
+  ui.cluster([
+    ui.popover("view-options", "View options", m.pop, "pop", ui.column([ui.toggle("dense", "Compact rows", m.dense, "dense"), ui.paragraph("A popover holds anything, and gives focus back when it closes.")], gap: 2)),
+    ui.spinner("Syncing"), ui.el("div", {class: "grow"}, [ui.progress("Indexing", missing)]),
+    ], gap: 3),
+])
+
 fn view(m) = ui.column([
   header(m),
   ui.grid([buttons(m), feedback(m)], min: 380),
   ui.grid([choices(m), lists(m)], min: 380),
+  gestures(m),
   forms(m),
   charts(m),
   data(m),
@@ -244,6 +283,10 @@ STYLE = """
 .error-line { margin: 0; min-height: 0; color: var(--danger); font-size: var(--t-sm); font-weight: 500; }
 .error-line:empty { display: none; }
 .between { display: flex; justify-content: space-between; align-items: center; gap: var(--s-3); }
+.inset-box { border-radius: var(--r-in-card); background: var(--surface-2); padding: var(--s-2); }
+.split-demo .split { height: 260px; }
+.split-demo .split-pane { padding: var(--s-1); }
+.grow { flex: 1; min-width: 160px; }
 """
 
 spec = {
@@ -276,6 +319,13 @@ SESSION = [
   {msg: "scroll", value: 36000},
   {msg: "reshuffle", value: missing},
   {msg: "theme", value: missing},
+  {msg: "split", value: 300},
+  {msg: "order", value: {key: "test", from: 2, to: 0}},
+  {msg: "order", value: {key: "nope", from: 0, to: 3}},
+  {msg: "tree-toggle", value: "docs"},
+  {msg: "tree-select", value: "docs/guide.md"},
+  {msg: "section", value: "gestures"},
+  {msg: "pop", value: missing},
 ]
 
 fn main(port: Int = 8080, open: Bool = false, window: Bool = false, replay: Bool = false) = if replay then ui.replay(spec, SESSION).map((html) => print(html)) else ui.app({...spec, port: port, open: open, window: window})

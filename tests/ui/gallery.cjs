@@ -245,6 +245,102 @@ async function session(browser, url, motion) {
   await p.waitForTimeout(250);
   check(await p.evaluate(() => document.querySelectorAll('[aria-label="Files"] [role=listitem]').length) === before_rows, 'Undo on the toast brings it back');
 
+  // --- Gestures (ADR 0057). The page drags; the app decides; the frame that answers settles
+  // it. A drag here is a real mouse: pressed, moved over a few frames, let go.
+  const ver = () => p.evaluate(() => Number(document.documentElement.dataset.version || 0));
+  const answered = async (fn) => {
+    const v = await ver();
+    await fn();
+    await p.waitForFunction((n) => Number(document.documentElement.dataset.version) > n, v, { timeout: 5000 }).catch(() => {});
+    await settle();
+    frames = await ver();
+  };
+  const drag = async (sel, dx, dy, ms = 180) => {
+    const h = await p.$(sel);
+    await h.scrollIntoViewIfNeeded();
+    const b = await h.boundingBox();
+    const x = b.x + b.width / 2, y = b.y + b.height / 2;
+    await p.mouse.move(x, y);
+    await p.mouse.down();
+    for (let i = 1; i <= 12; i++) { await p.mouse.move(x + (dx * i) / 12, y + (dy * i) / 12); await p.waitForTimeout(ms / 12); }
+    await p.mouse.up();
+  };
+  const near = (a, b, tol = 3) => Math.abs(a - b) <= tol;
+
+  // A divider: dragged, the pane follows; past its bounds it stops; its arrows move it too.
+  const size = async () => Number(await p.getAttribute('.split-demo .split-handle', 'aria-valuenow'));
+  const s0 = await size();
+  await answered(() => drag('.split-demo .split-handle', 60, 0));
+  check(near(await size(), s0 + 60), `dragging the divider resizes the pane (${s0} → ${await size()})`);
+  check(near(await p.evaluate(() => document.querySelector('.split-demo .split-pane').getBoundingClientRect().width), await size(), 2), 'the pane is the size the divider says');
+  await answered(() => drag('.split-demo .split-handle', 400, 0));
+  check(await size() === 420, 'a divider stops at its maximum');
+  await p.focus('.split-demo .split-handle');
+  await answered(() => p.keyboard.press('ArrowLeft'));
+  check(await size() === 404, 'the arrow keys move a divider 16 px');
+
+  // A sortable list: a row dragged by its grip lands where it was let go; a nudge changes
+  // nothing and leaves nothing out of place; Alt+↑ moves the focused row.
+  const order = () => p.evaluate(() => [...document.querySelectorAll('#tasks .li-title')].map((e) => e.textContent).join(' | '));
+  const first = await order();
+  const step = await p.evaluate(() => { const r = [...document.querySelectorAll('#tasks > [data-key]')].map((e) => e.getBoundingClientRect()); return r[1].top - r[0].top; });
+  await answered(() => drag('#tasks > [data-key="design"] .drag-handle', 0, step * 2 + 12));
+  check(await order() === 'Build the gestures | Test on a phone | Design the sheet | Ship it', `a row dragged down two places lands there (${first} → ${await order()})`);
+  check(await p.evaluate(() => [...document.querySelectorAll('#tasks > [data-key]')].every((e) => !e.style.translate && !e.classList.contains('hx-dragged'))), 'and every row is back in the flow');
+  const before = await order();
+  await drag('#tasks > [data-key="build"] .drag-handle', 0, 10);
+  await settle();
+  check(await order() === before, 'a nudge does not reorder');
+  check(await p.evaluate(() => getComputedStyle(document.querySelector('#tasks > [data-key="build"]')).translate === 'none'), 'and the row springs back to its place');
+  await p.focus('#tasks > [data-key="ship"] .drag-handle');
+  await answered(() => p.keyboard.press('Alt+ArrowUp'));
+  check(await order() === 'Build the gestures | Test on a phone | Ship it | Design the sheet', 'Alt+↑ moves the focused row up');
+  check(await p.evaluate(() => document.activeElement.closest('[data-key]').dataset.key) === 'ship', 'and focus stays on it');
+  await axe('after reordering');
+
+  // A tree, by keyboard: ↓ moves, → opens and goes in, Enter selects, ← goes out.
+  await p.focus('#files-tree-src');
+  await p.keyboard.press('ArrowDown');
+  check(await p.evaluate(() => document.activeElement.id) === 'files-tree-src_47_ui', '↓ moves to the next row');
+  await answered(() => p.keyboard.press('ArrowRight'));
+  check(await p.getAttribute('#files-tree-src_47_ui', 'aria-expanded') === 'true', '→ opens a closed row');
+  await p.keyboard.press('ArrowRight');
+  check(await p.evaluate(() => document.activeElement.id) === 'files-tree-src_47_ui_47_button_46_helix', '→ on an open row goes to its first child');
+  await answered(() => p.keyboard.press('Enter'));
+  check(await p.evaluate(() => document.body.textContent.includes('Selected: src/ui/button.helix')), 'Enter selects');
+  await p.keyboard.press('ArrowLeft');
+  check(await p.evaluate(() => document.activeElement.id) === 'files-tree-src_47_ui', '← goes to the parent');
+
+  // A disclosure springs open and is reachable only when open; a popover takes focus and gives
+  // it back.
+  check(await p.evaluate(() => document.getElementById('gestures-body').inert), 'a closed disclosure is inert');
+  await answered(() => p.click('#gestures-head'));
+  check(await p.evaluate(() => !document.getElementById('gestures-body').inert) && await p.getAttribute('#gestures-head', 'aria-expanded') === 'true', 'clicked, it opens');
+  await answered(() => p.click('#view-options-button'));
+  check(await p.evaluate(() => document.getElementById('view-options-pop').contains(document.activeElement)), 'an opened popover takes focus');
+  await axe('popover open');
+  await shot('gallery-gestures');
+  await answered(() => p.keyboard.press('Escape'));
+  check(await p.evaluate(() => !document.getElementById('view-options-pop') && document.activeElement.id === 'view-options-button'), 'Escape closes it and gives focus back');
+
+  // A toast thrown sideways is dismissed; one nudged springs back.
+  await post(() => p.click('[data-click="toast"]'));
+  const toasts = () => p.evaluate(() => [...document.querySelectorAll('.toast')].filter((t) => !t.__gone).length);
+  const t0 = await toasts();
+  await drag('.toast:last-child', 24, 0, 300);
+  await settle();
+  check(await toasts() === t0, 'a toast nudged sideways stays');
+  await answered(() => drag('.toast:last-child', 220, 0, 120));
+  check(await toasts() === t0 - 1, 'a toast thrown sideways is dismissed');
+
+  // A sheet pulled down by its grabber closes; a short pull springs back.
+  await post(() => p.click('[data-click="open-sheet"]'));
+  await drag('#share .grabber-zone', 0, 30, 300);
+  await settle();
+  check(await p.evaluate(() => !!document.getElementById('share') && getComputedStyle(document.getElementById('share')).translate === 'none'), 'a short pull leaves the sheet open, in place');
+  await answered(() => drag('#share .grabber-zone', 0, 260, 160));
+  check(await p.evaluate(() => !document.getElementById('share')), 'a sheet pulled down closes');
+
   // Every material passes in both modes; the page restyles live when the design changes.
   for (const mat of ['glass', 'tonal', 'hybrid']) {
     const card0 = await p.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--card-bg'));
