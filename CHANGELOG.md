@@ -24,6 +24,20 @@
 - **`ui.open_url(url)`** opens the system browser without a shell; both example apps take
   `--open`.
 
+- **A component library and design system for apps (ADR 0055 Phase 2).** `ui.helix` now
+  carries tokens (space, type, radii, elevation, colour in light and dark, three springs) and
+  components: `column`/`row`/`cluster`/`grid`, `card`, `button` (default, primary, ghost,
+  danger) and `icon_button`, `text_input`, `textarea`, `select`, `checkbox`, `toggle`, `slider`,
+  `form` with validators (`required`, `min_length`, `pattern`, `check`), `tabs`, `menu`,
+  `dialog`, `toasts`, `tooltip`, `progress`, `badge`, a virtualised `data_table` over a
+  DataFrame, and `line_chart`, `scatter_chart` and `bar_chart`. Each is accessible by
+  construction — labels, ARIA roles and states, keyboard paths, visible focus, reduced motion —
+  and `examples/apps/gallery.helix` shows them all. Checked in Chromium with axe-core in light
+  and dark, with zero violations, by `tests/ui/gallery.cjs`, which CI now runs.
+- **`view_html` reads the props components need**: `id`, `role`, `aria` (a record of ARIA
+  attributes), `value`, the events `change`, `submit`, `dismiss` and `scroll`, the motion hooks
+  `enter`, `exit` and `layout`; and a Bool in `attrs` is an HTML boolean attribute.
+
 ### Fixed
 
 - **A patch that replaced the focused input's subtree dropped focus and the text being

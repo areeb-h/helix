@@ -1,46 +1,250 @@
-# ui — a model–update–view app runtime, written in Helix on the primitives that exist today.
+# ui — a model–update–view app runtime and its component library (ADR 0055).
 #
-# A PROTOTYPE for ADR 0055 (docs/adr/0055-apps.md), kept small on purpose: it is here to
-# find out what the language and runtime already carry and what they are missing, by
-# building a real app on them. The decisions it tests:
+# The decisions it carries:
 #
 #   - The program is three values: `init` (the model), `update(model, event) -> model` and
 #     `view(model) -> tree`. No mutable state, no callbacks, no async: events are folded
 #     through `update` the way the HTTP server folds requests through a handler.
-#   - A view is DATA — element records — so it can be diffed, replayed in a test, and handed
-#     to a different renderer later. Here it is rendered to HTML.
-#   - Helix decides WHAT the screen is; the GPU decides how to get there. Animation is
-#     declared in the view (`transition`, `spring(...)`) and run by the browser's compositor,
-#     never by Helix code per frame. The client patches the page IN PLACE — attributes, not
-#     nodes — which is what lets a changed style transition instead of jump.
-#
-#   - Only the person who started the app can drive it. A localhost port is reachable by
-#     every local process and, through DNS rebinding, by any web page the browser visits, so
-#     every request must carry a session token (see "The session" below).
+#   - A view is DATA — element records — so it can be diffed (`view_diff`), replayed in a test,
+#     and handed to a different renderer later. Here it is rendered to HTML (`view_html`).
+#   - Helix decides WHAT the screen is; the GPU decides how to get there. Motion is declared in
+#     the view (`transition`, `spring`, `motion`, and the `enter` / `exit` / `layout` hooks) and
+#     run by the browser's compositor, never by Helix code per frame.
+#   - Accessibility is the components' job, not the app's: every control has a real label,
+#     composite widgets (tabs, menus, dialogs) carry their ARIA roles and keyboard paths, focus
+#     is always visible, and `prefers-reduced-motion` turns motion off everywhere.
+#   - Only the person who started the app can drive it (see "The session").
 #
 #   import ui
 #   ui.app({port: 8080, title: "…", init: {…}, update: (m, e) => …, view: (m) => …})
 #
-# Optional spec fields: `style` (CSS added to the theme), `theme` (model -> "light"/"dark"),
-# `subscriptions` (model -> a list of `every(ms, msg)`), and `open` (true opens a browser).
+# Optional spec fields: `style` (CSS added to the design system), `theme` (model ->
+# "light"/"dark"), `subscriptions` (model -> a list of `every(ms, msg)`), and `open` (true opens
+# a browser). An event is `{msg, value}`: a click sends its `value` prop (or missing), a text
+# field its text, a checkbox or switch a Bool, a select the chosen value, a form its fields as a
+# record, a scroller its scroll offset.
+#
+# `examples/apps/gallery.helix` shows every component.
 
 # --- The tree. ---------------------------------------------------------------------------
 
-# One element: a tag, its properties and its children. Properties the renderer knows:
-#   class, style (a record; `border_radius` becomes `border-radius`), key (keeps an element's
-#   identity across renders), click / input (the message the event sends), transition, and
-#   attrs (a record of raw attributes, e.g. SVG geometry).
+# One element: a tag, its properties and its children. Properties the renderer knows (see
+# `helix doc view_html`): class, id, role, key (an element's identity across renders), the
+# event messages click / input / change / submit / dismiss / scroll and the `value` a click
+# sends, the motion hooks enter / exit / layout, aria (a record of ARIA attributes), style (a
+# record; `border_radius` becomes `border-radius`), transition, and attrs (raw attributes; a
+# Bool there is an HTML boolean attribute).
 export fn el(tag, props, children) = {tag: tag, props: props, children: children}
 export fn text(s) = {tag: "#text", props: {}, children: [], text: "{s}"}
 
-export fn column(children) = el("div", {class: "col"}, children)
-export fn row(children) = el("div", {class: "row"}, children)
-export fn card(title, children) = el("section", {class: "card"}, [el("h2", {}, [text(title)])].concat(children))
+# A node with more props merged in, later winning — how a wrapper adds ARIA to a child.
+export fn with_props(node, extra) = {...node, props: {...node.props, ...extra}}
+
+fn present(xs) = xs.filter((x) => not x.is_missing())
+
+# --- Layout. -----------------------------------------------------------------------------
+#
+# Spacing is a scale, not pixels: `gap` is a step of the design system's spacing tokens
+# (1 = 4px, 2 = 8px, 3 = 12px, 4 = 16px, 5 = 24px, 6 = 32px, 7 = 48px).
+
+export fn column(children, gap = 4) = el("div", {class: "col gap-{gap}"}, children)
+# A row shares its width among its children (cards side by side); a cluster keeps each child
+# its own size and wraps (buttons, badges, a toolbar).
+export fn row(children, gap = 4) = el("div", {class: "row gap-{gap}"}, children)
+export fn cluster(children, gap = 2) = el("div", {class: "cluster gap-{gap}"}, children)
+# Children laid out in as many columns of at least `min` pixels as fit.
+export fn grid(children, min = 260, gap = 4) = el("div", {class: "grid gap-{gap}", style: {grid_template_columns: "repeat(auto-fill, minmax(min({min}px, 100%), 1fr))"}}, children)
+export fn spacer() = el("div", {class: "spacer"}, [])
+export fn divider() = el("hr", {class: "divider"}, [])
+
+# --- Text. -------------------------------------------------------------------------------
+
 export fn heading(s) = el("h1", {}, [text(s)])
+export fn subheading(s) = el("h3", {class: "subheading"}, [text(s)])
 export fn label(s) = el("span", {class: "label"}, [text(s)])
+export fn paragraph(s) = el("p", {class: "para"}, [text(s)])
+export fn code(s) = el("code", {class: "code"}, [text(s)])
+# A short status word. Tones: neutral, accent, success, warning, danger.
+export fn badge(s, tone = "neutral") = el("span", {class: "badge {tone}"}, [text(s)])
+
+# --- Containers. -------------------------------------------------------------------------
+
+export fn card(title, children) = el("section", {class: "card"}, [el("h2", {}, [text(title)])].concat(children))
 export fn stat(name, value) = el("div", {class: "stat"}, [el("span", {class: "stat-name"}, [text(name)]), el("span", {class: "stat-value"}, [text(value)])])
-export fn button(caption, msg) = el("button", {class: "btn", click: msg}, [text(caption)])
-export fn slider(msg, lo, hi, value) = el("input", {class: "slider", input: msg, attrs: {type: "range", min: "{lo}", max: "{hi}", step: "1", value: "{value}"}}, [])
+
+# --- Buttons. ----------------------------------------------------------------------------
+#
+# Variants: default, primary, ghost, danger. A button with only an icon must say what it does
+# in `label` — that is what a screen reader announces.
+
+export fn button(caption, msg, variant = "default", value = missing, disabled = false, label = missing) =
+  el("button", {class: "btn {variant}", click: msg, value: value, aria: {label: label}, attrs: {type: "button", disabled: disabled}}, [text(caption)])
+export fn icon_button(icon, label, msg, value = missing) =
+  el("button", {class: "btn ghost icon", click: msg, value: value, aria: {label: label}, attrs: {type: "button"}}, [el("span", {aria: {hidden: true}}, [text(icon)])])
+
+# --- Form controls. ----------------------------------------------------------------------
+#
+# Every control is a FIELD: a real `<label for>`, an optional hint, and an optional error. The
+# hint and the error are tied to the control by `aria-describedby`, so a screen reader reads
+# them with it, and an error sets `aria-invalid`. Validation is a pure function of the model:
+# `check(value, [required("…"), min_length(3, "…")])` answers the first message that applies,
+# or missing — the app decides when to show it (usually once the field has been touched).
+
+fn field(id, label, control, hint, error) = do {
+  hint_id = "{id}-hint"
+  err_id = "{id}-error"
+  described = present([if hint.is_missing() then missing else hint_id, if error.is_missing() then missing else err_id])
+  c = with_props(control, {id: id, aria: {describedby: if described.count() == 0 then missing else described.join(" "), invalid: if error.is_missing() then missing else true}})
+  notes = present([
+    if hint.is_missing() then missing else el("p", {key: "hint", id: hint_id, class: "hint"}, [text(hint)]),
+    if error.is_missing() then missing else el("p", {key: "error", id: err_id, class: "error", enter: "rise", exit: "fade"}, [text(error)]),
+  ])
+  el("div", {class: if error.is_missing() then "field" else "field invalid"}, [
+    el("label", {class: "field-label", attrs: {"for": id}}, [text(label)]),
+    c,
+    el("div", {class: "field-notes"}, notes),
+  ])
+}
+
+export fn text_input(id, label, value, msg, hint = missing, error = missing, kind = "text", placeholder = missing) =
+  field(id, label, el("input", {class: "input", input: msg, attrs: {type: kind, name: id, value: "{value}", placeholder: placeholder}}, []), hint, error)
+
+export fn textarea(id, label, value, msg, rows = 4, hint = missing, error = missing) =
+  field(id, label, el("textarea", {class: "input", input: msg, attrs: {name: id, rows: "{rows}"}}, [text(value)]), hint, error)
+
+# `options` is a list of values, or of [value, caption] pairs.
+export fn select(id, label, value, options, msg, hint = missing, error = missing) = do {
+  opts = options.map((o) => do {
+    pair = type_of(o) == "Array"
+    v = if pair then o[0] else o
+    caption = if pair then o[1] else o
+    el("option", {attrs: {value: "{v}", selected: v == value}}, [text(caption)])
+  })
+  field(id, label, el("select", {class: "input", change: msg, attrs: {name: id}}, opts), hint, error)
+}
+
+# A checkbox and a switch both send `{msg, value: <checked>}`. The switch is a checkbox with
+# `role="switch"`, so Space toggles it and it is announced "on"/"off".
+export fn checkbox(id, label, checked, msg) = el("label", {class: "check"}, [
+  el("input", {id: id, change: msg, attrs: {type: "checkbox", name: id, checked: checked}}, []),
+  el("span", {}, [text(label)]),
+])
+export fn toggle(id, label, on, msg) = el("label", {class: "switch"}, [
+  el("input", {id: id, role: "switch", change: msg, attrs: {type: "checkbox", name: id, checked: on}}, []),
+  el("span", {class: "track", aria: {hidden: true}}, [el("span", {class: "thumb"}, [])]),
+  el("span", {}, [text(label)]),
+])
+
+# A range input. It holds its own value while dragged (D6): Helix's frame confirms it.
+export fn slider(msg, lo, hi, value, label = missing, step = 1) =
+  el("input", {class: "slider", input: msg, aria: {label: label ?? msg}, attrs: {type: "range", min: "{lo}", max: "{hi}", step: "{step}", value: "{value}"}}, [])
+
+# A form sends `{msg: submit, value: {field: text, …}}` on Enter or its submit button, and never
+# reloads the page. Fields are named by their ids.
+export fn form(submit, children) = el("form", {class: "form", submit: submit, attrs: {novalidate: true}}, children)
+export fn submit_button(caption, variant = "primary") = el("button", {class: "btn {variant}", attrs: {type: "submit"}}, [text(caption)])
+
+# Validators: each is a function from a value to missing (fine) or a message.
+export fn required(message) = (v) => if v.is_missing() or "{v}".trim() == "" then message else missing
+export fn min_length(n, message) = (v) => if "{v}".trim().count() < n then message else missing
+export fn max_length(n, message) = (v) => if "{v}".count() > n then message else missing
+export fn pattern(regex, message) = (v) => if "{v}".re_match(regex) then missing else message
+export fn check(value, rules) = rules.reduce(missing, (err, rule) => if err.is_missing() then rule(value) else err)
+
+# --- Feedback. ---------------------------------------------------------------------------
+
+# `value` from 0 to `max`. The bar scales on the compositor.
+export fn progress(label, value, max = 1.0) = el("div", {class: "progress", role: "progressbar", aria: {label: label, valuemin: "0", valuemax: "{max}", valuenow: "{value}"}}, [
+  el("span", {class: "progress-bar", style: {transform: "scaleX({clamp(value / max, 0.0, 1.0):.4f})"}}, []),
+])
+
+# A live region of toasts, `[{id, text, tone?}]`. What arrives is announced politely; each
+# toast rises in, fades out, and the others glide into place. Dismissing sends `{msg, value:
+# "<id>"}`; the app removes it (a timer in `subscriptions` can expire them).
+export fn toasts(items, dismiss) = el("div", {class: "toasts", role: "status", aria: {live: "polite"}}, items.map((t) =>
+  el("div", {key: "toast-{t.id}", class: "toast {t.get("tone") ?? "neutral"}", enter: "rise", exit: "fade", layout: true}, [
+    el("span", {class: "toast-text"}, [text(t.text)]),
+    icon_button("✕", "Dismiss", dismiss, "{t.id}"),
+])))
+
+# A tooltip: shown on hover and on keyboard focus, and tied to its control by
+# `aria-describedby`, so it is read, not only seen.
+export fn tooltip(id, tip, child) = do {
+  a = child.props.get("aria")
+  aria = if a.is_missing() then {describedby: id} else {...a, describedby: id}
+  el("span", {class: "tip-wrap"}, [with_props(child, {aria: aria}), el("span", {id: id, role: "tooltip", class: "tip"}, [text(tip)])])
+}
+
+# --- Navigation and overlays. ------------------------------------------------------------
+
+# Tabs: `items` is `[{id, label, content}]`. Every panel is rendered and the unselected ones are
+# `hidden`, so each tab's `aria-controls` names a real element. Arrow keys, Home and End move
+# between tabs and select them; only the selected tab is in the Tab order.
+export fn tabs(id, selected, items, msg, label = missing) = el("div", {class: "tabs"}, [
+  el("div", {class: "tabbar", role: "tablist", aria: {label: label}}, items.map((t) => el("button", {
+    id: "{id}-tab-{t.id}", role: "tab", class: "tab", click: msg, value: t.id,
+    aria: {selected: t.id == selected, controls: "{id}-panel-{t.id}"},
+    attrs: {type: "button", tabindex: if t.id == selected then "0" else "-1"},
+    }, [text(t.label)]))),
+  ].concat(items.map((t) => el("div", {
+    key: "{id}-panel-{t.id}", id: "{id}-panel-{t.id}", role: "tabpanel", class: "tabpanel",
+    aria: {labelledby: "{id}-tab-{t.id}"}, attrs: {tabindex: "0", hidden: t.id != selected},
+    }, [t.content]))))
+
+# A menu button. `items` is `[{label, msg, value?}]`. Open, it takes focus to its first item;
+# arrows, Home and End move; Escape or a press outside sends `toggle` (the app closes it); and
+# choosing an item sends the item's message — close the menu in `update` when it arrives.
+export fn menu(id, caption, open, toggle, items) = do {
+  trigger = el("button", {id: "{id}-button", class: "btn default", click: toggle,
+    aria: {haspopup: "menu", expanded: open, controls: if open then "{id}-menu" else missing},
+    attrs: {type: "button"}}, [text(caption), el("span", {class: "caret", aria: {hidden: true}}, [text("▾")])])
+  list = if not open then [] else [el("div", {key: "{id}-menu", id: "{id}-menu", role: "menu", class: "menu-list", enter: "pop", exit: "fade", aria: {labelledby: "{id}-button"}},
+    range(0, items.count()).map((i) => el("button", {role: "menuitem", class: "menu-item", click: items[i].msg, value: items[i].get("value"),
+      attrs: {type: "button", tabindex: "-1", autofocus: i == 0}}, [text(items[i].label)])))]
+  el("div", {class: "menu", dismiss: if open then toggle else missing}, [trigger].concat(list))
+}
+
+# A modal dialog, on the platform's own `<dialog>`: it traps focus, makes the page behind it
+# inert, and gives focus back to whatever opened it. Escape, a press on the backdrop or the
+# close button send `close`; the app sets `open` to false.
+export fn dialog(id, open, title, children, close, actions = []) = el("dialog", {
+  id: id, class: "dialog", dismiss: close, aria: {labelledby: "{id}-title"},
+  attrs: {"data-modal": "true", "data-open": if open then "true" else "false"},
+  }, [
+    el("header", {class: "dialog-head"}, [el("h2", {id: "{id}-title"}, [text(title)]), icon_button("✕", "Close", close)]),
+    el("div", {class: "dialog-body"}, children),
+  ].concat(if actions.count() == 0 then [] else [el("footer", {class: "dialog-actions"}, actions)]))
+
+# --- Data. -------------------------------------------------------------------------------
+
+# A DataFrame as a table that renders only the rows in view. Scrolling is the CLIENT's (D6): it
+# scrolls natively and reports its offset as `{msg: scroll, value: <px>}`; Helix answers with
+# that window's rows plus an overscan above and below, so a quick flick shows rows, not gaps.
+# The rows between are two spacers of exactly their height, so the scrollbar is the whole
+# table's. Screen readers get `aria-rowcount` and each row's `aria-rowindex`.
+export fn data_table(id, df, offset, scroll, label, height = 360, row_height = 36) = do {
+  n = df.count()
+  cols = df.columns()
+  numeric = df.schema().filter((c) => c.type == "Int" or c.type == "Float").map((c) => c.name)
+  first = max(0, floor(offset / row_height) - 6)
+  shown = max(0, min(n - first, ceil(height / row_height) + 12))
+  rows = if shown == 0 then [] else df.slice(first, shown).records()
+  cell = (r, c) => el("td", {class: if numeric.contains(c) then "num" else "txt"}, [text(fmt_cell(r.get(c)))])
+  body = range(0, rows.count()).map((i) => el("tr", {key: "r{first + i}", attrs: {"aria-rowindex": "{first + i + 2}"}}, cols.map((c) => cell(rows[i], c))))
+  pad = (k, px) => el("tr", {key: k, class: "pad", aria: {hidden: true}, style: {height: "{px}px"}}, [el("td", {attrs: {colspan: "{cols.count()}"}}, [])])
+  el("div", {id: id, class: "table-wrap", role: "region", scroll: scroll, aria: {label: label}, style: {height: "{height}px", __row: "{row_height}px"}, attrs: {tabindex: "0"}}, [
+    el("table", {class: "table", attrs: {"aria-rowcount": "{n + 1}"}}, [
+      el("thead", {}, [el("tr", {attrs: {"aria-rowindex": "1"}}, cols.map((c) => el("th", {class: if numeric.contains(c) then "num" else "txt", attrs: {scope: "col"}}, [text(c)])))]),
+      el("tbody", {}, [pad("top", first * row_height)].concat(body).concat([pad("bottom", (n - first - shown) * row_height)])),
+    ]),
+  ])
+}
+
+fn fmt_cell(v) = match type_of(v) {
+  "Float" => if abs(v) >= 1000.0 then "{v:.1f}" else "{v:.3f}",
+  "Missing" => "—",
+  _ => "{v}",
+}
 
 # --- Subscriptions. -----------------------------------------------------------------------
 
@@ -76,8 +280,8 @@ fn sleep_ms(timers, t) = if timers.count() == 0 then 1000 else clamp(round((time
 # A damped spring, solved HERE and handed to the compositor as a CSS `linear()` easing curve:
 # Helix does the physics once per declaration, the GPU does every frame. Unit mass,
 # stiffness k, damping c; the response of x'' + c·x' + k·x = k from rest is sampled until
-# it settles within 0.1%. Returns the `transition` timing for one property.
-export fn spring(prop, stiffness, damping) = do {
+# it settles within 0.1%. Answers `{ms, easing}`.
+export fn spring_curve(stiffness, damping) = do {
   w0 = sqrt(stiffness)
   zeta = damping / (2.0 * w0)
   settle = log(1000.0) / max(zeta * w0, 0.001)
@@ -85,7 +289,120 @@ export fn spring(prop, stiffness, damping) = do {
   x = (t) => 1.0 - exp(-zeta * w0 * t) * (cos(wd * t) + (zeta * w0 / wd) * sin(wd * t))
   # The last sample is exactly 1: the curve ends where the property does, with no snap.
   pts = range(0, 41).map((i) => if i == 40 then "1" else "{x(settle * i / 40.0):.4f}")
-  "{prop} {round(settle * 1000.0)}ms linear({pts.join(", ")})"
+  {ms: round(settle * 1000.0), easing: "linear({pts.join(", ")})"}
+}
+
+# The `transition` for one property, as a spring.
+export fn spring(prop, stiffness, damping) = do {
+  c = spring_curve(stiffness, damping)
+  "{prop} {c.ms}ms {c.easing}"
+}
+
+# The design system's three springs. `snappy` is critically damped at stiffness 420 — the
+# spring mobile-os's shell settles on (`shell/src/motion.rs`), so an app moves like the OS
+# around it; `gentle` is a soft settle for things arriving; `bouncy` overshoots once.
+MOTION = {snappy: [420.0, 41.0], gentle: [170.0, 26.0], bouncy: [260.0, 18.0]}
+
+# The `transition` for one property with a named preset: `motion("transform", "snappy")`.
+export fn motion(prop, preset) = do {
+  k = MOTION.get(preset) ?? MOTION.gentle
+  spring(prop, k[0], k[1])
+}
+
+# The presets as CSS custom properties, for the stylesheet and for the client's `enter` /
+# `exit` / `layout` animations: `--spring-snappy` (the easing) and `--spring-snappy-ms`.
+fn motion_tokens() = ["snappy", "gentle", "bouncy"].map((name) => do {
+  k = MOTION.get(name)
+  c = spring_curve(k[0], k[1])
+  "--spring-{name}: {c.easing}; --spring-{name}-ms: {c.ms};"
+}).join(" ")
+
+# --- Charts. -----------------------------------------------------------------------------
+#
+# Charts are views like any other — SVG elements in the tree — so they diff, replay and
+# animate: points are keyed and move on `cx`/`cy` springs, bars grow from their baseline, and
+# a line with the same number of points interpolates its path. The springs are in the
+# stylesheet, not on each element, so a frame of new data carries only the new geometry. Each is an image with a label
+# and a `<title>`, and the axes have readable tick labels.
+
+fn nice_step(span, n) = do {
+  raw = max(span, 0.000000001) / n
+  mag = 10.0 ** floor(log10(raw))
+  f = raw / mag
+  mag * (if f < 1.5 then 1.0 else if f < 3.0 then 2.0 else if f < 7.0 then 5.0 else 10.0)
+}
+# Round tick values for [lo, hi], and the padded domain they span.
+fn axis(lo, hi, n) = do {
+  same = hi == lo
+  a = if same then lo - 1.0 else lo
+  b = if same then hi + 1.0 else hi
+  step = nice_step(b - a, n)
+  start = floor(a / step) * step
+  stop = ceil(b / step) * step
+  {lo: start, hi: stop, step: step, ticks: range(0, round((stop - start) / step) + 1).map((i) => start + i * step)}
+}
+fn fmt_tick(v, step) = if step >= 1.0 then "{round(v)}" else if step >= 0.1 then "{v:.1f}" else if step >= 0.01 then "{v:.2f}" else "{v:.3f}"
+
+CW = 640.0
+CH = 280.0
+ML = 48.0
+MR = 16.0
+MT = 14.0
+MB = 30.0
+
+fn px(ax, v) = ML + (v - ax.lo) / (ax.hi - ax.lo) * (CW - ML - MR)
+fn py(ay, v) = CH - MB - (v - ay.lo) / (ay.hi - ay.lo) * (CH - MT - MB)
+
+fn chart_frame(label, ax, ay, body, xlabels) = do {
+  ygrid = ay.ticks.map((t) => el("g", {class: "tick"}, [
+    el("line", {class: "gridline", attrs: {x1: "{ML}", x2: "{CW - MR}", y1: "{py(ay, t):.1f}", y2: "{py(ay, t):.1f}"}}, []),
+    el("text", {class: "axis-label", attrs: {x: "{ML - 8.0}", y: "{py(ay, t) + 4.0:.1f}", "text-anchor": "end"}}, [text(fmt_tick(t, ay.step))]),
+  ]))
+  xticks = if xlabels.is_missing() then ax.ticks.map((t) => el("text", {class: "axis-label", attrs: {x: "{px(ax, t):.1f}", y: "{CH - 10.0}", "text-anchor": "middle"}}, [text(fmt_tick(t, ax.step))])) else xlabels
+  el("svg", {class: "chart", role: "img", aria: {label: label}, attrs: {viewBox: "0 0 {CW} {CH}"}}, [el("title", {}, [text(label)])].concat(ygrid).concat(xticks).concat(body))
+}
+
+# Lines: `series` is `[{name, xs, ys}]`, drawn in the palette's order with a legend.
+export fn line_chart(label, series) = do {
+  allx = series.map((s) => s.xs).reduce([], (a, b) => a.concat(b))
+  ally = series.map((s) => s.ys).reduce([], (a, b) => a.concat(b))
+  ax = axis(allx.min(), allx.max(), 6)
+  ay = axis(ally.min(), ally.max(), 5)
+  lines = range(0, series.count()).map((k) => do {
+    s = series[k]
+    pts = range(0, s.xs.count()).map((i) => "{px(ax, s.xs[i]):.1f},{py(ay, s.ys[i]):.1f}")
+    path = "M{pts.join(" L")}"
+    el("path", {key: "line-{s.name}", class: "series s{k % 6 + 1}", style: {d: "path(\"{path}\")"}, attrs: {d: path}}, [])
+  })
+  n = series.count()
+  legend = el("g", {class: "legend"}, range(0, n).map((k) => el("text", {class: "legend-item s{k % 6 + 1}", attrs: {x: "{CW - MR - (n - 1 - k) * 110.0}", y: "{MT + 4.0}", "text-anchor": "end"}}, [text("● {series[k].name}")])))
+  chart_frame(label, ax, ay, lines.concat([legend]), missing)
+}
+
+# Points: keyed by index, so new data moves them rather than redrawing them.
+export fn scatter_chart(label, xs, ys) = do {
+  ax = axis(xs.min(), xs.max(), 6)
+  ay = axis(ys.min(), ys.max(), 5)
+  dots = range(0, xs.count()).map((i) => el("circle", {key: "p{i}", class: "dot s1", style: {cx: "{px(ax, xs[i]):.1f}px", cy: "{py(ay, ys[i]):.1f}px"}, attrs: {r: "4"}}, []))
+  chart_frame(label, ax, ay, dots, missing)
+}
+
+# Bars: one per label, scaled from the baseline on the compositor.
+export fn bar_chart(label, labels, values) = do {
+  ay = axis(min(0.0, values.min()), max(0.0, values.max()), 5)
+  ax = {lo: 0.0, hi: labels.count() * 1.0, step: 1.0, ticks: []}
+  slot = (CW - ML - MR) / labels.count()
+  base = py(ay, 0.0)
+  bars = range(0, labels.count()).map((i) => do {
+    top = py(ay, values[i])
+    h = abs(base - top)
+    y = min(base, top)
+    el("rect", {key: "bar-{labels[i]}", class: "bar s1", style: {y: "{y:.1f}px", height: "{h:.1f}px"}, enter: "grow", attrs: {x: "{ML + i * slot + slot * 0.18:.1f}", y: "{y:.1f}", width: "{slot * 0.64:.1f}", height: "{h:.1f}", rx: "4"}}, [
+      el("title", {}, [text("{labels[i]}: {values[i]}")]),
+    ])
+  })
+  names = range(0, labels.count()).map((i) => el("text", {class: "axis-label", attrs: {x: "{ML + (i + 0.5) * slot:.1f}", y: "{CH - 10.0}", "text-anchor": "middle"}}, [text(labels[i])]))
+  chart_frame(label, ax, ay, bars, names)
 }
 
 # --- Rendering. -----------------------------------------------------------------------------
@@ -140,49 +457,215 @@ fn local_host(rt, req) = do {
 }
 fn set_cookie(rt) = "{rt.cookie}={rt.token}; HttpOnly; SameSite=Strict; Path=/"
 
-# --- The page: theme and client. ----------------------------------------------------------
+# --- The design system: tokens and component styles. ------------------------------------
+#
+# Every colour, space, size, radius, shadow and duration is a token (a CSS custom property),
+# defined once for light and once for dark; components use only tokens, so an app restyles by
+# overriding tokens in `spec.style`, never by chasing selectors. Text colours meet WCAG AA on
+# every surface they sit on, in both themes (the gallery is checked with axe-core). Focus is
+# always visible from the keyboard. Under `prefers-reduced-motion` every transition and
+# animation is cut to nothing — inline springs included, by `!important`.
 
 THEME = """
-:root { --bg: #f6f7f9; --fg: #14161a; --muted: #687080; --card: #ffffff; --line: #e3e6ec;
-  --accent: #4f46e5; --accent-soft: #e0e7ff; --shadow: 0 1px 2px rgba(16,24,40,.06), 0 8px 24px rgba(16,24,40,.06);
-  color-scheme: light; }
-:root[data-theme="dark"] { --bg: #0d0f14; --fg: #e8eaf0; --muted: #8b93a7; --card: #161a22; --line: #262c38;
-  --accent: #8b87ff; --accent-soft: #23264a; --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
-  color-scheme: dark; }
+:root {
+  --s-1: 4px; --s-2: 8px; --s-3: 12px; --s-4: 16px; --s-5: 24px; --s-6: 32px; --s-7: 48px;
+  --t-xs: 12px; --t-sm: 13px; --t-md: 15px; --t-lg: 18px; --t-xl: 22px; --t-2xl: 28px;
+  --r-sm: 6px; --r-md: 10px; --r-lg: 14px; --r-full: 999px;
+  --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --dur-1: 120ms; --dur-2: 200ms; --dur-3: 320ms;
+  --ease: cubic-bezier(.2, 0, 0, 1);
+  --bg: #f6f7f9; --surface: #ffffff; --surface-2: #f0f2f5; --fg: #14161a; --muted: #586174;
+  --line: #e1e4ea; --line-strong: #b9c0cc; --accent: #4f46e5; --accent-fg: #ffffff;
+  --accent-soft: #e6e8ff; --accent-text: #3f37c9; --danger: #b42318; --danger-soft: #fdecea;
+  --success: #146c2e; --success-soft: #e6f4ea; --warning: #8a5300; --warning-soft: #fdf3e1;
+  --focus: #4f46e5;
+  --e-1: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.08);
+  --e-2: 0 1px 2px rgba(16,24,40,.06), 0 8px 24px rgba(16,24,40,.08);
+  --e-3: 0 4px 12px rgba(16,24,40,.10), 0 24px 48px rgba(16,24,40,.16);
+  --chart-1: #4f46e5; --chart-2: #0e9384; --chart-3: #dc6803; --chart-4: #c11574; --chart-5: #2e90fa; --chart-6: #667085;
+  --card: var(--surface); --shadow: var(--e-2);
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  --bg: #0d0f14; --surface: #161a22; --surface-2: #1e232d; --fg: #e8eaf0; --muted: #a0a8b8;
+  --line: #2a303c; --line-strong: #4a5363; --accent: #8b87ff; --accent-fg: #0d0f14;
+  --accent-soft: #262a52; --accent-text: #aeabff; --danger: #ff8a80; --danger-soft: #3a1c1c;
+  --success: #6fdc8c; --success-soft: #16301f; --warning: #f5c26b; --warning-soft: #33280f;
+  --focus: #aeabff;
+  --e-1: 0 1px 2px rgba(0,0,0,.4); --e-2: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
+  --e-3: 0 8px 24px rgba(0,0,0,.5), 0 24px 64px rgba(0,0,0,.5);
+  --chart-1: #8b87ff; --chart-2: #3cc9b5; --chart-3: #f79b4b; --chart-4: #f06bb5; --chart-5: #6cb4ff; --chart-6: #a0a8b8;
+  color-scheme: dark;
+}
 * { box-sizing: border-box; }
-html, body { margin: 0; background: var(--bg); color: var(--fg);
-  font: 15px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  transition: background-color 400ms ease, color 400ms ease; }
-#root { max-width: 1080px; margin: 0 auto; padding: 28px 20px 48px; }
-h1 { font-size: 26px; letter-spacing: -0.02em; margin: 0 0 4px; }
-h2 { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 12px; }
-.col { display: flex; flex-direction: column; gap: 16px; }
-.row { display: flex; gap: 16px; flex-wrap: wrap; align-items: stretch; }
+html, body { margin: 0; background: var(--bg); color: var(--fg); font: var(--t-md)/1.5 var(--font);
+  transition: background-color var(--dur-3) ease, color var(--dur-3) ease; }
+#root { max-width: 1120px; margin: 0 auto; padding: var(--s-6) var(--s-5) var(--s-7); }
+h1 { font-size: var(--t-2xl); letter-spacing: -0.02em; line-height: 1.2; margin: 0 0 var(--s-1); }
+h2 { font-size: var(--t-sm); font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 var(--s-3); }
+.subheading { font-size: var(--t-lg); font-weight: 600; margin: 0; }
+.para { margin: 0; max-width: 68ch; }
+.code { font: var(--t-sm) var(--mono); background: var(--surface-2); padding: 1px 6px; border-radius: var(--r-sm); }
+.label, .hint { color: var(--muted); }
+::placeholder { color: var(--muted); opacity: 1; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: var(--r-sm); }
+
+.col { display: flex; flex-direction: column; }
+.row { display: flex; flex-wrap: wrap; align-items: stretch; }
 .row > * { flex: 1 1 280px; }
-.card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px;
-  box-shadow: var(--shadow); transition: background-color 400ms ease, border-color 400ms ease; }
-.label { color: var(--muted); }
+.cluster { display: flex; flex-wrap: wrap; align-items: center; }
+.grid { display: grid; }
+.gap-1 { gap: var(--s-1); } .gap-2 { gap: var(--s-2); } .gap-3 { gap: var(--s-3); } .gap-4 { gap: var(--s-4); }
+.gap-5 { gap: var(--s-5); } .gap-6 { gap: var(--s-6); } .gap-7 { gap: var(--s-7); }
+.spacer { flex: 1; }
+.divider { border: 0; border-top: 1px solid var(--line); margin: var(--s-2) 0; width: 100%; }
+
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); padding: var(--s-4) var(--s-5);
+  box-shadow: var(--e-2); transition: background-color var(--dur-3) ease, border-color var(--dur-3) ease; min-width: 0;
+  display: flex; flex-direction: column; gap: var(--s-3); }
+.card > h2 { margin: 0; }
 .stat { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
 .stat:last-child { border-bottom: 0; }
 .stat-name { color: var(--muted); }
 .stat-value { font-weight: 600; }
-.btn { appearance: none; border: 1px solid var(--line); background: var(--card); color: var(--fg); font: inherit;
-  padding: 8px 14px; border-radius: 10px; cursor: pointer; box-shadow: var(--shadow);
-  transition: transform 160ms cubic-bezier(.2,.8,.2,1), background-color 200ms ease; }
-.btn:hover { transform: translateY(-1px); }
-.btn:active { transform: translateY(0) scale(.97); }
+.badge { display: inline-flex; align-items: center; height: 22px; padding: 0 var(--s-2); border-radius: var(--r-full);
+  font-size: var(--t-xs); font-weight: 600; background: var(--surface-2); color: var(--fg); }
+.badge.accent { background: var(--accent-soft); color: var(--accent-text); }
+.badge.success { background: var(--success-soft); color: var(--success); }
+.badge.warning { background: var(--warning-soft); color: var(--warning); }
+.badge.danger { background: var(--danger-soft); color: var(--danger); }
+
+.btn { appearance: none; display: inline-flex; align-items: center; justify-content: center; gap: var(--s-2);
+  border: 1px solid var(--line-strong); background: var(--surface); color: var(--fg); font: 500 var(--t-md)/1 var(--font);
+  min-height: 36px; padding: 0 var(--s-4); border-radius: var(--r-md); cursor: pointer; box-shadow: var(--e-1);
+  transition: transform var(--dur-1) var(--ease), background-color var(--dur-2) ease, border-color var(--dur-2) ease, box-shadow var(--dur-2) ease; }
+.btn:hover { background: var(--surface-2); }
+.btn:active { transform: scale(.97); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.btn.primary:hover { filter: brightness(1.06); }
+.btn.danger { background: var(--danger); border-color: var(--danger); color: var(--surface); }
+.btn.ghost { background: transparent; border-color: transparent; box-shadow: none; }
+.btn.ghost:hover { background: var(--surface-2); }
+.btn.icon { min-height: 32px; width: 32px; padding: 0; color: var(--muted); }
+.btn[disabled] { opacity: .5; cursor: not-allowed; transform: none; }
+.caret { font-size: var(--t-xs); color: var(--muted); }
+.btn.primary .caret { color: inherit; }
+
+.form { display: flex; flex-direction: column; gap: var(--s-4); }
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field-label { font-weight: 600; font-size: var(--t-sm); }
+.field-notes:empty { display: none; }
+.hint, .error { margin: 0; font-size: var(--t-sm); }
+.error { color: var(--danger); font-weight: 500; }
+.input { font: var(--t-md)/1.4 var(--font); color: var(--fg); background: var(--surface); border: 1px solid var(--line-strong);
+  border-radius: var(--r-md); padding: 8px var(--s-3); min-height: 38px; width: 100%;
+  transition: border-color var(--dur-2) ease, box-shadow var(--dur-2) ease; }
+.input:focus-visible { outline: none; border-color: var(--focus); box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 30%, transparent); }
+.field.invalid .input { border-color: var(--danger); }
+textarea.input { resize: vertical; }
+select.input { appearance: none; padding-right: 32px; background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+  linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 18px) 55%, calc(100% - 13px) 55%;
+  background-size: 5px 5px; background-repeat: no-repeat; }
+.check, .switch { display: inline-flex; align-items: center; gap: var(--s-2); cursor: pointer; user-select: none; min-height: 32px; }
+.check input { width: 18px; height: 18px; accent-color: var(--accent); margin: 0; }
+.switch { position: relative; }
+.switch input { position: absolute; opacity: 0; width: 40px; height: 24px; margin: 0; cursor: pointer; z-index: 1; }
+.switch .track { width: 40px; height: 24px; border-radius: var(--r-full); background: var(--line-strong); position: relative; flex: none;
+  transition: background-color var(--dur-2) ease; }
+.switch .thumb { position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: var(--e-1);
+  transition: transform calc(var(--spring-snappy-ms) * 1ms) var(--spring-snappy); }
+.switch input:checked + .track { background: var(--accent); }
+.switch input:checked + .track .thumb { transform: translateX(16px); }
+.switch input:focus-visible + .track { outline: 2px solid var(--focus); outline-offset: 2px; }
 .slider { width: 100%; accent-color: var(--accent); }
+
+.progress { height: 8px; border-radius: var(--r-full); background: var(--surface-2); overflow: hidden; border: 1px solid var(--line); }
+.progress-bar { display: block; height: 100%; background: var(--accent); transform-origin: left;
+  transition: transform calc(var(--spring-gentle-ms) * 1ms) var(--spring-gentle); }
+.toasts { position: fixed; right: var(--s-5); bottom: var(--s-5); display: flex; flex-direction: column; gap: var(--s-2); z-index: 50; width: min(360px, calc(100vw - 32px)); }
+.toast { display: flex; align-items: center; gap: var(--s-3); background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--line-strong);
+  border-radius: var(--r-md); padding: var(--s-2) var(--s-2) var(--s-2) var(--s-4); box-shadow: var(--e-3); }
+.toast-text { flex: 1; }
+.toast.success { border-left-color: var(--success); } .toast.warning { border-left-color: var(--warning); }
+.toast.danger { border-left-color: var(--danger); } .toast.accent { border-left-color: var(--accent); }
+.tip-wrap { position: relative; display: inline-flex; }
+.tip { position: absolute; bottom: calc(100% + 8px); left: 50%; translate: -50% 4px; white-space: nowrap; pointer-events: none;
+  background: var(--fg); color: var(--bg); font-size: var(--t-sm); padding: 4px var(--s-2); border-radius: var(--r-sm);
+  opacity: 0; transition: opacity var(--dur-2) ease, translate var(--dur-2) var(--ease); z-index: 20; }
+.tip-wrap:hover .tip, .tip-wrap:focus-within .tip { opacity: 1; translate: -50% 0; }
+
+.tabbar { display: flex; gap: var(--s-1); border-bottom: 1px solid var(--line); margin-bottom: var(--s-4); }
+.tab { appearance: none; background: none; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; padding: var(--s-2) var(--s-3);
+  font: 500 var(--t-md) var(--font); color: var(--muted); cursor: pointer; border-radius: var(--r-sm) var(--r-sm) 0 0;
+  transition: color var(--dur-2) ease, border-color var(--dur-2) ease; }
+.tab:hover { color: var(--fg); }
+.tab[aria-selected="true"] { color: var(--accent-text); border-bottom-color: var(--accent); }
+.tabpanel:not([hidden]) { animation: hx-rise calc(var(--spring-gentle-ms) * 1ms) var(--spring-gentle); }
+.menu { position: relative; display: inline-block; }
+.menu-list { position: absolute; top: calc(100% + 6px); left: 0; min-width: 200px; z-index: 30; display: flex; flex-direction: column;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-md); box-shadow: var(--e-3); padding: var(--s-1); transform-origin: top left; }
+.menu-item { appearance: none; background: none; border: 0; text-align: left; font: var(--t-md) var(--font); color: var(--fg);
+  padding: var(--s-2) var(--s-3); border-radius: var(--r-sm); cursor: pointer; }
+.menu-item:hover, .menu-item:focus-visible { background: var(--accent-soft); color: var(--accent-text); outline: none; }
+.dialog { border: 1px solid var(--line); border-radius: var(--r-lg); padding: 0; width: min(520px, calc(100vw - 32px));
+  background: var(--surface); color: var(--fg); box-shadow: var(--e-3); }
+.dialog[open] { animation: hx-pop calc(var(--spring-snappy-ms) * 1ms) var(--spring-snappy); }
+.dialog::backdrop { background: rgba(10, 12, 18, .45); backdrop-filter: blur(2px); }
+.dialog[open]::backdrop { animation: hx-fade var(--dur-3) ease; }
+.dialog-head { display: flex; align-items: center; justify-content: space-between; padding: var(--s-3) var(--s-3) 0 var(--s-5); }
+.dialog-head h2 { margin: 0; font-size: var(--t-lg); text-transform: none; letter-spacing: 0; color: var(--fg); }
+.dialog-body { padding: var(--s-3) var(--s-5) var(--s-4); }
+.dialog-actions { display: flex; justify-content: flex-end; gap: var(--s-2); padding: var(--s-3) var(--s-5) var(--s-4); border-top: 1px solid var(--line); }
+
+.table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); overscroll-behavior: contain; }
+.table { border-collapse: separate; border-spacing: 0; width: 100%; font-variant-numeric: tabular-nums; font-size: var(--t-sm); }
+.table th { position: sticky; top: 0; z-index: 1; background: var(--surface-2); text-align: left; font-weight: 600; height: var(--row);
+  padding: 0 var(--s-3); border-bottom: 1px solid var(--line); white-space: nowrap; }
+.table td { height: var(--row); padding: 0 var(--s-3); border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+.table .num { text-align: right; }
+.table tr.pad td { padding: 0; border: 0; height: inherit; }
+.table tbody tr:not(.pad):hover td { background: var(--surface-2); }
+
+.chart { width: 100%; height: auto; display: block; overflow: visible; }
+.chart .gridline { stroke: var(--line); stroke-width: 1; }
+.chart .axis-label { fill: var(--muted); font-size: 14px; font-family: var(--font); }
+.chart .series { fill: none; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round;
+  transition: d calc(var(--spring-gentle-ms) * 1ms) var(--spring-gentle); }
+.chart .dot { fill-opacity: .8; transition: cx calc(var(--spring-gentle-ms) * 1ms) var(--spring-gentle), cy calc(var(--spring-gentle-ms) * 1ms) var(--spring-gentle); }
+.chart .bar { transform-box: fill-box; transform-origin: bottom;
+  transition: y calc(var(--spring-gentle-ms) * 1ms) var(--spring-gentle), height calc(var(--spring-gentle-ms) * 1ms) var(--spring-gentle); }
+.chart .s1 { stroke: var(--chart-1); fill: var(--chart-1); } .chart .s2 { stroke: var(--chart-2); fill: var(--chart-2); }
+.chart .s3 { stroke: var(--chart-3); fill: var(--chart-3); } .chart .s4 { stroke: var(--chart-4); fill: var(--chart-4); }
+.chart .s5 { stroke: var(--chart-5); fill: var(--chart-5); } .chart .s6 { stroke: var(--chart-6); fill: var(--chart-6); }
+.chart path.series { fill: none; }
+.chart .legend-item { font-size: 14px; font-family: var(--font); stroke: none; }
+
+@keyframes hx-fade { from { opacity: 0; } }
+@keyframes hx-rise { from { opacity: 0; transform: translateY(6px); } }
+@keyframes hx-pop { from { opacity: 0; transform: scale(.96); } }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after, ::backdrop { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
+}
 """
+
+# --- The client. --------------------------------------------------------------------------
+#
+# The only JavaScript an app runs. It builds the page from tree data, applies each frame's
+# patch operations, turns DOM events into `{msg, value}` posts, and plays the motion the view
+# declared. It never decides anything an app would: what to show is always Helix's.
 
 CLIENT = """
 (() => {
   const root = document.getElementById('root');
-  // The page is BUILT FROM TREE DATA, not parsed from HTML, so a path of child indices
-  // names exactly one node: a parser's fix-ups (the <tbody> it adds to a <table>) would
-  // otherwise make the server's paths and the browser's nodes disagree. Each frame is a
-  // list of patch operations from `view_diff`, applied in order: only what changed is
-  // touched, so a node that is moving keeps its running transition.
   const SVG = 'http://www.w3.org/2000/svg';
+  const still = matchMedia('(prefers-reduced-motion: reduce)');
+  const css = getComputedStyle(document.documentElement);
+  const spring = (name) => ({ duration: Number(css.getPropertyValue('--spring-' + name + '-ms')) || 300,
+                              easing: css.getPropertyValue('--spring-' + name).trim() || 'ease-out' });
+
+  // --- Building and patching. The page is BUILT FROM TREE DATA, not parsed from HTML, so a
+  // path of child indices names exactly one node (a parser would add a <tbody> to a table).
   function build(n, ns) {
     if (typeof n === 'string') return document.createTextNode(n);
     const [tag, attrs, kids] = n;
@@ -190,78 +673,176 @@ CLIENT = """
     const el = here ? document.createElementNS(here, tag) : document.createElement(tag);
     for (const [k, v] of attrs) el.setAttribute(k, v);
     if (tag === 'input' && el.hasAttribute('value')) el.value = el.getAttribute('value');
+    if (tag === 'input' && el.hasAttribute('checked')) el.checked = true;
     const inner = tag === 'foreignObject' ? null : here;
     for (const c of kids) el.appendChild(build(c, inner));
     return el;
   }
   const nsOf = (p) => (p && p.namespaceURI === SVG && p.localName !== 'foreignObject' ? SVG : null);
-  function at(path) { let n = root.firstChild; for (const i of path) n = n.childNodes[i]; return n; }
-  // Focus, the caret and scroll positions belong to the person, not the frame. A patch that
-  // only changes attributes leaves them alone by construction; one that REPLACES the focused
-  // node (or the root, after a reconnect) would drop them, so they are noted first and given
-  // back to the node that now carries the same key or id.
-  const ident = (n) => n && n.getAttribute && (n.getAttribute('data-key') || n.id || null);
-  function byIdent(k) {
-    return root.querySelector('[data-key="' + CSS.escape(k) + '"]') || document.getElementById(k);
+  // A node that is playing its exit animation is still in the document but no longer in the
+  // tree, so indices skip it; a parent with none leaving is indexed directly.
+  const live = (p) => (p.__leaving ? Array.from(p.childNodes).filter((c) => !c.__gone) : p.childNodes);
+  const kid = (p, i) => live(p)[i];
+  function at(path) { let n = root.firstChild; for (const i of path) n = kid(n, i); return n; }
+  const owned = (n) => n === document.activeElement;   // a focused control owns its value (D6)
+  function setAttr(n, k, v) {
+    n.setAttribute(k, v);
+    if (owned(n)) return;
+    if (k === 'value' && (n.tagName === 'INPUT' || n.tagName === 'SELECT')) n.value = v;
+    else if (k === 'checked' && n.tagName === 'INPUT') n.checked = true;
+    else if (k === 'selected' && n.tagName === 'OPTION' && !owned(n.parentNode)) n.selected = true;
   }
+  function removeAttr(n, k) {
+    n.removeAttribute(k);
+    if (k === 'checked' && n.tagName === 'INPUT' && !owned(n)) n.checked = false;
+  }
+
+  // --- Motion. `enter` and `exit` name a preset; `layout` animates a node from where it was
+  // to where it is (FLIP). All of it is transform and opacity — the compositor's properties.
+  const PRESETS = {
+    fade: [{ opacity: 0 }, { opacity: 1 }],
+    rise: [{ opacity: 0, transform: 'translateY(8px)' }, { opacity: 1, transform: 'none' }],
+    pop: [{ opacity: 0, transform: 'scale(.96)' }, { opacity: 1, transform: 'none' }],
+    grow: [{ transform: 'scaleY(0)' }, { transform: 'none' }],
+  };
+  function enter(n) {
+    if (still.matches || !(n instanceof Element)) return;
+    const els = n.matches('[data-enter]') ? [n] : [];
+    for (const e of [...els, ...n.querySelectorAll('[data-enter]')]) {
+      const kf = PRESETS[e.dataset.enter];
+      if (kf) e.animate(kf, { ...spring('gentle'), fill: 'backwards' });
+    }
+  }
+  function leave(p, n) {
+    const kf = n instanceof Element && !still.matches && PRESETS[n.dataset.exit];
+    if (!kf) { p.removeChild(n); return; }
+    n.__gone = true;
+    p.__leaving = (p.__leaving || 0) + 1;
+    n.setAttribute('aria-hidden', 'true');
+    n.inert = true;
+    n.style.pointerEvents = 'none';
+    const done = () => {
+      const moving = flipFrom();
+      if (n.parentNode === p) p.removeChild(n);
+      p.__leaving -= 1;
+      flipTo(moving);
+    };
+    n.animate([...kf].reverse(), { duration: 160, easing: 'ease-in', fill: 'forwards' }).finished.then(done, done);
+  }
+  function flipFrom() {
+    if (still.matches) return null;
+    const m = new Map();
+    for (const e of root.querySelectorAll('[data-layout]')) if (!e.__gone) m.set(e, e.getBoundingClientRect());
+    return m.size ? m : null;
+  }
+  function flipTo(m) {
+    if (!m) return;
+    const s = spring('snappy');
+    for (const [e, a] of m) {
+      if (!e.isConnected || e.__gone) continue;
+      const b = e.getBoundingClientRect();
+      const dx = a.left - b.left, dy = a.top - b.top;
+      if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) e.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }], s);
+    }
+  }
+
+  // --- Focus, the caret and scroll positions belong to the person, not the frame. A frame
+  // that replaces or removes the focused node would drop them, so they are noted first and
+  // given back to the node now carrying the same key or id — or, for a menu that closed under
+  // the focus, to the button that controls it.
+  const ident = (n) => n && n.getAttribute && (n.getAttribute('data-key') || n.id || null);
+  const byIdent = (k) => root.querySelector('[data-key="' + CSS.escape(k) + '"]') || document.getElementById(k);
   function note() {
     const a = document.activeElement;
-    const k = a && a !== document.body && root.contains(a) ? ident(a) : null;
+    const inside = a && a !== document.body && root.contains(a);
+    const k = inside ? ident(a) : null;
+    let ctl = null;
+    for (let p = inside ? a : null; p && p !== root; p = p.parentElement) {
+      if (p.id) { const c = root.querySelector('[aria-controls="' + CSS.escape(p.id) + '"]'); if (c) { ctl = c; break; } }
+    }
     let sel = null;
     try { if (k && a.selectionStart != null) sel = [a.selectionStart, a.selectionEnd, a.selectionDirection]; } catch (_) {}
     const scrolls = [];
-    for (const n of root.querySelectorAll('[data-key]')) if (n.scrollTop || n.scrollLeft) scrolls.push([n.getAttribute('data-key'), n.scrollTop, n.scrollLeft]);
-    return {a, k, sel, scrolls, x: window.scrollX, y: window.scrollY};
+    for (const n of root.querySelectorAll('[data-key], [data-scroll]')) if (n.scrollTop || n.scrollLeft) scrolls.push([n, ident(n), n.scrollTop, n.scrollLeft]);
+    return { a, inside, k, ctl, sel, scrolls, x: window.scrollX, y: window.scrollY };
   }
   function restore(s) {
-    if (s.k && !root.contains(s.a)) {
-      const n = byIdent(s.k);
+    const lost = s.inside && (!root.contains(s.a) || s.a.closest('[aria-hidden="true"]'));
+    if (lost) {
+      const n = (s.k && byIdent(s.k)) || (s.ctl && s.ctl.isConnected ? s.ctl : null);
       if (n) {
-        // A focused field owns its text, as a dragged slider owns its value: what the person
-        // typed may be ahead of the model the new node was built from.
         if (n.tagName === s.a.tagName && 'value' in n && 'value' in s.a) n.value = s.a.value;
-        n.focus({preventScroll: true});
+        n.focus({ preventScroll: true });
         try { if (s.sel && n.setSelectionRange) n.setSelectionRange(s.sel[0], s.sel[1], s.sel[2]); } catch (_) {}
       }
     }
-    for (const [k, top, left] of s.scrolls) {
-      const n = root.querySelector('[data-key="' + CSS.escape(k) + '"]');
-      if (n) { n.scrollTop = top; n.scrollLeft = left; }
+    for (const [old, k, top, left] of s.scrolls) {
+      const n = old.isConnected ? old : (k && byIdent(k));
+      if (n && (n.scrollTop !== top || n.scrollLeft !== left)) { n.scrollTop = top; n.scrollLeft = left; }
     }
     if (window.scrollX !== s.x || window.scrollY !== s.y) window.scrollTo(s.x, s.y);
   }
+
+  // --- Applying a frame.
   function apply(ops) {
-    // Only a frame that replaces nodes can lose anything; the common frame skips the bookkeeping.
-    const saved = ops.some((o) => o.op === 'replace' || o.op === 'remove') ? note() : null;
+    const structural = ops.some((o) => o.op !== 'text' && o.op !== 'attrs');
+    const saved = structural ? note() : null;
+    const moving = structural ? flipFrom() : null;
+    const arrived = [];
     for (const o of ops) {
       if (o.op === 'replace') {
         if (o.path.length === 0) root.replaceChildren(build(o.node, null));
-        else { const n = at(o.path); n.replaceWith(build(o.node, nsOf(n.parentNode))); }
+        else { const n = at(o.path); const b = build(o.node, nsOf(n.parentNode)); n.replaceWith(b); arrived.push(b); }
       } else if (o.op === 'text') {
-        at(o.path).nodeValue = o.text;
+        const t = at(o.path);
+        t.nodeValue = o.text;
+        const p = t.parentNode;
+        if (p && p.tagName === 'TEXTAREA' && !owned(p)) p.value = o.text;
       } else if (o.op === 'attrs') {
         const n = at(o.path);
-        for (const k of o.remove) n.removeAttribute(k);
-        for (const [k, v] of o.set) {
-          n.setAttribute(k, v);
-          // A slider being dragged owns its value; Helix's frame confirms it, never fights it.
-          if (k === 'value' && n.tagName === 'INPUT' && document.activeElement !== n) n.value = v;
-        }
+        for (const k of o.remove) removeAttr(n, k);
+        for (const [k, v] of o.set) setAttr(n, k, v);
       } else if (o.op === 'insert') {
         const p = at(o.path);
-        p.insertBefore(build(o.node, nsOf(p)), p.childNodes[o.at] || null);
+        const b = build(o.node, nsOf(p));
+        p.insertBefore(b, kid(p, o.at) || null);
+        arrived.push(b);
       } else if (o.op === 'remove') {
         const p = at(o.path);
-        p.removeChild(p.childNodes[o.at]);
+        leave(p, kid(p, o.at));
       } else if (o.op === 'move') {
         const p = at(o.path);
-        const n = p.childNodes[o.from];
+        const n = kid(p, o.from);
         p.removeChild(n);
-        p.insertBefore(n, p.childNodes[o.to] || null);
+        p.insertBefore(n, kid(p, o.to) || null);
       }
     }
+    for (const n of arrived) enter(n);
     if (saved) restore(saved);
+    flipTo(moving);
+    // A newly shown menu (or anything marked `autofocus`) takes focus to its first item.
+    for (const n of arrived) {
+      const f = n instanceof Element && (n.matches('[autofocus]') ? n : n.querySelector('[autofocus]'));
+      if (f) { f.focus({ preventScroll: true }); break; }
+    }
+    syncDialogs();
   }
+
+  // A modal dialog's state is the model's: `data-open` says whether it is showing.
+  function syncDialogs() {
+    for (const d of root.querySelectorAll('dialog[data-modal]')) {
+      const want = d.getAttribute('data-open') === 'true';
+      if (want && !d.open) d.showModal();
+      else if (!want && d.open && !d.__closing) {
+        if (still.matches) { d.close(); continue; }
+        d.__closing = true;
+        const done = () => { d.__closing = false; if (d.getAttribute('data-open') !== 'true') d.close(); };
+        d.animate([{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'scale(.97)' }], { duration: 140, easing: 'ease-in' }).finished.then(done, done);
+      }
+    }
+  }
+
+  // --- The wire. A frame is patch operations and the theme.
   let version = 0;
   const es = new EventSource('/events');
   es.onmessage = (e) => {
@@ -271,25 +852,95 @@ CLIENT = """
     version += 1;
     document.documentElement.dataset.version = version;
   };
-  // Events: one request in flight, and only the LATEST value per message waiting behind it,
-  // so dragging a slider sends what the user is pointing at, not every pixel on the way.
-  const pending = new Map();
+  // Events go out one request at a time, in order. A CONTINUOUS one — typing, dragging,
+  // scrolling — replaces the same message still waiting, so the app sees where the person is,
+  // not every step on the way; a discrete one (a click, a choice) is never dropped.
+  const queue = [];
   let inflight = false;
   function flush() {
-    if (inflight || pending.size === 0) return;
-    const [msg, ev] = pending.entries().next().value;
-    pending.delete(msg);
+    if (inflight || queue.length === 0) return;
+    const ev = queue.shift().ev;
     inflight = true;
-    fetch('/event', {method: 'POST', body: JSON.stringify(ev)}).finally(() => { inflight = false; flush(); });
+    fetch('/event', { method: 'POST', body: JSON.stringify(ev) }).finally(() => { inflight = false; flush(); });
   }
-  function post(ev) { pending.set(ev.msg, ev); flush(); }
+  function post(ev, continuous) {
+    if (continuous) {
+      const same = queue.find((q) => q.continuous && q.ev.msg === ev.msg);
+      if (same) { same.ev = ev; return; }
+    }
+    queue.push({ ev, continuous });
+    flush();
+  }
+  const valueOf = (t) => (t.type === 'checkbox' ? t.checked : t.type === 'range' || t.type === 'number' ? Number(t.value) : t.value);
+
   document.addEventListener('click', (e) => {
     const t = e.target.closest('[data-click]');
-    if (t) post({msg: t.dataset.click, value: null});
+    if (t && !t.disabled) post({ msg: t.dataset.click, value: t.dataset.value ?? null }, false);
   });
   document.addEventListener('input', (e) => {
     const t = e.target.closest('[data-input]');
-    if (t) post({msg: t.dataset.input, value: t.type === 'range' || t.type === 'number' ? Number(t.value) : t.value});
+    if (t) post({ msg: t.dataset.input, value: valueOf(t) }, true);
+  });
+  document.addEventListener('change', (e) => {
+    const t = e.target.closest('[data-change]');
+    if (t) post({ msg: t.dataset.change, value: valueOf(t) }, false);
+  });
+  document.addEventListener('submit', (e) => {
+    const f = e.target.closest('[data-submit]');
+    if (!f) return;
+    e.preventDefault();
+    post({ msg: f.dataset.submit, value: Object.fromEntries(new FormData(f)) }, false);
+  });
+  document.addEventListener('scroll', (e) => {
+    const t = e.target instanceof Element && e.target.closest('[data-scroll]');
+    if (t) post({ msg: t.dataset.scroll, value: Math.round(t.scrollTop) }, true);
+  }, true);
+
+  // Dismissal: Escape inside an element that asks for it, or a press outside it. A dialog's
+  // Escape arrives as its `cancel` event, and its backdrop is a press on the dialog itself
+  // outside its box.
+  const openNow = (d) => d.tagName !== 'DIALOG' || d.open;
+  document.addEventListener('pointerdown', (e) => {
+    for (const d of root.querySelectorAll('[data-dismiss]')) {
+      if (!openNow(d) || d.__gone) continue;
+      if (d.tagName === 'DIALOG') {
+        if (e.target !== d) continue;
+        const r = d.getBoundingClientRect();
+        if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) continue;
+      } else if (d.contains(e.target)) continue;
+      post({ msg: d.dataset.dismiss, value: null }, false);
+    }
+  });
+  root.addEventListener('cancel', (e) => {
+    const d = e.target;
+    if (d.tagName === 'DIALOG' && d.dataset.dismiss) { e.preventDefault(); post({ msg: d.dataset.dismiss, value: null }, false); }
+  }, true);
+
+  // Keyboard paths for the composite widgets: tabs and menus move with the arrow keys, Home
+  // and End (WAI-ARIA Authoring Practices); a tab is selected as it is reached.
+  document.addEventListener('keydown', (e) => {
+    const t = e.target;
+    if (e.key === 'Escape') {
+      const d = t.closest && t.closest('[data-dismiss]');
+      if (d && d.tagName !== 'DIALOG') { e.preventDefault(); post({ msg: d.dataset.dismiss, value: null }, false); }
+      return;
+    }
+    const group = t.closest && (t.closest('[role="tablist"]') || t.closest('[role="menu"]'));
+    if (!group) return;
+    const tablist = group.getAttribute('role') === 'tablist';
+    const items = Array.from(group.querySelectorAll(tablist ? '[role="tab"]' : '[role="menuitem"]'));
+    const i = items.indexOf(t);
+    if (i < 0) return;
+    const prev = tablist ? 'ArrowLeft' : 'ArrowUp', next = tablist ? 'ArrowRight' : 'ArrowDown';
+    let j = null;
+    if (e.key === next) j = (i + 1) % items.length;
+    else if (e.key === prev) j = (i - 1 + items.length) % items.length;
+    else if (e.key === 'Home') j = 0;
+    else if (e.key === 'End') j = items.length - 1;
+    if (j === null) return;
+    e.preventDefault();
+    items[j].focus();
+    if (tablist) items[j].click();
   });
 })();
 """
@@ -298,8 +949,8 @@ fn page(spec, model) = do {
   title = html_escape("{spec.title}")
   body = render((spec.view)(model))
   theme = theme_of(spec, model)
-  extra = if spec.get("style").is_missing() then "" else spec.style
-  "<!doctype html><html lang=\"en\" data-theme=\"{theme}\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{title}</title><style>{THEME}{extra}</style></head><body><div id=\"root\">{body}</div><script>{CLIENT}</script></body></html>"
+  extra = spec.get("style") ?? ""
+  "<!doctype html><html lang=\"en\" data-theme=\"{theme}\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{title}</title><style>:root {{ {motion_tokens()} }}{THEME}{extra}</style></head><body><main id=\"root\">{body}</main><script>{CLIENT}</script></body></html>"
 }
 fn theme_of(spec, model) = if spec.get("theme").is_missing() then "light" else (spec.theme)(model)
 

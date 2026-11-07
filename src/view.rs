@@ -105,9 +105,39 @@ fn parse(v: &Value, line: usize, col: usize) -> Result<Node, HelixError> {
     let props = get(v, "props").unwrap_or(Value::Missing);
     let key = get(&props, "key").map(|k| text_of(&k, line, col)).transpose()?;
     let mut attrs: Vec<(String, String)> = Vec::new();
-    for (prop, out) in [("class", "class"), ("key", "data-key"), ("click", "data-click"), ("input", "data-input")] {
+    // The props the runtime knows, in a fixed order so a tree renders to one string. The
+    // event props (`click`, `input`, `change`, `submit`, `dismiss`, `scroll`) name the message
+    // the event sends, and `value` is what a click sends with it; `enter`/`exit` name a motion
+    // preset the client plays when the node arrives or leaves, and `layout` asks it to animate
+    // the node to its new position (FLIP).
+    for (prop, out) in [
+        ("class", "class"),
+        ("id", "id"),
+        ("role", "role"),
+        ("key", "data-key"),
+        ("click", "data-click"),
+        ("value", "data-value"),
+        ("input", "data-input"),
+        ("change", "data-change"),
+        ("submit", "data-submit"),
+        ("dismiss", "data-dismiss"),
+        ("scroll", "data-scroll"),
+        ("enter", "data-enter"),
+        ("exit", "data-exit"),
+        ("layout", "data-layout"),
+    ] {
         if let Some(v) = get(&props, prop) {
             attrs.push((out.to_string(), text_of(&v, line, col)?));
+        }
+    }
+    // `aria` is a record of ARIA states and properties: `{label: "Close", expanded: false}` is
+    // `aria-label="Close" aria-expanded="false"` — `_` becomes `-`, and a Bool is written as
+    // the words ARIA expects rather than dropped, since `aria-expanded="false"` means something.
+    if let Some(aria) = get(&props, "aria").as_ref().and_then(pairs) {
+        for (k, v) in aria {
+            if !matches!(v, Value::Missing) {
+                attrs.push((format!("aria-{}", k.replace('_', "-")), text_of(&v, line, col)?));
+            }
         }
     }
     // `style` is a record of CSS properties (`border_radius` is `border-radius`), and
@@ -127,9 +157,15 @@ fn parse(v: &Value, line: usize, col: usize) -> Result<Node, HelixError> {
     if !styled.is_empty() {
         attrs.push(("style".to_string(), styled));
     }
+    // Raw attributes. A Bool is an HTML boolean attribute: `disabled: true` is present (as
+    // `disabled=""`), `disabled: false` is absent — `disabled="false"` would still disable.
     if let Some(raw) = get(&props, "attrs").as_ref().and_then(pairs) {
         for (k, v) in raw {
-            attrs.push((k, text_of(&v, line, col)?));
+            match v {
+                Value::Bool(false) | Value::Missing => {}
+                Value::Bool(true) => attrs.push((k, String::new())),
+                v => attrs.push((k, text_of(&v, line, col)?)),
+            }
         }
     }
     let kids = match get(v, "children") {
@@ -344,6 +380,34 @@ mod tests {
             Value::Array(a) => a.to_values().iter().map(|o| format!("{o}")).collect(),
             other => panic!("not an array: {other}"),
         }
+    }
+
+    #[test]
+    fn component_props_render_in_a_fixed_order_with_aria_and_boolean_attributes() {
+        let t = el(
+            "button",
+            vec![
+                ("attrs", rec(vec![("disabled", Value::Bool(true)), ("hidden", Value::Bool(false)), ("type", s("button"))])),
+                ("aria", rec(vec![("expanded", Value::Bool(false)), ("has_popup", s("menu"))])),
+                ("layout", Value::Bool(true)),
+                ("exit", s("fade")),
+                ("enter", s("pop")),
+                ("dismiss", s("close")),
+                ("value", s("7")),
+                ("change", s("c")),
+                ("role", s("switch")),
+                ("id", s("b1")),
+                ("class", s("btn")),
+            ],
+            vec![],
+        );
+        let Value::Str(h) = view_html(&t, 0, 0).expect("render") else { panic!() };
+        assert_eq!(
+            h.as_str(),
+            "<button class=\"btn\" id=\"b1\" role=\"switch\" data-value=\"7\" data-change=\"c\" data-dismiss=\"close\" \
+             data-enter=\"pop\" data-exit=\"fade\" data-layout=\"true\" aria-expanded=\"false\" \
+             aria-has-popup=\"menu\" disabled=\"\" type=\"button\"></button>"
+        );
     }
 
     #[test]
