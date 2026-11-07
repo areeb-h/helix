@@ -1,3 +1,5 @@
+exit: 0
+--- stdout ---
 [true, true, true, true]
 data_table offset NaN: draws
 data_table offset 1e30: draws
@@ -21,3 +23,4 @@ every(0): raises: a timer's period is a positive number of milliseconds, not 0
 every("x"): raises: a timer's period is a positive number of milliseconds, not x
 every(1000, 5): raises: a timer's message is a string, not Int
 {every: 250, msg: "tick"}
+--- stderr ---

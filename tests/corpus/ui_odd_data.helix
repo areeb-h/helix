@@ -9,9 +9,6 @@ fn draws(name, f) = do {
   print("{name}: {if r.ok then "draws" else "raises: {r.error}"}")
 }
 
-
-
-
 # Numbers that are not numbers.
 df = dataframe({x: [1.5, nan, inf, -inf, 1234.5], y: ["a", "b", "c", "d", "e"]})
 t = ui.render(ui.data_table("t", df, 0, "s", "T"))
