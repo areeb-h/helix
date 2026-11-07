@@ -287,6 +287,49 @@ pub(super) fn a_file_size(name: &str, args: Vec<Value>, line: usize, col: usize)
     }
 }
 
+/// `file_info(path)` — what a path IS, without opening it: `{name, kind, size, modified}`.
+///
+/// `kind` is `"dir"`, `"file"`, `"link"` or `"other"`, read with `lstat`: a symbolic link is
+/// reported AS a link, never as what it points to. That is the property a program confining
+/// itself to a directory needs — it can see that a name leads elsewhere before following it,
+/// which `file_exists` and `file_size` (both of which follow links) cannot tell it. `size` is
+/// the entry's own length in bytes; `modified` is seconds since the Unix epoch, or `missing`
+/// where the platform keeps no such time.
+#[inline]
+pub(super) fn a_file_info(name: &str, args: Vec<Value>, line: usize, col: usize) -> Result<Value, HelixError> {
+    arity(name, &args, 1, line, col)?;
+    let s = match &args[0] {
+        Value::Str(s) => s,
+        other => return Err(type_err("file_info", "a string path", other, line, col)),
+    };
+    let path = std::path::Path::new(s.as_str());
+    let md = std::fs::symlink_metadata(path).map_err(|e| {
+        HelixError::new(format!("could not stat `{s}`: {e}"), line, col).hint("`file_exists(path)` asks first without raising.")
+    })?;
+    let ft = md.file_type();
+    let kind = if ft.is_symlink() {
+        "link"
+    } else if ft.is_dir() {
+        "dir"
+    } else if ft.is_file() {
+        "file"
+    } else {
+        "other"
+    };
+    let modified = md
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(Value::Missing, |d| Value::Float(d.as_secs_f64()));
+    let base = path.file_name().map_or_else(|| s.to_string(), |n| n.to_string_lossy().into_owned());
+    Ok(Value::Record(Rc::new(vec![
+        (Symbol::intern("name"), Value::Str(Rc::new(base))),
+        (Symbol::intern("kind"), Value::Str(Rc::new(kind.to_string()))),
+        (Symbol::intern("size"), Value::Int(md.len() as i64)),
+        (Symbol::intern("modified"), modified),
+    ])))
+}
+
 /// `read_at(path, offset, len)` — read a slice WITHOUT reading the whole file.
 ///
 /// The primitive that makes a page-oriented store possible: every read was O(file), so an

@@ -1831,12 +1831,35 @@ CLIENT = """
     if (saved) restore(saved);
     flipTo(moving);
     sharedTo(sharing);
+    reveal();
+    for (const n of arrived) if (n instanceof Element) place(n);
     // A newly shown menu (or anything marked `autofocus`) takes focus to its first item.
     for (const n of arrived) {
       const f = n instanceof Element && (n.matches('[autofocus]') ? n : n.querySelector('[autofocus]'));
       if (f) { f.focus({ preventScroll: true }); break; }
     }
     syncDialogs();
+  }
+
+  // The node marked `reveal` is scrolled into view when it becomes the revealed one — the
+  // selected row a key moved to — and left alone while it stays so, so the person's own
+  // scrolling is not undone by every frame.
+  let revealed = null;
+  function reveal() {
+    const n = root.querySelector('[data-reveal="true"]');
+    const id = n && (ident(n) || n);
+    if (n && id !== revealed) n.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    revealed = id;
+  }
+  // A menu placed where the pointer was stays on the screen: moved left or up by what would
+  // fall off the edge.
+  function place(n) {
+    for (const m of [n, ...n.querySelectorAll('.context-menu')]) {
+      if (!m.classList || !m.classList.contains('context-menu')) continue;
+      const r = m.getBoundingClientRect();
+      const dx = Math.max(0, r.right - innerWidth + 8), dy = Math.max(0, r.bottom - innerHeight + 8);
+      if (dx || dy) { m.style.left = Math.max(8, r.left - dx) + 'px'; m.style.top = Math.max(8, r.top - dy) + 'px'; }
+    }
   }
 
   // A modal dialog's state is the model's: `data-open` says whether it is showing.
@@ -1910,9 +1933,28 @@ CLIENT = """
   const num = (s) => { const n = Number(s); return s.trim() === '' || !Number.isFinite(n) ? null : n; };
   const valueOf = (t) => (t.type === 'checkbox' ? t.checked : t.type === 'range' || t.type === 'number' ? num(t.value) : t.value);
 
+  // Which modifier keys a click carried — "ctrl", "shift", "ctrl+shift" or "" — for the
+  // selection gestures of a desktop list. Command on a Mac counts as Ctrl.
+  const mods = (e) => [(e.ctrlKey || e.metaKey) && 'ctrl', e.altKey && 'alt', e.shiftKey && 'shift'].filter(Boolean).join('+');
   document.addEventListener('click', (e) => {
+    const cp = e.target.closest('[data-copy]');
+    if (cp && navigator.clipboard) navigator.clipboard.writeText(cp.dataset.copy).catch(() => {});
     const t = e.target.closest('[data-click]');
-    if (t && !t.disabled) post({ msg: t.dataset.click, value: t.dataset.value ?? null }, false);
+    if (t && !t.disabled) post({ msg: t.dataset.click, value: t.dataset.value ?? null, mods: mods(e) }, false);
+  });
+  document.addEventListener('dblclick', (e) => {
+    const t = e.target.closest('[data-dblclick]');
+    if (t) { e.preventDefault(); post({ msg: t.dataset.dblclick, value: t.dataset.value ?? null, mods: mods(e) }, false); }
+  });
+  // A right click (or the menu key) where the view asked for one: the node's value and where
+  // the pointer is, so the app can put its menu there.
+  document.addEventListener('contextmenu', (e) => {
+    const t = e.target.closest('[data-contextmenu]');
+    if (!t) return;
+    e.preventDefault();
+    let x = e.clientX, y = e.clientY;
+    if (!x && !y) { const r = t.getBoundingClientRect(); x = r.left + 24; y = r.bottom; }
+    post({ msg: t.dataset.contextmenu, value: { value: t.dataset.value ?? null, x: Math.round(x), y: Math.round(y) }, mods: mods(e) }, false);
   });
   document.addEventListener('input', (e) => {
     const t = e.target.closest('[data-input]');
@@ -1963,8 +2005,38 @@ CLIENT = """
 
   // Keyboard paths for the composite widgets: tabs and menus move with the arrow keys, Home
   // and End (WAI-ARIA Authoring Practices); a tab is selected as it is reached.
+  // A key as a chord: "Ctrl+K", "Shift+ArrowDown", "Enter", "/". A printed character carries
+  // Shift already ("?" rather than "Shift+/"), so Shift is named only on keys that print none.
+  function chord(e) {
+    const k = e.key === ' ' ? 'Space' : e.key.length === 1 ? e.key.toUpperCase() : e.key;
+    const m = [(e.ctrlKey || e.metaKey) && 'Ctrl', e.altKey && 'Alt', e.shiftKey && (e.key.length > 1 || e.key === ' ') && 'Shift'].filter(Boolean);
+    return [...m, k].join('+');
+  }
+  const editable = (t) => t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName);
+  // In a text field the keys that edit text are the field's own: only a chord with Ctrl or
+  // Alt, Escape, Enter and the vertical arrows reach a shortcut from there.
+  const fieldKey = (c) => /^(Ctrl|Alt)\+/.test(c) || ['Escape', 'Enter', 'ArrowUp', 'ArrowDown'].includes(c);
+  // Shortcuts: the nearest node with `keydown` whose `shortcuts` name this chord; with nothing
+  // focused, the app's own. A shortcut outside an open dialog never fires from inside it.
+  function shortcut(e) {
+    const t = e.target, c = chord(e);
+    if (editable(t) && !fieldKey(c)) return false;
+    let scope = t.closest && t.closest('[data-keydown]');
+    while (scope && !(scope.dataset.shortcuts || '').split(' ').includes(c)) scope = scope.parentElement && scope.parentElement.closest('[data-keydown]');
+    if (!scope && (t === document.body || !root.contains(t))) {
+      const top = root.querySelector('[data-keydown]');
+      if (top && (top.dataset.shortcuts || '').split(' ').includes(c)) scope = top;
+    }
+    if (!scope) return false;
+    const d = t.closest && t.closest('dialog');
+    if (d && !d.contains(scope)) return false;
+    e.preventDefault();
+    post({ msg: scope.dataset.keydown, value: c }, false);
+    return true;
+  }
   document.addEventListener('keydown', (e) => {
     const t = e.target;
+    if (!e.isComposing && shortcut(e)) return;
     if (e.key === 'Escape') {
       const d = t.closest && t.closest('[data-dismiss]');
       if (d && d.tagName !== 'DIALOG') { e.preventDefault(); post({ msg: d.dataset.dismiss, value: null }, false); }

@@ -1112,6 +1112,14 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         notes: "O(1). `read_text(p).length()` is O(file) AND counts CHARACTERS, a different number for any non-ASCII content, so it is neither a fast nor a correct substitute. Pairs with `read_at` to walk a file page by page. Keywords: size, length, bytes, stat, metadata, database, storage.",
     },
     DocEntry {
+        name: "file_info",
+        sig: "file_info(path)",
+        doc: "What a path is, without following it: {name, kind, size, modified}.",
+        example: "file_info(\"data\").kind",
+        example_out: "",
+        notes: "`kind` is \"dir\", \"file\", \"link\" or \"other\", read with lstat: a SYMBOLIC LINK IS REPORTED AS A LINK, not as what it points to, so a program that keeps to one directory can see a name leads elsewhere before it follows it (`file_exists` and `file_size` follow links). `size` is the entry's own length in bytes; `modified` is seconds since the Unix epoch, comparable with `now()`, or missing where the platform keeps none. Raises for a path that does not exist. Pairs with `read_dir` to list a folder with its details. Keywords: stat, lstat, metadata, directory, folder, symlink, modified, mtime, size, is dir, file manager.",
+    },
+    DocEntry {
         name: "read_at",
         sig: "read_at(path, offset, len)",
         doc: "Read at most len bytes from offset, without reading the whole file.",
