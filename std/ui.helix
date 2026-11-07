@@ -1794,7 +1794,7 @@ CLIENT = """
   function flipFrom() {
     if (still.matches) return null;
     const m = new Map();
-    for (const e of root.querySelectorAll('[data-layout]')) if (!e.__gone && !e.dataset.share) m.set(e, e.getBoundingClientRect());
+    for (const e of root.querySelectorAll('[data-layout]')) if (!e.__gone && !e.__held && !e.dataset.share) m.set(e, e.getBoundingClientRect());
     return m.size ? m : null;
   }
   function currentVelocity(e) {
@@ -1805,26 +1805,30 @@ CLIENT = """
   }
   function flipTo(m) {
     if (!m) return;
-    const sp = springOf('spatial');
     for (const [e, a] of m) {
       if (!e.isConnected || e.__gone) continue;
       const v = currentVelocity(e);
-      const old = motions.get(e);
-      if (old) for (const an of old.anims) an.cancel();
       const b = e.getBoundingClientRect();
-      const d = [a.left - b.left, a.top - b.top];
-      if (Math.abs(d[0]) < 0.5 && Math.abs(d[1]) < 0.5) { motions.delete(e); continue; }
-      const axes = d.map((dist, i) => {
-        if (Math.abs(dist) < 0.5) return null;
-        // The velocity of the offset, as a fraction of the new distance per second; the offset
-        // shrinks toward zero, so moving toward the target is negative velocity.
-        return { from: dist, ...curve(sp, -v[i] / dist) };
-      });
-      const anims = [];
-      if (axes[0]) anims.push(e.animate([{ transform: `translateX(${d[0]}px)` }, { transform: 'translateX(0)' }], { duration: axes[0].ms, easing: axes[0].easing, composite: 'add' }));
-      if (axes[1]) anims.push(e.animate([{ translate: `0 ${d[1]}px` }, { translate: '0 0' }], { duration: axes[1].ms, easing: axes[1].easing, composite: 'add' }));
-      motions.set(e, { t0: performance.now(), axes, anims });
+      springFrom(e, [a.left - b.left, a.top - b.top], v);
     }
+  }
+  // `e` is drawn at its place in the layout and seen `d` away from it, moving at `v` (px/s):
+  // it springs home on each axis from there, at that speed.
+  function springFrom(e, d, v) {
+    const old = motions.get(e);
+    if (old) for (const an of old.anims) an.cancel();
+    if (Math.abs(d[0]) < 0.5 && Math.abs(d[1]) < 0.5) { motions.delete(e); return; }
+    const sp = springOf('spatial');
+    const axes = d.map((dist, i) => {
+      if (Math.abs(dist) < 0.5) return null;
+      // The velocity of the offset, as a fraction of the new distance per second; the offset
+      // shrinks toward zero, so moving toward the target is negative velocity.
+      return { from: dist, ...curve(sp, -v[i] / dist) };
+    });
+    const anims = [];
+    if (axes[0]) anims.push(e.animate([{ transform: `translateX(${d[0]}px)` }, { transform: 'translateX(0)' }], { duration: axes[0].ms, easing: axes[0].easing, composite: 'add' }));
+    if (axes[1]) anims.push(e.animate([{ translate: `0 ${d[1]}px` }, { translate: '0 0' }], { duration: axes[1].ms, easing: axes[1].easing, composite: 'add' }));
+    motions.set(e, { t0: performance.now(), axes, anims });
   }
 
   // Shared elements: a node marked `share: "name"` that is in this frame and the last — the
@@ -1987,7 +1991,11 @@ CLIENT = """
       if (d.css != null) { const st = document.getElementById('hx-style'); if (st && st.textContent !== d.css) st.textContent = d.css; }
       if (d.effects != null) { if (d.effects === 'auto') delete document.documentElement.dataset.effects; else document.documentElement.dataset.effects = d.effects; }
       if (d.title != null && document.title !== d.title) document.title = d.title;
+      // A gesture this frame answers lands where the frame puts it, from where it was let go.
+      const due = d.acks ? settling.filter((s) => d.acks.includes(s.seq)) : [];
+      const seen = due.map(boxes);
       apply(d.ops);
+      due.forEach((s, i) => settle(s, seen[i]));
       document.documentElement.dataset.theme = d.theme || 'light';
       version += 1;
       document.documentElement.dataset.version = version;
@@ -2101,6 +2109,262 @@ CLIENT = """
     if (d.tagName === 'DIALOG' && d.dataset.dismiss) { e.preventDefault(); post({ msg: d.dataset.dismiss, value: null }, false); }
   }, true);
 
+
+  // --- Gestures: dragging. What can be dragged, and which way, is the view's data:
+  //
+  //  - `drag` (with `drag_axis`): the node follows the pointer here, on the page, with no
+  //    round trip. Let go, the app is sent the node's `value` (what a click would send) with
+  //    `drag: {dx, dy, vx, vy}`, and its next frame decides what became of the node — kept,
+  //    moved or gone. It springs there from where it was let go, at the speed it was thrown.
+  //    With `drag_commit` (px), only a throw that would carry it that far, counting its
+  //    momentum, is sent; a smaller one springs back and the app hears nothing. An axis given
+  //    as a direction ("down", "left"…) travels freely only that way: the other way it
+  //    resists, like a rubber band.
+  //  - `reorder` on a container: its keyed children can be dragged into a new order — by
+  //    their `handle` when they have one, and on a touch screen after a short press — and the
+  //    others make room as it passes. Let go, the app is sent `{key, from, to}`. Alt with an
+  //    arrow key moves the focused one.
+  //  - `resize` on a divider: the size the pane before it would have, sent as it moves, and
+  //    once more with `done: true` when it is let go. The arrow keys move it 16 px (64 with
+  //    Shift).
+  //
+  // A gesture's last event carries a `seq`, and the frame that answers it lists it in `acks`
+  // even when nothing changed — so the page knows when the app has decided, and never guesses.
+  const AXES = { x: [1, 0], left: [1, 0], right: [1, 0], y: [0, 1], up: [0, 1], down: [0, 1], both: [1, 1] };
+  const SIGN = { left: [-1, 0], right: [1, 0], up: [0, -1], down: [0, 1] };
+  const TAB = Math.random().toString(36).slice(2, 10);
+  let g = null, seqs = 0, swallow = false;
+  const settling = [];
+  const rowwise = (box) => /^row/.test(getComputedStyle(box).flexDirection) && getComputedStyle(box).display.includes('flex');
+  const keyedKids = (box) => Array.from(box.children).filter((c) => c.dataset.key && !c.__gone);
+  function grabbed(t) {
+    if (!(t instanceof Element) || editable(t)) return null;
+    for (let p = t; p && p !== root; p = p.parentElement) {
+      if (p.dataset.resize) return { kind: 'resize', el: p };
+      const box = p.parentElement;
+      const sortable = box && box.dataset.reorder && p.dataset.key;
+      if (p.dataset.drag || sortable) {
+        const h = p.querySelector('[data-drag-handle]');
+        if (h && !h.contains(t)) return null;
+        return p.dataset.drag ? { kind: 'drag', el: p, handle: !!h } : { kind: 'reorder', el: p, box, handle: !!h };
+      }
+    }
+    return null;
+  }
+  function axisOf(hit) {
+    if (hit.kind === 'drag') { const a = hit.el.dataset.dragAxis || 'both'; return { axis: AXES[a] || AXES.both, dir: a }; }
+    const box = hit.kind === 'reorder' ? hit.box : hit.el.parentElement;
+    const a = hit.el.dataset.dragAxis || (box && rowwise(box) ? 'x' : 'y');
+    return { axis: AXES[a] || AXES.y, dir: a };
+  }
+  const rubber = (v, dim) => Math.sign(v) * (1 - 1 / ((Math.abs(v) * 0.55) / Math.max(dim, 1) + 1)) * Math.max(dim, 1);
+  // The pointer's speed over its last tenth of a second, px/s; nothing if it had stopped.
+  function velocity(track, axis) {
+    const b = track[track.length - 1];
+    const a = track.find((p) => b[0] - p[0] <= 100) || track[0];
+    const dt = (b[0] - a[0]) / 1000;
+    if (dt <= 0 || performance.now() - b[0] > 80) return [0, 0];
+    return [((b[1] - a[1]) / dt) * axis[0], ((b[2] - a[2]) / dt) * axis[1]];
+  }
+  document.addEventListener('pointerdown', (e) => {
+    if (g || e.button !== 0 || !e.isPrimary) return;
+    const hit = grabbed(e.target);
+    if (!hit || hit.el.__gone) return;
+    g = { ...hit, ...axisOf(hit), id: e.pointerId, x0: e.clientX, y0: e.clientY, on: false, d: [0, 0],
+          track: [[e.timeStamp, e.clientX, e.clientY]], touch: e.pointerType === 'touch', held: false };
+    // On a touch screen a row of a list that scrolls is dragged after a short press, so a
+    // swipe still scrolls the list.
+    if (g.touch && g.kind === 'reorder' && !g.handle) {
+      const mine = g;
+      mine.wait = setTimeout(() => { if (g === mine) { mine.held = true; mine.el.classList.add('hx-lifted'); } }, 350);
+    }
+  });
+  document.addEventListener('pointermove', (e) => {
+    if (!g || e.pointerId !== g.id) return;
+    const raw = [e.clientX - g.x0, e.clientY - g.y0];
+    g.track.push([e.timeStamp, e.clientX, e.clientY]);
+    if (g.track.length > 32) g.track.shift();
+    if (!g.on) {
+      if (Math.hypot(raw[0], raw[1]) < 4) return;
+      const along = Math.abs(raw[0] * g.axis[0]) + Math.abs(raw[1] * g.axis[1]);
+      const across = Math.abs(raw[0] * (1 - g.axis[0])) + Math.abs(raw[1] * (1 - g.axis[1]));
+      // A touch that moves across the axis first is a scroll, and a press too short is a swipe.
+      if ((g.touch && across > along) || (g.wait && !g.held)) { clearTimeout(g.wait); g = null; return; }
+      begin();
+    }
+    e.preventDefault();
+    move(raw);
+  }, { passive: false });
+  document.addEventListener('touchmove', (e) => { if (g && (g.on || g.held)) e.preventDefault(); }, { passive: false });
+  document.addEventListener('pointerup', (e) => { if (g && e.pointerId === g.id) end(false); });
+  document.addEventListener('pointercancel', (e) => { if (g && e.pointerId === g.id) end(true); });
+  // The click that ends a drag is not a click.
+  document.addEventListener('click', (e) => { if (swallow) { swallow = false; e.stopPropagation(); e.preventDefault(); } }, true);
+  function begin() {
+    const el = g.el;
+    g.on = true;
+    swallow = true;
+    try { el.setPointerCapture(g.id); } catch (_) {}
+    // Taken while it is still springing: from where it is seen, not where it is going.
+    const seen = el.getBoundingClientRect();
+    const old = motions.get(el);
+    if (old) { for (const an of old.anims) an.cancel(); motions.delete(el); }
+    const now = el.getBoundingClientRect();
+    g.x0 -= seen.left - now.left;
+    g.y0 -= seen.top - now.top;
+    g.r = now;
+    document.documentElement.classList.add('hx-gesture');
+    el.classList.add('hx-dragged');
+    if (g.kind === 'resize') {
+      const prev = el.previousElementSibling, r = prev ? prev.getBoundingClientRect() : now;
+      g.s0 = g.axis[0] ? r.width : r.height;
+      g.size = Math.round(g.s0);
+      return;
+    }
+    g.items = g.kind === 'reorder' ? keyedKids(g.box) : [el];
+    for (const it of g.items) it.__held = true;
+    if (g.kind === 'reorder') {
+      g.rects = g.items.map((it) => it.getBoundingClientRect());
+      g.from = g.to = g.items.indexOf(el);
+      const ax = g.axis[0] ? 0 : 1, lo = (r) => (ax ? r.top : r.left), hi = (r) => (ax ? r.bottom : r.right);
+      g.gap = g.rects.length > 1 ? Math.max(0, lo(g.rects[1]) - hi(g.rects[0])) : 0;
+      g.box.classList.add('hx-reordering');
+    }
+  }
+  function move(raw) {
+    const el = g.el;
+    if (g.kind === 'resize') {
+      const size = Math.round(g.s0 + raw[0] * g.axis[0] + raw[1] * g.axis[1]);
+      if (size !== g.size) { g.size = size; post({ msg: el.dataset.resize, value: size, done: false }, true); }
+      return;
+    }
+    let d = [raw[0] * g.axis[0], raw[1] * g.axis[1]];
+    if (g.kind === 'reorder') {
+      // Within the list it moves freely; past either end it resists.
+      const ax = g.axis[0] ? 0 : 1, lo = (r) => (ax ? r.top : r.left), hi = (r) => (ax ? r.bottom : r.right);
+      const a = g.rects[g.from], min = lo(g.rects[0]) - lo(a), max = hi(g.rects[g.rects.length - 1]) - hi(a), size = hi(a) - lo(a);
+      const v = d[ax];
+      d[ax] = v < min ? min + rubber(v - min, size) : v > max ? max + rubber(v - max, size) : v;
+    } else {
+      const s = SIGN[g.dir];
+      if (s) d = d.map((v, i) => (s[i] && v * s[i] < 0 ? rubber(v, i ? g.r.height : g.r.width) : v));
+    }
+    g.d = d;
+    el.style.translate = `${d[0]}px ${d[1]}px`;
+    if (g.kind === 'reorder') makeRoom();
+  }
+  // The slot the dragged row is over, and the rows between it and its old slot moved aside.
+  function makeRoom() {
+    const ax = g.axis[0] ? 0 : 1, lo = (r) => (ax ? r.top : r.left), size = (r) => (ax ? r.height : r.width);
+    const a = g.rects[g.from], c = lo(a) + size(a) / 2 + g.d[ax];
+    let to = g.from;
+    g.rects.forEach((r, j) => {
+      const mid = lo(r) + size(r) / 2;
+      if (j < g.from && c < mid) to = Math.min(to, j);
+      if (j > g.from && c > mid) to = Math.max(to, j);
+    });
+    g.to = to;
+    const step = size(a) + g.gap;
+    g.items.forEach((it, j) => {
+      if (j === g.from) return;
+      const shift = j > g.from && j <= to ? -step : j < g.from && j >= to ? step : 0;
+      it.style.translate = ax ? `0 ${shift}px` : `${shift}px 0`;
+    });
+  }
+  function end(cancel) {
+    const G = g;
+    g = null;
+    clearTimeout(G.wait);
+    G.el.classList.remove('hx-lifted');
+    if (!G.on) return;
+    setTimeout(() => { swallow = false; }, 0);
+    document.documentElement.classList.remove('hx-gesture');
+    const el = G.el;
+    el.classList.remove('hx-dragged');
+    if (G.box) G.box.classList.remove('hx-reordering');
+    if (G.kind === 'resize') {
+      post({ msg: el.dataset.resize, value: cancel ? Math.round(G.s0) : G.size, done: true }, false);
+      return;
+    }
+    const v = velocity(G.track, G.axis);
+    let ev = null;
+    if (!cancel && G.kind === 'reorder' && G.to !== G.from) ev = { msg: G.box.dataset.reorder, value: { key: el.dataset.key, from: G.from, to: G.to } };
+    if (!cancel && G.kind === 'drag') {
+      // Where its momentum would carry it: the pointer's speed for a fifth of a second.
+      const reach = G.d.map((d, i) => d + v[i] * 0.2);
+      const s = SIGN[G.dir];
+      const far = s ? reach[0] * s[0] + reach[1] * s[1] : Math.hypot(reach[0], reach[1]);
+      const commit = Number(el.dataset.dragCommit || 0);
+      if (!commit || far >= commit) ev = { msg: el.dataset.drag, value: el.dataset.value ?? null, drag: { dx: Math.round(G.d[0]), dy: Math.round(G.d[1]), vx: Math.round(v[0]), vy: Math.round(v[1]) } };
+    }
+    const s = { els: G.items, dragged: el, v };
+    if (!ev) { settle(s, null); return; }
+    s.seq = TAB + ':' + ++seqs;
+    ev.seq = s.seq;
+    // An app that never answers (an update that raised and was logged) still gets its node back.
+    s.timer = setTimeout(() => settle(s, null), 2000);
+    settling.push(s);
+    post(ev, false);
+  }
+  const boxes = (s) => new Map(s.els.map((e) => [e, e.getBoundingClientRect()]));
+  // A gesture lands: each node it held springs from where it was seen to where the layout now
+  // puts it — the dragged one at the speed it was let go. One the frame removed carries on the
+  // way it was thrown while it fades.
+  function settle(s, seen) {
+    clearTimeout(s.timer);
+    const i = settling.indexOf(s);
+    if (i >= 0) settling.splice(i, 1);
+    const was = seen || boxes(s);
+    for (const e of s.els) {
+      e.__held = false;
+      const v = e === s.dragged ? s.v : [0, 0];
+      if (e.__gone) { if (!still.matches) fling(e, v); continue; }
+      const n = e.isConnected ? e : e.dataset.key ? byIdent(e.dataset.key) : null;
+      e.style.translate = '';
+      if (!n) continue;
+      n.style.translate = '';
+      const a = was.get(e), b = n.getBoundingClientRect();
+      if (a && !still.matches) springFrom(n, [a.left - b.left, a.top - b.top], v);
+    }
+  }
+  function fling(e, v) {
+    const c = curve(springOf('effects-fast'), 0);
+    const from = e.style.translate || '0px 0px';
+    const [x, y] = from.split(' ').map((p) => parseFloat(p) || 0);
+    const to = `${x + v[0] * 0.25}px ${y + v[1] * 0.25}px`;
+    e.animate([{ translate: from }, { translate: to }], { duration: c.ms, easing: 'ease-out', fill: 'forwards' });
+  }
+
+  // The keyboard's way to do what a drag does.
+  function gestureKey(e) {
+    const t = e.target;
+    if (!(t instanceof Element) || !/^Arrow/.test(e.key) || e.ctrlKey || e.metaKey) return false;
+    const sep = t.closest('[data-resize]');
+    if (sep && !e.altKey) {
+      const { axis } = axisOf({ kind: 'resize', el: sep });
+      const dir = axis[0] ? { ArrowLeft: -1, ArrowRight: 1 }[e.key] : { ArrowUp: -1, ArrowDown: 1 }[e.key];
+      const prev = sep.previousElementSibling;
+      if (!dir || !prev) return false;
+      const r = prev.getBoundingClientRect();
+      e.preventDefault();
+      post({ msg: sep.dataset.resize, value: Math.round((axis[0] ? r.width : r.height) + dir * (e.shiftKey ? 64 : 16)), done: true }, false);
+      return true;
+    }
+    if (!e.altKey || editable(t)) return false;
+    for (let p = t; p && p !== root; p = p.parentElement) {
+      const box = p.parentElement;
+      if (!box || !box.dataset.reorder || !p.dataset.key) continue;
+      const items = keyedKids(box), from = items.indexOf(p);
+      const dir = rowwise(box) ? { ArrowLeft: -1, ArrowRight: 1 }[e.key] : { ArrowUp: -1, ArrowDown: 1 }[e.key];
+      const to = from + (dir || 0);
+      if (!dir || to < 0 || to >= items.length) return false;
+      e.preventDefault();
+      post({ msg: box.dataset.reorder, value: { key: p.dataset.key, from, to } }, false);
+      return true;
+    }
+    return false;
+  }
+
   // Keyboard paths for the composite widgets: tabs and menus move with the arrow keys, Home
   // and End (WAI-ARIA Authoring Practices); a tab is selected as it is reached.
   // A key as a chord: "Ctrl+K", "Shift+ArrowDown", "Enter", "/". A printed character carries
@@ -2134,7 +2398,9 @@ CLIENT = """
   }
   document.addEventListener('keydown', (e) => {
     const t = e.target;
+    if (g && g.on && e.key === 'Escape') { e.preventDefault(); end(true); return; }
     if (!e.isComposing && shortcut(e)) return;
+    if (gestureKey(e)) return;
     if (e.key === 'Escape') {
       const d = t.closest && t.closest('[data-dismiss]');
       if (d && d.tagName !== 'DIALOG') { e.preventDefault(); post({ msg: d.dataset.dismiss, value: null }, false); }
