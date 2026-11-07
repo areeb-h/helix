@@ -107,6 +107,10 @@ mod imp {
     /// The program's line to the main thread; set by `run_main` before the program starts.
     static LINE: OnceLock<Mutex<Sender<Msg>>> = OnceLock::new();
 
+    /// Whether the program has asked for a window, so the main thread is (or is about to be)
+    /// inside the window's event loop rather than waiting to join the program.
+    static WINDOWED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
     /// Whether this machine has a display a window could appear on. Asked BEFORE anything is
     /// created, because creating an event loop with no display aborts the process.
     fn has_display() -> bool {
@@ -122,7 +126,10 @@ mod imp {
             return false;
         }
         match LINE.get().and_then(|l| l.lock().ok()) {
-            Some(tx) => tx.send(Msg::Open { url, title, w, h }).is_ok(),
+            Some(tx) => {
+                WINDOWED.store(true, std::sync::atomic::Ordering::SeqCst);
+                tx.send(Msg::Open { url, title, w, h }).is_ok()
+            }
             None => false,
         }
     }
@@ -134,6 +141,13 @@ mod imp {
             let done = tx.clone();
             let worker = std::thread::Builder::new().stack_size(stack).spawn_scoped(scope, move || {
                 let code = f();
+                // Once a window was asked for, the main thread belongs to the window toolkit,
+                // which may be busy — a first start can spend many seconds building the font
+                // cache before the window even appears. A finished program must end the process
+                // regardless, with its own code, so it does not wait for the toolkit to listen.
+                if WINDOWED.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::process::exit(if code == ExitCode::SUCCESS { 0 } else { 1 });
+                }
                 let _ = done.send(Msg::Done(code == ExitCode::SUCCESS));
                 code
             });

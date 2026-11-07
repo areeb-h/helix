@@ -39,7 +39,8 @@ sleep 1
 "$HELIX" run examples/apps/gallery.helix --port 18961 --window >"$work/win.log" 2>&1 &
 pid=$!
 wid=""
-for _ in $(seq 100); do wid=$(xdotool search --name '^Component gallery$' 2>/dev/null | head -1); [ -n "$wid" ] && break; sleep 0.1; done
+# Up to 30 s: a first start on a fresh machine can spend many seconds building caches.
+for _ in $(seq 300); do wid=$(xdotool search --name '^Component gallery$' 2>/dev/null | head -1); [ -n "$wid" ] && break; sleep 0.1; done
 if [ -n "$wid" ]; then
   ok "a window titled \"Component gallery\" opened"
   sleep 3
@@ -52,12 +53,12 @@ if [ -n "$wid" ]; then
   wait $pid 2>/dev/null
   curl -s -m 1 -o /dev/null http://127.0.0.1:18961/ && bad "the port is still held" || ok "and frees its port"
 else
-  bad "no window appeared"; cat "$work/win.log"
+  bad "no window appeared"; cat "$work/win.log"; echo "windows on the display:"; xwininfo -root -tree | head -30; ps aux | grep -E 'helix|WebKit' | grep -v grep
 fi
 
 echo "— a program that ends while its window is open"
 printf 'w = open_window("http://127.0.0.1:18962/", "short", 400, 300)\nsleep(500)\nraise("boom")\n' >"$work/fail.helix"
-timeout 20 "$HELIX" run "$work/fail.helix" >/dev/null 2>"$work/fail.log"
+timeout 60 "$HELIX" run "$work/fail.helix" >/dev/null 2>"$work/fail.log"
 status=$?
 [ $status = 1 ] && grep -q 'boom' "$work/fail.log" && ok "exits with the program's code (1) and its error" || bad "exit $status: $(cat "$work/fail.log")"
 
