@@ -33,7 +33,7 @@ pub fn category_of(name: &str) -> &'static str {
         // Filesystem I/O (readers + the two writers).
         "read_bytes" | "read_bytes_at"
         | "lock_file" | "try_lock_file"
-        | "rename" | "fsync" | "sync_dir" | "create_new" | "file_size" | "read_at"
+        | "rename" | "fsync" | "sync_dir" | "create_new" | "file_size" | "file_info" | "read_at"
         | "write_at" | "truncate" | "remove_dir"
         | "read_csv" | "read_parquet" | "read_text" | "read_json" | "read_dir" | "file_exists"
         | "remove_file" | "mkdir" | "read_fasta" | "read_fastq" | "read_vcf" | "read_bcf"
@@ -177,6 +177,7 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "sync_dir", pure: false },
     BuiltinDef { path: "create_new", pure: false },
     BuiltinDef { path: "file_size", pure: false },
+    BuiltinDef { path: "file_info", pure: false },
     BuiltinDef { path: "read_at", pure: false },
     BuiltinDef { path: "write_at", pure: false },
     BuiltinDef { path: "truncate", pure: false },
@@ -663,7 +664,8 @@ mod tests {
         // and bump this. The bump is the point.
         // 165 as of `view_html` and `view_diff` (ADR 0055), which need NO feature: they are
         // pure Rust over values, and an app's view must render in every build. 166 as of
-        // `dev_generation` (hot reload), which needs no feature either. 167 as of `open_window`,
+        // `dev_generation` (hot reload), which needs no feature either. 168 as of `file_info`
+        // (lstat as a record), plain std::fs. 167 as of `open_window`,
         // which exists in every build and answers false where `desktop` is off — so an app
         // asks once and falls back to the browser, rather than failing to type-check.
         // 163 as of `postgres_execute`; 162 as of `has_feature`, which needs NO feature and must not have one: a build
@@ -672,7 +674,7 @@ mod tests {
             // matters. That is the decision this count exists to force.
             assert_eq!(
             BUILTINS.len(),
-            167,
+            168,
             "a builtin was added or removed — decide whether it needs a Cargo feature, add it \
              to `feature_of` if it does, and update this count in the same change"
         );

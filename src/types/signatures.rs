@@ -360,7 +360,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         // generic readers + hashing + fs ops: one string argument each
         "read_text" | "read_json" | "read_dir" | "file_exists" | "sha256" | "remove_file"
-        | "mkdir" | "fsync" | "sync_dir" | "remove_dir" | "file_size" => {
+        | "mkdir" | "fsync" | "sync_dir" | "remove_dir" | "file_size" | "file_info" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, 1, args.len(), line, col));
             }

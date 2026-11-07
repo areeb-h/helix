@@ -203,6 +203,18 @@ fn parse(v: &Value, line: usize, col: usize) -> Result<Node, HelixError> {
         ("enter", "data-enter"),
         ("exit", "data-exit"),
         ("layout", "data-layout"),
+        // A desktop app's gestures. `dblclick` and `contextmenu` name the message a double
+        // click or a right click (or the menu key) sends, with the node's `value`; `keydown`
+        // names the message a key in `shortcuts` (space-separated chords: "Enter Ctrl+K /")
+        // sends from inside the node, carrying the chord. `reveal: true` scrolls the node into
+        // view when it becomes the one revealed, and `copy` is text a click puts on the
+        // clipboard. All are data the page's own script reads: none is a handler.
+        ("dblclick", "data-dblclick"),
+        ("contextmenu", "data-contextmenu"),
+        ("keydown", "data-keydown"),
+        ("shortcuts", "data-shortcuts"),
+        ("reveal", "data-reveal"),
+        ("copy", "data-copy"),
     ] {
         if let Some(v) = get(&props, prop) {
             attrs.push((out.to_string(), text_of(&v, line, col)?));

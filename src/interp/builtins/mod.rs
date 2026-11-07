@@ -176,6 +176,7 @@ impl super::Interp {
             "sync_dir" => return io::a_sync_dir(name, args, line, col),
             "create_new" => return io::a_create_new(name, args, line, col),
             "file_size" => return io::a_file_size(name, args, line, col),
+            "file_info" => return io::a_file_info(name, args, line, col),
             "read_at" => return io::a_read_at(name, args, line, col),
             "write_at" => return io::a_write_at(name, args, line, col),
             "truncate" => return io::a_truncate(name, args, line, col),
