@@ -1,0 +1,60 @@
+# The design engine (std.ui): what it promises, checked as numbers.
+#
+# Colour: one seed becomes every role of a light and a dark palette, and every text colour
+# reaches its WCAG ratio on every surface it sits on — for ANY seed, so this sweeps the hue
+# circle in all three materials. Geometry: nested corners are concentric (inner = outer minus
+# the padding between them, never below the floor; a capsule stays a capsule). Motion: the
+# springs are what they say. Components: the new ones render accessibly and refuse misuse.
+import std.ui
+
+# --- Colour. ---------------------------------------------------------------------------------
+print(ui.hex_of(ui.parse_hex("#4f46e5")))
+c = ui.parse_hex("#4f46e5")
+print("{c.l:.4f} {c.c:.4f} {c.h:.2f}")
+print("{ui.contrast(ui.parse_hex("#ffffff"), ui.parse_hex("#000000")):.2f}")
+
+sweep = range(0, 12).flat_map((i) => ["tonal", "glass", "hybrid"].map((m) => ui.contrast_report(ui.design({hue: i * 30, material: m}))))
+checked = sweep.flat_map((r) => r)
+print("pairs checked: {checked.count()}, failing: {checked.filter((x) => not x.ok).count()}")
+seeds = ["#ff0000", "#00ff00", "#0000ff", "#ffff00", "#000000", "#ffffff", "#808080"]
+print("extreme seeds failing: {seeds.flat_map((s) => ui.contrast_report(ui.design({seed: s}))).filter((x) => not x.ok).count()}")
+
+d = ui.design({hue: 160, material: "glass"})
+print([d.light.get("card-bg"), d.light.get("overlay-bg"), d.dark.get("frame-bg")])
+print([d.light.get("accent"), d.light.get("accent-fg"), d.dark.get("accent"), d.dark.get("accent-fg")])
+
+# --- Geometry. -------------------------------------------------------------------------------
+fn concentric(g) = [
+  [g.card, g.pad_card, g.in_card], [g.list, g.pad_list, g.row], [g.overlay, g.pad_overlay, g.item],
+  [g.sheet, g.pad_sheet, g.in_sheet], [g.window, g.inset, g.in_window],
+].filter((t) => t[2] != (if t[0] >= 999.0 then 999.0 else max(4.0, t[0] - t[1]))).count() == 0
+["sharp", "soft", "round"].map((shape) => ["comfortable", "compact"].map((density) => do {
+  g = ui.geometry(shape, density)
+  print("{shape}/{density}: card {g.card} row {g.row} item {g.item} sheet {g.sheet} ctl {g.ctl} concentric {concentric(g)}")
+}))
+soft = ui.geometry("soft", "comfortable")
+print("soft cards derive from controls: {soft.card == soft.ctl + soft.pad_card}")
+print(ui.design({shape: "round"}).light.get("r-btn"))
+
+# --- Motion. ---------------------------------------------------------------------------------
+k = ui.spring_ratio_curve(700.0, 0.9)
+print("spatial spring settles in {k.ms} ms")
+print(ui.motion("opacity", "effects-fast").take(18))
+print(ui.motion("transform", "snappy").take(20))
+
+# --- Components. -----------------------------------------------------------------------------
+print(view_html(ui.segmented("v", "View", "b", [["a", "A"], ["b", "B"]], "pick")))
+print(view_html(ui.stepper("n", "copies", 9, "set", lo: 1, hi: 9)).contains("aria-label=\"Increase copies\" type=\"button\" disabled=\"\""))
+print(view_html(ui.sheet("s", false, "Share", [], "close")))
+print(view_html(ui.toasts([{id: 1, text: "Removed", action: {label: "Undo", msg: "undo", value: "3"}}], "dismiss")).contains("data-click=\"undo\" data-value=\"3\""))
+print(view_html(ui.avatar("Ada Lovelace")))
+print(view_html(ui.icon("check", label: "Done")).take(60))
+print(view_html(ui.scoped(ui.design({hue: 30, effects: "light"}), ui.text("x"))).take(80))
+
+fn refused(name, f) = do {
+  r = try f()
+  print(if r.ok then "accepted {name}" else "refused {name}: {r.error}")
+}
+r_1 = refused("an unknown material", () => ui.design({material: "metal"}))
+r_2 = refused("a malformed seed", () => ui.design({seed: "#12345"}))
+r_3 = refused("an unknown icon", () => ui.icon("rocket"))

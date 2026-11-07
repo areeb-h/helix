@@ -1,0 +1,292 @@
+# Design lab — the design engine's three materials side by side, live.
+#
+#   helix run examples/apps/design-lab.helix --window
+#
+# One small app drawn three ways by `ui.design`: A is glass (translucent, blurred surfaces
+# over a backdrop the design generates), B is tonal (solid surfaces layered by tone), C is the
+# hybrid (solid content, a glass frame and overlays). Every colour comes from one seed — pick
+# a swatch or drag the hue — and every text colour is proven to reach WCAG AA on what it sits
+# on. Every corner is computed: an inner corner is its container's minus the padding between
+# them. Shape, density and effects are design options too.
+#
+# The app inside each pane is built only from `std.ui`'s components. The three panes share
+# one model, so whatever you do in one happens in all three.
+
+import std.ui
+
+SEEDS = ["#4f46e5", "#7c3aed", "#db2777", "#ea580c", "#ca8a04", "#059669", "#0891b2", "#2563eb"]
+
+FILES = [
+  {name: "Q3 report.pdf", icon: "doc", kind: "doc", meta: "Today, 09:41", size: "2.4 MB"},
+  {name: "Launch hero.png", icon: "image", kind: "image", meta: "Yesterday", size: "840 KB"},
+  {name: "Budget 2027.csv", icon: "table", kind: "doc", meta: "Monday", size: "96 KB"},
+  {name: "Designs", icon: "folder", kind: "folder", meta: "14 items", size: "—"},
+  {name: "Meeting notes.md", icon: "doc", kind: "doc", meta: "Oct 28", size: "4 KB"},
+  {name: "Brand kit", icon: "folder", kind: "folder", meta: "32 items", size: "—"},
+  {name: "Roadmap.key", icon: "chart", kind: "doc", meta: "Oct 21", size: "18 MB"},
+  {name: "Customer list.csv", icon: "table", kind: "doc", meta: "Oct 19", size: "212 KB"},
+  {name: "Onboarding.mp4", icon: "image", kind: "image", meta: "Oct 12", size: "64 MB"},
+  {name: "Contracts", icon: "folder", kind: "folder", meta: "8 items", size: "—"},
+  {name: "Release notes.md", icon: "doc", kind: "doc", meta: "Oct 3", size: "9 KB"},
+  {name: "Icons.svg", icon: "image", kind: "image", meta: "Sep 30", size: "48 KB"},
+]
+PEOPLE = ["Ada Lovelace", "Grace Hopper", "Linus Torvalds", "Margaret Hamilton", "Alan Turing", "Barbara Liskov", "Ken Thompson"]
+ISSUES = dataframe({
+  issue: range(0, 40).map((i) => "HX-{1040 + i}"),
+  title: range(0, 40).map((i) => ["Glass fallback", "Tonal palettes", "Spring motion", "Scrollbars", "Contrast proofs", "Window chrome", "Shared elements"][i % 7]),
+  owner: range(0, 40).map((i) => PEOPLE[(i * 5) % 7].split(" ")[0]),
+  points: range(0, 40).map((i) => (i * 7) % 13 + 1),
+})
+
+fn designs_for(m) = do {
+  base = if m.seed == "" then {hue: m.hue} else {seed: m.seed}
+  opts = {...base, shape: m.shape, density: m.density, effects: m.effects}
+  {glass: ui.design({...opts, material: "glass"}), tonal: ui.design({...opts, material: "tonal"}), hybrid: ui.design({...opts, material: "hybrid"})}
+}
+fn with_designs(m) = {...m, designs: designs_for(m)}
+
+init = with_designs({
+  seed: "#4f46e5", hue: 277, shape: "soft", density: "comfortable", effects: "full", dark: false, layout: "compare",
+  tab: "files", sel: 1, chip: "all", query: "", menu: "", sheet: false, files: range(0, 12),
+  name: "Northwind", vis: "team", view: "list", usage: true, beta: false, digest: "weekly", notify: true, sync: true,
+  quality: 72, copies: 2, offset: 0, toasts: [], next: 1,
+})
+
+fn toast(m, text, action = missing, tone = "neutral") = do {
+  all = m.toasts.concat([{id: m.next, text: text, tone: tone, action: action, born: missing}])
+  {...m, toasts: all.drop(max(all.count() - 3, 0)), next: m.next + 1}
+}
+
+fn update(m, e) = match e.msg {
+  "seed" => with_designs({...m, seed: e.value}),
+  "hue" => if e.value.is_missing() then m else with_designs({...m, hue: e.value, seed: ""}),
+  "shape" => with_designs({...m, shape: e.value}),
+  "density" => with_designs({...m, density: e.value}),
+  "effects" => with_designs({...m, effects: e.value}),
+  "dark" => {...m, dark: e.value},
+  "layout" => {...m, layout: e.value},
+  "tab" => {...m, tab: e.value, menu: ""},
+  "sel" => {...m, sel: to_int(e.value), menu: ""},
+  "chip" => {...m, chip: e.value},
+  "query" => {...m, query: e.value},
+  "menu" => {...m, menu: if m.menu == e.value then "" else e.value},
+  "trash" => if not m.files.contains(m.sel) then {...m, menu: ""} else toast({...m, menu: "", files: m.files.filter((i) => i != m.sel)}, "Moved “{FILES[m.sel].name}” to the trash", {label: "Undo", msg: "undo", value: "{m.sel}"}),
+  "undo" => do {
+    i = to_int(e.value)
+    {...m, files: m.files.concat([i]).sort(), toasts: m.toasts.filter((t) => t.action.is_missing() or t.action.value != e.value)}
+  },
+  "star" => toast({...m, menu: ""}, "Added “{FILES[m.sel].name}” to starred", missing, "accent"),
+  "sheet" => {...m, sheet: true, menu: ""},
+  "close-sheet" => {...m, sheet: false},
+  "share" => toast({...m, sheet: false}, "Invites sent", missing, "success"),
+  "saved" => toast(m, "Saved “{m.name}”", missing, "success"),
+  "dismiss" => {...m, toasts: m.toasts.filter((t) => "{t.id}" != e.value)},
+  "tick" => {...m, toasts: m.toasts.map((t) => if t.born.is_missing() then {...t, born: e.value} else t).filter((t) => e.value - t.born < 4.0)},
+  "name" => {...m, name: e.value},
+  "vis" => {...m, vis: e.value},
+  "view" => {...m, view: e.value},
+  "usage" => {...m, usage: e.value},
+  "beta" => {...m, beta: e.value},
+  "digest" => {...m, digest: e.value},
+  "notify" => {...m, notify: e.value},
+  "sync" => {...m, sync: e.value},
+  "quality" => if e.value.is_missing() then m else {...m, quality: e.value},
+  "copies" => {...m, copies: to_int(e.value)},
+  "scroll" => {...m, offset: e.value},
+  _ => m,
+}
+
+# --- One app, from std.ui's components, drawn by whichever design its pane is in. ----------
+#
+# Every id carries the pane's name: the three panes are one page.
+
+fn files_tab(m, p) = do {
+  q = m.query.lower()
+  shown = m.files.filter((i) => (m.chip == "all" or FILES[i].kind == m.chip) and (q == "" or FILES[i].name.lower().contains(q)))
+  ui.column([
+    ui.breadcrumbs([["home", "Home"], ["projects", "Projects"], ["2027", "2027"]], "tab"),
+    ui.el("div", {class: "title-row"}, [ui.el("h2", {class: "screen-title"}, [ui.text("Projects")]), ui.el("span", {class: "meta"}, [ui.text("{shown.count()} items")])]),
+    ui.chips("{p}-filter", "Filter", m.chip, [["all", "All"], ["image", "Images"], ["doc", "Documents"], ["folder", "Folders"]], "chip"),
+    if shown.count() == 0 then ui.el("div", {class: "list mat-card"}, [ui.empty_state("search", "No matches", "Try another filter or search.")])
+      else ui.list(shown.map((i) => ui.list_item(FILES[i].name, subtitle: FILES[i].meta, leading: ui.icon(FILES[i].icon), trailing: FILES[i].size, selected: m.sel == i, click: "sel", value: "{i}", key: "f{i}")), label: "Files"),
+    ui.card("Storage", [
+      ui.el("div", {class: "between"}, [ui.el("span", {class: "two-line"}, [ui.el("span", {class: "strong"}, [ui.text("31.6 of 50 GB")]), ui.el("span", {class: "meta"}, [ui.text("Across 1,204 files")])]), ui.badge("Pro", tone: "accent")]),
+      ui.progress("Storage used", 0.63),
+      ui.cluster([ui.button("Upgrade", "saved", variant: "primary"), ui.button("Share", "sheet", variant: "tonal", icon: "share")], gap: 2),
+    ]),
+    ], gap: 3)
+}
+
+fn controls_tab(m, p) = ui.column([
+  ui.el("div", {class: "title-row"}, [ui.el("h2", {class: "screen-title"}, [ui.text("Settings")]), ui.badge(if m.sync then "Synced" else "Offline", tone: if m.sync then "success" else "warning")]),
+  ui.el("div", {class: "cols"}, [
+    ui.card("Project", [
+      ui.text_input("{p}-name", "Name", m.name, "name", hint: "{m.name.count()} of 32 characters"),
+      ui.select("{p}-vis", "Visibility", m.vis, [["private", "Only me"], ["team", "My team"], ["public", "Anyone with the link"]], "vis"),
+      ui.el("div", {class: "field"}, [ui.el("span", {class: "field-label"}, [ui.text("Layout")]), ui.segmented("{p}-view", "Layout", m.view, [["list", "List"], ["grid", "Grid"], ["board", "Board"]], "view")]),
+    ]),
+    ui.card("Notifications", [
+      ui.toggle("{p}-notify", "Mentions", m.notify, "notify", hint: "When someone mentions you"),
+      ui.toggle("{p}-sync", "Auto-sync", m.sync, "sync", hint: "Keep files up to date"),
+      ui.divider(),
+      ui.radio_group("{p}-digest", "Digest", m.digest, [["daily", "Daily"], ["weekly", "Weekly"], ["never", "Never"]], "digest"),
+      ui.checkbox("{p}-usage", "Share usage data", m.usage, "usage"),
+      ui.checkbox("{p}-beta", "Try beta features", m.beta, "beta"),
+    ]),
+    ui.card("Export", [
+      ui.el("div", {class: "between"}, [ui.el("span", {class: "field-label"}, [ui.text("Quality")]), ui.el("span", {class: "strong"}, [ui.text("{m.quality}%")])]),
+      ui.slider("quality", 0, 100, m.quality, label: "Export quality"),
+      ui.el("div", {class: "between"}, [ui.el("span", {class: "field-label"}, [ui.text("Copies")]), ui.stepper("{p}-copies", "copies", m.copies, "copies", lo: 1, hi: 9)]),
+      ui.el("div", {class: "between"}, [ui.el("span", {class: "two-line"}, [ui.el("span", {class: "strong"}, [ui.text("Rendering")]), ui.el("span", {class: "meta"}, [ui.text("Frames done")])]), ui.ring("Rendering", m.quality)]),
+      ui.skeleton(3),
+    ]),
+    ui.card("Actions", [
+      ui.cluster([ui.button("Primary", "saved", variant: "primary"), ui.button("Tonal", "saved", variant: "tonal"), ui.button("Outline", "saved", variant: "outline"), ui.button("Ghost", "saved", variant: "ghost")], gap: 2),
+      ui.cluster([ui.button("Delete", "trash", variant: "danger", icon: "trash"), ui.button("Share", "sheet", icon: "share"), ui.icon_button("pen", "Edit", "saved", variant: "outline"), ui.icon_button("star", "Star", "star", variant: "outline")], gap: 2),
+      ui.el("div", {class: "between"}, [ui.avatars(PEOPLE, max: 5), ui.cluster([ui.badge("New", tone: "accent"), ui.badge("Live", tone: "success"), ui.badge("Late", tone: "danger")], gap: 1)]),
+    ]),
+  ]),
+  ], gap: 3)
+
+fn activity_tab(m, p) = ui.column([
+  ui.el("div", {class: "title-row"}, [ui.el("h2", {class: "screen-title"}, [ui.text("Activity")]), ui.el("span", {class: "meta"}, [ui.text("Last 30 days")])]),
+  ui.grid([
+    ui.stat_tile("Shipped", "128", delta: "+12%", series: range(0, 14).map((i) => 10.0 + 6.0 * sin(i * 0.8) + i)),
+    ui.stat_tile("Reviews", "46", delta: "+4%", series: range(0, 14).map((i) => 12.0 + 5.0 * cos(i * 0.6) + i * 0.5)),
+    ui.stat_tile("Blocked", "3", delta: "−2", trend: "down", series: range(0, 14).map((i) => 9.0 - i * 0.4 + 2.0 * sin(i))),
+    ], min: 120, gap: 3),
+  ui.data_table("{p}-issues", ISSUES, m.offset, "scroll", "Issues", height: 280),
+  ui.list(range(0, 3).map((i) => ui.list_item(PEOPLE[i], subtitle: ["Reviewed “Spring motion”", "Commented on “Scrollbars”", "Merged “Contrast proofs”"][i], leading: ui.avatar(PEOPLE[i]), trailing: ["2m", "1h", "3h"][i], key: "a{i}")), label: "Recent activity"),
+  ], gap: 3)
+
+fn app(m, p) = ui.shell(
+  ui.rail("Sections", [["files", "Files", "folder"], ["controls", "Controls", "settings"], ["activity", "Activity", "chart"]], m.tab, "tab",
+    top: ui.el("div", {class: "logo"}, [ui.icon("cloud")]), bottom: ui.avatar(PEOPLE[0])),
+  ui.toolbar([
+    ui.search_field("{p}-search", "Search files", m.query, "query", placeholder: "Search", shortcut: "⌘K"),
+    [ui.icon_button("bell", "Notifications", "star"), ui.menu("{p}-more", "More", m.menu == p, "menu", [
+      {label: "Share…", msg: "sheet", icon: "share"},
+      {label: "Add to starred", msg: "star", icon: "star"},
+      {label: "Move to trash", msg: "trash", icon: "trash", danger: true},
+      ], icon: "more", align: "end")],
+  ]),
+  match m.tab { "controls" => controls_tab(m, p), "activity" => activity_tab(m, p), _ => files_tab(m, p) },
+)
+
+fn overlays(m, p) = [
+  if m.tab == "files" then ui.fab("plus", "New file", "saved") else ui.el("span", {}, []),
+  ui.sheet("{p}-share", m.sheet, "Share “{FILES[m.sel].name}”", [
+    ui.search_field("{p}-invite", "Add people", "", "query", placeholder: "Add people or groups"),
+    ui.list(range(0, 3).map((i) => ui.list_item(PEOPLE[i], subtitle: if i == 0 then "Owner" else "Can edit", leading: ui.avatar(PEOPLE[i]), key: "s{i}"))),
+    ], "close-sheet", actions: [ui.button("Cancel", "close-sheet", variant: "ghost"), ui.button("Send invite", "share", variant: "primary")]),
+  ui.toasts(m.toasts.map((t) => if t.action.is_missing() then {id: t.id, text: t.text, tone: t.tone} else {id: t.id, text: t.text, tone: t.tone, action: t.action}), "dismiss"),
+]
+
+PANES = [
+  {id: "glass", letter: "A", name: "Glass", blurb: "Translucent surfaces over a backdrop the design generates."},
+  {id: "tonal", letter: "B", name: "Tonal", blurb: "Solid surfaces layered by tone. Calm and fast everywhere."},
+  {id: "hybrid", letter: "C", name: "Hybrid", blurb: "Solid content; glass only on the frame, menus and sheets."},
+]
+
+fn pane(m, p) = ui.el("figure", {class: "lab-pane", key: p.id}, [
+  ui.el("figcaption", {class: "lab-cap"}, [
+    ui.el("span", {class: "lab-letter"}, [ui.text(p.letter)]),
+    ui.el("span", {class: "two-line"}, [ui.el("strong", {}, [ui.text(p.name)]), ui.el("span", {class: "meta"}, [ui.text(p.blurb)])]),
+  ]),
+  ui.scoped(m.designs.get(p.id), ui.el("div", {class: "stage"}, [ui.el("div", {class: "window"}, [app(m, p.id)].concat(overlays(m, p.id)))]), "lab-scope"),
+])
+
+fn swatch(m, s) = ui.el("button", {class: if m.seed == s then "swatch on" else "swatch", click: "seed", value: s, aria: {label: "Seed colour {s}", pressed: m.seed == s}, attrs: {type: "button"}, style: {background: s}}, [])
+fn group(label, control) = ui.el("div", {class: "lab-group"}, [ui.el("span", {class: "lab-label"}, [ui.text(label)]), control])
+
+fn controls(m) = ui.el("header", {class: "lab-top"}, [
+  ui.el("div", {}, [ui.el("h1", {}, [ui.text("Design lab")]), ui.el("p", {class: "meta lab-sub"}, [ui.text("One seed, three materials, computed corners, proven contrast. The panes share one model.")])]),
+  ui.el("div", {class: "lab-controls"}, [
+    group("Seed", ui.el("div", {class: "swatches"}, SEEDS.map((s) => swatch(m, s)))),
+    group(if m.seed == "" then "Hue {m.hue}°" else "Hue", ui.el("input", {class: "hue", input: "hue", aria: {label: "Accent hue"}, attrs: {type: "range", min: "0", max: "359", step: "1", value: "{m.hue}"}}, [])),
+    group("Shape", ui.segmented("lab-shape", "Shape", m.shape, [["sharp", "Sharp"], ["soft", "Soft"], ["round", "Round"]], "shape", size: "sm")),
+    group("Density", ui.segmented("lab-density", "Density", m.density, [["comfortable", "Cozy"], ["compact", "Compact"]], "density", size: "sm")),
+    group("Effects", ui.segmented("lab-effects", "Effects", m.effects, [["auto", "Auto"], ["full", "Full"], ["light", "Light"]], "effects", size: "sm")),
+    group("View", ui.segmented("lab-layout", "View", m.layout, [["compare", "All"], ["glass", "A"], ["tonal", "B"], ["hybrid", "C"]], "layout", size: "sm")),
+    group("Mode", ui.toggle("lab-dark", "Dark", m.dark, "dark")),
+  ]),
+])
+
+fn view(m) = ui.el("div", {class: "lab"}, [
+  controls(m),
+  ui.el("div", {class: "lab-panes {m.layout}"}, PANES.filter((p) => m.layout == "compare" or m.layout == p.id).map((p) => pane(m, p))),
+])
+
+# Only the lab's own frame is styled here; everything inside the panes is std.ui.
+STYLE = """
+#root { max-width: none; padding: 14px 18px 18px; }
+body { background: var(--bg); }
+.lab { display: flex; flex-direction: column; gap: 12px; }
+.lab-top { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px 20px; flex-wrap: wrap; }
+.lab-top h1 { font-size: 20px; margin: 0; }
+.lab-sub { margin: 2px 0 0; }
+.lab-controls { display: flex; gap: 10px 16px; align-items: flex-end; flex-wrap: wrap; }
+.lab-group { display: flex; flex-direction: column; gap: 4px; }
+.lab-label { font-size: 11px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.swatches { display: flex; gap: 5px; height: 32px; align-items: center; }
+.swatch { width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--surface); box-shadow: 0 0 0 1px var(--line-strong); cursor: pointer; padding: 0; transition: transform var(--sp-fast); }
+.swatch:hover { transform: scale(1.12); }
+.swatch.on { box-shadow: 0 0 0 2px var(--fg); transform: scale(1.12); }
+.hue { -webkit-appearance: none; appearance: none; width: 150px; height: 10px; border-radius: 99px; margin: 11px 0;
+  background: linear-gradient(90deg, #f43f5e, #f59e0b, #84cc16, #10b981, #06b6d4, #3b82f6, #8b5cf6, #ec4899, #f43f5e); }
+.hue::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.1), 0 1px 4px rgba(0,0,0,.3); }
+.lab-panes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.lab-panes:not(.compare) { grid-template-columns: minmax(0, 1fr); }
+.lab-pane { margin: 0; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.lab-cap { display: flex; gap: 10px; align-items: flex-start; min-height: 34px; }
+.lab-letter { flex: none; width: 24px; height: 24px; border-radius: 7px; display: grid; place-items: center; font-weight: 700; font-size: 12px; background: var(--fg); color: var(--bg); }
+
+/* A stage (the desktop) and a window on it: the stage's corner is the window's plus the gap
+   between them, so the two are concentric too. */
+.lab-scope { contain: layout paint; border-radius: calc(var(--r-window) + 14px); }
+.stage { height: max(480px, calc(100vh - 236px)); padding: 14px; background: var(--page); border-radius: inherit; }
+.window { position: relative; height: 100%; overflow: hidden; border-radius: var(--r-window); border: 1px solid var(--frame-line);
+  background: var(--bg); box-shadow: var(--e-3), inset 0 1px 0 var(--glass-edge); }
+.m-glass .window { background: transparent; }
+.m-glass .shell-scroll { background: transparent; }
+.window .toasts { position: absolute; left: var(--inset); right: var(--inset); bottom: var(--inset); width: auto; }
+.window .sheet-layer { position: absolute; }
+.logo { width: 38px; height: 38px; border-radius: max(4px, calc(var(--r-window) - 12px)); display: grid; place-items: center; margin-bottom: 10px;
+  background: var(--accent); color: var(--accent-fg); box-shadow: 0 6px 16px -6px var(--accent-glow); }
+.title-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.screen-title { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -.022em; color: var(--fg); }
+.between { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.cols { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+@container (min-width: 620px) { .cols { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@container (min-width: 960px) { .cols { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 1100px) { .lab-panes { grid-template-columns: minmax(0, 1fr); } }
+"""
+
+spec = {
+  title: "Design lab",
+  init: init,
+  update: update,
+  view: view,
+  style: STYLE,
+  design: ui.design({seed: "#4f46e5", material: "tonal", density: "compact"}),
+  theme: (m) => if m.dark then "dark" else "light",
+  subscriptions: (m) => if m.toasts.count() == 0 then [] else [ui.every(1000, "tick")],
+}
+
+# A scripted session for `--replay`: a seed, a shape, a file trashed and brought back, a
+# segment chosen, the sheet, dark mode, and one pane alone. One screen per event.
+SESSION = [
+  {msg: "seed", value: "#059669"},
+  {msg: "shape", value: "round"},
+  {msg: "sel", value: "2"},
+  {msg: "trash", value: missing},
+  {msg: "undo", value: "2"},
+  {msg: "tab", value: "controls"},
+  {msg: "view", value: "board"},
+  {msg: "sheet", value: missing},
+  {msg: "close-sheet", value: missing},
+  {msg: "dark", value: true},
+  {msg: "layout", value: "hybrid"},
+]
+
+fn main(port: Int = 8080, open: Bool = false, window: Bool = false, replay: Bool = false) = if replay then ui.replay(spec, SESSION).map((html) => print(html)) else ui.app({...spec, port: port, open: open, window: if window then {width: 1260, height: 820} else false})
