@@ -4,6 +4,15 @@
 
 ### Added
 
+- **`import std.ui` works from any directory: the app library is compiled into `helix`.** It
+  was `examples/apps/ui.helix`, which only a file beside it could import, so an installed
+  Helix could not build an app at all. It is now `std/ui.helix`, embedded in the binary as
+  the last rung of the import ladder — after the importing file's directory, the project and
+  `HELIX_PATH` — so a copy on disk still wins (pin or patch it with `HELIX_PATH`), and a
+  `helix build` executable carries it. The loader always searched `std/` beside the
+  executable, but nothing ever shipped there; this is the first standard-library module.
+  `helix search app` (or `gui`, `dashboard`, `button`) and `helix describe app` now find it.
+
 - **`view_html(tree)` and `view_diff(old, new)`: an app's view rendered and diffed in Rust
   (ADR 0055 Phase 1).** A view is data — `{tag, props, children}` records and text nodes —
   and these are the two things the app runtime does with it every frame. `view_html` is the

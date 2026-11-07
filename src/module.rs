@@ -384,9 +384,11 @@ pub fn load(entry: &Path) -> Result<Loaded, String> {
 pub fn load_diag(entry: &Path) -> Result<Loaded, Diag> {
     let ProjectContext { deps, root: project_root, from_manifest } = project_context(entry)?;
     // Resolution order for an import: the importing file's own directory (local siblings),
-    // then the project root, then the stdlib / `HELIX_PATH` search roots.
+    // then the project root, then the stdlib / `HELIX_PATH` search roots, and last the
+    // standard library compiled into this binary (`EMBED_ROOT`).
     let mut roots = vec![project_root.clone()];
     roots.extend(search_roots());
+    roots.push(PathBuf::from(EMBED_ROOT));
     let mut loader =
         Loader { roots, deps, project_root, anchored_by_manifest: from_manifest, ..Loader::default() };
     // THE ENTRY'S KEY ANCHORS EVERY OTHER ONE. It is the entry's path relative to the
@@ -529,9 +531,38 @@ fn normalize(p: &Path) -> PathBuf {
     out
 }
 
+/// The root of the standard library compiled INTO the binary — the last rung of the import
+/// ladder, after every directory on disk. It is not a real directory (the angle brackets
+/// keep it from ever being one by accident), and it is what a diagnostic inside a stdlib
+/// module names as the file: `<helix>/std/ui.helix`.
+///
+/// WHY EMBEDDED. The loader has always searched `std/` beside the executable, but nothing
+/// ever shipped there, so `import std.x` had no x to find; and a library that lives in a
+/// directory beside the binary is a library a `curl | sh` install, a copied binary or a
+/// `helix build` executable can lose. Compiled in, it is exactly as present as the
+/// builtins are. A file on disk still WINS — beside the importer, in the project, or on
+/// `HELIX_PATH` — so a project can pin or patch its own copy, and the library can be
+/// developed with `HELIX_PATH=.` without a rebuild.
+pub const EMBED_ROOT: &str = "<helix>";
+
+/// The embedded standard library, keyed by its path under [`EMBED_ROOT`].
+pub const EMBEDDED: &[(&str, &str)] = &[
+    // The app runtime and component library (ADR 0055): `import std.ui`.
+    ("std/ui.helix", include_str!("../std/ui.helix")),
+];
+
+/// The embedded source at `p`, when `p` is under [`EMBED_ROOT`].
+fn embedded(p: &Path) -> Option<&'static str> {
+    let rel = normalize(p);
+    let rel = rel.strip_prefix(EMBED_ROOT).ok()?;
+    let key = rel.to_string_lossy().replace('\\', "/");
+    EMBEDDED.iter().find(|(k, _)| *k == key).map(|(_, src)| *src)
+}
+
 impl Store {
     fn is_file(&self, p: &Path) -> bool {
         match self {
+            Store::Fs if p.starts_with(EMBED_ROOT) => embedded(p).is_some(),
             Store::Fs => p.is_file(),
             Store::Archive(m) => m.contains_key(&normalize(p)),
         }
@@ -539,6 +570,7 @@ impl Store {
 
     fn canonicalize(&self, p: &Path) -> std::io::Result<PathBuf> {
         match self {
+            Store::Fs if p.starts_with(EMBED_ROOT) => Ok(normalize(p)),
             Store::Fs => p.canonicalize(),
             Store::Archive(_) => Ok(normalize(p)),
         }
@@ -546,6 +578,9 @@ impl Store {
 
     fn read_to_string(&self, p: &Path) -> std::io::Result<String> {
         match self {
+            Store::Fs if p.starts_with(EMBED_ROOT) => embedded(p).map(str::to_string).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "not in Helix's built-in standard library")
+            }),
             Store::Fs => std::fs::read_to_string(p),
             Store::Archive(m) => m.get(&normalize(p)).cloned().ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "not in this program's archive")

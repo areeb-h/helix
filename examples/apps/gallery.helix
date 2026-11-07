@@ -7,7 +7,7 @@
 # It is also the design system's test bench: `tests/ui/gallery.mjs` drives it in Chromium,
 # checks every state with axe-core in light and dark, and screenshots it.
 
-import ui
+import std.ui
 
 ROWS = 10000
 GROUPS = ["alpha", "beta", "gamma", "delta", "epsilon"]

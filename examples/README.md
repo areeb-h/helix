@@ -88,12 +88,15 @@ golden output on all three engines.
 [`shapes.helix`](modules/shapes.helix) imports [`geometry.helix`](modules/geometry.helix).
 Run `helix examples/modules/shapes.helix`.
 
-## apps/ — interactive apps (ADR 0055, a prototype)
+## apps/ — interactive apps (ADR 0055)
+Each is built on `import std.ui` — the app runtime and component library, compiled into the
+`helix` binary ([`std/ui.helix`](../std/ui.helix)). Run one and open the link it prints, or
+pass `--open`; `--replay` prints every screen of a scripted session instead.
+- [`apps/gallery.helix`](apps/gallery.helix) — every component: forms with validation, tabs, a
+  menu, a dialog, toasts, charts and a 10,000-row virtualised table, accessible and animated.
 - [`apps/explorer.helix`](apps/explorer.helix) — a polynomial regression explorer: drag the
-  degree, the fit springs to its new shape, the BIC bars rescale. `helix examples/apps/explorer.helix`
-  and open `http://127.0.0.1:8080`; `--replay` prints every screen of a scripted session instead.
-- [`apps/ui.helix`](apps/ui.helix) — the runtime it is built on: `init`, `update`, `view`, with
-  motion declared in the view and run by the browser's compositor.
+  degree, the fit springs to its new shape, the BIC bars rescale.
+- [`apps/stopwatch.helix`](apps/stopwatch.helix) — the smallest app with a timer subscription.
 
 ## interop/ — outside the runtime (network or optional features)
 - [`python/`](python/) — CPython interop (`--features python`): DataFrames, tensors, calling Python.

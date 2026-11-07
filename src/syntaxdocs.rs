@@ -252,6 +252,25 @@ pub static SYNTAX: &[SyntaxDoc] = &[
                 Keywords: module, use, require, include, package, library, namespace, dependency, glob, star, wildcard.",
     },
     SyntaxDoc {
+        name: "app",
+        form: "import std.ui",
+        doc: "Build an app: model, update and view in Helix, rendered in a browser — components, charts, motion.",
+        example: "print(view_html({tag: \"b\", props: {class: \"note\"}, children: [{tag: \"#text\", text: \"hi\"}]}))",
+        example_out: "<b class=\"note\">hi</b>",
+        notes: "THE APP LIBRARY (ADR 0055), compiled into `helix`, so it imports from any directory. An app is \
+                `ui.app({title, init, update: (model, event) => model, view: (model) => tree})`; an event is \
+                `{msg, value}`. Components: `column`/`row`/`cluster`/`grid`, `card`, `button`, `text_input`, \
+                `textarea`, `select`, `checkbox`, `toggle`, `slider`, `form` with `required`/`min_length`/`pattern`, \
+                `tabs`, `menu`, `dialog`, `toasts`, `tooltip`, `progress`, `badge`, `data_table` (a DataFrame, \
+                virtualised), `line_chart`/`scatter_chart`/`bar_chart`; timers with `every(ms, msg)` in \
+                `subscriptions`. Accessible by construction, light and dark, motion run by the GPU. \
+                `ui.replay(spec, events)` returns every screen as HTML — testable without a browser, the same \
+                on all three engines. `helix run app.helix` prints a link (add `--open`); see \
+                `examples/apps/gallery.helix`. A `std/ui.helix` on `HELIX_PATH` overrides the built-in copy. \
+                Keywords: std.ui, gui, ui, interface, window, desktop, web, dashboard, component, widget, button, form, \
+                chart, plot, interactive, elm, model view update.",
+    },
+    SyntaxDoc {
         name: "main",
         form: "fn main(seq: String, threads: Int = 1) = ...",
         doc: "If a program defines `fn main`, its parameters ARE the command line.",

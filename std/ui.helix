@@ -15,8 +15,12 @@
 #     is always visible, and `prefers-reduced-motion` turns motion off everywhere.
 #   - Only the person who started the app can drive it (see "The session").
 #
-#   import ui
+#   import std.ui
 #   ui.app({port: 8080, title: "…", init: {…}, update: (m, e) => …, view: (m) => …})
+#
+# This file is compiled into the `helix` binary, so `import std.ui` works from any directory
+# with nothing installed beside it. A `std/ui.helix` on disk — beside the importing file, in
+# the project, or on `HELIX_PATH` — is used instead, which is how to pin or patch a copy.
 #
 # Optional spec fields: `style` (CSS added to the design system), `theme` (model ->
 # "light"/"dark"), `subscriptions` (model -> a list of `every(ms, msg)`), and `open` (true opens

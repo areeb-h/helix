@@ -342,6 +342,28 @@ More in [`examples/`](examples/), the full [stdlib reference](docs/reference.md)
   supercookie defence.
 - **Real-time** — `emit` (flushed NDJSON sink) + `sleep` compose into paced live streams.
 
+### Apps
+- **`import std.ui`** (ADR 0055) — an app is three values: `init`, `update(model, event)` and
+  `view(model)`. Views are data, rendered and diffed in Rust and patched into the page, so a
+  frame touches only what changed; motion is declared in the view and run by the GPU.
+- **Components accessible by construction**: forms with validation, tabs, menus, dialogs,
+  toasts, tooltips, charts and a virtualised DataFrame table, in light and dark — checked with
+  axe-core in CI. Each run serves on localhost behind a session token.
+- **Testable without a browser**: `ui.replay(spec, events)` returns every screen as HTML, the
+  same on all three engines. The library is compiled into `helix`, so a 10-line app runs from
+  any directory:
+
+```helix
+import std.ui
+
+fn view(n) = ui.column([ui.heading("Count: {n}"), ui.button("+", "inc", variant: "primary")])
+fn update(n, e) = if e.msg == "inc" then n + 1 else n
+
+ui.app({title: "Counter", init: 0, update: update, view: view})   # prints a link to open
+```
+
+See `examples/apps/gallery.helix` for every component.
+
 ### Cryptography
 Native, audited-crate-backed primitives, misuse-resistant by construction: `sha256`,
 `hmac_sha256`, `base64`/`hex` encode/decode, **AES-256-GCM** (fresh nonce per call, authenticated),
@@ -400,8 +422,8 @@ tests of the same one. Details in [docs/execution-engine.md](docs/execution-engi
 
 ## Status & roadmap
 
-A mature implementation, **not a prototype**: **1,054 tests** (618 library + 401 CLI + 3
-native-df + 32 dual-engine differential), plus 164 programs run under both DataFrame backends
+A mature implementation, **not a prototype**: **1,055 tests** (618 library + 402 CLI + 3
+native-df + 32 dual-engine differential), plus 165 programs run under both DataFrame backends
 and a whole-tree type-check over 106 files — zero compiler warnings, with a differential oracle and a VM/tree-walker
 parity gate on every change. Phase status (full plan in
 [docs/ROADMAP.md](docs/ROADMAP.md)):

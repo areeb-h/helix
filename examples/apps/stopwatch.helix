@@ -9,7 +9,7 @@
 # work at all. Because time is just another event, a recorded session replays exactly, ticks
 # and all, on every engine — which is what `--replay` prints.
 
-import ui
+import std.ui
 
 init = {running: false, elapsed: 0.0, last: missing, laps: []}
 

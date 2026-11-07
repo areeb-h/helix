@@ -11,7 +11,7 @@
 # None of that motion is Helix code running per frame: the view DECLARES each transition and
 # the browser's compositor runs it. The whole app is the three functions at the bottom.
 
-import ui
+import std.ui
 
 N = 60
 W = 900.0

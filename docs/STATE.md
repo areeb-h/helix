@@ -75,7 +75,7 @@ carries one has to be cut as `minor` by hand. This cycle is one.
 ## In flight for the next release
 
 - **Apps: ADR 0055, proposed with a working prototype.** Model–update–view over the existing
-  event loop (`examples/apps/ui.helix`, ~240 lines of Helix, no `src/` change), and a regression
+  event loop (then `examples/apps/ui.helix`, now `std/ui.helix`, compiled in), and a regression
   explorer built on it (`examples/apps/explorer.helix`), driven in Chromium: input to patched
   DOM in 11–22 ms, springs run by the compositor, no console errors, and the replayed UI
   byte-identical on all three engines (`an_app_replays_identically_on_every_engine`). The ADR
