@@ -1,7 +1,7 @@
 //! `view_html(tree)` and `view_diff(old, new)` — the app runtime's hot path (ADR 0055, Phase 1).
 //!
 //! An app's view is DATA: element records `{tag, props, children}` and text records `{tag:
-//! "#text", text}`, built in Helix by `examples/apps/ui.helix`. Rendering that tree to HTML
+//! "#text", text}`, built in Helix by `std/ui.helix` (`import std.ui`). Rendering that tree to HTML
 //! and diffing two of them were Helix code in the prototype, and measured too slow for the
 //! ADR's budget: a 2,001-node view rendered in 5.4 ms on the JIT (9.0 on the tree-walker),
 //! and the client's full-page morph of the result took 11.6 ms p50 / 16.9 ms p95 in

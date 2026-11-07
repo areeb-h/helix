@@ -4448,10 +4448,59 @@ fn unbounded_mutual_recursion_raises_instead_of_crashing() {
     }
 }
 
+/// `import std.ui` works from ANY directory: the library is compiled into the binary, so an
+/// app needs nothing installed beside it — and nothing beside a `helix build` executable
+/// either. Before, `ui` was `examples/apps/ui.helix`, reachable only by a file next to it;
+/// the loader searched `std/` beside the executable, but nothing ever shipped there, so this
+/// program failed with "cannot find module `std.ui`". A copy on `HELIX_PATH` still wins, so
+/// a project can pin or patch the library.
+#[test]
+fn std_ui_is_built_in_and_importable_from_anywhere() {
+    let dir = std::env::temp_dir().join(format!("helix_std_ui_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("over/std")).unwrap();
+    let app = dir.join("counter.helix");
+    std::fs::write(
+        &app,
+        "import std.ui\n\
+         fn view(n) = ui.column([ui.heading(\"Count: {n}\"), ui.button(\"+\", \"inc\", variant: \"primary\")])\n\
+         fn update(n, e) = match e.msg { \"inc\" => n + 1, _ => n }\n\
+         spec = {title: \"Counter\", init: 0, update: update, view: view}\n\
+         ui.replay(spec, [{msg: \"inc\", value: missing}, {msg: \"inc\", value: missing}]).map((h) => print(h))\n",
+    )
+    .unwrap();
+    let app_s = app.to_str().unwrap();
+    let want = "<div class=\"col gap-4\"><h1>Count: 2</h1><button class=\"btn primary\" data-click=\"inc\" type=\"button\">+</button></div>";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run(&["run", app_s], env, "");
+        assert_eq!(code, Some(0), "{env:?}: {err}");
+        assert_eq!(out.lines().last(), Some(want), "{env:?}");
+    }
+    let (out, err, code) = run(&["check", app_s], &[], "");
+    assert_eq!(code, Some(0), "check: {out}{err}");
+
+    // A copy on HELIX_PATH is used instead of the built-in one.
+    let lib = std::fs::read_to_string("std/ui.helix").unwrap();
+    std::fs::write(dir.join("over/std/ui.helix"), lib.replace("class: \"col gap-{gap}\"", "class: \"pinned col gap-{gap}\"")).unwrap();
+    let over = dir.join("over");
+    let (out, err, code) = run(&["run", app_s], &[("HELIX_PATH", over.to_str().unwrap())], "");
+    assert_eq!(code, Some(0), "{err}");
+    assert!(out.lines().last().unwrap().starts_with("<div class=\"pinned col gap-4\">"), "{out}");
+
+    // A built executable carries the library and runs with no files around it.
+    let exe = dir.join("counter-app");
+    let (out, err, code) = run(&["build", app_s, "-o", exe.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "build: {out}{err}");
+    let res = Command::new(&exe).current_dir("/").stdin(Stdio::null()).output().expect("run the built app");
+    assert_eq!(res.status.code(), Some(0), "{}", String::from_utf8_lossy(&res.stderr));
+    assert_eq!(String::from_utf8_lossy(&res.stdout).lines().last(), Some(want));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// An app's UI is a pure function of its event log (ADR 0055, D2): the regression explorer's
 /// scripted session renders every screen byte-identically on all three engines, and each
 /// screen shows what its event did. The apps serve until stopped, so `vmparity.sh` and the
-/// compat capture skip `examples/apps/`; this is what keeps `ui.helix` from rotting unseen.
+/// compat capture skip `examples/apps/`; this is what keeps `std/ui.helix` from rotting unseen.
 #[test]
 fn an_app_replays_identically_on_every_engine() {
     let mut seen: Vec<String> = Vec::new();

@@ -75,7 +75,8 @@ cmp a.out b.out && cmp a.out c.out
 - A function value in a record field is called parenthesized: `(rec.f)(x)`.
 - Imports are `import lib.stats` (for `lib/stats.helix`), `import lib.stats as st`, or
   `import lib.stats.{mean, sd}` to bring names in unqualified. Not `use`, not
-  `from … import …`.
+  `from … import …`. **`import std.ui`** is built in (bound as `ui`): the app library —
+  `helix describe app` for the whole surface, `examples/apps/gallery.helix` for every component.
 - **`mut` is top-level only, and this is a design question, not a spelling one.** A
   function body evolves state by *rebinding* — `do { n = 0` / `n = n + 1` / `n }`, each
   line shadowing the last — and state that crosses a sequence is *threaded*, with
