@@ -1,0 +1,16 @@
+# The v0.13.0 release notes' ERROR claims: the cells whose answer is a refusal. One per line:
+#
+#   <substring the diagnostic must contain>	<program>
+#
+# Tab-separated, `#` comments ignored. Each program must exit NON-ZERO and its stderr must
+# contain the substring. Each program is ONE line.
+
+# --- "A view is data — `{tag, props, children}` records and text nodes": anything else is
+# --- refused by name, not rendered as something.
+a view node must be an element record	print(view_html(5))
+# --- "`dev_generation()` tells a program which start it is": it takes no arguments.
+dev_generation	print(dev_generation(1))
+# --- Fixed: "a tag or attribute name must be a plain name"; "`<script>` … refused".
+is not an element name	print(view_html({tag: "img src=x onerror=alert(1)", props: {}, children: []}))
+cannot be part of a view	print(view_html({tag: "script", props: {}, children: []}))
+inline script handler	print(view_html({tag: "a", props: {attrs: {onclick: "x"}}, children: []}))
