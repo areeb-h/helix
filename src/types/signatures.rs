@@ -386,14 +386,12 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         // `Bytes` is RUNTIME-TYPED, like `Dict` and `Net`: the checker sees `Unknown`, so
         // its methods are resolved when they run. Arity and argument types are still
         // checked here, which is where most mistakes actually are.
-        // Hot reload's two halves (`helix run --watch`): the session a reload hands over, a
-        // record or `missing` — so `Unknown` — and whether the model was kept.
-        "dev_session" | "dev_keep" => {
-            let want = if name == "dev_session" { 0 } else { 1 };
-            if args.len() != want {
-                return Err(arity_err(name, want, want, args.len(), line, col));
+        // Hot reload (`helix run --watch`): which start this is, or `missing` — so `Unknown`.
+        "dev_generation" => {
+            if !args.is_empty() {
+                return Err(arity_err(name, 0, 0, args.len(), line, col));
             }
-            Ok(if name == "dev_session" { Type::Unknown } else { Type::Bool })
+            Ok(Type::Unknown)
         }
         "view_html" | "view_diff" => {
             let want = if name == "view_html" { 1 } else { 2 };

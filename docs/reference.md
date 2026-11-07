@@ -1569,25 +1569,14 @@ Pause the program for ms milliseconds (wall clock; fractional ms honoured).
 
 ## ui
 
-### `dev_keep(model)`
+### `dev_generation()`
 
-Under `helix run --watch`, keep the model for the next reload and answer true; otherwise do nothing and answer false.
+Under `helix run --watch`, which start of the program this is (1 for the first); otherwise missing.
 
-**Note:** HOT RELOAD'S SENDING HALF: the model is written as JSON to the file `helix run --watch` owns (atomically, so a reload never reads half of one). A model that is not JSON — a function inside it — is not kept and answers false; the next start begins from `init`. Keywords: hot reload, watch, keep, save, state.
-
-```
->>> dev_keep({count: 3})
-false
-```
-
-### `dev_session()`
-
-Under `helix run --watch`, the session a reload hands over: `{token, generation, model}`; otherwise missing.
-
-**Note:** HOT RELOAD'S RECEIVING HALF (ADR 0055). `helix run --watch app.helix` restarts the program when a file it loads changes and still checks; `token` is the session every generation shares (so the browser's cookie stays valid), `generation` counts starts from 1, and `model` is what the previous generation kept with `dev_keep` — `missing` if nothing was kept. `std.ui` uses both, so an app reloads with its state without writing either; a model is restored over `init`, so a field added since is filled in. Keywords: hot reload, watch, live reload, dev, restart, state.
+**Note:** HOT RELOAD (ADR 0055). `helix run --watch app.helix` restarts the program when a file it loads changes and still checks. `std.ui` asks this so a reload does not open another browser tab, and to enable the routes the supervisor hands the model and session over on — the app's own authenticated HTTP, so a reload needs no authority the app does not already have. It reads one fixed, non-secret number; no file, socket or secret. Keywords: hot reload, watch, live reload, dev, restart.
 
 ```
->>> dev_session()
+>>> dev_generation()
 missing
 ```
 
@@ -1723,24 +1712,6 @@ Extra roots searched for a non-local import.
 
 **Note:** Searched BEFORE the install-relative standard-library locations, so a directory here shadows a stdlib module of the same path — which is how a local copy is tested, and how one is shadowed by accident. Keywords: import, module, search, library, include, resolve.
 
-### `HELIX_DEV_TOKEN`
-
-Hot reload: the app session every generation of one `helix run --watch` shares.
-
-- **Values:** set by `helix run --watch`; not for setting by hand
-- **Unset:** unset — `dev_session()` answers missing
-
-**Note:** With `HELIX_DEV_STATE` (the file the model crosses reloads in) and `HELIX_DEV_GENERATION` (1 for the first start, then one more per reload), it is what `dev_session()` reads — so a reloaded app keeps its model and the browser's session cookie stays valid. Keywords: hot reload, watch, live reload, dev server, restart.
-
-### `HELIX_DEV_STATE`
-
-Hot reload: where `dev_keep` leaves the model for the next generation.
-
-- **Values:** a file path, set by `helix run --watch`
-- **Unset:** unset — `dev_keep(model)` does nothing and answers false
-
-**Note:** Written atomically (beside, then renamed) after every change, read by the next generation's `dev_session()`. The supervisor names it in the temp directory. Keywords: hot reload, state, model.
-
 ### `HELIX_DEV_GENERATION`
 
 Hot reload: which start of the app this is — 1, then one more per reload.
@@ -1748,7 +1719,7 @@ Hot reload: which start of the app this is — 1, then one more per reload.
 - **Values:** a positive integer, set by `helix run --watch`
 - **Unset:** 1
 
-**Note:** An app prints its link and opens the browser on generation 1 only. Keywords: hot reload, reload count.
+**Note:** Set by `helix run --watch` and read by `dev_generation()`. An app opens the browser on generation 1 only, and serves the routes the supervisor hands its model and session over on only when this is set. It carries no secret: the session token never goes through the environment, which other processes of the same user can read. Keywords: hot reload, reload count, watch.
 
 ### `HELIX_THREADS`
 

@@ -10,9 +10,11 @@
   watches every file the program loads, and CHECKS the program before reloading: a save that
   does not check prints its error and the running app carries on. The model is restored over
   the new `init`, so a field added since is filled in; if the new view cannot draw it, the
-  app starts from `init` and says why. Two builtins carry state between restarts —
-  `dev_session()` and `dev_keep(model)` — and are inert in an ordinary run; `std.ui` uses them
-  so an app needs no code for any of this. A supervisor that is killed takes its app with it,
+  app starts from `init` and says why. The handover needs no authority the app does not
+  already hold — no file, no secret in the environment: the model and session cross on the
+  app's own authenticated HTTP, on routes that exist only under `--watch` (a 404 otherwise).
+  `dev_generation()` tells a program which start it is (missing outside `--watch`). A
+  supervisor that is killed takes its app with it,
   so the port is never left held.
 
 - **`import std.ui` works from any directory: the app library is compiled into `helix`.** It

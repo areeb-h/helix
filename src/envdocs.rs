@@ -127,25 +127,11 @@ pub static ENV: &[EnvDoc] = &[
         notes: "Searched BEFORE the install-relative standard-library locations, so a directory here shadows a stdlib module of the same path — which is how a local copy is tested, and how one is shadowed by accident. Keywords: import, module, search, library, include, resolve.",
     },
     EnvDoc {
-        name: "HELIX_DEV_TOKEN",
-        values: "set by `helix run --watch`; not for setting by hand",
-        default: "unset — `dev_session()` answers missing",
-        doc: "Hot reload: the app session every generation of one `helix run --watch` shares.",
-        notes: "With `HELIX_DEV_STATE` (the file the model crosses reloads in) and `HELIX_DEV_GENERATION` (1 for the first start, then one more per reload), it is what `dev_session()` reads — so a reloaded app keeps its model and the browser's session cookie stays valid. Keywords: hot reload, watch, live reload, dev server, restart.",
-    },
-    EnvDoc {
-        name: "HELIX_DEV_STATE",
-        values: "a file path, set by `helix run --watch`",
-        default: "unset — `dev_keep(model)` does nothing and answers false",
-        doc: "Hot reload: where `dev_keep` leaves the model for the next generation.",
-        notes: "Written atomically (beside, then renamed) after every change, read by the next generation's `dev_session()`. The supervisor names it in the temp directory. Keywords: hot reload, state, model.",
-    },
-    EnvDoc {
         name: "HELIX_DEV_GENERATION",
         values: "a positive integer, set by `helix run --watch`",
         default: "1",
         doc: "Hot reload: which start of the app this is — 1, then one more per reload.",
-        notes: "An app prints its link and opens the browser on generation 1 only. Keywords: hot reload, reload count.",
+        notes: "Set by `helix run --watch` and read by `dev_generation()`. An app opens the browser on generation 1 only, and serves the routes the supervisor hands its model and session over on only when this is set. It carries no secret: the session token never goes through the environment, which other processes of the same user can read. Keywords: hot reload, reload count, watch.",
     },
     EnvDoc {
         name: "HELIX_THREADS",

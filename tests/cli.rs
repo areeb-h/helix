@@ -4589,6 +4589,9 @@ fn the_component_gallery_replays_identically_on_every_engine() {
 /// field filled from `init`), and the old cookie still works. A save that does not check is
 /// reported and the running app kept. Killing the supervisor ends the app too. Before this,
 /// `run --watch` was read as a script named `--watch`.
+///
+/// The handover adds no authority: the model and session cross on the app's own HTTP, behind
+/// its session token — a request to the handover routes without it is refused like any other.
 #[test]
 fn an_app_hot_reloads_with_its_state() {
     use std::io::{BufRead, BufReader, Read, Write};
@@ -4609,15 +4612,26 @@ fn an_app_hot_reloads_with_its_state() {
     );
     std::fs::write(&app, &v1).unwrap();
 
-    let mut sup = Command::new(env!("CARGO_BIN_EXE_helix"))
-        .args(["run", "--watch", app.to_str().unwrap()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start the supervisor");
+    // Killed on drop, so a failing assertion cannot leave a supervisor (and its app, holding
+    // the port) running into the next test run.
+    struct Supervisor(std::process::Child);
+    impl Drop for Supervisor {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut sup = Supervisor(
+        Command::new(env!("CARGO_BIN_EXE_helix"))
+            .args(["run", "--watch", app.to_str().unwrap()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start the supervisor"),
+    );
     let log = Arc::new(Mutex::new(String::new()));
     let sink = log.clone();
-    let err = sup.stderr.take().unwrap();
+    let err = sup.0.stderr.take().unwrap();
     std::thread::spawn(move || {
         for line in BufReader::new(err).lines().map_while(Result::ok) {
             sink.lock().unwrap().push_str(&(line + "\n"));
@@ -4665,6 +4679,12 @@ fn an_app_hot_reloads_with_its_state() {
     inc();
     inc();
     assert_eq!(heading(), "Count: 2");
+    // The handover routes need the session, like every route.
+    let anon = ask(format!("GET /__dev/model HTTP/1.0\r\n{host}\r\n"));
+    assert!(anon.starts_with("HTTP/1.1 403"), "{anon}");
+    let forged = r#"{"token":"0000000000000000000000000000000000000000000000000000000000000000","model":null}"#;
+    let anon = ask(format!("POST /__dev/adopt HTTP/1.0\r\n{host}Content-Length: {}\r\n\r\n{forged}", forged.len()));
+    assert!(anon.starts_with("HTTP/1.1 403"), "{anon}");
 
     // Edit the view and add a field: the count survives, the new field is filled from init.
     let v2 = v1
@@ -4686,8 +4706,7 @@ fn an_app_hot_reloads_with_its_state() {
     assert_eq!(heading(), "Total: 3 clicks");
 
     // Killing the supervisor ends the app: nothing is left holding the port.
-    let _ = sup.kill();
-    let _ = sup.wait();
+    drop(sup);
     let end = Instant::now() + Duration::from_secs(5);
     while TcpStream::connect(("127.0.0.1", PORT)).is_ok() {
         assert!(Instant::now() < end, "the app outlived its supervisor");
@@ -4696,12 +4715,13 @@ fn an_app_hot_reloads_with_its_state() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Outside `helix run --watch`, the hot-reload builtins are inert: no session, nothing kept.
+/// Outside `helix run --watch`, `dev_generation()` is missing — and so an app serves no
+/// handover routes at all (`an_app_answers_only_its_session` pins the 404).
 #[test]
-fn dev_builtins_are_inert_in_an_ordinary_run() {
-    let (out, err, code) = run(&["eval", "print(dev_session())\nprint(dev_keep({n: 1}))"], &[], "");
+fn dev_generation_is_missing_in_an_ordinary_run() {
+    let (out, err, code) = run(&["eval", "print(dev_generation())"], &[], "");
     assert_eq!(code, Some(0), "{err}");
-    assert_eq!(out, "missing\nfalse\n");
+    assert_eq!(out, "missing\n");
 }
 
 /// An app answers only the person who started it (ADR 0055 Phase 1). A localhost port is
@@ -4787,6 +4807,16 @@ fn an_app_answers_only_its_session() {
     let _ = read_for(&mut events, 300);
     let after = read_for(&mut events, 600);
     assert_eq!(after.matches("data: ").count(), 0, "a stopped stopwatch asks for no timer: {after}");
+
+    // Hot reload's handover routes do not exist outside `helix run --watch`, even for the
+    // session's own holder: an ordinary app cannot have its model read or replaced that way.
+    assert!(get("/__dev/model", &host, &cookie).starts_with("HTTP/1.1 404"));
+    let adopt = format!("{{\"token\":\"{}\",\"model\":{{\"running\":true}}}}", "1".repeat(64));
+    let r = ask(format!(
+        "POST /__dev/adopt HTTP/1.0\r\nHost: {host}\r\n{cookie}Content-Length: {}\r\n\r\n{adopt}",
+        adopt.len()
+    ));
+    assert!(r.starts_with("HTTP/1.1 404"), "{r}");
     let _ = child.kill();
     let _ = child.wait();
 }
