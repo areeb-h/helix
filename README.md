@@ -347,8 +347,13 @@ More in [`examples/`](examples/), the full [stdlib reference](docs/reference.md)
   `view(model)`. Views are data, rendered and diffed in Rust and patched into the page, so a
   frame touches only what changed; motion is declared in the view and run by the GPU.
 - **Components accessible by construction**: forms with validation, tabs, menus, dialogs,
-  toasts, tooltips, charts and a virtualised DataFrame table, in light and dark — checked with
-  axe-core in CI. Each run serves on localhost behind a session token.
+  sheets, toasts with Undo, segmented controls, lists, charts and a virtualised DataFrame
+  table, in light and dark — checked with axe-core in CI. Each run serves on localhost behind
+  a session token.
+- **A design engine** ([ADR 0056](docs/adr/0056-design-engine.md)): one seed colour becomes
+  both palettes with WCAG contrast proven for every pair; corners are concentric by
+  construction; glass, tonal and hybrid materials; spring motion that keeps its velocity, and
+  shared elements that morph between frames.
 - **Hot reload**: `helix run --watch app.helix` shows each save in the open page with the
   app's state kept; a save that does not type-check is reported and the app keeps running.
 - **A native window** (built with `--features desktop`): `ui.app({…, window: true})` shows the

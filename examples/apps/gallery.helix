@@ -48,7 +48,14 @@ fn counts(seed) = do {
 
 # --- The model. ---------------------------------------------------------------------------
 
-init = {
+PEOPLE = ["Ada Lovelace", "Grace Hopper", "Linus Torvalds", "Margaret Hamilton", "Alan Turing", "Barbara Liskov"]
+ITEMS = [["Q3 report.pdf", "doc", "2.4 MB"], ["Launch hero.png", "image", "840 KB"], ["Budget.csv", "table", "96 KB"], ["Designs", "folder", "14 items"]]
+
+fn design_for(m) = ui.design({seed: m.accent, material: m.material, shape: m.shape})
+
+init0 = {
+  material: "hybrid", shape: "soft", accent: "#4f46e5",
+  view: "list", filter: "all", digest: "weekly", copies: 2, sheet: false, picked: 0, items: [0, 1, 2, 3],
   dark: false,
   tab: "account",
   name: "", email: "", bio: "", plan: "pro", agree: false, notify: true, volume: 40,
@@ -59,8 +66,9 @@ init = {
   seed: 1,
   last: "nothing yet",
 }
+init = {...init0, design: design_for(init0)}
 
-fn toast(m, text, tone) = {...m, toasts: m.toasts.concat([{id: m.next, text: text, tone: tone, born: missing}]), next: m.next + 1}
+fn toast(m, text, tone, action = missing) = {...m, toasts: m.toasts.concat([if action.is_missing() then {id: m.next, text: text, tone: tone, born: missing} else {id: m.next, text: text, tone: tone, action: action, born: missing}]), next: m.next + 1}
 
 fn errors(m) = {
   name: ui.check(m.name, [ui.required("Enter your name."), ui.min_length(2, "A name has at least two letters.")]),
@@ -73,6 +81,23 @@ fn valid(m) = do {
 }
 
 fn update(m, e) = match e.msg {
+  "material" => do {
+    n = {...m, material: e.value}
+    {...n, design: design_for(n)}
+  },
+  "shape" => do {
+    n = {...m, shape: e.value}
+    {...n, design: design_for(n)}
+  },
+  "view" => {...m, view: e.value},
+  "filter" => {...m, filter: e.value},
+  "digest" => {...m, digest: e.value},
+  "copies" => {...m, copies: to_int(e.value)},
+  "pick-item" => {...m, picked: to_int(e.value)},
+  "open-sheet" => {...m, sheet: true},
+  "close-sheet" => {...m, sheet: false},
+  "remove" => if not m.items.contains(m.picked) then m else toast({...m, items: m.items.filter((i) => i != m.picked)}, "Removed “{ITEMS[m.picked][0]}”.", "neutral", {label: "Undo", msg: "restore", value: "{m.picked}"}),
+  "restore" => {...m, items: m.items.concat([to_int(e.value)]).sort(), toasts: m.toasts.filter((t) => t.get("action").is_missing())},
   "theme" => {...m, dark: not m.dark},
   "tab" => {...m, tab: e.value},
   "name" => {...m, name: e.value},
@@ -103,6 +128,8 @@ fn update(m, e) = match e.msg {
 fn header(m) = ui.el("header", {class: "top"}, [
   ui.el("div", {}, [ui.heading("Components"), ui.label("Every component of ui.helix — built in Helix, rendered and diffed in Rust, animated on the compositor.")]),
   ui.el("div", {class: "actions"}, [
+    ui.segmented("material", "Material", m.material, [["tonal", "Tonal"], ["hybrid", "Hybrid"], ["glass", "Glass"]], "material", size: "sm"),
+    ui.segmented("shape", "Shape", m.shape, [["sharp", "Sharp"], ["soft", "Soft"], ["round", "Round"]], "shape", size: "sm"),
     ui.menu("actions", "Actions", m.menu, "menu", [
       {label: "Duplicate", msg: "pick", value: "Duplicate"},
       {label: "Rename", msg: "pick", value: "Rename"},
@@ -179,9 +206,31 @@ fn charts(m) = do {
   ])
 }
 
+fn choices(m) = ui.card("Choices and status", [
+  ui.el("div", {class: "field"}, [ui.el("span", {class: "field-label"}, [ui.text("View")]), ui.segmented("view", "View", m.view, [["list", "List"], ["grid", "Grid"], ["board", "Board"]], "view")]),
+  ui.chips("filter", "Filter", m.filter, [["all", "All"], ["docs", "Documents"], ["images", "Images"]], "filter"),
+  ui.radio_group("digest", "Digest", m.digest, [["daily", "Daily"], ["weekly", "Weekly"], ["never", "Never"]], "digest"),
+  ui.toggle("sync", "Auto-sync", m.notify, "notify", hint: "Keep files up to date"),
+  ui.el("div", {class: "between"}, [ui.el("span", {class: "field-label"}, [ui.text("Copies")]), ui.stepper("copies", "copies", m.copies, "copies", lo: 1, hi: 5)]),
+  ui.el("div", {class: "between"}, [ui.avatars(PEOPLE, max: 4), ui.ring("Upload", m.volume)]),
+  ui.skeleton(3),
+])
+
+fn lists(m) = ui.card("Lists, sheets and summaries", [
+  ui.grid([ui.stat_tile("Shipped", "128", delta: "+12%", series: [3, 5, 4, 6, 8, 7, 9, 11]), ui.stat_tile("Blocked", "3", delta: "−2", trend: "down", series: [9, 8, 8, 6, 7, 5, 4, 3])], min: 140, gap: 3),
+  if m.items.count() == 0 then ui.empty_state("folder", "Nothing left", "Undo brings them back.")
+    else ui.list(m.items.map((i) => ui.list_item(ITEMS[i][0], subtitle: ITEMS[i][2], leading: ui.icon(ITEMS[i][1]), selected: m.picked == i, click: "pick-item", value: "{i}", key: "item-{i}")), label: "Files"),
+  ui.cluster([ui.button("Share…", "open-sheet", variant: "tonal", icon: "share"), ui.button("Remove", "remove", variant: "outline", icon: "trash")], gap: 2),
+  ui.sheet("share", m.sheet, "Share “{ITEMS[m.picked][0]}”", [
+    ui.search_field("invite", "Add people", "", "noop", placeholder: "Add people or groups"),
+    ui.list(range(0, 3).map((i) => ui.list_item(PEOPLE[i], subtitle: if i == 0 then "Owner" else "Can edit", leading: ui.avatar(PEOPLE[i]), key: "p{i}")), label: "People"),
+    ], "close-sheet", actions: [ui.button("Cancel", "close-sheet", variant: "ghost"), ui.button("Send", "close-sheet", variant: "primary")]),
+])
+
 fn view(m) = ui.column([
   header(m),
   ui.grid([buttons(m), feedback(m)], min: 380),
+  ui.grid([choices(m), lists(m)], min: 380),
   forms(m),
   charts(m),
   data(m),
@@ -194,6 +243,7 @@ STYLE = """
 .actions { display: flex; gap: var(--s-4); align-items: center; }
 .error-line { margin: 0; min-height: 0; color: var(--danger); font-size: var(--t-sm); font-weight: 500; }
 .error-line:empty { display: none; }
+.between { display: flex; justify-content: space-between; align-items: center; gap: var(--s-3); }
 """
 
 spec = {
@@ -202,6 +252,7 @@ spec = {
   update: update,
   view: view,
   style: STYLE,
+  design: (m) => m.design,
   theme: (m) => if m.dark then "dark" else "light",
   subscriptions: (m) => if m.toasts.count() == 0 then [] else [ui.every(1000, "tick")],
 }

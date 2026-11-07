@@ -4,6 +4,48 @@
 
 ### Added
 
+- **A design engine for apps** ([ADR 0056](docs/adr/0056-design-engine.md)).
+  - **Colour from one seed.** `ui.design({seed: "#4f46e5", material, shape, density})` computes
+    every colour of a light and a dark palette from the seed, in OKLCH. Each text colour is
+    moved just far enough to reach WCAG AA on every surface it sits on.
+    `ui.contrast_report(design)` lists the pairs. A sweep of the hue circle in every material
+    checks 1,440 pairs, and all pass.
+  - **Concentric corners.** Every corner is computed: an inner corner is its container's radius
+    minus the padding between them, so nested curves share a centre (`ui.geometry` returns the
+    numbers).
+  - **Three materials.** `tonal` uses solid surfaces layered by tone. `glass` is translucent,
+    over a backdrop the design generates. `hybrid`, the default, keeps content solid and puts
+    glass on toolbars, rails, menus, sheets and toasts. Glass opacity is solved so that text
+    stays legible over its own backdrop.
+  - **Graceful on weak machines.** Glass draws as solid surfaces without GPU compositing, with
+    reduce transparency, and with high contrast.
+  - **Shape and density.** Choose sharp, soft or round corners (capsule controls), and
+    comfortable or compact spacing.
+  - **Live designs.** `design:` may be a function of the model, so the page restyles live.
+    `ui.scoped(design, node)` gives part of a view its own design.
+- **Motion, version 2.**
+  - **Two spring families.** Spatial springs move things and effects springs fade things; each
+    comes in fast, default and slow (`motion(prop, "spatial")`).
+  - **Velocity carries over.** A list re-ordered mid-animation bends toward the new order
+    instead of restarting.
+  - **Shared elements.** The `share` prop morphs one element into the next with the same
+    name, so a segmented control's selection glides between options.
+  - **Batched frames.** Frames are applied once per display refresh, and every animation runs
+    on the compositor.
+- **New components in `std.ui`:**
+  - a built-in icon set (`ui.icon`);
+  - `segmented`, `chips`, `radio_group` and `stepper`;
+  - `ring`, `skeleton`, `sheet`, and toasts with an action (Undo);
+  - `list` and `list_item`, `avatar` and `avatars`;
+  - `stat_tile` and `sparkline`;
+  - `breadcrumbs`, `search_field`, `kbd` and `fab`;
+  - the app frame: `shell`, `rail` and `toolbar`, where the toolbar floats over content that
+    scrolls beneath it.
+
+  Switches, checkboxes, sliders, buttons, menus and dialogs are restyled. Scrollbars are thin
+  and themed, and appear while scrolling. `examples/apps/design-lab.helix` shows the three
+  materials side by side.
+
 - **An app in its own native window** (ADR 0055 Phase 4, built with `--features desktop`).
   `ui.app({…, window: true})` — or `helix run examples/apps/gallery.helix --window` — shows the
   app on the platform's web view (WebKitGTK, WebView2, WKWebView) in a native window instead

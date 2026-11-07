@@ -68,7 +68,8 @@ async function session(browser, url, motion) {
   // slower runner, where even reduced motion's 0.01 ms transitions finish a frame or two later.
   const settle = async () => {
     await p.waitForTimeout(30);
-    await p.waitForFunction(() => document.getAnimations().every((a) => a.playState !== 'running'), null, { timeout: 5000 });
+    // A loading shimmer runs forever by design; "at rest" means every animation that ENDS has.
+    await p.waitForFunction(() => document.getAnimations().every((a) => a.playState !== 'running' || a.effect.getTiming().iterations === Infinity), null, { timeout: 5000 });
     await p.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
   };
   const shot = (name) => motion === 'reduce' ? null : p.screenshot({ path: path.join(OUT, name + '.png'), fullPage: name.endsWith('page') });
@@ -204,6 +205,57 @@ async function session(browser, url, motion) {
   const dot = await p.$('circle[data-key="p0"]');
   await post(() => p.click('[data-click="reshuffle"]'));
   check(await p.evaluate((d) => d.isConnected, dot), 'a reshuffled scatter moves its points, not replaces them');
+
+  // A segmented control is a radio group: arrow keys move AND choose, focus follows.
+  await p.focus('#view [aria-checked="true"]');
+  await post(() => p.keyboard.press('ArrowRight'));
+  check(await p.getAttribute('#view [data-value="grid"]', 'aria-checked') === 'true', 'ArrowRight chooses the next segment');
+  check(await p.evaluate(() => document.activeElement.dataset.value) === 'grid', 'focus follows the chosen segment');
+  // Its thumb is a shared element: chosen elsewhere, it glides there on a spring — and under
+  // reduced motion it simply is there.
+  await p.click('#view [data-value="board"]');
+  await p.waitForSelector('#view [data-value="board"] .seg-thumb');
+  const gliding = await p.evaluate(() => document.querySelector('#view .seg-thumb').getAnimations().length);
+  frames = await p.evaluate(() => Number(document.documentElement.dataset.version));
+  check(motion === 'reduce' ? gliding === 0 : gliding > 0, motion === 'reduce' ? 'the segmented thumb does not move under reduced motion' : 'the segmented thumb glides to its new option');
+  await settle();
+
+  // The stepper sends the new value and stops at its bounds.
+  await post(() => p.click('#copies [aria-label="Increase copies"]'));
+  check(await p.textContent('#copies .stepper-value') === '3', 'the stepper steps up');
+  await post(() => p.click('#copies [aria-label="Increase copies"]'));
+  await post(() => p.click('#copies [aria-label="Increase copies"]'));
+  check(await p.evaluate(() => document.querySelector('#copies [aria-label="Increase copies"]').disabled), 'the stepper stops at its maximum');
+
+  // A sheet: rises with focus inside it, is labelled, and Escape closes it.
+  await post(() => p.click('[data-click="open-sheet"]'));
+  check(await p.evaluate(() => { const d = document.getElementById('share'); return !!d && d.contains(document.activeElement); }), 'an opened sheet takes focus');
+  await axe('sheet open');
+  await shot('gallery-sheet');
+  await post(() => p.keyboard.press('Escape'));
+  check(await p.evaluate(() => !document.getElementById('share')), 'Escape closes the sheet');
+
+  // A toast's action: removing a row offers Undo, and Undo brings it back.
+  const before_rows = await p.evaluate(() => document.querySelectorAll('[aria-label="Files"] [role=listitem]').length);
+  await post(() => p.click('[data-click="remove"]'));
+  await p.waitForTimeout(250);
+  check(await p.evaluate(() => document.querySelectorAll('[aria-label="Files"] [role=listitem]').length) === before_rows - 1, 'removing a row removes it');
+  await post(() => p.click('.toast-action'));
+  await p.waitForTimeout(250);
+  check(await p.evaluate(() => document.querySelectorAll('[aria-label="Files"] [role=listitem]').length) === before_rows, 'Undo on the toast brings it back');
+
+  // Every material passes in both modes; the page restyles live when the design changes.
+  for (const mat of ['glass', 'tonal', 'hybrid']) {
+    const card0 = await p.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--card-bg'));
+    await post(() => p.click(`#material [data-value="${mat}"]`));
+    if (mat !== 'hybrid') check(await p.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--card-bg')) !== card0 || mat === 'tonal', `the ${mat} material restyles the page`);
+    for (let k = 0; k < 2; k++) {
+      const theme = await p.evaluate(() => document.documentElement.dataset.theme);
+      await axe(`${mat}, ${theme}`);
+      if (mat === 'glass') await shot(`gallery-glass-${theme}`);
+      await post(() => p.click('#dark'));
+    }
+  }
 
   check(errors.length === 0, `no page errors (${errors.join('; ')})`);
   await ctx.close();

@@ -261,9 +261,14 @@ pub static SYNTAX: &[SyntaxDoc] = &[
                 `ui.app({title, init, update: (model, event) => model, view: (model) => tree})`; an event is \
                 `{msg, value}`. Components: `column`/`row`/`cluster`/`grid`, `card`, `button`, `text_input`, \
                 `textarea`, `select`, `checkbox`, `toggle`, `slider`, `form` with `required`/`min_length`/`pattern`, \
-                `tabs`, `menu`, `dialog`, `toasts`, `tooltip`, `progress`, `badge`, `data_table` (a DataFrame, \
+                `tabs`, `menu`, `dialog`, `sheet`, `toasts` (with an action), `tooltip`, `progress`, `ring`, `skeleton`, \
+                `badge`, `segmented`, `chips`, `radio_group`, `stepper`, `search_field`, `list`/`list_item`, `avatar`, \
+                `stat_tile`, `breadcrumbs`, `icon`, `fab`, `shell`/`rail`/`toolbar`, `data_table` (a DataFrame, \
                 virtualised), `line_chart`/`scatter_chart`/`bar_chart`; timers with `every(ms, msg)` in \
-                `subscriptions`. Accessible by construction, light and dark, motion run by the GPU. \
+                `subscriptions`. Accessible by construction, light and dark, motion run by the GPU. A DESIGN is \
+                `ui.design({seed: \"#4f46e5\", material: \"hybrid\" | \"glass\" | \"tonal\", shape, density})` given as \
+                `design:` (ADR 0056): colours computed in OKLCH with contrast proven (`ui.contrast_report`), \
+                concentric corners (`ui.geometry`), spring motion and shared elements (`share:`). \
                 `ui.replay(spec, events)` returns every screen as HTML — testable without a browser, the same \
                 on all three engines. `helix run app.helix` prints a link (add `--open`, or `window: true` in a `--features desktop` build for a native \
                 window); `helix run --watch app.helix` reloads on save with the \
