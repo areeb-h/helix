@@ -4470,7 +4470,7 @@ fn std_ui_is_built_in_and_importable_from_anywhere() {
     )
     .unwrap();
     let app_s = app.to_str().unwrap();
-    let want = "<div class=\"col gap-4\"><h1>Count: 2</h1><button class=\"btn primary\" data-click=\"inc\" type=\"button\">+</button></div>";
+    let want = "<div class=\"col hx-gap-4\"><h1>Count: 2</h1><button class=\"btn primary\" data-click=\"inc\" type=\"button\">+</button></div>";
     for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
         let (out, err, code) = run(&["run", app_s], env, "");
         assert_eq!(code, Some(0), "{env:?}: {err}");
@@ -4481,11 +4481,11 @@ fn std_ui_is_built_in_and_importable_from_anywhere() {
 
     // A copy on HELIX_PATH is used instead of the built-in one.
     let lib = std::fs::read_to_string("std/ui.helix").unwrap();
-    std::fs::write(dir.join("over/std/ui.helix"), lib.replace("class: \"col gap-{gap}\"", "class: \"pinned col gap-{gap}\"")).unwrap();
+    std::fs::write(dir.join("over/std/ui.helix"), lib.replace("class: \"col hx-gap-{gap}\"", "class: \"pinned col hx-gap-{gap}\"")).unwrap();
     let over = dir.join("over");
     let (out, err, code) = run(&["run", app_s], &[("HELIX_PATH", over.to_str().unwrap())], "");
     assert_eq!(code, Some(0), "{err}");
-    assert!(out.lines().last().unwrap().starts_with("<div class=\"pinned col gap-4\">"), "{out}");
+    assert!(out.lines().last().unwrap().starts_with("<div class=\"pinned col hx-gap-4\">"), "{out}");
 
     // A built executable carries the library and runs with no files around it.
     let exe = dir.join("counter-app");
@@ -5128,6 +5128,102 @@ fn open_window_shows_only_the_apps_own_page() {
         assert_eq!(code, Some(1), "{url} must be refused");
         assert!(err.contains("a window shows only this app's own page on 127.0.0.1"), "{url}: {err}");
     }
+}
+
+/// Utility classes in a live app (ADR 0060): the first page carries the CSS for the classes its
+/// view uses, a frame whose view uses new ones carries the stylesheet for all seen so far, and
+/// a frame with no new classes carries none. A class from data that tries to break out of its
+/// rule produces nothing.
+#[test]
+fn an_apps_utility_classes_are_generated_as_its_view_uses_them() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpStream;
+    use std::time::{Duration, Instant};
+
+    const PORT: u16 = 18477;
+    let dir = std::env::temp_dir().join(format!("helix_utility_app_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let app = dir.join("app.helix");
+    std::fs::write(
+        &app,
+        format!(
+            "import std.ui\n\
+             fn view(m) = ui.el(\"div\", {{class: \"p-4 rounded-card\"}}, [ui.el(\"p\", {{class: if m.big then \"text-2xl md:text-4xl\" else \"text-sm\"}}, [ui.text(\"Hi\")]), ui.el(\"span\", {{class: m.tag}}, [])])\n\
+             fn update(m, e) = match e.msg {{ \"big\" => {{...m, big: true}}, \"tag\" => {{...m, tag: e.value}}, _ => m }}\n\
+             ui.app({{title: \"T\", init: {{big: false, tag: \"\"}}, update: update, view: view, port: {PORT}}})\n"
+        ),
+    )
+    .unwrap();
+    struct Running(std::process::Child);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut run = Running(
+        Command::new(env!("CARGO_BIN_EXE_helix"))
+            .args(["run", app.to_str().unwrap()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut banner = String::new();
+    BufReader::new(run.0.stderr.take().unwrap()).read_line(&mut banner).unwrap();
+    let token = banner.split("token=").nth(1).unwrap().trim().to_string();
+    let host = format!("127.0.0.1:{PORT}");
+    let cookie = format!("Cookie: helix_app_{PORT}={token}\r\n");
+    let ask = |raw: String| -> String {
+        let mut s = TcpStream::connect(("127.0.0.1", PORT)).expect("the app has stopped");
+        s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        s.write_all(raw.as_bytes()).unwrap();
+        let mut out = String::new();
+        let _ = s.read_to_string(&mut out);
+        out
+    };
+    let post = |body: &str| {
+        ask(format!("POST /event HTTP/1.0\r\nHost: {host}\r\n{cookie}Content-Length: {}\r\n\r\n{body}", body.len()))
+    };
+    let page = ask(format!("GET / HTTP/1.0\r\nHost: {host}\r\n{cookie}\r\n"));
+    let util = page.split("<style id=\"hx-util\">").nth(1).and_then(|s| s.split("</style>").next()).unwrap_or("").to_string();
+    assert!(util.contains(".p-4 { padding: calc(var(--spacing) * 4); }"), "{util}");
+    assert!(util.contains(".rounded-card { border-radius: var(--r-card); }") && util.contains(".text-sm {"), "{util}");
+    assert!(!util.contains("text-2xl"), "only the classes the view uses");
+    assert!(page.contains("@layer hx-components, hx-utilities;"), "utilities come after the components");
+
+    let mut events = TcpStream::connect(("127.0.0.1", PORT)).unwrap();
+    events.set_read_timeout(Some(Duration::from_millis(200))).ok();
+    events.write_all(format!("GET /events HTTP/1.1\r\nHost: {host}\r\n{cookie}\r\n").as_bytes()).unwrap();
+    let read_for = |s: &mut TcpStream, ms: u64| -> String {
+        let end = Instant::now() + Duration::from_millis(ms);
+        let mut got = Vec::new();
+        let mut buf = [0u8; 8192];
+        while Instant::now() < end {
+            if let Ok(n) = s.read(&mut buf) {
+                got.extend_from_slice(&buf[..n]);
+            }
+        }
+        String::from_utf8_lossy(&got).into_owned()
+    };
+    let _first = read_for(&mut events, 500);
+    assert!(post(r#"{"msg":"big","value":null}"#).starts_with("HTTP/1.1 204"));
+    let grown = read_for(&mut events, 800);
+    assert!(grown.contains("\"util\":") && grown.contains(".text-2xl {") && grown.contains("@media (width >= 48rem)"), "a frame with new classes carries their CSS: {grown}");
+    assert!(grown.contains(".text-sm {"), "and keeps the ones seen before");
+    // A class from data that tries to leave its rule produces nothing; the frame's stylesheet
+    // is unchanged, so it is not sent again.
+    let attack = r#"{"msg":"tag","value":"bg-[red;}body{display:none] w-[1px]</style><script>alert(1)</script>"}"#;
+    assert!(post(attack).starts_with("HTTP/1.1 204"));
+    let after = read_for(&mut events, 800);
+    assert!(after.contains("data: ") && !after.contains("\"util\":"), "no utility to add, so no stylesheet: {after}");
+    let page = ask(format!("GET / HTTP/1.0\r\nHost: {host}\r\n{cookie}\r\n"));
+    let util = page.split("<style id=\"hx-util\">").nth(1).and_then(|s| s.split("</style>").next()).unwrap_or("");
+    assert!(!util.contains("display:none") && !util.contains("red;"), "the attack never reaches the stylesheet: {util}");
+    assert!(!page.contains("<script>alert") && page.contains("&lt;script&gt;alert"), "and is only ever text in an attribute");
+    drop(run);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// An app answers only the person who started it (ADR 0055 Phase 1). A localhost port is

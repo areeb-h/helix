@@ -58,7 +58,7 @@ pub fn category_of(name: &str) -> &'static str {
         "chr" | "ord" | "to_float" | "to_int" | "numerator" | "denominator"
         | "from_hex" | "from_base64" | "html_escape" => "conversion",
         // An app's view tree, rendered and diffed (ADR 0055).
-        "view_html" | "view_diff" | "dev_generation" | "open_window" => "ui",
+        "view_html" | "view_diff" | "view_classes" | "utility_css" | "dev_generation" | "open_window" => "ui",
         // Math — elementwise, broadcasting, missing-propagating.
         "sqrt" | "cbrt" | "abs" | "exp" | "ln" | "log10" | "log2" | "log" | "sin" | "cos"
         | "tan" | "asin" | "acos" | "atan" | "atan2" | "sinh" | "cosh" | "tanh" | "floor"
@@ -185,6 +185,8 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "html_escape", pure: true },
     BuiltinDef { path: "view_html", pure: true },
     BuiltinDef { path: "view_diff", pure: true },
+    BuiltinDef { path: "view_classes", pure: true },
+    BuiltinDef { path: "utility_css", pure: true },
     BuiltinDef { path: "dev_generation", pure: false },
     BuiltinDef { path: "open_window", pure: false },
     BuiltinDef { path: "read_bytes", pure: false },
@@ -668,13 +670,13 @@ mod tests {
         // (lstat as a record), plain std::fs. 167 as of `open_window`,
         // which exists in every build and answers false where `desktop` is off — so an app
         // asks once and falls back to the browser, rather than failing to type-check.
-        // 163 as of `postgres_execute`; 162 as of `has_feature`, which needs NO feature and must not have one: a build
+        // 170 as of `view_classes` and `utility_css` (ADR 0060), pure Rust, in every build. 163 as of `postgres_execute`; 162 as of `has_feature`, which needs NO feature and must not have one: a build
             // without regex is exactly where a program needs to ask, so gating the question
             // on the thing being asked about would make it unanswerable precisely when it
             // matters. That is the decision this count exists to force.
             assert_eq!(
             BUILTINS.len(),
-            168,
+            170,
             "a builtin was added or removed — decide whether it needs a Cargo feature, add it \
              to `feature_of` if it does, and update this count in the same change"
         );

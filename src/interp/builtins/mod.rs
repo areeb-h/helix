@@ -148,7 +148,7 @@ impl super::Interp {
             "sha256" => return encoding::a_sha256(name, args, line, col),
             "hmac_sha256" => return encoding::a_hmac_sha256(name, args, line, col),
             "html_escape" => return encoding::a_html_escape(name, args, line, col),
-            "view_html" | "view_diff" => return a_view(name, args, line, col),
+            "view_html" | "view_diff" | "view_classes" | "utility_css" => return a_view(name, args, line, col),
             "dev_generation" => return crate::devwatch::dev_generation(&args, line, col),
             "open_window" => return crate::desktop::open_window(&args, line, col),
             "url_encode" => return encoding::a_url_encode(args, line, col),
@@ -853,7 +853,9 @@ fn a_view(name: &str, args: Vec<Value>, line: usize, col: usize) -> Result<Value
     match (name, args.as_slice()) {
         ("view_html", [tree]) => crate::view::view_html(tree, line, col),
         ("view_diff", [old, new]) => crate::view::view_diff(old, new, line, col),
-        ("view_html", _) => Err(HelixError::new(format!("`view_html` takes 1 argument, got {}", args.len()), line, col)),
+        ("view_classes", [tree]) => crate::view::view_classes(tree, line, col),
+        ("utility_css", [classes]) => crate::view::utility_css(classes, line, col),
+        ("view_html" | "view_classes" | "utility_css", _) => Err(HelixError::new(format!("`{name}` takes 1 argument, got {}", args.len()), line, col)),
         _ => Err(HelixError::new(format!("`view_diff` takes 2 arguments, got {}", args.len()), line, col)),
     }
 }

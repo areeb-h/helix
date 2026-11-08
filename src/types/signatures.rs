@@ -407,6 +407,12 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(if name == "view_html" { Type::String } else { Type::Array(Box::new(Type::Unknown)) })
         }
+        "view_classes" | "utility_css" => {
+            if args.len() != 1 {
+                return Err(arity_err(name, 1, 1, args.len(), line, col));
+            }
+            Ok(if name == "utility_css" { Type::String } else { Type::Array(Box::new(Type::String)) })
+        }
         "html_escape" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, 1, args.len(), line, col));

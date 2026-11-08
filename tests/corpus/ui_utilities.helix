@@ -1,0 +1,50 @@
+# Utility classes (ADR 0060): Tailwind's names, generated in Rust as a view renders, with the
+# design's tokens beside them. What a class produces, what a variant wraps it in, the order in
+# which later rules win, and the classes that must produce nothing — on every engine.
+
+fn rules(classes) = do {
+  css = utility_css(classes)
+  # The rules, without the layer and the root variables around them.
+  if css == "" then "" else do {
+    body = css.drop(css.index_of("} ") + 2)
+    body.take(body.count() - 2)
+  }
+}
+fn show(c) = print("{c} -> {rules([c])}")
+
+# Tailwind's scale and palette.
+["p-4", "px-2.5", "-mt-2", "mx-auto", "w-1/2", "size-10", "max-w-md", "grid-cols-3", "col-span-2", "gap-x-6",
+  "text-sm", "text-sm/6", "font-semibold", "tracking-tight", "leading-relaxed", "truncate", "line-clamp-2",
+  "bg-blue-500", "bg-blue-500/50", "text-white/70", "border", "border-2", "border-t", "border-red-600", "rounded-xl", "rounded-t-lg",
+  "shadow-lg", "ring-2", "ring-blue-500", "opacity-60", "blur-sm", "backdrop-blur-md", "transition", "duration-300", "ease-out",
+  "scale-95", "rotate-3", "-translate-x-1/2", "z-10", "inset-0", "absolute", "sr-only", "bg-linear-to-r", "from-indigo-500", "to-pink-500",
+  "space-y-4", "divide-y", "aspect-video", "animate-spin"].map(show)
+
+# Helix's tokens: the design's colours, radii, paddings, elevations, type and springs.
+["bg-accent", "text-muted", "bg-accent/10", "border-line", "bg-card", "bg-surface-2", "text-danger", "rounded-card", "rounded-control",
+  "p-card", "shadow-2", "text-title-2", "ease-spring"].map(show)
+
+# Variants, and a class with several.
+["hover:bg-accent", "focus-visible:ring-2", "active:scale-95", "disabled:opacity-50", "group-hover:opacity-100", "peer-checked:block",
+  "dark:bg-surface", "md:grid-cols-2", "max-md:hidden", "@md:flex", "data-[state=open]:block", "aria-selected:font-bold",
+  "motion-reduce:transition-none", "first:pt-0", "*:p-2", "placeholder:text-muted", "md:dark:hover:bg-accent/20", "p-4!"].map(show)
+
+# The order: whatever order the classes come in, the shorthand comes before its sides, the base
+# before its states, and smaller screens before larger ones.
+print(rules(["lg:p-12", "pt-2", "hover:p-6", "md:p-8", "p-4"]))
+print(utility_css(["p-4", "bg-accent", "md:flex"]) == utility_css(["md:flex", "p-4", "bg-accent"]))
+
+# Arbitrary values, checked: what passes, and what can never leave its rule.
+["w-[320px]", "grid-cols-[1fr_2fr]", "bg-[#0a84ff]", "top-[calc(100%_-_2px)]", "text-[15px]", "text-[#333]"].map(show)
+attacks = [
+  "bg-[url(https://evil.example/x.png)]", "w-[1px;color:red]", """w-[1px}body{color:red]""", "bg-['x']", "bg-[\"x\"]",
+  "w-[calc(1px))]", "bg-[image-set(x)]", "w-[expression(1)]", "data-[a=b\"]:block", "data-[a=b]c]:block",
+  "w-[1px]</style><script>", "hover:[color:red]", "bg-[var(--x);]",
+]
+print("attacks producing CSS: {attacks.filter((a) => utility_css([a]) != "").count()} of {attacks.count()}")
+
+# Names that are not utilities produce nothing, as in Tailwind.
+print(["btn", "card", "p-", "p-4.3", "grid-cols-99", "bg-notacolour-500", "héllo", "text-[", ""].map((c) => utility_css([c]) == ""))
+
+# A view's classes, once each.
+print(view_classes({tag: "div", props: {class: "p-4 card  p-4"}, children: [{tag: "span", props: {class: "text-sm\tcard"}, children: []}, {tag: "#text", text: "x"}]}))

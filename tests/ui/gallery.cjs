@@ -469,6 +469,23 @@ async function session(browser, url, motion) {
   check(await p.evaluate(() => { const a = document.activeElement; return a.classList.contains('band') && a === a.parentNode.querySelectorAll(':scope > .band')[1]; }), '→ moves to the next point');
   check(await p.evaluate(() => (document.activeElement.getAttribute('aria-label') || '').includes('signal')), 'and each point says its values');
 
+  // --- Utility classes (ADR 0060): Tailwind's names, Tailwind's sizes, the design's tokens.
+  const plan = await p.$('section[aria-label="Utility classes"] .group:nth-child(2)');
+  await plan.scrollIntoViewIfNeeded();
+  await settle();
+  check(await plan.evaluate((e) => getComputedStyle(e).paddingTop) === '24px', 'a utility is Tailwind’s size (p-6 is 24 px)');
+  check(await plan.evaluate((e) => getComputedStyle(e).borderTopLeftRadius === getComputedStyle(document.documentElement).getPropertyValue('--r-card').trim()), 'a token utility follows the design (rounded-card)');
+  check(await p.evaluate(() => getComputedStyle(document.querySelector('section[aria-label="Utility classes"] .grid')).gridTemplateColumns.split(' ').length) === 3, 'md:grid-cols-3 lays out three columns at this width');
+  check(await p.evaluate(() => getComputedStyle(document.querySelector('.btn.outlined') || document.body).outlineStyle !== 'solid'), 'a component class never collides with a utility (the outlined button has no outline)');
+  if (motion !== 'reduce') {
+    const y0 = (await plan.boundingBox()).y;
+    await plan.hover();
+    await p.waitForTimeout(700);
+    check(y0 - (await plan.boundingBox()).y >= 3, 'hover:-translate-y-1 lifts the card on its spring');
+    await p.mouse.move(5, 5);
+  }
+  await axe('the utility-class card');
+
   // Every material passes in both modes; the page restyles live when the design changes.
   for (const mat of ['glass', 'tonal', 'hybrid']) {
     const card0 = await p.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--card-bg'));

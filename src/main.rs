@@ -114,6 +114,8 @@ mod serve;
 mod simd;
 mod stats;
 mod view;
+mod style;
+mod style_palette;
 mod devwatch;
 mod desktop;
 mod strfmt;
