@@ -343,6 +343,48 @@ async function session(browser, url, motion) {
   await answered(() => drag('#share .grabber-zone', 0, 260, 160));
   check(await p.evaluate(() => !document.getElementById('share')), 'a sheet pulled down closes');
 
+  // --- Navigation and motion. A stack pushes and pops, and is swiped back from its edge; a
+  // tile opens into its card (a container transform) and the tiles cascade back.
+  const stackTitle = () => p.evaluate(() => { const t = document.querySelector('#mail > .stack-screen.stack-top .stack-title'); return t && t.textContent; });
+  await answered(async () => { const r = await p.$('#mail [data-click="open-mail"][data-value="1"]'); await r.scrollIntoViewIfNeeded(); await r.click(); });
+  check(await stackTitle() === 'A bug, found', 'a row pushes its screen');
+  check(await p.getAttribute('#mail .stack-back', 'aria-label') === 'Back to Inbox', 'whose back button names where it goes');
+  check(await p.evaluate(() => document.querySelector('#mail > .stack-screen.stack-beneath').inert), 'and the screen beneath is inert');
+  await axe('a pushed screen');
+  await shot('gallery-stack');
+  const width = await p.evaluate(() => document.getElementById('mail').getBoundingClientRect().width);
+  await drag('#mail .stack-edge', 40, 0, 300);
+  await settle();
+  check(await stackTitle() === 'A bug, found', 'a short swipe from the edge springs back');
+  check(await p.evaluate(() => getComputedStyle(document.querySelector('#mail > .stack-screen.stack-top')).translate === 'none' && !document.getElementById('mail').style.getPropertyValue('--drag-p')), 'and leaves nothing out of place');
+  await answered(() => drag('#mail .stack-edge', width * 0.6, 0, 160));
+  check(await stackTitle() === 'Inbox', 'a swipe from the edge goes back');
+  await answered(() => p.click('#mail [data-click="open-mail"][data-value="0"]'));
+  await answered(() => p.click('#mail .stack-back'));
+  check(await stackTitle() === 'Inbox', 'the back button goes back');
+
+  const tiles = () => p.evaluate(() => document.querySelectorAll('.albums .album-tile').length);
+  await p.$eval('.albums', (e) => e.scrollIntoView({ block: 'center' }));
+  const v0 = await ver();
+  await p.click('.album-tile[data-value="2"]');
+  await p.waitForFunction((n) => Number(document.documentElement.dataset.version) > n, v0);
+  const morphing = await p.evaluate(() => { const g = document.querySelector('.hx-ghosts'); return { ghost: !!g && g.children.length > 0, clip: document.querySelector('.album-open').getAnimations().some((a) => a.effect.getKeyframes().some((k) => k.clipPath)) }; });
+  if (motion === 'reduce') check(!morphing.ghost && !morphing.clip, 'reduced motion: the card simply appears');
+  else check(morphing.ghost && morphing.clip, 'a tile opens into its card: clipped open, the tile fading as a ghost');
+  await settle();
+  await p.waitForTimeout(400);
+  check(await p.evaluate(() => !document.querySelector('.hx-ghosts') || document.querySelector('.hx-ghosts').children.length === 0), 'and the ghost is gone after');
+  check(await tiles() === 0 && await p.evaluate(() => !!document.querySelector('.album-open')), 'the card replaces the grid');
+  await axe('an album open');
+  const v1 = await ver();
+  await p.click('.album-open [aria-label="Close Forest"]');
+  await p.waitForFunction((n) => Number(document.documentElement.dataset.version) > n, v1);
+  const delays = await p.evaluate(() => [...document.querySelectorAll('.album-tile')].map((t) => Math.max(0, ...t.getAnimations().map((a) => a.effect.getTiming().delay || 0))));
+  if (motion !== 'reduce') check(delays.length === 4 && delays.every((d, i) => i === 0 || d > delays[i - 1]), `tiles arriving together cascade (${delays.join(', ')} ms)`);
+  await settle();
+  frames = await ver();
+  check(await tiles() === 4, 'closing brings the tiles back');
+
   // Every material passes in both modes; the page restyles live when the design changes.
   for (const mat of ['glass', 'tonal', 'hybrid']) {
     const card0 = await p.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--card-bg'));

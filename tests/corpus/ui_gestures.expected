@@ -21,4 +21,7 @@ abc
 ["<span class="spinner md" role="progressbar" aria-label="Syncing"></span>", "<div class="progress indeterminate" role="progressbar" aria-label="Indexing"><span class="progress-bar"></span></div>"]
 [true, true]
 [true, true]
+[2, true, true, true, true, true]
+[false, false, false]
+["<h1 class="large-title">Files</h1>", "<span class="tb-title" aria-hidden="true">Files</span>"]
 --- stderr ---

@@ -457,7 +457,7 @@ fn listing(m) = do {
   ui.column([
     ui.breadcrumbs([["0", root_name(m)]].concat(range(0, m.path.count()).map((i) => ["{i + 1}", m.path[i]])), "crumb"),
     ui.el("div", {class: "title-row"}, [
-      ui.el("h1", {class: "screen-title"}, [ui.text(if m.path.count() == 0 then root_name(m) else m.path.last())]),
+      ui.el("h1", {class: "screen-title large-title"}, [ui.text(if m.path.count() == 0 then root_name(m) else m.path.last())]),
       ui.el("span", {class: "meta"}, [ui.text("{v.count()} items{if m.hidden or hidden_n == 0 then "" else ", {hidden_n} hidden"}{if m.query == "" then "" else " matching “{m.query}”"}")]),
     ]),
     if m.error != "" then ui.empty_state("lock", "Can't open this folder", m.error)
@@ -498,6 +498,8 @@ fn toolbar(m) = ui.toolbar(present([
     ui.el("button", {class: "btn ghost icon", click: "forward", aria: {label: "Forward"}, attrs: {type: "button", title: "Forward (Alt+→)", disabled: m.fwd.count() == 0}}, [ui.icon("arrow_right")]),
     ui.el("button", {class: "btn ghost icon", click: "up", aria: {label: "Enclosing folder"}, attrs: {type: "button", title: "Up (Backspace)", disabled: m.path.count() == 0}}, [ui.icon("arrow_up")]),
   ],
+  # The folder's name, which appears here as its large title scrolls away under the toolbar.
+  ui.toolbar_title(if m.path.count() == 0 then root_name(m) else m.path.last()),
   ui.el("div", {class: "search", key: "search-{m.focus}"}, [
     ui.icon("search", "sm"),
     ui.el("input", {class: "search-input", input: "query", aria: {label: "Search this folder"}, attrs: {type: "search", value: m.query, placeholder: "Search this folder", autocomplete: "off", autofocus: m.focus > 0}}, []),

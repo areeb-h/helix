@@ -61,6 +61,12 @@ TREE = [
   {key: "README.md", label: "README.md", icon: "doc"},
 ]
 TASKS = {design: "Design the sheet", build: "Build the gestures", test: "Test on a phone", ship: "Ship it"}
+MAIL = [
+  {from: "Ada Lovelace", subject: "Notes on the engine", body: "The engine might compose elaborate pieces of music of any degree of complexity."},
+  {from: "Grace Hopper", subject: "A bug, found", body: "First actual case of a bug being found — a moth, taped into the log book."},
+  {from: "Margaret Hamilton", subject: "Priority displays", body: "The software recognised the overload and kept only the most important jobs running."},
+]
+ALBUMS = [["Coast", 200], ["Desert", 40], ["Forest", 140], ["Dusk", 300]]
 fn toggled(xs, x) = if xs.contains(x) then xs.filter((y) => y != x) else xs.concat([x])
 
 fn design_for(m) = ui.design({seed: m.accent, material: m.material, shape: m.shape})
@@ -77,6 +83,7 @@ init0 = {
   offset: 0,
   seed: 1,
   last: "nothing yet",
+  mail: [], album: -1,
   split: 240, order: ["design", "build", "test", "ship"], open: ["src"], file: "src/app.helix", sections: ["motion"], pop: false, dense: false,
 }
 init = {...init0, design: design_for(init0)}
@@ -138,6 +145,10 @@ fn update(m, e) = match e.msg {
   "section" => {...m, sections: toggled(m.sections, e.value)},
   "pop" => {...m, pop: not m.pop},
   "dense" => {...m, dense: e.value},
+  "open-mail" => {...m, mail: [to_int(e.value)]},
+  "mail-back" => {...m, mail: m.mail.take(max(m.mail.count() - 1, 0))},
+  "album" => {...m, album: to_int(e.value)},
+  "album-close" => {...m, album: -1},
   # Toasts expire five seconds after the first tick that sees them.
   "tick" => {...m, toasts: m.toasts.map((t) => if t.born.is_missing() then {...t, born: e.value} else t).filter((t) => e.value - t.born < 5.0)},
   _ => m,
@@ -265,11 +276,29 @@ fn gestures(m) = ui.card("Gestures and structure", [
     ], gap: 3),
 ])
 
+fn album_tile(i) = ui.el("button", {class: "album-tile", key: "tile-{i}", share: "album-{i}", click: "album", value: "{i}", enter: "pop", style: {__hue: "{ALBUMS[i][1]}"}, attrs: {type: "button"}}, [
+  ui.el("span", {class: "album-name"}, [ui.text(ALBUMS[i][0])]),
+])
+fn album_open(i) = ui.el("div", {class: "album-open", key: "open-{i}", share: "album-{i}", style: {__hue: "{ALBUMS[i][1]}"}, role: "group", aria: {label: ALBUMS[i][0]}}, [
+  ui.el("div", {class: "album-hero"}, [ui.el("h3", {class: "album-title"}, [ui.text(ALBUMS[i][0])]), ui.icon_button("close", "Close {ALBUMS[i][0]}", "album-close")]),
+  ui.paragraph("Opened in place: the tile grew into this card, its corners and position carried by one spring, and nothing in it stretched."),
+])
+
+fn navigation(m) = ui.card("Navigation and motion", [
+  ui.paragraph("Open a message and swipe it back from its left edge. Open an album: the tile becomes the card. Close it and the tiles cascade back."),
+  ui.grid([
+    ui.stack("mail", [{key: "inbox", title: "Inbox", content: ui.list(range(0, MAIL.count()).map((i) => ui.list_item(MAIL[i].subject, subtitle: MAIL[i].from, leading: ui.avatar(MAIL[i].from), click: "open-mail", value: "{i}", key: "mail-{i}")), label: "Messages")}]
+        .concat(m.mail.map((i) => {key: "msg-{i}", title: MAIL[i].subject, content: ui.column([ui.el("div", {class: "between"}, [ui.el("strong", {}, [ui.text(MAIL[i].from)]), ui.label("Today")]), ui.paragraph(MAIL[i].body)], gap: 2)})), "mail-back"),
+    ui.el("div", {class: "albums"}, if m.album < 0 then range(0, ALBUMS.count()).map(album_tile) else [album_open(m.album)]),
+    ], min: 300, gap: 4),
+])
+
 fn view(m) = ui.column([
   header(m),
   ui.grid([buttons(m), feedback(m)], min: 380),
   ui.grid([choices(m), lists(m)], min: 380),
   gestures(m),
+  navigation(m),
   forms(m),
   charts(m),
   data(m),
@@ -287,6 +316,17 @@ STYLE = """
 .split-demo .split { height: 260px; }
 .split-demo .split-pane { padding: var(--s-1); }
 .grow { flex: 1; min-width: 160px; }
+#mail { min-height: 300px; }
+.albums { display: grid; grid-template-columns: repeat(2, 1fr); gap: var(--s-2); align-content: start; min-height: 300px; }
+.album-tile { --tone: oklch(.62 .14 var(--hue)); border: 0; border-radius: var(--r-in-card); min-height: 140px; padding: var(--s-3); display: flex; align-items: flex-end; cursor: pointer;
+  background: linear-gradient(150deg, oklch(.55 .13 var(--hue)), oklch(.4 .14 calc(var(--hue) + 30))); color: #fff; font: var(--type-headline); text-align: left; }
+.album-name { text-shadow: 0 1px 8px rgba(0, 0, 0, .35); }
+.album-open { grid-column: 1 / -1; border-radius: var(--r-in-card); overflow: hidden; background: var(--surface-2); min-height: 300px; display: flex; flex-direction: column; }
+.album-hero { min-height: 180px; display: flex; align-items: flex-end; justify-content: space-between; padding: var(--s-3); color: #fff;
+  background: linear-gradient(150deg, oklch(.55 .13 var(--hue)), oklch(.4 .14 calc(var(--hue) + 30))); }
+.album-hero .btn { color: #fff; }
+.album-title { margin: 0; font: var(--type-title-1); letter-spacing: var(--track-title-1); text-shadow: 0 1px 8px rgba(0, 0, 0, .35); }
+.album-open .para { padding: var(--s-3); margin: 0; }
 """
 
 spec = {
@@ -326,6 +366,10 @@ SESSION = [
   {msg: "tree-select", value: "docs/guide.md"},
   {msg: "section", value: "gestures"},
   {msg: "pop", value: missing},
+  {msg: "open-mail", value: "1"},
+  {msg: "album", value: "2"},
+  {msg: "mail-back", value: missing},
+  {msg: "album-close", value: missing},
 ]
 
 fn main(port: Int = 8080, open: Bool = false, window: Bool = false, replay: Bool = false) = if replay then ui.replay(spec, SESSION).map((html) => print(html)) else ui.app({...spec, port: port, open: open, window: window})

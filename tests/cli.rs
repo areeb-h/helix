@@ -4608,7 +4608,7 @@ fn the_file_manager_stays_in_its_root_and_changes_only_what_it_should() {
     assert!(seen.windows(2).all(|w| w[0] == w[1]), "engines disagree on the file manager");
     let screens: Vec<&str> = seen[0].split("<div class=\"files\" ").skip(1).collect();
     assert_eq!(screens.len(), 23, "one screen per event");
-    let title = |i: usize| screens[i].split("<h1 class=\"screen-title\">").nth(1).and_then(|t| t.split('<').next()).unwrap_or("");
+    let title = |i: usize| screens[i].split("<h1 class=\"screen-title large-title\">").nth(1).and_then(|t| t.split('<').next()).unwrap_or("");
     assert_eq!(title(0), "Notes");
     assert!(screens[0].contains("Jan 2, 2020"), "a file's date, from its modification time");
     // Every way out leaves it at the top of its root, and nothing outside is ever listed.
@@ -4765,7 +4765,7 @@ fn the_file_manager_asks_the_disk_again_before_it_acts() {
 
     // The palette's recent folders are the folders it went to, nothing else.
     post("palette-pick", "\"recent:trash-was\"");
-    assert!(page().contains("<h1 class=\"screen-title\">root</h1>"), "a folder never visited was opened from Recent");
+    assert!(page().contains("<h1 class=\"screen-title large-title\">root</h1>"), "a folder never visited was opened from Recent");
 
     drop(app);
     let _ = fs::remove_dir_all(&base);
@@ -4818,18 +4818,25 @@ fn the_component_gallery_replays_identically_on_every_engine() {
     }
     assert!(seen.windows(2).all(|w| w[0] == w[1]), "engines disagree on the replayed UI");
     let s: Vec<&str> = seen[0].lines().collect();
-    assert_eq!(s.len(), 23, "one screen per event");
+    assert_eq!(s.len(), 27, "one screen per event");
     let has = |i: usize, what: &str| assert!(s[i].contains(what), "screen {i} lacks {what}");
     // Gestures (ADR 0057): what the page sends when something is let go, and what the app makes
     // of it. A size is kept; a move that fits the list moves it, and a stale one is ignored.
     has(16, "aria-valuenow=\"300\"");
-    let tasks = |i: usize| s[i].split("data-reorder=\"order\"").nth(1).unwrap_or("").split("<span class=\"li-title\">").skip(1).map(|t| t.split('<').next().unwrap_or("")).collect::<Vec<_>>().join(" | ");
+    let tasks = |i: usize| s[i].split("data-reorder=\"order\"").nth(1).unwrap_or("").split("id=\"tasks-how\"").next().unwrap_or("").split("<span class=\"li-title\">").skip(1).map(|t| t.split('<').next().unwrap_or("")).collect::<Vec<_>>().join(" | ");
     assert_eq!(tasks(17), "Test on a phone | Design the sheet | Build the gestures | Ship it");
     assert_eq!(tasks(18), tasks(17), "a move that does not fit the list is ignored");
     has(19, "aria-expanded=\"true\" aria-selected=\"false\"");
     has(20, "Selected: docs/guide.md");
     has(21, "aria-expanded=\"true\" aria-controls=\"gestures-body\"");
     has(22, "class=\"popover mat-overlay start\" id=\"view-options-pop\" role=\"dialog\"");
+    // Navigation: a pushed screen over the one it came from (inert), with a way back by button
+    // and by swipe; a tile and the card it opens share a name, so one morphs into the other.
+    has(23, "class=\"stack-screen stack-beneath\"");
+    has(23, "data-drag=\"mail-back\" data-drag-axis=\"right\" data-drag-commit=\"120\"");
+    has(23, "aria-label=\"Back to Inbox\"");
+    has(24, "class=\"album-open\" role=\"group\" data-key=\"open-2\" data-share=\"album-2\"");
+    assert!(!s[25].contains("stack-beneath") && !s[26].contains("album-open"), "back, and closed");
     // An empty submit: every error shows, tied to its field.
     has(0, "aria-describedby=\"name-error\" aria-invalid=\"true\"");
     has(0, "<p class=\"error\" id=\"name-error\" data-key=\"error\" data-enter=\"rise\" data-exit=\"fade\">Enter your name.</p>");

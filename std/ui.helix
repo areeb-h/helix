@@ -667,6 +667,39 @@ export fn popover(id, caption, open, toggle, content, icon = missing, align = "s
 # with no value is the other form, `ui.progress(label, missing)`).
 export fn spinner(label, size = "md") = el("span", {class: "spinner {size}", role: "progressbar", aria: {label: label}}, [])
 
+# --- Navigation: a stack of screens, and titles that follow the scroll. ----------------------
+
+# A navigation stack, as on a phone: `screens` is `[{key, title, content}]`, the last one on
+# top. A screen pushed on slides in from the side over the one below, which steps back; one
+# popped slides away. The top screen has a back button (naming the screen it goes back to), and
+# is swiped back from its left edge — let go far enough, or flicked, and `back` is sent; let go
+# sooner and it springs home, the screen below following it the whole way. Only the top two
+# screens are drawn; the lower one is inert.
+export fn stack(id, screens, back, back_label = "Back") = do {
+  n = screens.count()
+  el("div", {id: id, class: "stack"}, range(max(0, n - 2), n).map((i) => do {
+    sc = screens[i]
+    top = i == n - 1
+    can_back = top and n > 1
+    el("section", {key: "{id}-{id_part(sc.key)}", class: if top then "stack-screen stack-top" else "stack-screen stack-beneath", enter: if top and n > 1 then "push" else missing, exit: "push",
+      drag: if can_back then back else missing, drag_axis: if can_back then "right" else missing, drag_commit: if can_back then 120 else missing,
+      role: "region", aria: {label: sc.title, hidden: if top then missing else true}, attrs: {inert: not top}}, present([
+        if can_back then el("div", {class: "stack-edge", handle: true, aria: {hidden: true}}, []) else missing,
+        el("header", {class: "stack-head"}, present([
+          if can_back then el("button", {class: "btn ghost stack-back", click: back, aria: {label: "{back_label} to {screens[i - 1].title}"}, attrs: {type: "button"}}, [icon("chevron_left", "sm"), el("span", {class: "stack-back-label"}, [text(screens[i - 1].title)])]) else missing,
+          el("h2", {class: "stack-title"}, [text(sc.title)]),
+        ])),
+        el("div", {class: "stack-body"}, [sc.content]),
+    ]))
+  }))
+}
+
+# A page's large title, and the small one that takes its place in the toolbar as the page
+# scrolls under it (Apple's large titles). The scroll drives both on the compositor; where the
+# browser cannot link an animation to scrolling, the large title simply stays.
+export fn large_title(s) = el("h1", {class: "large-title"}, [text(s)])
+export fn toolbar_title(s) = el("span", {class: "tb-title", aria: {hidden: true}}, [text(s)])
+
 # --- Data. -------------------------------------------------------------------------------
 
 # A DataFrame as a table that renders only the rows in view. Scrolling is the CLIENT's (D6): it
@@ -1863,6 +1896,36 @@ button.li:active { background: var(--press); }
 @keyframes hx-spin { to { rotate: 1turn; } }
 @keyframes hx-sweep { from { translate: -100% 0; } to { translate: 250% 0; } }
 
+/* Navigation stack. Screens share one grid cell; the one beneath steps back a third of the way
+   and dims, and while the top one is swiped it follows (--drag-p, set by the page's script). */
+.stack { display: grid; overflow: hidden; border-radius: var(--r-in-card); position: relative; isolation: isolate; }
+.stack-screen { grid-area: 1 / 1; min-width: 0; background: var(--surface); display: flex; flex-direction: column; position: relative; }
+.stack-screen.stack-top { z-index: 2; box-shadow: -12px 0 32px -18px rgba(0, 0, 0, .35); }
+.stack-screen.stack-beneath { z-index: 1; translate: calc(-30% + var(--drag-p, 0) * 30%) 0; filter: brightness(calc(.92 + var(--drag-p, 0) * .08)); transition: translate var(--sp), filter var(--fx); }
+.stack:has(> .hx-dragged) > .stack-beneath { transition: none; }
+.stack-screen { transition: translate var(--sp), filter var(--fx); }
+.stack-edge { position: absolute; left: 0; top: 0; bottom: 0; width: 22px; z-index: 3; cursor: grab; }
+.stack-head { display: flex; align-items: center; gap: var(--s-2); min-height: calc(var(--ctl-h) + 12px); padding: 6px var(--s-3) 0; }
+.stack-back { padding-left: 4px; gap: 2px; color: var(--accent-text); }
+.stack-back-label { max-width: 14ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stack-title { margin: 0; font: var(--type-headline); letter-spacing: var(--track-headline); color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stack-body { padding: var(--s-2) var(--s-3) var(--s-3); min-width: 0; }
+.hx-ghosts { position: fixed; inset: 0; pointer-events: none; z-index: 100; }
+
+/* Large titles. The shell's scroller names its scroll timeline, so the toolbar (beside it, not
+   in it) can follow it too. */
+.shell-main { timeline-scope: --hx-page; }
+.shell-scroll { scroll-timeline: --hx-page block; }
+.large-title { font: var(--type-large-title); letter-spacing: var(--track-large-title); margin: 0; transform-origin: left center; }
+.tb-item:has(> .tb-title) { display: contents; }
+.tb-title { display: none; font: var(--type-headline); letter-spacing: var(--track-headline); color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 30ch; padding: 0 var(--s-2); }
+@supports (animation-timeline: scroll()) {
+  .shell .large-title { animation: hx-title-away linear both; animation-timeline: --hx-page; animation-range: 0 64px; }
+  .tb-title { display: block; opacity: 0; animation: hx-title-in linear both; animation-timeline: --hx-page; animation-range: 36px 72px; }
+}
+@keyframes hx-title-away { to { opacity: 0; scale: .92; translate: 0 -6px; } }
+@keyframes hx-title-in { from { opacity: 0; translate: 0 4px; } to { opacity: 1; translate: 0 0; } }
+
 @keyframes hx-fade { from { opacity: 0; } }
 @keyframes hx-rise { from { opacity: 0; transform: translateY(6px); } }
 @keyframes hx-pop { from { opacity: 0; transform: scale(.96); } }
@@ -1872,6 +1935,8 @@ button.li:active { background: var(--press); }
      an inherited change (a button's colour) would move its children. Animations are cut to
      one 0.01ms iteration, so their end events still fire. */
   *, *::before, *::after, ::backdrop { transition-duration: 0s !important; transition-delay: 0s !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
+  /* Scrolling drives these, not time: they are direct manipulation, and stay. */
+  .shell .large-title, .tb-title { animation-duration: auto !important; }
   /* Work under way still shows as such: a still bar at half strength, not one swept away. */
   .progress.indeterminate .progress-bar { animation: none !important; width: 100%; opacity: .45; }
 }
@@ -1980,17 +2045,21 @@ CLIENT = """
     pop: { from: { transform: 'scale(.94)' }, spring: 'spatial-fast' },
     grow: { from: { transform: 'scaleY(0)' }, spring: 'spatial' },
     sheet: { from: { transform: 'translateY(105%)' }, spring: 'spatial', solid: true },
+    push: { from: { transform: 'translateX(100%)' }, spring: 'spatial', solid: true },
   };
   // Arrival: the movement on a spatial spring, the fade on an effects spring (a fade must not
   // overshoot), each on the compositor.
-  function enter(n) {
+  // Things that arrive together into one container arrive one after another, 28 ms apart (at
+  // most twelve steps), so a list that fills reads as a cascade rather than a flash.
+  function enter(n, order = 0) {
     if (still.matches || !(n instanceof Element)) return;
     const els = n.matches('[data-enter]') ? [n] : [];
+    const delay = Math.min(order, 12) * 28;
     for (const e of [...els, ...n.querySelectorAll('[data-enter]')]) {
       const p = PRESETS[e.dataset.enter];
       if (!p) continue;
-      if (p.from.transform) { const c = curve(springOf(p.spring), 0); e.animate([{ transform: p.from.transform }, { transform: 'none' }], { duration: c.ms, easing: c.easing, fill: 'backwards', composite: 'add' }); }
-      if (!p.solid) { const f = curve(springOf('effects'), 0); e.animate([{ opacity: 0 }, { opacity: 1 }], { duration: f.ms, easing: f.easing, fill: 'backwards' }); }
+      if (p.from.transform) { const c = curve(springOf(p.spring), 0); e.animate([{ transform: p.from.transform }, { transform: 'none' }], { duration: c.ms, delay, easing: c.easing, fill: 'backwards', composite: 'add' }); }
+      if (!p.solid) { const f = curve(springOf('effects'), 0); e.animate([{ opacity: 0 }, { opacity: 1 }], { duration: f.ms, delay, easing: f.easing, fill: 'backwards' }); }
     }
   }
   // Leaving: quicker than arriving, critically damped, then gone.
@@ -2008,9 +2077,11 @@ CLIENT = """
       p.__leaving -= 1;
       flipTo(moving);
     };
-    const c = curve(springOf('effects-fast'), 0);
-    const kf = [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: pre.from.transform || 'none' }];
-    n.animate(kf, { duration: c.ms, easing: c.easing, fill: 'forwards' }).finished.then(done, done);
+    // A solid thing (a screen, a sheet) slides away whole, on a spatial spring; anything else
+    // fades, quicker than it arrived.
+    const c = curve(springOf(pre.solid ? 'spatial' : 'effects-fast'), 0);
+    const kf = pre.solid ? [{ transform: 'none' }, { transform: pre.from.transform }] : [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: pre.from.transform || 'none' }];
+    n.animate(kf, { duration: c.ms, easing: c.easing, fill: 'forwards', composite: pre.solid ? 'add' : 'replace' }).finished.then(done, done);
   }
 
   // Layout (FLIP): a node marked `layout` that moves is animated from where it was. Each axis
@@ -2064,16 +2135,54 @@ CLIENT = """
   function sharedFrom() {
     if (still.matches) return null;
     const m = new Map();
-    for (const e of root.querySelectorAll('[data-share]')) if (!e.__gone) m.set(e.dataset.share, e.getBoundingClientRect());
+    for (const e of root.querySelectorAll('[data-share]')) if (!e.__gone) m.set(e.dataset.share, { r: e.getBoundingClientRect(), el: e });
     return m.size ? m : null;
   }
   // Where the layout puts a node, untouched by its animations (offsets ignore transforms).
   const layoutOf = (e) => (e instanceof HTMLElement && e.offsetParent ? [e.offsetLeft, e.offsetTop, e.offsetWidth, e.offsetHeight].join(' ') : null);
+  // A container transform (Material's, and the App Store's card opening into its page). The
+  // new node starts in the old one's box and grows into its own: revealed by a clip that opens
+  // when it is larger, so nothing in it is stretched (scaled down to it when it is smaller).
+  // Its content fades in as the old node — kept for the moment as a ghost of itself, where it
+  // was — moves with it, stretching, and fades out.
+  let ghosts = null;
+  function morph(e, old, a, b) {
+    const c = curve(springOf('spatial'), 0);
+    const dx = a.left - b.left, dy = a.top - b.top;
+    const round = getComputedStyle(e).borderRadius || '0px';
+    const grows = b.width * b.height >= a.width * a.height;
+    const kf = grows
+      ? [{ transform: `translate(${dx}px, ${dy}px)`, clipPath: `inset(0 ${Math.max(0, b.width - a.width)}px ${Math.max(0, b.height - a.height)}px 0 round ${round})` }, { transform: 'none', clipPath: `inset(0 0 0 0 round ${round})` }]
+      : [{ transformOrigin: '0 0', transform: `translate(${dx}px, ${dy}px) scale(${a.width / b.width}, ${a.height / b.height})` }, { transformOrigin: '0 0', transform: 'none' }];
+    const f = curve(springOf('effects'), 0);
+    const anims = [
+      e.animate(kf, { duration: c.ms, easing: c.easing }),
+      e.animate([{ opacity: 0 }, { opacity: 1 }], { duration: f.ms, delay: Math.round(c.ms * 0.12), easing: f.easing, fill: 'backwards' }),
+    ];
+    motions.set(e, { t0: performance.now(), axes: [null, null], anims, lay: layoutOf(e) });
+    // An old node still on the page (playing its exit) fades on its own.
+    if (!old || old.isConnected || !(old instanceof HTMLElement)) return;
+    if (!ghosts) {
+      ghosts = document.createElement('div');
+      ghosts.className = 'hx-ghosts';
+      ghosts.setAttribute('aria-hidden', 'true');
+      ghosts.inert = true;
+    }
+    if (!ghosts.isConnected) document.body.appendChild(ghosts);
+    old.removeAttribute('id');
+    for (const x of old.querySelectorAll('[id]')) x.removeAttribute('id');
+    Object.assign(old.style, { position: 'fixed', left: a.left + 'px', top: a.top + 'px', width: a.width + 'px', height: a.height + 'px', margin: '0', boxSizing: 'border-box' });
+    ghosts.appendChild(old);
+    const gone = () => old.remove();
+    old.animate([{ transformOrigin: '0 0', transform: 'none' }, { transformOrigin: '0 0', transform: `translate(${-dx}px, ${-dy}px) scale(${b.width / a.width}, ${b.height / a.height})` }], { duration: c.ms, easing: c.easing, fill: 'forwards' });
+    old.animate([{ opacity: 1 }, { opacity: 0 }], { duration: Math.round(c.ms * 0.35), easing: 'ease-out', fill: 'forwards' }).finished.then(() => setTimeout(gone, c.ms), gone);
+  }
   function sharedTo(m) {
     if (!m) return;
     for (const e of root.querySelectorAll('[data-share]')) {
-      const a = m.get(e.dataset.share);
-      if (!a || e.__gone) continue;
+      const o = m.get(e.dataset.share);
+      if (!o || e.__gone) continue;
+      const a = o.r;
       const prev = motions.get(e);
       // Still morphing toward the same place: a frame that changed something else leaves it be,
       // rather than starting it over from rest.
@@ -2084,6 +2193,9 @@ CLIENT = """
       if (!b.width || !b.height) continue;
       const dx = a.left - b.left, dy = a.top - b.top, sx = a.width / b.width, sy = a.height / b.height;
       if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5 && Math.abs(sx - 1) < 0.01 && Math.abs(sy - 1) < 0.01) continue;
+      // A new node with content in the place of an old one, at another size — a row opening
+      // into its detail — is a container transform: it is not stretched.
+      if (o.el !== e && e.childNodes.length && (Math.abs(sx - 1) > 0.02 || Math.abs(sy - 1) > 0.02)) { morph(e, o.el, a, b); continue; }
       const c = curve(springOf('spatial'), 0);
       const an = e.animate([{ transformOrigin: '0 0', transform: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})` }, { transformOrigin: '0 0', transform: 'none' }], { duration: c.ms, easing: c.easing });
       motions.set(e, { t0: performance.now(), axes: [null, null], anims: [an], lay: here });
@@ -2178,7 +2290,8 @@ CLIENT = """
         if (p.moveBefore) p.moveBefore(n, ref); else p.insertBefore(n, ref);
       }
     }
-    for (const n of arrived) enter(n);
+    const siblings = new Map();
+    for (const n of arrived) { const k = n.parentNode; const i = siblings.get(k) || 0; siblings.set(k, i + 1); enter(n, i); }
     if (saved) restore(saved, ops.some((o) => o.op === 'replace' && o.path.length === 0));
     flipTo(moving);
     sharedTo(sharing);
@@ -2507,6 +2620,12 @@ CLIENT = """
     }
     g.d = d;
     el.style.translate = `${d[0]}px ${d[1]}px`;
+    const host = el.parentElement;
+    if (host && g.kind === 'drag') {
+      host.style.setProperty('--drag-x', d[0] + 'px');
+      host.style.setProperty('--drag-y', d[1] + 'px');
+      host.style.setProperty('--drag-p', Math.max(0, Math.min(1, Math.abs(g.axis[0] ? d[0] / (g.r.width || 1) : d[1] / (g.r.height || 1)))).toFixed(4));
+    }
     if (g.kind === 'reorder') makeRoom();
   }
   // The slot the dragged row is over, and the rows between it and its old slot moved aside.
@@ -2537,6 +2656,7 @@ CLIENT = """
     delete document.documentElement.dataset.gesture;
     const el = G.el;
     el.classList.remove('hx-dragged');
+
     if (G.box) G.box.classList.remove('hx-reordering');
     if (G.kind === 'resize') {
       post({ msg: el.dataset.resize, value: cancel ? Math.round(G.s0) : G.size, done: true }, false);
@@ -2553,7 +2673,7 @@ CLIENT = """
       const commit = Number(el.dataset.dragCommit || 0);
       if (!commit || far >= commit) ev = { msg: el.dataset.drag, value: el.dataset.value ?? null, drag: { dx: Math.round(G.d[0]), dy: Math.round(G.d[1]), vx: Math.round(v[0]), vy: Math.round(v[1]) } };
     }
-    const s = { els: G.items, dragged: el, v };
+    const s = { els: G.items, dragged: el, v, host: G.kind === 'drag' ? el.parentElement : null };
     if (!ev) { settle(s, null); return; }
     s.seq = TAB + ':' + ++seqs;
     ev.seq = s.seq;
@@ -2573,14 +2693,18 @@ CLIENT = """
     const i = settling.indexOf(s);
     if (i >= 0) settling.splice(i, 1);
     const was = seen || boxes(s);
+    // What followed the drag (the screen beneath a swiped one) lets go with it, in this frame.
+    if (s.host) for (const v of ['--drag-x', '--drag-y', '--drag-p']) s.host.style.removeProperty(v);
     for (const e of s.els) {
       e.__held = false;
       const v = e === s.dragged ? s.v : [0, 0];
       if (leaving(e)) { if (!still.matches) fling(e, v); continue; }
       const n = e.isConnected ? e : e.dataset.key ? byIdent(e.dataset.key) : null;
-      e.style.translate = '';
+      // The offset goes with no CSS transition of its own: the spring below is the movement.
+      const quiet = (x) => { x.style.transition = 'none'; x.style.translate = ''; void getComputedStyle(x).translate; x.style.transition = ''; };
+      quiet(e);
       if (!n) continue;
-      n.style.translate = '';
+      quiet(n);
       const a = was.get(e), b = n.getBoundingClientRect();
       if (a && !still.matches) springFrom(n, [a.left - b.left, a.top - b.top], v);
     }
