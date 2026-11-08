@@ -4809,6 +4809,40 @@ fn the_design_lab_replays_identically_on_every_engine() {
 }
 
 #[test]
+fn orbit_written_in_markup_replays_identically_on_every_engine() {
+    // examples/apps/orbit.helix is markup and utility classes only (ADR 0060, 0061): a timer, a
+    // board, habits and the palette, replayed on a fixed day.
+    let mut seen: Vec<String> = Vec::new();
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run(&["run", "examples/apps/orbit.helix", "--replay"], env, "");
+        assert_eq!(code, Some(0), "{env:?} stderr: {err}");
+        seen.push(out);
+    }
+    assert!(seen.windows(2).all(|w| w[0] == w[1]), "engines disagree on the replayed UI");
+    let s: Vec<&str> = seen[0].lines().collect();
+    assert_eq!(s.len(), 14, "one screen per event");
+    let has = |i: usize, what: &str| assert!(s[i].contains(what), "screen {i} lacks {what}");
+    // A sprint runs, and the tick past its minute ends it with a toast.
+    has(0, "aria-label=\"Pause (S)\"");
+    has(2, "Sprint complete — 1 min of focus. Take a breath.");
+    has(2, ">1 today</span>");
+    has(3, "data-value=\"read\" aria-pressed=\"true\"");
+    // A card dragged to Done lands there, and says so.
+    let col = |i: usize, id: &str| s[i].split(&format!("data-value=\"{id}\"")).nth(1).unwrap_or("").split("</section>").next().unwrap_or("").matches("role=\"listitem\"").count();
+    assert_eq!((col(4, "doing"), col(4, "done")), (1, 2), "a card moved to Done");
+    has(4, "Done: Markup for every component");
+    // A new task heads the To do column; a card's sheet moves it.
+    assert_eq!(col(6, "todo"), 4);
+    has(6, "Water the plants");
+    has(7, "class=\"sheet-title\" id=\"task-title\">Sketch the onboarding flow");
+    assert_eq!((col(8, "todo"), col(8, "doing")), (3, 2), "the sheet moved the card");
+    // The palette finds the accent and applies it; then the dark theme.
+    has(10, "role=\"dialog\"");
+    has(12, "accent Rose,");
+    has(13, "aria-label=\"Light appearance (D)\"");
+}
+
+#[test]
 fn the_component_gallery_replays_identically_on_every_engine() {
     let mut seen: Vec<String> = Vec::new();
     for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {

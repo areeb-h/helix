@@ -2173,7 +2173,14 @@ CLIENT = """
   // sent, with nothing from the field still on its way, is the app's answer — a search cleared
   // by Escape — and the field shows it. (Before, the attribute then matched the app's tree, so
   // the value was never sent again and the field stayed wrong.)
-  const answered = (n, v) => v !== n.value && v !== n.__sent && !busy(n.dataset.input || n.dataset.change);
+  //
+  // Which value is the app's answer is decided by acknowledgement, not by timing: each edit
+  // carries a `seq`, and the server lists it in `acks` on the first frame computed after it.
+  // Until a frame has acknowledged a field's latest edit, any value it carries is the answer to
+  // an older keystroke — "r" arriving after "rose" was typed and sent — and the field keeps
+  // what the person typed. (Timing alone could not tell: frames wait for the next animation
+  // frame, and the newer request can finish in that wait.)
+  const answered = (n, v) => v !== n.value && v !== n.__sent && !busy(n.dataset.input || n.dataset.change) && (n.__seq == null || fieldAcked >= n.__seq);
   function setAttr(n, k, v) {
     n.setAttribute(k, v);
     if (k === 'value' && (n.tagName === 'INPUT' || n.tagName === 'SELECT') && owned(n) && answered(n, v)) { n.value = v; return; }
@@ -2535,6 +2542,10 @@ CLIENT = """
   // is back within a fraction of a second, and the browser's own retry waits seconds.
   let version = 0, delay = 100, scheduled = false;
   const pending = [];
+  // The newest field edit a frame has acknowledged; edits are numbered in the order they are
+  // sent, and the app takes them in that order, so one number covers every field. Another
+  // tab's edits are named for that tab and do not count.
+  let fieldAcked = 0;
   function drain() {
     scheduled = false;
     for (const d of pending.splice(0)) {
@@ -2545,6 +2556,7 @@ CLIENT = """
       if (d.title != null && document.title !== d.title) document.title = d.title;
       // A gesture this frame answers lands where the frame puts it, from where it was let go.
       const due = d.acks ? settling.filter((s) => d.acks.includes(s.seq)) : [];
+      if (d.acks) for (const a of d.acks) { const m = a.startsWith('f' + TAB + ':') && /:(\d+)$/.exec(a); if (m) fieldAcked = Math.max(fieldAcked, Number(m[1])); }
       const seen = due.map(boxes);
       apply(d.ops);
       due.forEach((s, i) => settle(s, seen[i]));
@@ -2574,7 +2586,7 @@ CLIENT = """
   // never dropped. Only the last: typing that follows a submit must reach `update` after it,
   // and merging into an earlier waiting event would move it ahead.
   const queue = [];
-  let inflight = null;
+  let inflight = null, fieldSeq = 0;
   const busy = (msg) => !!msg && ((inflight && inflight.msg === msg) || queue.some((q) => q.ev.msg === msg));
   function flush() {
     if (inflight || queue.length === 0) return;
@@ -2618,11 +2630,11 @@ CLIENT = """
   });
   document.addEventListener('input', (e) => {
     const t = e.target.closest('[data-input]');
-    if (t) { t.__sent = String(t.value); post({ msg: t.dataset.input, value: valueOf(t) }, true); }
+    if (t) { t.__sent = String(t.value); t.__seq = ++fieldSeq; post({ msg: t.dataset.input, value: valueOf(t), seq: 'f' + TAB + ':' + t.__seq }, true); }
   });
   document.addEventListener('change', (e) => {
     const t = e.target.closest('[data-change]');
-    if (t) { t.__sent = String(t.value); post({ msg: t.dataset.change, value: valueOf(t) }, false); }
+    if (t) { t.__sent = String(t.value); t.__seq = ++fieldSeq; post({ msg: t.dataset.change, value: valueOf(t), seq: 'f' + TAB + ':' + t.__seq }, false); }
   });
   document.addEventListener('submit', (e) => {
     const f = e.target.closest('[data-submit]');

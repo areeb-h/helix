@@ -1,0 +1,527 @@
+# Orbit — a focus timer, a board and habits, written as markup and styled with utilities
+# (ADR 0060, ADR 0061). Every pixel here is a Tailwind class name or a design token; there is
+# no build step and no stylesheet beyond a few lines for the background's drift.
+#
+#   helix run examples/apps/orbit.helix            # then open the link it prints
+#   helix run examples/apps/orbit.helix --open     # …or let it open the browser
+#   helix run examples/apps/orbit.helix --replay   # a scripted session, as HTML
+#
+# Things to try: start a Sprint (one minute) and watch the ring; drag a card to Done, or focus
+# it and press Alt+→; tick a habit; press ⌘K (Ctrl+K) for every command; pick another accent
+# or material and the whole design is recomputed, contrast proven, light and dark.
+
+import std.ui
+
+# --- Data. ------------------------------------------------------------------------------------
+
+ACCENTS = [["#4f46e5", "Indigo"], ["#0d9488", "Teal"], ["#e11d48", "Rose"], ["#d97706", "Amber"], ["#7c3aed", "Violet"], ["#0284c7", "Sky"]]
+MATERIALS = [["hybrid", "Hybrid"], ["glass", "Glass"], ["tonal", "Tonal"]]
+MODES = [["focus", "Focus"], ["short", "Break"], ["sprint", "Sprint"]]
+PROJECTS = [
+  {id: "helix", name: "Helix", dot: "bg-indigo-500"},
+  {id: "home", name: "Home", dot: "bg-emerald-500"},
+  {id: "studio", name: "Studio", dot: "bg-rose-500"},
+]
+DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+# Minutes of focus on the days before today, so the week has a shape on the first run.
+HISTORY = [52, 78, 31, 96, 64, 40, 58]
+
+COLUMNS = [
+  {id: "todo", title: "To do", items: [
+    {key: "t1", title: "Sketch the onboarding flow", project: "studio", est: 2},
+    {key: "t2", title: "Write ADR 0062", project: "helix", est: 1},
+    {key: "t3", title: "Book the dentist", project: "home", est: 1},
+  ]},
+  {id: "doing", title: "Doing", items: [
+    {key: "t4", title: "Markup for every component", project: "helix", est: 3},
+    {key: "t5", title: "Colour study for the deck", project: "studio", est: 2},
+  ]},
+  {id: "done", title: "Done", items: [
+    {key: "t6", title: "Utility classes", project: "helix", est: 3},
+  ]},
+]
+
+HABITS = [
+  {id: "water", name: "Drink water", icon: "cloud", past: "1101111"},
+  {id: "read", name: "Read 20 pages", icon: "doc", past: "1110110"},
+  {id: "move", name: "Move for 30 minutes", icon: "heart", past: "0111011"},
+  {id: "ship", name: "Ship something", icon: "code", past: "1011111"},
+]
+
+fn duration(mode) = match mode {
+  "focus" => 25 * 60,
+  "short" => 5 * 60,
+  _ => 60,
+}
+fn mode_name(mode) = match mode {
+  "focus" => "Focus",
+  "short" => "Break",
+  _ => "Sprint",
+}
+fn project(id) = PROJECTS.filter((p) => p.id == id).first() ?? PROJECTS[0]
+fn accent_name(hex) = (ACCENTS.filter((a) => a[0] == hex).first() ?? ACCENTS[0])[1]
+
+# Today, Monday first. Only the first screen asks the clock; every later one is the model's.
+fn weekday(t) = (floor(t / 86400.0).to_int() + 3) % 7
+
+fn design_for(m) = ui.design({seed: m.accent, material: m.material})
+
+fn initial(today) = do {
+  m = {
+    today: today,
+    accent: "#4f46e5", material: "hybrid", dark: false,
+    mode: "sprint", left: 60.0, running: false, last: missing, sessions: 0, minutes: 25,
+    columns: COLUMNS, draft: "", pick: "helix", focus: 0, next: 7,
+    habits: HABITS.map((h) => {id: h.id, name: h.name, icon: h.icon, week: range(0, 7).map((i) => i < today and h.past.chars()[i] == "1"), bumps: 0}),
+    open: missing, trash: missing,
+    palette: {open: false, query: "", sel: 0},
+    toasts: [], toast_id: 1,
+  }
+  {...m, design: design_for(m)}
+}
+init = initial(weekday(now()))
+
+# --- Reading the model. -----------------------------------------------------------------------
+
+fn clock(secs) = do {
+  s = max(ceil(secs).to_int(), 0)
+  "{s // 60:02}:{s % 60:02}"
+}
+fn all_cards(m) = m.columns.map((c) => c.items.map((it) => {...it, col: c.id})).flatten()
+fn find(m, key) = all_cards(m).filter((it) => it.key == key).first()
+fn done_count(m) = m.columns.filter((c) => c.id == "done").first().items.count()
+fn streak(h, today) = do {
+  start = if h.week[today] then today else today - 1
+  if start < 0 then 0 else range(0, start + 1).map((k) => start - k).take_while((i) => h.week[i]).count()
+}
+fn week_minutes(m) = range(0, 7).map((i) => if i < m.today then HISTORY[i] else if i == m.today then m.minutes else 0)
+
+# --- Changing it. -----------------------------------------------------------------------------
+
+fn toast(m, text, tone = "success", action = missing) = do {
+  t = if action.is_missing() then {id: m.toast_id, text: text, tone: tone, born: missing} else {id: m.toast_id, text: text, tone: tone, action: action, born: missing}
+  {...m, toasts: m.toasts.concat([t]).drop(max(m.toasts.count() - 2, 0)), toast_id: m.toast_id + 1}
+}
+fn restyle(m) = {...m, design: design_for(m)}
+fn set_mode(m, mode) = {...m, mode: mode, left: duration(mode) * 1.0, running: false, last: missing}
+fn toggle_timer(m) = if m.running then {...m, running: false, last: missing} else {...m, running: true, last: missing}
+
+fn tick(m, t) = do {
+  # Toasts are stamped by the first tick that sees them, and leave five seconds later.
+  m1 = {...m, toasts: m.toasts.map((x) => if x.born.is_missing() then {...x, born: t} else x).filter((x) => t - x.born < 5.0)}
+  if not m1.running then m1 else if m1.last.is_missing() then {...m1, last: t} else do {
+    left = m1.left - (t - m1.last)
+    if left > 0.0 then {...m1, left: left, last: t} else do {
+      mins = duration(m1.mode) // 60
+      worked = m1.mode != "short"
+      n = {...set_mode(m1, m1.mode), sessions: m1.sessions + (if worked then 1 else 0), minutes: m1.minutes + (if worked then mins else 0)}
+      toast(n, if worked then "{mode_name(m1.mode)} complete — {mins} min of focus. Take a breath." else "Break's over. Back to it.")
+    }
+  }
+}
+
+fn moved_to(m, key, col) = do {
+  card = find(m, key)
+  if card.is_missing() or card.col == col then m else do {
+    cols = m.columns.map((c) => if c.id == card.col then {...c, items: c.items.filter((x) => x.key != key)} else if c.id == col then {...c, items: c.items.concat([{key: card.key, title: card.title, project: card.project, est: card.est}])} else c)
+    celebrate({...m, columns: cols}, card, col)
+  }
+}
+fn celebrate(m, card, col) = if col == "done" then toast(m, "Done: {card.title}") else m
+
+fn on_move(m, mv) = do {
+  card = find(m, "{mv.get("key")}")
+  n = {...m, columns: ui.moved_between(m.columns, mv)}
+  if card.is_missing() then n else do {
+    now_in = find(n, card.key)
+    if now_in.is_missing() or now_in.col == card.col then n else celebrate(n, card, now_in.col)
+  }
+}
+
+fn add(m) = do {
+  title = m.draft.trim()
+  if title == "" then m else {...m, draft: "", next: m.next + 1, columns: m.columns.map((c) => if c.id == "todo" then {...c, items: [{key: "t{m.next}", title: title, project: m.pick, est: 1}].concat(c.items)} else c)}
+}
+
+fn delete(m, key) = do {
+  card = find(m, key)
+  if card.is_missing() then m else do {
+    col = m.columns.filter((c) => c.id == card.col).first()
+    at = col.items.map((x) => x.key).index_of(key) ?? 0
+    n = {...m, open: missing, trash: {card: card, at: at}, columns: m.columns.map((c) => if c.id == card.col then {...c, items: c.items.filter((x) => x.key != key)} else c)}
+    toast(n, "Deleted “{card.title}”.", "neutral", {label: "Undo", msg: "restore"})
+  }
+}
+fn restore(m) = if m.trash.is_missing() then m else do {
+  t = m.trash
+  card = {key: t.card.key, title: t.card.title, project: t.card.project, est: t.card.est}
+  {...m, trash: missing, toasts: m.toasts.filter((x) => x.get("action").is_missing()),
+    columns: m.columns.map((c) => if c.id == t.card.col then {...c, items: c.items.take(t.at).concat([card]).concat(c.items.drop(t.at))} else c)}
+}
+
+fn set_est(m, key, est) = {...m, columns: m.columns.map((c) => {...c, items: c.items.map((x) => if x.key == key then {...x, est: clamp(est, 1, 5)} else x)})}
+
+fn habit(m, id) = {...m, habits: m.habits.map((h) => if h.id != id then h else do {
+  week = range(0, 7).map((i) => if i == m.today then not h.week[i] else h.week[i])
+  {...h, week: week, bumps: h.bumps + (if week[m.today] then 1 else 0)}
+})}
+
+# --- Commands: the palette and the keys. ------------------------------------------------------
+
+fn commands(m) = [
+  {label: if m.running then "Pause the timer" else "Start the timer", value: "cmd:timer", icon: "clock", hint: "S"},
+  {label: "Reset the timer", value: "cmd:reset", icon: "arrow_left"},
+].concat(MODES.map((o) => {label: "{o[1]} — {duration(o[0]) // 60} min", value: "mode:{o[0]}", icon: "clock", hint: "Timer"}))
+  .concat([
+    {label: "New task", value: "cmd:new", icon: "plus", hint: "N"},
+    {label: if m.dark then "Light appearance" else "Dark appearance", value: "cmd:dark", icon: if m.dark then "sun" else "moon", hint: "D"},
+    {label: "Clear the Done column", value: "cmd:clear", icon: "archive"},
+  ])
+  .concat(ACCENTS.map((a) => {label: "Accent: {a[1]}", value: "accent:{a[0]}", icon: "sparkle", hint: "Design"}))
+  .concat(MATERIALS.map((o) => {label: "Material: {o[1]}", value: "material:{o[0]}", icon: "grid", hint: "Design"}))
+  .concat(all_cards(m).map((it) => {label: it.title, value: "open:{it.key}", icon: "doc", hint: project(it.project).name}))
+
+fn run(m, v) = do {
+  n = {...m, palette: {...m.palette, open: false}}
+  if v.starts_with("mode:") then set_mode(n, v.drop(5))
+    else if v.starts_with("accent:") then restyle({...n, accent: v.drop(7)})
+    else if v.starts_with("material:") then restyle({...n, material: v.drop(9)})
+    else if v.starts_with("open:") then {...n, open: v.drop(5)}
+    else match v {
+      "cmd:timer" => toggle_timer(n),
+      "cmd:reset" => set_mode(n, n.mode),
+      "cmd:new" => {...n, focus: n.focus + 1},
+      "cmd:dark" => {...n, dark: not n.dark},
+      "cmd:clear" => {...n, columns: n.columns.map((c) => if c.id == "done" then {...c, items: []} else c)},
+      _ => n,
+    }
+}
+
+KEYS = "Ctrl+K S N D"
+fn on_key(m, k) = match k {
+  "Ctrl+K" => {...m, palette: {open: true, query: "", sel: 0}},
+  "S" => toggle_timer(m),
+  "N" => {...m, focus: m.focus + 1},
+  "D" => {...m, dark: not m.dark},
+  _ => m,
+}
+fn palette_key(m, k) = do {
+  shown = ui.palette_matches(m.palette.query, commands(m))
+  match k {
+    "ArrowDown" => {...m, palette: {...m.palette, sel: min(m.palette.sel + 1, max(shown.count() - 1, 0))}},
+    "ArrowUp" => {...m, palette: {...m.palette, sel: max(m.palette.sel - 1, 0)}},
+    "Enter" => if shown.count() == 0 then m else run(m, shown[clamp(m.palette.sel, 0, shown.count() - 1)].value),
+    "Escape" => {...m, palette: {...m.palette, open: false}},
+    _ => m,
+  }
+}
+
+fn update(m, e) = match e.msg {
+  "tick" => tick(m, e.value),
+  "timer" => toggle_timer(m),
+  "reset" => set_mode(m, m.mode),
+  "mode" => set_mode(m, e.value),
+  "accent" => restyle({...m, accent: e.value}),
+  "material" => restyle({...m, material: e.value}),
+  "dark" => {...m, dark: not m.dark},
+  "habit" => habit(m, e.value),
+  "draft" => {...m, draft: e.value ?? ""},
+  "pick" => {...m, pick: e.value},
+  "add" => add(m),
+  "move" => on_move(m, e.value),
+  "open" => {...m, open: e.value},
+  "close-task" => {...m, open: missing},
+  "status" => moved_to(m, m.open, e.value),
+  "est" => if m.open.is_missing() then m else set_est(m, m.open, to_int(e.value)),
+  "delete" => if m.open.is_missing() then m else delete(m, m.open),
+  "restore" => restore(m),
+  "dismiss" => {...m, toasts: m.toasts.filter((t) => "{t.id}" != "{e.value}")},
+  "key" => on_key(m, e.value),
+  "palette" => {...m, palette: {open: true, query: "", sel: 0}},
+  "palette-query" => {...m, palette: {...m.palette, query: e.value ?? "", sel: 0}},
+  "palette-key" => palette_key(m, e.value),
+  "palette-pick" => run(m, e.value),
+  "palette-close" => {...m, palette: {...m.palette, open: false}},
+  _ => m,
+}
+
+# --- Components: functions, used as tags. -----------------------------------------------------
+
+BTN = "inline-flex items-center justify-center gap-2 rounded-full px-4 py-2 text-sm font-semibold transition ease-spring active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2 focus-visible:ring-offset-surface disabled:opacity-40"
+fn tone(t) = match t {
+  "primary" => "bg-accent text-accent-fg shadow-1 hover:bg-accent/90 hover:shadow-2",
+  "soft" => "bg-accent/10 text-accent-text hover:bg-accent/15",
+  "danger" => "bg-danger-soft text-danger hover:bg-danger/15",
+  _ => "text-muted hover:bg-hover hover:text-fg",
+}
+fn pill(children, msg, value = missing, kind = "primary", label = missing) =
+  <button type="button" click={msg} value={value} aria-label={label} class={[BTN, tone(kind)]}>{children}</button>
+
+fn panel(title, children, aside = missing, label = missing) =
+  <section aria-label={label ?? title} class="rounded-card bg-card p-card shadow-1 ring-1 ring-line">
+    <header class="mb-4 flex items-center justify-between gap-3">
+      <h2 class="text-base font-semibold tracking-tight">{title}</h2>
+      {aside}
+    </header>
+    {children}
+  </section>
+
+fn dot(p) = <span aria-hidden class={["inline-block size-2 shrink-0 rounded-full", project(p).dot]} />
+
+# --- The view. --------------------------------------------------------------------------------
+
+fn header(m) = <header class="sticky top-0 z-20 border-b border-line bg-surface/70 backdrop-blur-xl">
+  <div class="mx-auto flex max-w-7xl items-center gap-3 px-4 py-3 md:px-8">
+    <div class="flex items-center gap-2.5">
+      <span aria-hidden class="grid size-8 place-items-center rounded-full bg-linear-to-br from-accent to-accent/50 shadow-2 ring-2 ring-accent/20">
+        <span class="size-3 rounded-full bg-white/90" />
+      </span>
+      <span class="text-lg font-bold tracking-tight">Orbit</span>
+    </div>
+    <button type="button" click="palette" aria-label="Search or run a command (Ctrl+K)"
+      class="ml-2 hidden min-w-64 items-center gap-2 rounded-full bg-surface-2 px-4 py-2 text-sm text-muted ring-1 ring-line transition hover:text-fg hover:ring-line-strong md:flex">
+      <ui.Icon name="search" size="sm" />
+      <span class="flex-1 text-left">Search or run a command</span>
+      <kbd class="rounded-md bg-surface px-1.5 py-0.5 font-mono text-xs ring-1 ring-line">⌘K</kbd>
+    </button>
+    <div class="ml-auto flex items-center gap-3">
+      <div role="group" aria-label="Accent colour" class="hidden items-center gap-1.5 sm:flex">
+        {ACCENTS.map((a) => <button type="button" key={a[0]} click="accent" value={a[0]} aria-label="{a[1]} accent" aria-pressed={m.accent == a[0]}
+          style="background: {a[0]}"
+          class={["size-6 rounded-full shadow-1 ring-offset-2 ring-offset-surface transition ease-spring hover:scale-110", if m.accent == a[0] then "ring-2 ring-fg/70 scale-110" else "ring-1 ring-black/10"]} />)}
+      </div>
+      <ui.Segmented id="material" label="Material" value={m.material} options={MATERIALS} msg="material" size="sm" />
+      <button type="button" click="dark" aria-label={if m.dark then "Light appearance (D)" else "Dark appearance (D)"}
+        class="grid size-9 place-items-center rounded-full text-muted ring-1 ring-line transition hover:bg-hover hover:text-fg">
+        <ui.Symbol name={if m.dark then "sun" else "moon"} effect="swap" trigger={if m.dark then 1 else 0} size="sm" />
+      </button>
+    </div>
+  </div>
+</header>
+
+fn timer(m) = do {
+  total = duration(m.mode) * 1.0
+  frac = clamp(1.0 - m.left / total, 0.0, 1.0)
+  c = 326.73
+  status = if m.running then mode_name(m.mode) else if m.left < total then "Paused" else "Ready"
+  <Panel title="Focus" aside={<span class="rounded-full bg-accent/10 px-2.5 py-1 text-xs font-semibold text-accent-text">{m.sessions} today</span>}>
+    <div class="flex flex-col items-center gap-5">
+      <ui.Segmented id="mode" label="Timer" value={m.mode} options={MODES} msg="mode" />
+      <div class="relative">
+        <svg viewBox="0 0 120 120" class="size-64 -rotate-90" role="img" aria-label="{mode_name(m.mode)}: {clock(m.left)} left">
+          <defs>
+            <linearGradient id="orbit-ring" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" style="stop-color: var(--accent)" />
+              <stop offset="100%" style="stop-color: color-mix(in oklab, var(--accent) 45%, white)" />
+            </linearGradient>
+          </defs>
+          <circle cx="60" cy="60" r="52" class="fill-none stroke-surface-3" stroke-width="9" />
+          <circle cx="60" cy="60" r="52" fill="none" stroke="url(#orbit-ring)" stroke-width="9" stroke-linecap="round"
+            stroke-dasharray="{c}" stroke-dashoffset="{c * (1.0 - frac):.2f}"
+            style={if m.running then "transition: stroke-dashoffset 1s linear" else "transition: stroke-dashoffset 600ms cubic-bezier(.2,.8,.2,1)"} />
+        </svg>
+        <div class="absolute inset-0 grid place-items-center">
+          <div class="text-center">
+            <p class="text-5xl font-semibold tracking-tighter tabular-nums">{clock(m.left)}</p>
+            <p class="mt-1 text-xs font-medium uppercase tracking-wider text-muted">{status}</p>
+          </div>
+        </div>
+      </div>
+      <div class="flex items-center gap-2">
+        <Pill msg="timer" label={if m.running then "Pause (S)" else "Start (S)"}>
+          <ui.Symbol name={if m.running then "minus" else "chevron_right"} effect="swap" trigger={if m.running then 1 else 0} size="sm" />
+          {if m.running then "Pause" else "Start"}
+        </Pill>
+        <Pill msg="reset" kind="ghost">Reset</Pill>
+      </div>
+    </div>
+  </Panel>
+}
+
+fn habits(m) = <Panel title="Habits" aside={<span class="text-xs text-muted">This week</span>}>
+  <ul class="space-y-3">
+    {m.habits.map((h) => do {
+      done = h.week[m.today]
+      <li key={h.id} class="flex items-center gap-3">
+        <button type="button" click="habit" value={h.id} aria-pressed={done} aria-label="{h.name}, today"
+          class={["grid size-10 shrink-0 place-items-center rounded-control ring-1 transition ease-spring active:scale-90", if done then "bg-accent text-accent-fg ring-accent shadow-2" else "bg-surface-2 text-muted ring-line hover:text-fg"]}>
+          <ui.Symbol name={if done then "check" else h.icon} effect="bounce" trigger={h.bumps} size="sm" />
+        </button>
+        <div class="min-w-0 flex-1">
+          <p class={["truncate text-sm font-medium", if done then "text-fg" else "text-fg/80"]}>{h.name}</p>
+          <div class="mt-1.5 flex gap-1" aria-hidden>
+            {range(0, 7).map((i) => <span key="d{i}" class={["h-1.5 flex-1 rounded-full transition", if h.week[i] then "bg-accent" else if i > m.today then "bg-surface-3/50" else "bg-surface-3", if i == m.today then "ring-1 ring-accent/50 ring-offset-1 ring-offset-surface" else missing]} />)}
+          </div>
+        </div>
+        <span class="w-10 text-right text-xs font-semibold tabular-nums text-muted" title="Streak">{streak(h, m.today)}d</span>
+      </li>
+    })}
+  </ul>
+</Panel>
+
+fn stats(m) = do {
+  week = week_minutes(m)
+  best = m.habits.map((h) => streak(h, m.today)).max()
+  tiles = [
+    ["Focus today", "{m.minutes}", "min", "clock"],
+    ["This week", "{week.sum() // 60}h {week.sum() % 60}", "min", "chart"],
+    ["Done", "{done_count(m)}", if done_count(m) == 1 then "task" else "tasks", "check"],
+    ["Best streak", "{best}", "days", "star"],
+  ]
+  <div class="grid grid-cols-2 gap-4 xl:grid-cols-4">
+    {tiles.map((t) => <div key={t[0]} class="rounded-card bg-card p-card shadow-1 ring-1 ring-line">
+      <div class="flex items-center justify-between text-muted">
+        <span class="text-xs font-medium uppercase tracking-wider">{t[0]}</span>
+        <ui.Icon name={t[3]} size="sm" />
+      </div>
+      <p class="mt-3 flex items-baseline gap-1">
+        <span class="text-3xl font-bold tracking-tight tabular-nums">{t[1]}</span>
+        <span class="text-sm text-muted">{t[2]}</span>
+      </p>
+    </div>)}
+  </div>
+}
+
+fn chart(m) = do {
+  week = week_minutes(m)
+  top = max(week.max(), 1)
+  <Panel title="Focus this week" aside={<span class="text-xs text-muted">minutes per day</span>}>
+    <div class="flex h-44 items-end gap-3" role="list" aria-label="Minutes of focus per day">
+      {range(0, 7).map((i) => <div key={DAYS[i]} role="listitem" aria-label="{DAYS[i]}: {week[i]} minutes" class="group flex h-full flex-1 flex-col items-center justify-end gap-2">
+        <span class="text-xs font-semibold tabular-nums text-muted opacity-0 transition group-hover:opacity-100">{week[i]}</span>
+        <div style="height: {max(week[i] * 100 / top, 3)}%"
+          class={["w-full max-w-12 rounded-t-lg rounded-b-sm transition-all duration-500 ease-spring", if i == m.today then "bg-linear-to-t from-accent to-accent/55 shadow-2" else if i > m.today then "bg-surface-3/50" else "bg-accent/25 group-hover:bg-accent/40"]} />
+        <span class={["text-xs", if i == m.today then "font-bold text-accent-text" else "text-muted"]}>{DAYS[i]}</span>
+      </div>)}
+    </div>
+  </Panel>
+}
+
+fn card(it, col) = <div key={it.key} role="listitem" tabindex="0" layout click="open" value={it.key} aria-describedby="board-how"
+  class="group cursor-grab rounded-control bg-surface p-3 shadow-1 ring-1 ring-line transition ease-spring hover:-translate-y-0.5 hover:shadow-2 hover:ring-line-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus active:cursor-grabbing">
+  <div class="flex items-center gap-2 text-xs text-muted">
+    <Dot p={it.project} />
+    <span>{project(it.project).name}</span>
+    <span class="ml-auto flex gap-0.5" role="img" aria-label={if it.est == 1 then "1 session" else "{it.est} sessions"}>
+      {range(0, it.est).map((i) => <span key="e{i}" class="size-1.5 rounded-full bg-accent/50" />)}
+    </span>
+  </div>
+  <p class={["mt-2 text-sm font-medium leading-snug", if col == "done" then "text-muted line-through decoration-accent/50" else missing]}>{it.title}</p>
+</div>
+
+fn column(c) = <section key="col-{c.id}" aria-label={c.title} class="flex min-w-0 flex-col rounded-card bg-surface-2/60 p-3 ring-1 ring-line">
+  <header class="mb-3 flex items-center gap-2 px-1">
+    <h3 class="text-sm font-semibold">{c.title}</h3>
+    <span key="n{c.items.count()}" enter="pop" class="rounded-full bg-surface px-2 py-0.5 text-xs font-semibold tabular-nums text-muted ring-1 ring-line">{c.items.count()}</span>
+  </header>
+  <div role="list" aria-label={c.title} reorder="move" reorder-group="board" value={c.id} class="flex min-h-24 flex-1 flex-col gap-2">
+    {c.items.map((it) => card(it, c.id))}
+    {if c.items.count() == 0 then <p class="grid flex-1 place-items-center rounded-control border-2 border-dashed border-line py-6 text-xs text-muted">Drop a card here</p> else missing}
+  </div>
+</section>
+
+fn board(m) = <Panel title="Board" label="Board" aside={<span class="hidden text-xs text-muted sm:inline">Drag cards, or Alt + arrows</span>}>
+  <form submit="add" class="mb-4 flex flex-wrap items-center gap-2">
+    <input key="new-{m.focus}" input="draft" value={m.draft} placeholder="Add a task and press Enter" aria-label="New task" autocomplete="off" autofocus={m.focus > 0}
+      class="min-w-0 flex-1 rounded-full border-0 bg-surface-2 px-4 py-2 text-sm ring-1 ring-line transition placeholder:text-muted focus:bg-surface focus:outline-none focus:ring-2 focus:ring-focus" />
+    <div role="group" aria-label="Project" class="flex gap-1">
+      {PROJECTS.map((p) => <button type="button" key={p.id} click="pick" value={p.id} aria-pressed={m.pick == p.id}
+        class={["flex items-center gap-1.5 rounded-full px-3 py-2 text-xs font-medium ring-1 transition", if m.pick == p.id then "bg-surface text-fg ring-line-strong shadow-1" else "text-muted ring-transparent hover:text-fg"]}>
+        <Dot p={p.id} />{p.name}
+      </button>)}
+    </div>
+    <button type="submit" class={[BTN, tone("primary")]}><ui.Icon name="plus" size="sm" />Add</button>
+  </form>
+  <div class="grid gap-3 md:grid-cols-3">{m.columns.map(column)}</div>
+  <span id="board-how" class="sr-only">Drag to move. With the keyboard: Alt with up and down moves a card in its column, Alt with left and right moves it to the next column. Enter opens it.</span>
+</Panel>
+
+fn detail(m) = do {
+  it = if m.open.is_missing() then missing else find(m, m.open)
+  ui.sheet("task", not it.is_missing(), if it.is_missing() then "" else it.title,
+    if it.is_missing() then [] else [
+      <div class="space-y-5">
+        <div class="flex items-center gap-2 text-sm text-muted"><Dot p={it.project} />{project(it.project).name}</div>
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <span class="text-sm font-medium">Status</span>
+          <ui.Segmented id="status" label="Status" value={it.col} options={m.columns.map((c) => [c.id, c.title])} msg="status" />
+        </div>
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <span class="text-sm font-medium">Focus sessions</span>
+          <ui.Stepper id="est" label="Focus sessions" value={it.est} msg="est" lo={1} hi={5} />
+        </div>
+      </div>,
+    ], "close-task", actions: if it.is_missing() then [] else [<Pill msg="delete" kind="danger"><ui.Icon name="trash" size="sm" />Delete</Pill>])
+}
+
+fn view(m) = <div keydown="key" shortcuts={KEYS} class="relative min-h-screen overflow-x-clip">
+  <div aria-hidden class="pointer-events-none fixed inset-0 -z-10 overflow-hidden">
+    <div class="drift absolute -left-40 -top-40 size-[38rem] rounded-full bg-accent/20 blur-3xl" />
+    <div class="drift slow absolute -right-32 top-1/3 size-[30rem] rounded-full bg-chart-2/20 blur-3xl" />
+    <div class="drift absolute -bottom-48 left-1/3 size-[34rem] rounded-full bg-chart-3/15 blur-3xl" />
+  </div>
+  {header(m)}
+  <div class="mx-auto max-w-7xl px-4 py-8 md:px-8">
+    <div class="mb-8">
+      <p class="text-sm font-medium text-accent-text">{DAYS[m.today]}day, and {m.minutes} minutes in</p>
+      <h1 class="mt-1 text-4xl font-bold tracking-tight md:text-5xl">Make it a good one.</h1>
+    </div>
+    <div class="grid gap-6 lg:grid-cols-[22rem_1fr]">
+      <div class="space-y-6">
+        {timer(m)}
+        {habits(m)}
+      </div>
+      <div class="min-w-0 space-y-6">
+        {stats(m)}
+        {chart(m)}
+        {board(m)}
+      </div>
+    </div>
+    <p class="mt-10 text-center text-xs text-muted">
+      Written in Helix markup, styled with utility classes, accent {accent_name(m.accent)}, {m.material} material. Press <kbd class="font-mono">⌘K</kbd> for everything.
+    </p>
+  </div>
+  {detail(m)}
+  {ui.command_palette("palette", m.palette.open, m.palette.query, commands(m), m.palette.sel, "palette-query", "palette-key", "palette-pick", "palette-close", placeholder: "Search tasks, or run a command")}
+  {ui.toasts(m.toasts, "dismiss")}
+</div>
+
+STYLE = """
+#root { max-width: none; padding: 0; }
+@keyframes orbit-drift { 0%, 100% { translate: 0 0; } 50% { translate: 3rem 2rem; } }
+.drift { animation: orbit-drift 18s ease-in-out infinite; }
+.drift.slow { animation-duration: 26s; animation-direction: reverse; }
+@media (prefers-reduced-motion: reduce) { .drift { animation: none; } }
+"""
+
+spec = {
+  title: "Orbit",
+  init: init,
+  update: update,
+  view: view,
+  style: STYLE,
+  design: (m) => m.design,
+  theme: (m) => if m.dark then "dark" else "light",
+  subscriptions: (m) => if m.running or m.toasts.count() > 0 then [ui.every(1000, "tick")] else [],
+}
+
+# A scripted session on a fixed day: a sprint that runs out, a habit, a card dragged to Done,
+# a new task, the palette, a new accent and the dark theme. One screen per event.
+SESSION = [
+  {msg: "timer", value: missing},
+  {msg: "tick", value: 100.0},
+  {msg: "tick", value: 161.0},
+  {msg: "habit", value: "read"},
+  {msg: "move", value: {key: "t4", from: 0, to: 1, from_list: "doing", to_list: "done"}},
+  {msg: "draft", value: "Water the plants"},
+  {msg: "add", value: missing},
+  {msg: "open", value: "t1"},
+  {msg: "status", value: "doing"},
+  {msg: "close-task", value: missing},
+  {msg: "key", value: "Ctrl+K"},
+  {msg: "palette-query", value: "rose"},
+  {msg: "palette-key", value: "Enter"},
+  {msg: "dark", value: missing},
+]
+
+fn main(port: Int = 8080, open: Bool = false, window: Bool = false, replay: Bool = false) = if replay then ui.replay({...spec, init: initial(3)}, SESSION).map((html) => print(html)) else ui.app({...spec, port: port, open: open, window: window})

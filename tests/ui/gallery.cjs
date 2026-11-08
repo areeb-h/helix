@@ -174,6 +174,22 @@ async function session(browser, url, motion) {
   await settle();
   await post(() => p.click('[data-click="reset"]'));
 
+  // A frame that answers an OLDER keystroke never overwrites newer typing. Frames wait for the
+  // next animation frame, and the request for "rose" can finish in that wait; the frame for
+  // "r" then looked like the app's own answer and the field showed "r". Holding animation
+  // frames makes the race certain.
+  await p.evaluate(() => { window.__held = []; window.__raf = window.requestAnimationFrame; window.requestAnimationFrame = (f) => { window.__held.push(f); return 0; }; });
+  await p.focus('#name');
+  await p.keyboard.type('r');
+  await p.waitForTimeout(300);
+  await p.keyboard.type('ose');
+  await p.waitForTimeout(500);
+  await p.evaluate(() => { window.requestAnimationFrame = window.__raf; for (const f of window.__held.splice(0)) f(performance.now()); });
+  await p.waitForTimeout(300);
+  check(await p.inputValue('#name') === 'rose', `a late frame does not undo typing (the field shows "${await p.inputValue('#name')}")`);
+  await settle();
+  await post(() => p.click('[data-click="reset"]'));
+
   // Toasts: a live region; each arrives, and leaves when dismissed.
   await post(() => p.click('[data-click="toast"].primary'));
   await post(() => p.click('[data-click="toast"].primary'));

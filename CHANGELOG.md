@@ -4,6 +4,17 @@
 
 ### Added
 
+- **Orbit (`examples/apps/orbit.helix`)**, an app written only in markup and utility classes:
+  - a focus timer with a live ring;
+  - a board whose cards drag between columns (or move with Alt + arrows);
+  - habits that bounce when ticked;
+  - a weekly chart;
+  - a ⌘K command palette;
+  - toasts with Undo;
+  - accent, material and dark mode that recompute the whole design live.
+
+  Its scripted session replays identically on all three engines.
+
 - **Markup: write views as elements (ADR 0061).**
   - **What you write.** `<li class="row" click="open" value={f.id}>{f.name}</li>` is the
     record `ui.el` builds, read by the parser, so the checker and the three engines see only
@@ -177,6 +188,12 @@
   program that never asks for a window never touches the windowing system.
 
 ### Fixed
+
+- **Typing quickly into a field no longer loses characters.** A frame answering an older
+  keystroke could arrive after newer typing had been sent and answered, and replace it ("rose"
+  became "r"). Each edit now carries a `seq`, and a field accepts a value from the app only
+  once a frame has acknowledged its latest edit. A browser test holds the page's animation
+  frames to make the race certain.
 
 - **A window that cannot open now falls back to the browser.** `open_window` answered `true`
   as soon as `DISPLAY` or `WAYLAND_DISPLAY` was set, and the app ended when the window failed.
