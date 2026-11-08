@@ -537,10 +537,10 @@ fn valued(u: &str, negative: bool, neg: &dyn Fn(String) -> String) -> Option<Rul
             if let Some((sz, lh)) = TEXT.iter().find(|(n, _, _)| *n == v).map(|(_, s, l)| (s.to_string(), l.to_string())) {
                 return rule(&[("font-size", sz), ("line-height", lh)]);
             }
-            if let Some((name, lead)) = v.split_once('/') {
-                if let Some((_, sz, _)) = TEXT.iter().find(|(n, _, _)| *n == name) {
-                    return rule(&[("font-size", sz.to_string()), ("line-height", spacing(lead).or_else(|| lookup(LEADING, lead))?)]);
-                }
+            if let Some((name, lead)) = v.split_once('/')
+                && let Some((_, sz, _)) = TEXT.iter().find(|(n, _, _)| *n == name)
+            {
+                return rule(&[("font-size", sz.to_string()), ("line-height", spacing(lead).or_else(|| lookup(LEADING, lead))?)]);
             }
             if TYPE_STYLES.contains(&v) {
                 return rule(&[("font", format!("var(--type-{v})")), ("letter-spacing", format!("var(--track-{v})"))]);
@@ -879,7 +879,10 @@ fn escape(class: &str) -> String {
 // --- The stylesheet. ------------------------------------------------------------------------
 
 /// The CSS for one class: its sort key and its rule, or `None` when it is not a utility.
-fn compile(class: &str) -> Option<((u32, u8, u32, String), String, Option<&'static str>)> {
+/// Where a rule sorts: variant order, rank in its family, family, then the class itself.
+type SortKey = (u32, u8, u32, String);
+
+fn compile(class: &str) -> Option<(SortKey, String, Option<&'static str>)> {
     if class.is_empty() || class.len() > 200 || !class.chars().all(|c| c.is_ascii_graphic()) {
         return None;
     }
@@ -926,7 +929,7 @@ fn family_rank(u: &str) -> u32 {
 /// comes after the components', so a utility on a component always applies. The output is the
 /// same for the same set, in any order.
 pub fn css_for(classes: &BTreeSet<String>) -> String {
-    let mut rules: BTreeMap<(u32, u8, u32, String), String> = BTreeMap::new();
+    let mut rules: BTreeMap<SortKey, String> = BTreeMap::new();
     let mut frames: BTreeSet<&'static str> = BTreeSet::new();
     for c in classes {
         if let Some((key, css, kf)) = compile(c) {
