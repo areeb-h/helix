@@ -266,6 +266,13 @@ async function session(browser, url, motion) {
     await p.mouse.up();
   };
   const near = (a, b, tol = 3) => Math.abs(a - b) <= tol;
+  // A check of what the page shows, made once it shows it (or 3 s have passed).
+  const settles = async (f, want) => {
+    const end = Date.now() + 3000;
+    let got = await f();
+    while (got !== want && Date.now() < end) { await p.waitForTimeout(50); got = await f(); }
+    return got === want;
+  };
 
   // A divider: dragged, the pane follows; past its bounds it stops; its arrows move it too.
   const size = async () => Number(await p.getAttribute('.split-demo .split-handle', 'aria-valuenow'));
@@ -384,6 +391,83 @@ async function session(browser, url, motion) {
   await settle();
   frames = await ver();
   check(await tiles() === 4, 'closing brings the tiles back');
+
+  // --- Rich interactions: swipe actions, a carousel, a board with a bin, symbols, charts.
+  const rowOpen = (k) => p.evaluate((k) => document.querySelector(`[data-key="swipe-${k}"]`).classList.contains('open'), k);
+  await p.$eval('.swipe-list', (e) => e.scrollIntoView({ block: 'center' }));
+  await answered(() => drag('[data-key="swipe-n1"] .swipe-fg', -20, 0, 300));
+  check(!(await rowOpen('n1')), 'a row nudged toward the start stays closed');
+  await answered(() => drag('[data-key="swipe-n1"] .swipe-fg', -150, 0, 160));
+  check(await rowOpen('n1'), 'a row swiped toward the start opens on its actions');
+  check(await p.evaluate(() => { const r = document.querySelector('[data-key="swipe-n1"]'); const a = r.querySelector('.swipe-actions').getBoundingClientRect(), f = r.querySelector('.swipe-fg').getBoundingClientRect(); return f.right <= a.left + 2; }), 'and its actions are uncovered');
+  await answered(() => p.click('[data-key="swipe-n1"] .swipe-fg'));
+  check(!(await rowOpen('n1')), 'a tap on an open row closes it');
+  await answered(() => drag('[data-key="swipe-n2"] .swipe-fg', -150, 0, 160));
+  await answered(() => p.click('[data-key="swipe-n2"] .swipe-act.danger'));
+  check(await p.evaluate(() => !document.querySelector('[data-key="swipe-n2"]')), 'an action on an open row runs it');
+  await p.focus('[data-key="swipe-n3"] .swipe-act.accent');
+  await p.waitForTimeout(400);
+  check(await p.evaluate(() => { const r = document.querySelector('[data-key="swipe-n3"]'); return r.querySelector('.swipe-fg').getBoundingClientRect().right <= r.querySelector('.swipe-act.accent').getBoundingClientRect().left + 2; }), 'focus on an action uncovers it');
+  await p.focus('#tour-track');
+
+  const dots = () => p.evaluate(() => [...document.querySelectorAll('.carousel-dot')].map((d) => (d.getAttribute('aria-current') === 'true' ? 1 : 0)).join(''));
+  check(await p.evaluate(() => document.querySelector('[data-scroll-target="tour-track"][data-scroll-step="-1"]').disabled), "a carousel's previous button is off at the first slide");
+  await p.click('[data-scroll-target="tour-track"][data-scroll-step="1"]');
+  check(await settles(dots, '0100'), 'next moves one slide, and its dot is current');
+  check(await settles(() => p.evaluate(() => document.body.textContent.includes('Showing slide 2 of 4')), true), 'and the app is told which slide shows');
+  await p.click('[data-scroll-target="tour-track"][data-scroll-index="3"]');
+  check(await settles(dots, '0001'), 'a dot goes to its slide');
+  frames = await ver();
+
+  const column = (id) => p.evaluate((id) => [...document.querySelectorAll(`[data-reorder-group="plan"][data-value="${id}"] > [data-key]`)].map((e) => e.dataset.key).join(','), id);
+  const carry = async (from, to, during) => {
+    const a = await (await p.$(from)).boundingBox();
+    const b = await (await p.$(to)).boundingBox();
+    const x0 = a.x + a.width / 2, y0 = a.y + a.height / 2, x1 = b.x + b.width / 2, y1 = b.y + b.height - 6;
+    await p.mouse.move(x0, y0);
+    await p.mouse.down();
+    for (let i = 1; i <= 14; i++) { await p.mouse.move(x0 + ((x1 - x0) * i) / 14, y0 + ((y1 - y0) * i) / 14); await p.waitForTimeout(20); }
+    if (during) await during();
+    await p.mouse.up();
+  };
+  await p.$eval('#plan', (e) => e.scrollIntoView({ block: 'center' }));
+  await answered(() => carry('[data-key="c2"]', '[data-reorder-group="plan"][data-value="doing"]'));
+  check(await column('doing') === 'c3,c2' && await column('todo') === 'c1', `a card dragged into another column lands there (todo ${await column('todo')}, doing ${await column('doing')})`);
+  check(await p.evaluate(() => [...document.querySelectorAll('[data-reorder-group="plan"] > [data-key]')].every((e) => !e.style.translate)), 'and every card is back in the flow');
+  await p.focus('[data-key="c3"]');
+  await answered(() => p.keyboard.press('Alt+ArrowRight'));
+  check((await column('done')).split(',').includes('c3'), `Alt+→ moves a card to the next column (${await column('done')})`);
+  check(await p.evaluate(() => document.activeElement.dataset.key) === 'c3', 'and focus goes with it');
+  await answered(() => carry('[data-key="c1"]', '.bin', async () => {
+    check(await p.evaluate(() => document.querySelector('.bin').classList.contains('hx-drop-over')), 'a drop target lights up under a dragged card');
+  }));
+  check(await p.evaluate(() => !document.querySelector('[data-key="c1"]')), 'a card let go over the bin is removed');
+  await axe('after the board and the swipes');
+
+  const bell = await p.$('[data-click="bell"]');
+  await bell.scrollIntoViewIfNeeded();
+  const v2 = await ver();
+  await bell.click();
+  await p.waitForFunction((n) => Number(document.documentElement.dataset.version) > n, v2);
+  const playing = await p.evaluate(() => document.querySelector('[data-click="bell"] .sym').getAnimations().length > 0);
+  check(motion === 'reduce' ? !playing : playing, motion === 'reduce' ? 'reduced motion: a symbol does not move' : 'a symbol bounces when it is pressed');
+  await settle();
+  frames = await ver();
+
+  // A chart read by pointing at it, and from the keyboard.
+  const chart = await p.$('svg.chart[aria-label="Signal and trend over time"]');
+  await chart.scrollIntoViewIfNeeded();
+  const bands = await chart.$$('.band');
+  check(bands.length > 5, `a line chart has a band per point (${bands.length})`);
+  const bb = await (await bands[5].$('.band-hit')).boundingBox();
+  await p.mouse.move(bb.x + bb.width / 2, bb.y + bb.height / 2);
+  await p.waitForTimeout(300);
+  check(await bands[5].evaluate((b) => getComputedStyle(b.querySelector('.chart-tip')).opacity === '1'), 'pointing at it shows the values there');
+  await p.mouse.move(5, 5);
+  await bands[0].focus();
+  await p.keyboard.press('ArrowRight');
+  check(await p.evaluate(() => { const a = document.activeElement; return a.classList.contains('band') && a === a.parentNode.querySelectorAll(':scope > .band')[1]; }), '→ moves to the next point');
+  check(await p.evaluate(() => (document.activeElement.getAttribute('aria-label') || '').includes('signal')), 'and each point says its values');
 
   // Every material passes in both modes; the page restyles live when the design changes.
   for (const mat of ['glass', 'tonal', 'hybrid']) {

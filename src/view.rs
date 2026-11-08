@@ -232,6 +232,10 @@ fn parse(v: &Value, line: usize, col: usize) -> Result<Node, HelixError> {
         ("reorder", "data-reorder"),
         ("resize", "data-resize"),
         ("handle", "data-drag-handle"),
+        // Between containers: containers with the same `reorder_group` trade rows (a board's
+        // columns), and a node with `drop` names the message a row let go over it sends.
+        ("reorder_group", "data-reorder-group"),
+        ("drop", "data-drop"),
     ] {
         if let Some(v) = get(&props, prop) {
             attrs.push((out.to_string(), text_of(&v, line, col)?));
@@ -556,13 +560,15 @@ mod tests {
                 ("drag_commit", Value::Int(96)),
                 ("resize", s("size")),
                 ("handle", Value::Bool(true)),
+                ("reorder_group", s("board")),
+                ("drop", s("dropped")),
             ],
             vec![],
         );
         let Value::Str(h) = view_html(&v, 0, 0).expect("render") else { panic!() };
         assert_eq!(
             h.as_str(),
-            "<div data-drag=\"thrown\" data-drag-axis=\"down\" data-drag-commit=\"96\" data-reorder=\"moved\" data-resize=\"size\" data-drag-handle=\"true\"></div>"
+            "<div data-drag=\"thrown\" data-drag-axis=\"down\" data-drag-commit=\"96\" data-reorder=\"moved\" data-resize=\"size\" data-drag-handle=\"true\" data-reorder-group=\"board\" data-drop=\"dropped\"></div>"
         );
     }
 

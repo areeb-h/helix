@@ -24,4 +24,20 @@ abc
 [2, true, true, true, true, true]
 [false, false, false]
 ["<h1 class="large-title">Files</h1>", "<span class="tb-title" aria-hidden="true">Files</span>"]
+["a", "", "a"]
+["a", "a", missing, "b", "a"]
+[true, true, true, true]
+a:2 b:31
+a:2 b:13
+a:2 b:31
+a:21 b:3
+a:12 b:3
+a:12 b:3
+a:12 b:3
+[true, true, true, true]
+[2, true, true, true, true, true]
+[true, true]
+[3, 1, true, true]
+[false, true]
+[2, true]
 --- stderr ---
