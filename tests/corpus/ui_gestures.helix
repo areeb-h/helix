@@ -62,3 +62,37 @@ print([sk.split("class=\"stack-screen").count() - 1, not sk.contains("Inbox</h2>
 one = ui.render(ui.stack("nav", screens.take(1), "back"))
 print([one.contains("stack-back"), one.contains("data-drag"), one.contains("data-enter")])
 print([ui.render(ui.large_title("Files")), ui.render(ui.toolbar_title("Files"))])
+
+# Swipe rows: the app decides which row is open from where it was let go and how fast.
+print([ui.swiped("", {msg: "s", value: "a", drag: {dx: -120, dy: 0, vx: 0, vy: 0}}, 2), ui.swiped("", {msg: "s", value: "a", drag: {dx: -30, dy: 0, vx: 0, vy: 0}}, 2), ui.swiped("", {msg: "s", value: "a", drag: {dx: -30, dy: 0, vx: -900, vy: 0}}, 2)])
+print([ui.swiped("a", {msg: "s", value: "a", drag: {dx: 60, dy: 0, vx: 0, vy: 0}}, 2), ui.swiped("a", {msg: "s", value: "a", drag: {dx: 10, dy: 0, vx: 0, vy: 0}}, 2), ui.swiped("a", {msg: "s", value: "a"}, 2), ui.swiped("a", {msg: "s", value: "b", drag: {dx: -200, dy: 0, vx: 0, vy: 0}}, 2), ui.swiped("a", {msg: "s", value: "b", drag: "nonsense"}, 2)])
+sr = ui.render(ui.swipe_row("a", ui.text("Row"), [{label: "Delete", msg: "del", value: "a", icon: "trash", tone: "danger"}], "a", "s"))
+print([sr.contains("swipe-row open"), sr.contains("data-drag=\"s\" data-drag-axis=\"x\""), sr.contains("--n: 1"), sr.contains("swipe-act danger")])
+
+# A board: a move between columns, within one, and ones that do not fit.
+cols = [{id: "a", title: "A", items: [{key: "1", title: "one"}, {key: "2", title: "two"}]}, {id: "b", title: "B", items: [{key: "3", title: "three"}]}]
+show = (cs) => cs.map((c) => "{c.id}:{c.items.map((x) => x.key).join("")}").join(" ")
+print(show(ui.moved_between(cols, {key: "1", from: 0, to: 1, from_list: "a", to_list: "b"})))
+print(show(ui.moved_between(cols, {key: "1", from: 0, to: 0, from_list: "a", to_list: "b"})))
+print(show(ui.moved_between(cols, {key: "1", from: 0, to: 9, from_list: "a", to_list: "b"})))
+print(show(ui.moved_between(cols, {key: "2", from: 1, to: 0, from_list: "a", to_list: "a"})))
+print(show(ui.moved_between(cols, {key: "3", from: 0, to: 0, from_list: "a", to_list: "b"})))
+print(show(ui.moved_between(cols, {key: "1", from: 0, to: 0, from_list: "a", to_list: "nowhere"})))
+print(show(ui.moved_between(cols, "drop it")))
+bd = ui.render(ui.board("plan", "Plan", cols, "move"))
+print([bd.contains("data-reorder=\"move\" data-reorder-group=\"plan\""), bd.contains("data-value=\"b\""), bd.contains("aria-describedby=\"plan-how\""), bd.contains("id=\"plan-how\"")])
+
+# A carousel: slides, buttons and dots, the first marked current; the app named for changes.
+cr = ui.render(ui.carousel("tour", "Tour", [ui.text("a"), ui.text("b")], "slide"))
+print([cr.split("carousel-slide").count() - 1, cr.contains("data-carousel=\"slide\""), cr.contains("data-scroll-step=\"-1\""), cr.contains("aria-label=\"Slide 2\""), cr.contains("aria-current=\"true\""), cr.contains("aria-roledescription=\"carousel\"")])
+
+# A symbol replays its effect when its trigger changes: a new key, so a new node.
+print([ui.render(ui.symbol("bell", "bounce", 1)).contains("data-key=\"sym-bell-1\" data-enter=\"bounce\""), ui.render(ui.symbol("heart", "swap", 0)).contains("data-enter=\"symbol\" data-exit=\"fade\"")])
+
+# Charts read by pointing: a band per point, one in the Tab order, each saying its values.
+lc = ui.render(ui.line_chart("L", [{name: "a", xs: [1, 2, 3], ys: [1.0, 2.0, 3.0]}]))
+print([lc.split("class=\"band\"").count() - 1, lc.split("tabindex=\"0\"").count() - 1, lc.contains("role=\"group\""), lc.contains("aria-label=\"2.0: a 2.00\"")])
+many = ui.render(ui.line_chart("L", [{name: "a", xs: range(0, 200).map((i) => i * 1.0), ys: range(0, 200).map((i) => i * 1.0)}]))
+print([many.contains("class=\"band\""), many.contains("role=\"img\"")])
+bc = ui.render(ui.bar_chart("B", ["x", "y"], [3, 5]))
+print([bc.split("class=\"band\"").count() - 1, bc.contains("aria-label=\"y: 5\"")])

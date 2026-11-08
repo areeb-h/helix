@@ -265,14 +265,16 @@ pub static SYNTAX: &[SyntaxDoc] = &[
                 `badge`, `segmented`, `chips`, `radio_group`, `stepper`, `search_field`, `list`/`list_item`, `avatar`, \
                 `stat_tile`, `breadcrumbs`, `icon`, `fab`, `shell`/`rail`/`toolbar`, `context_menu`, `command_palette`, `split_view`, `sortable`, \
                 `tree`, `disclosure`/`accordion`, `popover`, `spinner`, `stack` (screens pushed, popped and \
-                swiped back), `large_title`, `data_table` (a DataFrame, \
+                swiped back), `large_title`, `swipe_row`, `board`, \
+                `carousel`, `symbol`, `data_table` (a DataFrame, \
                 virtualised), `line_chart`/`scatter_chart`/`bar_chart`; timers with `every(ms, msg)` in \
                 `subscriptions`. Accessible by construction, light and dark, motion run by the GPU. A DESIGN is \
                 `ui.design({seed: \"#4f46e5\", material: \"hybrid\" | \"glass\" | \"tonal\", shape, density})` given as \
                 `design:` (ADR 0056): colours computed in OKLCH with contrast proven (`ui.contrast_report`), \
                 concentric corners (`ui.geometry`), spring motion and shared elements (`share:`). GESTURES \
                 (ADR 0057) are props too: `drag` (with `drag_axis`, `drag_commit`), `reorder`, `resize` and \
-                `handle` — the page drags, the app gets one event when it is let go. \
+                `handle`, `reorder_group` and `drop` — the page drags, the app gets one event when it is \
+                let go. \
                 `ui.replay(spec, events)` returns every screen as HTML — testable without a browser, the same \
                 on all three engines. `helix run app.helix` prints a link (add `--open`, or `window: true` in a `--features desktop` build for a native \
                 window); `helix run --watch app.helix` reloads on save with the \

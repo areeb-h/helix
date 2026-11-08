@@ -67,6 +67,13 @@ MAIL = [
   {from: "Margaret Hamilton", subject: "Priority displays", body: "The software recognised the overload and kept only the most important jobs running."},
 ]
 ALBUMS = [["Coast", 200], ["Desert", 40], ["Forest", 140], ["Dusk", 300]]
+NOTES = {n1: ["Build finished", "main passed in 4 min"], n2: ["Review requested", "Ada wants your eyes on #29"], n3: ["New comment", "“Ship it” — Grace"], n4: ["Disk almost full", "92% of 512 GB used"]}
+COLUMNS = [
+  {id: "todo", title: "To do", items: [{key: "c1", title: "Sketch the board", subtitle: "Design"}, {key: "c2", title: "Write the ADR", subtitle: "Docs"}]},
+  {id: "doing", title: "Doing", items: [{key: "c3", title: "Cross-column drags", subtitle: "Engine"}]},
+  {id: "done", title: "Done", items: [{key: "c4", title: "Swipe actions", subtitle: "Engine"}]},
+]
+SLIDES = [["Springs", "Every movement carries its velocity.", 260], ["Gestures", "The page drags; the app decides.", 160], ["Materials", "Glass where things float.", 30], ["Access", "Every gesture has a key.", 330]]
 fn toggled(xs, x) = if xs.contains(x) then xs.filter((y) => y != x) else xs.concat([x])
 
 fn design_for(m) = ui.design({seed: m.accent, material: m.material, shape: m.shape})
@@ -84,6 +91,7 @@ init0 = {
   seed: 1,
   last: "nothing yet",
   mail: [], album: -1,
+  swiped: "", notes: ["n1", "n2", "n3", "n4"], columns: COLUMNS, slide: 0, bell: 0, like: false, gear: 0,
   split: 240, order: ["design", "build", "test", "ship"], open: ["src"], file: "src/app.helix", sections: ["motion"], pop: false, dense: false,
 }
 init = {...init0, design: design_for(init0)}
@@ -149,6 +157,15 @@ fn update(m, e) = match e.msg {
   "mail-back" => {...m, mail: m.mail.take(max(m.mail.count() - 1, 0))},
   "album" => {...m, album: to_int(e.value)},
   "album-close" => {...m, album: -1},
+  "swipe" => {...m, swiped: ui.swiped(m.swiped, e, 2)},
+  "archive" => toast({...m, notes: m.notes.filter((k) => k != e.value), swiped: ""}, "Archived “{(NOTES.get(e.value) ?? ["it"])[0]}”.", "neutral"),
+  "delete-note" => {...m, notes: m.notes.filter((k) => k != e.value), swiped: ""},
+  "card" => {...m, columns: ui.moved_between(m.columns, e.value)},
+  "bin" => {...m, columns: m.columns.map((c) => {...c, items: c.items.filter((x) => x.key != "{e.get("dropped")}")})},
+  "slide" => {...m, slide: e.value},
+  "bell" => {...m, bell: m.bell + 1},
+  "like" => {...m, like: not m.like},
+  "gear" => {...m, gear: m.gear + 1},
   # Toasts expire five seconds after the first tick that sees them.
   "tick" => {...m, toasts: m.toasts.map((t) => if t.born.is_missing() then {...t, born: e.value} else t).filter((t) => e.value - t.born < 5.0)},
   _ => m,
@@ -293,12 +310,37 @@ fn navigation(m) = ui.card("Navigation and motion", [
     ], min: 300, gap: 4),
 ])
 
+fn note_row(m, k) = ui.swipe_row(k, ui.el("div", {class: "li"}, [
+  ui.el("span", {class: "li-lead"}, [ui.icon("bell")]),
+  ui.el("span", {class: "two-line"}, [ui.el("span", {class: "li-title"}, [ui.text(NOTES.get(k)[0])]), ui.el("span", {class: "meta"}, [ui.text(NOTES.get(k)[1])])]),
+  ]), [{label: "Archive", msg: "archive", value: k, icon: "archive", tone: "accent"}, {label: "Delete", msg: "delete-note", value: k, icon: "trash", tone: "danger"}], m.swiped, "swipe")
+
+fn slide(s) = ui.el("div", {class: "slide", style: {__hue: "{s[2]}"}}, [ui.el("h3", {class: "slide-title"}, [ui.text(s[0])]), ui.el("p", {class: "slide-text"}, [ui.text(s[1])])])
+
+fn rich(m) = ui.card("Rich interactions", [
+  ui.paragraph("Swipe a row toward the start for its actions. Flick through the slides. Drag cards between columns, or onto the bin. Press the symbols."),
+  ui.grid([
+    ui.column([ui.subheading("Swipe actions"), if m.notes.count() == 0 then ui.empty_state("bell", "All caught up") else ui.swipe_list("Notifications", m.notes.map((k) => note_row(m, k)))], gap: 2),
+    ui.column([ui.subheading("Carousel"), ui.carousel("tour", "Tour", SLIDES.map(slide), "slide"), ui.el("p", {class: "meta"}, [ui.text("Showing slide {m.slide + 1} of {SLIDES.count()}")])], gap: 2),
+    ], min: 300, gap: 4),
+  ui.subheading("A board"),
+  ui.board("plan", "Plan", m.columns, "card"),
+  ui.el("div", {class: "bin", drop: "bin", value: "bin", role: "group", aria: {label: "Bin: drop a card here to remove it"}}, [ui.icon("trash"), ui.el("span", {}, [ui.text("Drop a card here to remove it")])]),
+  ui.subheading("Symbols"),
+  ui.cluster([
+    ui.el("button", {class: "btn tonal", click: "bell", attrs: {type: "button"}}, [ui.symbol("bell", "bounce", m.bell, size: "sm"), ui.text("Notify ({m.bell})")]),
+    ui.el("button", {class: "btn tonal", click: "like", aria: {pressed: m.like}, attrs: {type: "button"}}, [ui.symbol(if m.like then "sparkle" else "heart", "swap", if m.like then 1 else 0, size: "sm"), ui.text(if m.like then "Liked" else "Like")]),
+    ui.el("button", {class: "btn tonal", click: "gear", attrs: {type: "button"}}, [ui.symbol("settings", "wiggle", m.gear, size: "sm"), ui.text("Settings")]),
+    ], gap: 2),
+])
+
 fn view(m) = ui.column([
   header(m),
   ui.grid([buttons(m), feedback(m)], min: 380),
   ui.grid([choices(m), lists(m)], min: 380),
   gestures(m),
   navigation(m),
+  rich(m),
   forms(m),
   charts(m),
   data(m),
@@ -327,6 +369,11 @@ STYLE = """
 .album-hero .btn { color: #fff; }
 .album-title { margin: 0; font: var(--type-title-1); letter-spacing: var(--track-title-1); text-shadow: 0 1px 8px rgba(0, 0, 0, .35); }
 .album-open .para { padding: var(--s-3); margin: 0; }
+.slide { min-height: 170px; border-radius: var(--r-in-card); padding: var(--s-4); display: flex; flex-direction: column; justify-content: flex-end; color: #fff;
+  background: linear-gradient(150deg, oklch(.55 .13 var(--hue)), oklch(.4 .14 calc(var(--hue) + 40))); }
+.slide-title { margin: 0; font: var(--type-title-2); letter-spacing: var(--track-title-2); }
+.slide-text { margin: 4px 0 0; opacity: .92; }
+.bin { display: flex; align-items: center; justify-content: center; gap: var(--s-2); min-height: 56px; border-radius: var(--r-in-card); border: 1.5px dashed var(--line-strong); color: var(--muted); }
 """
 
 spec = {
@@ -370,6 +417,10 @@ SESSION = [
   {msg: "album", value: "2"},
   {msg: "mail-back", value: missing},
   {msg: "album-close", value: missing},
+  {msg: "swipe", value: "n2", drag: {dx: -120, dy: 0, vx: -400, vy: 0}},
+  {msg: "card", value: {key: "c1", from: 0, to: 1, from_list: "todo", to_list: "doing"}},
+  {msg: "bin", value: "bin", dropped: "c4"},
+  {msg: "bell", value: missing},
 ]
 
 fn main(port: Int = 8080, open: Bool = false, window: Bool = false, replay: Bool = false) = if replay then ui.replay(spec, SESSION).map((html) => print(html)) else ui.app({...spec, port: port, open: open, window: window})

@@ -700,6 +700,85 @@ export fn stack(id, screens, back, back_label = "Back") = do {
 export fn large_title(s) = el("h1", {class: "large-title"}, [text(s)])
 export fn toolbar_title(s) = el("span", {class: "tb-title", aria: {hidden: true}}, [text(s)])
 
+# --- Rich interactions: swipe rows, boards, carousels, symbols. -----------------------------
+
+# A row with actions behind it, as in Mail: swiped toward the start it opens on its actions,
+# swiped back (or tapped) it closes. `actions` is `[{label, msg, value?, icon?, tone?}]`; the
+# row sends `{msg, value: key}` with `drag` when it is let go, and a tap on an open row sends it
+# without — `ui.swiped(open, e, actions.count())` is the row now open (or missing). Focus on an
+# action opens the row too, so the keyboard reaches them; one row is open at a time.
+SWIPE_W = 76
+export fn swipe_list(label, rows) = el("div", {class: "list swipe-list mat-card", role: "list", aria: {label: label}}, rows)
+export fn swipe_row(key, content, actions, open, msg) = do {
+  on = "{open ?? ""}" == "{key}"
+  el("div", {key: "swipe-{key}", class: if on then "swipe-row open" else "swipe-row", role: "listitem", style: {__n: "{actions.count()}"}}, [
+    el("div", {class: "swipe-actions"}, actions.map((a) => el("button", {class: "swipe-act {a.get("tone") ?? "neutral"}", click: a.msg, value: a.get("value"), attrs: {type: "button"}},
+      present([if a.get("icon").is_missing() then missing else icon(a.icon, "sm"), el("span", {}, [text(a.label)])])))),
+    el("div", {class: "swipe-fg", drag: msg, drag_axis: "x", value: "{key}", layout: true, click: if on then msg else missing}, [content]),
+  ])
+}
+export fn swiped(open, e, n) = do {
+  k = "{e.value}"
+  d = e.get("drag")
+  was = "{open ?? ""}" == k
+  if type_of(d) != "Record" then (if was then missing else open) else do {
+    w = n * SWIPE_W
+    at = (if was then -w else 0) + (d.get("dx") ?? 0) + (d.get("vx") ?? 0) * 0.2
+    if at < -w / 2 then k else (if was then missing else open)
+  }
+}
+
+# A board: columns of cards that are dragged within a column and between columns. `columns` is
+# `[{id, title, items: [{key, title, subtitle?}]}]`; a move sends `{msg, value: {key, from, to,
+# from_list, to_list}}` (the lists are column ids) — apply it with `ui.moved_between(columns,
+# e.value)`. Anything with `drop: msg` (a trash, a folder) takes a card let go over it and is
+# sent `{msg, value, dropped: key}`.
+export fn board(id, label, columns, msg) = el("div", {class: "board-wrap"}, [el("div", {id: id, class: "board", role: "group", aria: {label: label}}, columns.map((c) =>
+  el("section", {class: "board-col", key: "col-{c.id}", aria: {label: c.title}}, [
+    el("header", {class: "board-head"}, [el("h3", {class: "board-title"}, [text(c.title)]), el("span", {class: "badge neutral"}, [text("{c.items.count()}")])]),
+    el("div", {class: "board-cards", role: "list", reorder: msg, reorder_group: id, value: "{c.id}", aria: {label: c.title}}, c.items.map((it) =>
+      el("div", {key: "{it.key}", class: "board-card mat-card", role: "listitem", layout: true, aria: {describedby: "{id}-how"}, attrs: {tabindex: "0"}}, present([
+        el("span", {class: "board-card-title"}, [text(it.title)]),
+        if it.get("subtitle").is_missing() then missing else el("span", {class: "meta"}, [text(it.subtitle)]),
+    ])))),
+  ]))), el("span", {id: "{id}-how", class: "sr-only"}, [text("Drag to move. With the keyboard: Alt with up and down moves a card in its column, Alt with left and right moves it to the next column.")])])
+export fn moved_between(columns, mv) = do {
+  ok = type_of(mv) == "Record" and type_of(mv.get("from")) == "Int" and type_of(mv.get("to")) == "Int"
+  src = if ok then columns.filter((c) => "{c.id}" == "{mv.get("from_list")}").first() else missing
+  dst = if ok then columns.filter((c) => "{c.id}" == "{mv.get("to_list")}").first() else missing
+  fits = not src.is_missing() and not dst.is_missing() and mv.from >= 0 and mv.from < src.items.count() and "{src.items[mv.from].key}" == "{mv.get("key")}" and mv.to >= 0
+  if not fits then columns else if src.id == dst.id then columns.map((c) => if c.id == src.id then {...c, items: reordered(c.items, mv)} else c) else do {
+    card = src.items[mv.from]
+    columns.map((c) => if c.id == src.id then {...c, items: c.items.filter((x) => x.key != card.key)} else if c.id == dst.id then {...c, items: c.items.take(mv.to).concat([card]).concat(c.items.drop(mv.to))} else c)
+  }
+}
+
+# A carousel: slides in a row that scrolls and snaps one at a time — the platform's own scroll,
+# so a flick, a trackpad and a touch screen all carry momentum. Its buttons and dots move it,
+# and it says which slide is showing. With `msg`, the app is sent `{msg, value: index}` when the
+# slide in view changes.
+export fn carousel(id, label, slides, msg = missing) = do {
+  n = slides.count()
+  el("div", {class: "carousel", role: "region", aria: {roledescription: "carousel", label: label}}, [
+    el("div", {id: "{id}-track", class: "carousel-track", attrs: {tabindex: "0", "data-carousel": msg ?? ""}, aria: {label: label}}, range(0, n).map((i) =>
+      el("div", {class: "carousel-slide", role: "group", aria: {roledescription: "slide", label: "{i + 1} of {n}"}}, [slides[i]]))),
+    el("div", {class: "carousel-nav"}, [
+      el("button", {class: "btn ghost icon", aria: {label: "Previous slide", controls: "{id}-track"}, attrs: {type: "button", "data-scroll-target": "{id}-track", "data-scroll-step": "-1"}}, [icon("chevron_left")]),
+      el("div", {class: "carousel-dots"}, range(0, n).map((i) => el("button", {class: "carousel-dot", aria: {label: "Slide {i + 1}", current: if i == 0 then "true" else missing},
+        attrs: {type: "button", "data-scroll-target": "{id}-track", "data-scroll-index": "{i}"}}, []))),
+      el("button", {class: "btn ghost icon", aria: {label: "Next slide", controls: "{id}-track"}, attrs: {type: "button", "data-scroll-target": "{id}-track", "data-scroll-step": "1"}}, [icon("chevron_right")]),
+    ]),
+  ])
+}
+
+# A symbol that moves when something happens: `effect` is "bounce", "wiggle", "pulse" or
+# "swap", and it plays each time `trigger` changes (a count, the state it shows). "swap"
+# replaces one symbol with another — a crossfade with a scale, the old one leaving as the new
+# one arrives. Under reduced motion the symbol simply changes.
+export fn symbol(name, effect, trigger, size = "md", label = missing) = el("span", {class: "sym-box"}, [
+  el("span", {key: "sym-{name}-{trigger}", class: "sym", enter: if effect == "swap" then "symbol" else effect, exit: if effect == "swap" then "fade" else missing}, [icon(name, size, label)]),
+])
+
 # --- Data. -------------------------------------------------------------------------------
 
 # A DataFrame as a table that renders only the rows in view. Scrolling is the CLIENT's (D6): it
@@ -909,14 +988,48 @@ fn no_data(label) = el("text", {class: "axis-label", attrs: {x: "{CW / 2.0}", y:
 fn px(ax, v) = ML + (v - ax.lo) / (ax.hi - ax.lo) * (CW - ML - MR)
 fn py(ay, v) = CH - MB - (v - ay.lo) / (ay.hi - ay.lo) * (CH - MT - MB)
 
-fn chart_frame(label, ax, ay, body, xlabels, empty = false) = do {
+fn chart_frame(label, ax, ay, body, xlabels, empty = false, role = "img") = do {
   ygrid = ay.ticks.map((t) => el("g", {class: "tick"}, [
     el("line", {class: "gridline", attrs: {x1: "{ML}", x2: "{CW - MR}", y1: "{py(ay, t):.1f}", y2: "{py(ay, t):.1f}"}}, []),
     el("text", {class: "axis-label", attrs: {x: "{ML - 8.0}", y: "{py(ay, t) + 4.0:.1f}", "text-anchor": "end"}}, [text(fmt_tick(t, ay.step))]),
   ]))
   xticks = if xlabels.is_missing() then ax.ticks.map((t) => el("text", {class: "axis-label", attrs: {x: "{px(ax, t):.1f}", y: "{CH - 10.0}", "text-anchor": "middle"}}, [text(fmt_tick(t, ax.step))])) else xlabels
   said = if empty then "{label} (no data)" else label
-  el("svg", {class: "chart", role: "img", aria: {label: said}, attrs: {viewBox: "0 0 {CW} {CH}"}}, [el("title", {}, [text(said)])].concat(ygrid).concat(xticks).concat(body).concat(if empty then [no_data(label)] else []))
+  el("svg", {class: "chart", role: role, aria: {label: said}, attrs: {viewBox: "0 0 {CW} {CH}"}}, [el("title", {}, [text(said)])].concat(ygrid).concat(xticks).concat(body).concat(if empty then [no_data(label)] else []))
+}
+
+# Reading a chart by pointing at it: a band per point of the first series that shows, on hover
+# or keyboard focus, a crosshair, each series' dot and a box with the values. It is CSS — the
+# bands are always there and only become visible — so it costs nothing per frame. ← → move
+# between bands from the keyboard (one is in the Tab order), and each says its values aloud.
+# Charts with more points than this draw no bands: the line is the reading.
+MAX_BANDS = 120
+fn tip_box(x, y0, lines, k_of) = do {
+  w = 150.0
+  h = 10.0 + lines.count() * 16.0
+  left = if x > CW * 0.66 then x - w - 10.0 else x + 10.0
+  [el("rect", {class: "tip-box", attrs: {x: "{left:.1f}", y: "{y0:.1f}", width: "{w}", height: "{h}", rx: "6"}}, [])].concat(range(0, lines.count()).map((j) =>
+    el("text", {class: "tip-text {k_of(j)}", attrs: {x: "{left + 10.0:.1f}", y: "{y0 + 18.0 + j * 16.0:.1f}"}}, [text(lines[j])])))
+}
+fn line_bands(series, ax, ay) = if series.count() == 0 or series[0].xs.count() > MAX_BANDS then [] else do {
+  xs = series[0].xs
+  n = xs.count()
+  idx = range(0, n).filter((i) => drawable(xs[i]))
+  range(0, idx.count()).map((j) => do {
+    i = idx[j]
+    x = px(ax, xs[i])
+    lo = if j == 0 then ML else (px(ax, xs[idx[j - 1]]) + x) / 2.0
+    hi = if j == idx.count() - 1 then CW - MR else (px(ax, xs[idx[j + 1]]) + x) / 2.0
+    vals = range(0, series.count()).filter((k) => i < series[k].ys.count() and drawable(series[k].ys[i]))
+    said = vals.map((k) => "{series[k].name} {fmt_tick(series[k].ys[i], ay.step / 10.0)}").join(", ")
+    lines = ["{fmt_tick(xs[i], ax.step)}"].concat(vals.map((k) => "{series[k].name}: {fmt_tick(series[k].ys[i], ay.step / 10.0)}"))
+    el("g", {class: "band", role: "img", aria: {label: "{fmt_tick(xs[i], ax.step)}: {said}"}, attrs: {tabindex: if j == 0 then "0" else "-1"}}, [
+      el("rect", {class: "band-hit", attrs: {x: "{lo:.1f}", y: "{MT}", width: "{max(hi - lo, 1.0):.1f}", height: "{CH - MT - MB}"}}, []),
+      el("g", {class: "chart-tip", aria: {hidden: true}}, [el("line", {class: "crosshair", attrs: {x1: "{x:.1f}", x2: "{x:.1f}", y1: "{MT}", y2: "{CH - MB}"}}, [])]
+          .concat(vals.map((k) => el("circle", {class: "tip-dot s{k % 6 + 1}", attrs: {cx: "{x:.1f}", cy: "{py(ay, series[k].ys[i]):.1f}", r: "4.5"}}, [])))
+          .concat(tip_box(x, MT + 22.0, lines, (jj) => if jj == 0 then "head" else "value"))),
+    ])
+  })
 }
 
 # Lines: `series` is `[{name, xs, ys}]`, drawn in the palette's order with a legend.
@@ -933,7 +1046,8 @@ export fn line_chart(label, series) = do {
   })
   n = series.count()
   legend = el("g", {class: "legend"}, range(0, n).map((k) => el("text", {class: "legend-item s{k % 6 + 1}", attrs: {x: "{CW - MR - (n - 1 - k) * 110.0}", y: "{MT + 4.0}", "text-anchor": "end"}}, [text("● {series[k].name}")])))
-  chart_frame(label, ax, ay, lines.concat([legend]), missing, empty: ex.empty)
+  bands = line_bands(series, ax, ay)
+  chart_frame(label, ax, ay, lines.concat([legend]).concat(bands), missing, empty: ex.empty, role: if bands.count() == 0 then "img" else "group")
 }
 
 # Points: keyed by index, so new data moves them rather than redrawing them.
@@ -957,12 +1071,14 @@ export fn bar_chart(label, labels, values) = do {
     top = if drawable(values[i]) then py(ay, values[i]) else base
     h = abs(base - top)
     y = min(base, top)
-    el("rect", {key: "bar-{labels[i]}", class: "bar s1", style: {y: "{y:.1f}px", height: "{h:.1f}px"}, enter: "grow", attrs: {x: "{ML + i * slot + slot * 0.18:.1f}", y: "{y:.1f}", width: "{slot * 0.64:.1f}", height: "{h:.1f}", rx: "4"}}, [
-      el("title", {}, [text("{labels[i]}: {values[i]}")]),
+    # Each bar is a band of its own: its value shows above it on hover or focus.
+    el("g", {key: "bar-{labels[i]}", class: "band", role: "img", aria: {label: "{labels[i]}: {values[i]}"}, attrs: {tabindex: if i == 0 then "0" else "-1"}}, [
+      el("rect", {class: "bar s1", style: {y: "{y:.1f}px", height: "{h:.1f}px"}, enter: "grow", attrs: {x: "{ML + i * slot + slot * 0.18:.1f}", y: "{y:.1f}", width: "{slot * 0.64:.1f}", height: "{h:.1f}", rx: "4"}}, []),
+      el("text", {class: "chart-tip tip-text bar-value", aria: {hidden: true}, attrs: {x: "{ML + (i + 0.5) * slot:.1f}", y: "{max(y - 6.0, MT + 10.0):.1f}", "text-anchor": "middle"}}, [text("{values[i]}")]),
     ])
   })
   names = range(0, labels.count()).map((i) => el("text", {class: "axis-label", attrs: {x: "{ML + (i + 0.5) * slot:.1f}", y: "{CH - 10.0}", "text-anchor": "middle"}}, [text(labels[i])]))
-  chart_frame(label, ax, ay, bars, names, empty: ev.empty)
+  chart_frame(label, ax, ay, bars, names, empty: ev.empty, role: if labels.count() == 0 then "img" else "group")
 }
 
 # --- Rendering. -----------------------------------------------------------------------------
@@ -1926,6 +2042,57 @@ button.li:active { background: var(--press); }
 @keyframes hx-title-away { to { opacity: 0; scale: .92; translate: 0 -6px; } }
 @keyframes hx-title-in { from { opacity: 0; translate: 0 4px; } to { opacity: 1; translate: 0 0; } }
 
+/* Swipe rows. The row's content is opaque and slides over its actions. */
+.swipe-list { gap: 0; padding: 0; overflow: hidden; }
+.swipe-row { position: relative; overflow: hidden; }
+.swipe-row + .swipe-row { border-top: 1px solid var(--line); }
+.swipe-actions { position: absolute; inset: 0 0 0 auto; display: flex; }
+.swipe-act { appearance: none; border: 0; width: 76px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; font: var(--type-caption); font-weight: 600; cursor: pointer; color: #fff; background: var(--muted); }
+.swipe-act.danger { background: var(--danger); color: var(--surface); } .swipe-act.accent { background: var(--accent); color: var(--accent-fg); } .swipe-act.warning { background: var(--warning); color: var(--surface); }
+.swipe-fg { position: relative; background: var(--surface); touch-action: pan-y; }
+.swipe-row.open > .swipe-fg, .swipe-row:focus-within:not(:has(> .swipe-fg:focus-within)) > .swipe-fg { transform: translateX(calc(var(--n) * -76px)); }
+
+/* Board. */
+.board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(200px, 1fr); gap: var(--s-3); overflow-x: auto; align-items: start; }
+.board-col { background: var(--surface-2); border-radius: var(--r-in-card); padding: var(--s-2); display: flex; flex-direction: column; gap: var(--s-2); min-width: 0; }
+.board-head { display: flex; align-items: center; justify-content: space-between; padding: 2px 4px; }
+.board-title { margin: 0; font: var(--type-headline); letter-spacing: var(--track-headline); color: var(--fg); }
+.board-cards { display: flex; flex-direction: column; gap: var(--s-2); min-height: 56px; border-radius: max(4px, calc(var(--r-in-card) - var(--s-2))); }
+.board-card { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border-radius: max(4px, calc(var(--r-in-card) - var(--s-2))); cursor: grab; outline-offset: 2px;
+  transition: box-shadow var(--fx), scale var(--sp-fast); }
+.board-card.hx-dragged { box-shadow: var(--e-3); scale: 1.03; rotate: -1.5deg; }
+.board-card-title { font-weight: 550; color: var(--fg); }
+[data-drop] { transition: background-color var(--fx-fast), box-shadow var(--fx-fast), scale var(--sp-fast); }
+.hx-drop-over { box-shadow: 0 0 0 2px var(--accent) inset; background: var(--accent-soft) !important; scale: 1.04; }
+
+/* Carousel: the platform's scroll, snapping a slide at a time. */
+.carousel { display: flex; flex-direction: column; gap: var(--s-2); min-width: 0; }
+.carousel-track { display: grid; grid-auto-flow: column; grid-auto-columns: 100%; overflow-x: auto; scroll-snap-type: x mandatory; overscroll-behavior-x: contain; border-radius: var(--r-in-card); scrollbar-width: none; outline-offset: 3px; }
+.carousel-track::-webkit-scrollbar { display: none; }
+.carousel-slide { scroll-snap-align: start; scroll-snap-stop: always; min-width: 0; }
+.carousel-nav { display: flex; align-items: center; justify-content: center; gap: var(--s-2); }
+.carousel-dots { display: flex; gap: 6px; }
+.carousel-dot { appearance: none; border: 0; padding: 0; width: 8px; height: 8px; border-radius: 999px; background: var(--line-strong); cursor: pointer; transition: width var(--sp-fast), background-color var(--fx-fast); }
+.carousel-dot[aria-current="true"] { width: 22px; background: var(--accent); }
+
+/* Symbols. Old and new share one cell, so a swap crossfades in place. */
+.sym-box { display: inline-grid; place-items: center; vertical-align: middle; }
+.sym-box > .sym { grid-area: 1 / 1; display: inline-grid; place-items: center; }
+
+/* Interactive charts: a band per point shows a crosshair and the values on hover or focus. */
+.chart .band { outline: none; cursor: crosshair; }
+.chart .band-hit { fill: transparent; }
+.chart .band .chart-tip { opacity: 0; transition: opacity var(--fx-fast); pointer-events: none; }
+.chart .band:hover .chart-tip, .chart .band:focus .chart-tip, .chart .band:focus-visible .chart-tip { opacity: 1; }
+.chart .band:focus-visible .band-hit { fill: color-mix(in srgb, var(--focus) 10%, transparent); }
+.chart .crosshair { stroke: var(--line-strong); stroke-width: 1; stroke-dasharray: 3 3; }
+.chart .tip-dot { stroke: var(--surface); stroke-width: 2; }
+.chart .tip-box { fill: var(--surface); stroke: var(--line); }
+.chart .tip-text { font-size: 12px; font-family: var(--font); fill: var(--fg); stroke: none; font-variant-numeric: tabular-nums; }
+.chart .band:hover .bar, .chart .band:focus .bar { opacity: .82; }
+.chart .tip-text.head { font-weight: 650; }
+.chart .tip-text.bar-value { font-weight: 650; }
+
 @keyframes hx-fade { from { opacity: 0; } }
 @keyframes hx-rise { from { opacity: 0; transform: translateY(6px); } }
 @keyframes hx-pop { from { opacity: 0; transform: scale(.96); } }
@@ -2046,6 +2213,12 @@ CLIENT = """
     grow: { from: { transform: 'scaleY(0)' }, spring: 'spatial' },
     sheet: { from: { transform: 'translateY(105%)' }, spring: 'spatial', solid: true },
     push: { from: { transform: 'translateX(100%)' }, spring: 'spatial', solid: true },
+    // Symbol effects, after SF Symbols': springs with less damping than the system's, so they
+    // are felt — a bounce that lands, a wiggle that settles, a pulse.
+    bounce: { from: { transform: 'translateY(-35%) scale(1.08)' }, sp: { k: 520, z: 0.32 }, solid: true },
+    wiggle: { from: { transform: 'rotate(-16deg)' }, sp: { k: 900, z: 0.16 }, solid: true },
+    pulse: { from: { transform: 'scale(1.35)' }, sp: { k: 420, z: 0.42 }, solid: true },
+    symbol: { from: { transform: 'scale(.4)' }, sp: { k: 600, z: 0.55 } },
   };
   // Arrival: the movement on a spatial spring, the fade on an effects spring (a fade must not
   // overshoot), each on the compositor.
@@ -2058,7 +2231,7 @@ CLIENT = """
     for (const e of [...els, ...n.querySelectorAll('[data-enter]')]) {
       const p = PRESETS[e.dataset.enter];
       if (!p) continue;
-      if (p.from.transform) { const c = curve(springOf(p.spring), 0); e.animate([{ transform: p.from.transform }, { transform: 'none' }], { duration: c.ms, delay, easing: c.easing, fill: 'backwards', composite: 'add' }); }
+      if (p.from.transform) { const c = curve(p.sp || springOf(p.spring), 0); e.animate([{ transform: p.from.transform }, { transform: 'none' }], { duration: c.ms, delay, easing: c.easing, fill: 'backwards', composite: 'add' }); }
       if (!p.solid) { const f = curve(springOf('effects'), 0); e.animate([{ opacity: 0 }, { opacity: 1 }], { duration: f.ms, delay, easing: f.easing, fill: 'backwards' }); }
     }
   }
@@ -2297,6 +2470,7 @@ CLIENT = """
     sharedTo(sharing);
     reveal();
     place(root);
+    for (const t of root.querySelectorAll('[data-carousel]')) carouselAt(t);
     // A newly shown menu (or anything marked `autofocus`) takes focus to its first item.
     for (const n of arrived) {
       const f = n instanceof Element && (n.matches('[autofocus]') ? n : n.querySelector('[autofocus]'));
@@ -2598,6 +2772,13 @@ CLIENT = """
       const ax = g.axis[0] ? 0 : 1, lo = (r) => (ax ? r.top : r.left), hi = (r) => (ax ? r.bottom : r.right);
       g.gap = g.rects.length > 1 ? Math.max(0, lo(g.rects[1]) - hi(g.rects[0])) : 0;
       g.box.classList.add('hx-reordering');
+      // Containers of one `reorder_group` trade rows, and a row can be let go over a `drop`
+      // target: then it moves freely, in both directions, and goes where the pointer is.
+      g.group = g.box.dataset.reorderGroup || null;
+      g.free = !!g.group || !!root.querySelector('[data-drop]');
+      g.over = g.box;
+      g.drop = null;
+      g.seen = new Map([[g.box, { items: g.items, rects: g.rects }]]);
     }
   }
   function move(raw) {
@@ -2608,7 +2789,9 @@ CLIENT = """
       return;
     }
     let d = [raw[0] * g.axis[0], raw[1] * g.axis[1]];
-    if (g.kind === 'reorder') {
+    if (g.kind === 'reorder' && g.free) {
+      d = raw;
+    } else if (g.kind === 'reorder') {
       // Within the list it moves freely; past either end it resists.
       const ax = g.axis[0] ? 0 : 1, lo = (r) => (ax ? r.top : r.left), hi = (r) => (ax ? r.bottom : r.right);
       const a = g.rects[g.from], min = lo(g.rects[0]) - lo(a), max = hi(g.rects[g.rects.length - 1]) - hi(a), size = hi(a) - lo(a);
@@ -2626,7 +2809,43 @@ CLIENT = """
       host.style.setProperty('--drag-y', d[1] + 'px');
       host.style.setProperty('--drag-p', Math.max(0, Math.min(1, Math.abs(g.axis[0] ? d[0] / (g.r.width || 1) : d[1] / (g.r.height || 1)))).toFixed(4));
     }
-    if (g.kind === 'reorder') makeRoom();
+    if (g.kind === 'reorder') { if (g.free) route(raw); else makeRoom(); }
+  }
+  // A row moving freely: over a drop target it is offered to it; over a container of its group
+  // it would go where the pointer is; anywhere else it keeps the last place it was over.
+  function route(raw) {
+    const x = g.x0 + raw[0], y = g.y0 + raw[1];
+    const under = document.elementsFromPoint(x, y).find((n) => !g.el.contains(n) && root.contains(n));
+    const drop = under ? under.closest('[data-drop]') : null;
+    if (g.drop !== drop) { if (g.drop) g.drop.classList.remove('hx-drop-over'); if (drop) drop.classList.add('hx-drop-over'); g.drop = drop; }
+    let box = under ? under.closest('[data-reorder]') : null;
+    if (box && box !== g.box && (!g.group || box.dataset.reorderGroup !== g.group)) box = null;
+    if (drop) box = g.box;
+    if (box && box !== g.over) {
+      if (g.over !== g.box) for (const it of g.seen.get(g.over).items) it.style.translate = '';
+      g.over = box;
+    }
+    if (drop) { for (const [, v] of g.seen) for (const it of v.items) if (it !== g.el) it.style.translate = ''; g.to = g.from; return; }
+    if (g.over === g.box) { makeRoom(); return; }
+    // Into another container: the rows after it in its own close up, and the ones in the new
+    // one from where it would go make room.
+    let t = g.seen.get(g.over);
+    if (!t) {
+      const items = keyedKids(g.over);
+      t = { items, rects: items.map((it) => it.getBoundingClientRect()) };
+      for (const it of items) it.__held = true;
+      g.over.classList.add('hx-reordering');
+      g.seen.set(g.over, t);
+    }
+    const ax = g.axis[0] ? 0 : 1, size = (r) => (ax ? r.height : r.width);
+    const a = g.rects[g.from], step = size(a) + g.gap;
+    g.items.forEach((it, j) => { if (j !== g.from) it.style.translate = j > g.from ? (ax ? `0 ${-step}px` : `${-step}px 0`) : ''; });
+    const tax = rowwise(g.over) ? 0 : 1, tlo = (r) => (tax ? r.top : r.left), tsize = (r) => (tax ? r.height : r.width);
+    const p = tax ? y : x;
+    let to = t.rects.filter((r) => tlo(r) + tsize(r) / 2 < p).length;
+    g.to = to;
+    const tstep = (tax ? a.height : a.width) + (t.rects.length > 1 ? Math.max(0, tlo(t.rects[1]) - (tlo(t.rects[0]) + tsize(t.rects[0]))) : g.gap);
+    t.items.forEach((it, j) => { it.style.translate = j >= to ? (tax ? `0 ${tstep}px` : `${tstep}px 0`) : ''; });
   }
   // The slot the dragged row is over, and the rows between it and its old slot moved aside.
   function makeRoom() {
@@ -2658,13 +2877,21 @@ CLIENT = """
     el.classList.remove('hx-dragged');
 
     if (G.box) G.box.classList.remove('hx-reordering');
+    if (G.seen) for (const [b] of G.seen) b.classList.remove('hx-reordering');
+    if (G.drop) G.drop.classList.remove('hx-drop-over');
     if (G.kind === 'resize') {
       post({ msg: el.dataset.resize, value: cancel ? Math.round(G.s0) : G.size, done: true }, false);
       return;
     }
     const v = velocity(G.track, G.axis);
     let ev = null;
-    if (!cancel && G.kind === 'reorder' && G.to !== G.from) ev = { msg: G.box.dataset.reorder, value: { key: el.dataset.key, from: G.from, to: G.to } };
+    if (!cancel && G.kind === 'reorder') {
+      // Let go over a drop target: the target's message, its value, and which row it was given.
+      if (G.drop) ev = { msg: G.drop.dataset.drop, value: G.drop.dataset.value ?? null, dropped: el.dataset.key };
+      // Into another container of the group: the move names both lists (each container's `value`).
+      else if (G.over && G.over !== G.box) ev = { msg: G.box.dataset.reorder, value: { key: el.dataset.key, from: G.from, to: G.to, from_list: G.box.dataset.value ?? null, to_list: G.over.dataset.value ?? null } };
+      else if (G.to !== G.from) ev = { msg: G.box.dataset.reorder, value: { key: el.dataset.key, from: G.from, to: G.to } };
+    }
     if (!cancel && G.kind === 'drag') {
       // Where its momentum would carry it: the pointer's speed for a fifth of a second.
       const reach = G.d.map((d, i) => d + v[i] * 0.2);
@@ -2673,7 +2900,8 @@ CLIENT = """
       const commit = Number(el.dataset.dragCommit || 0);
       if (!commit || far >= commit) ev = { msg: el.dataset.drag, value: el.dataset.value ?? null, drag: { dx: Math.round(G.d[0]), dy: Math.round(G.d[1]), vx: Math.round(v[0]), vy: Math.round(v[1]) } };
     }
-    const s = { els: G.items, dragged: el, v, host: G.kind === 'drag' ? el.parentElement : null };
+    const held = G.seen ? [...new Set([...G.seen.values()].flatMap((t) => t.items))] : G.items;
+    const s = { els: held, dragged: el, v, host: G.kind === 'drag' ? el.parentElement : null };
     if (!ev) { settle(s, null); return; }
     s.seq = TAB + ':' + ++seqs;
     ev.seq = s.seq;
@@ -2683,6 +2911,7 @@ CLIENT = """
     post(ev, false);
   }
   const boxes = (s) => new Map(s.els.map((e) => [e, e.getBoundingClientRect()]));
+  const quiet0 = (x) => { x.style.transition = 'none'; x.style.translate = ''; void getComputedStyle(x).translate; x.style.transition = ''; };
   // Leaving, itself or with what holds it (a sheet whose layer is fading out).
   const leaving = (e) => { for (let p = e; p; p = p.parentElement) if (p.__gone) return true; return false; };
   // A gesture lands: each node it held springs from where it was seen to where the layout now
@@ -2698,6 +2927,16 @@ CLIENT = """
     for (const e of s.els) {
       e.__held = false;
       const v = e === s.dragged ? s.v : [0, 0];
+      // A row that went into another container is a new node there: that one springs from
+      // where this one was let go, and this one goes at once.
+      const twin = e === s.dragged && e.dataset.key ? byIdent(e.dataset.key) : null;
+      if (twin && twin !== e && (leaving(e) || !e.isConnected)) {
+        if (e.isConnected) e.remove();
+        quiet0(twin);
+        const a0 = was.get(e), b0 = twin.getBoundingClientRect();
+        if (a0 && !still.matches) springFrom(twin, [a0.left - b0.left, a0.top - b0.top], v);
+        continue;
+      }
       if (leaving(e)) { if (!still.matches) fling(e, v); continue; }
       const n = e.isConnected ? e : e.dataset.key ? byIdent(e.dataset.key) : null;
       // The offset goes with no CSS transition of its own: the spring below is the movement.
@@ -2740,6 +2979,36 @@ CLIENT = """
     return true;
   }
 
+  // Carousels: buttons that move the track by a slide, dots that go to one, and the dot of the
+  // slide in view marked current — the scrolling itself is the platform's, snapping included.
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest && e.target.closest('[data-scroll-target]');
+    if (!b) return;
+    const t = document.getElementById(b.dataset.scrollTarget);
+    if (!t) return;
+    const smooth = still.matches ? 'auto' : 'smooth';
+    if (b.dataset.scrollStep) t.scrollBy({ left: Number(b.dataset.scrollStep) * t.clientWidth, behavior: smooth });
+    else if (b.dataset.scrollIndex) { const s = t.children[Number(b.dataset.scrollIndex)]; if (s) t.scrollTo({ left: s.offsetLeft - t.offsetLeft, behavior: smooth }); }
+  });
+  const showing = new WeakMap();
+  function carouselAt(t) {
+    const kids = Array.from(t.children);
+    if (!kids.length) return;
+    const x = t.scrollLeft + t.offsetLeft;
+    let i = 0;
+    kids.forEach((k, j) => { if (Math.abs(k.offsetLeft - x) < Math.abs(kids[i].offsetLeft - x)) i = j; });
+    for (const d of document.querySelectorAll('[data-scroll-target="' + CSS.escape(t.id) + '"][data-scroll-index]')) {
+      if (Number(d.dataset.scrollIndex) === i) d.setAttribute('aria-current', 'true'); else d.removeAttribute('aria-current');
+    }
+    for (const b of document.querySelectorAll('[data-scroll-target="' + CSS.escape(t.id) + '"][data-scroll-step]')) {
+      b.disabled = Number(b.dataset.scrollStep) < 0 ? t.scrollLeft <= 1 : t.scrollLeft + t.clientWidth >= t.scrollWidth - 1;
+    }
+    // Only a change is news: the first look at a carousel sends nothing.
+    if (showing.has(t) && showing.get(t) !== i && t.dataset.carousel) post({ msg: t.dataset.carousel, value: i }, true);
+    showing.set(t, i);
+  }
+  document.addEventListener('scroll', (e) => { const t = e.target; if (t instanceof Element && t.hasAttribute('data-carousel')) carouselAt(t); }, { capture: true, passive: true });
+
   // The keyboard's way to do what a drag does.
   function gestureKey(e) {
     const t = e.target;
@@ -2760,6 +3029,18 @@ CLIENT = """
       const box = p.parentElement;
       if (!box || !box.dataset.reorder || !p.dataset.key) continue;
       const items = keyedKids(box), from = items.indexOf(p);
+      // Across: a vertical container of a group sends its row to the next one with ← →, at the
+      // same height (or the end).
+      const group = box.dataset.reorderGroup;
+      const across = group && !rowwise(box) ? { ArrowLeft: -1, ArrowRight: 1 }[e.key] : null;
+      if (across) {
+        const all = Array.from(root.querySelectorAll('[data-reorder-group="' + CSS.escape(group) + '"]'));
+        const next = all[all.indexOf(box) + across];
+        if (!next) return false;
+        e.preventDefault();
+        post({ msg: box.dataset.reorder, value: { key: p.dataset.key, from, to: Math.min(from, keyedKids(next).length), from_list: box.dataset.value ?? null, to_list: next.dataset.value ?? null } }, false);
+        return true;
+      }
       const dir = rowwise(box) ? { ArrowLeft: -1, ArrowRight: 1 }[e.key] : { ArrowUp: -1, ArrowDown: 1 }[e.key];
       const to = from + (dir || 0);
       if (!dir || to < 0 || to >= items.length) return false;
@@ -2829,6 +3110,17 @@ CLIENT = """
     // comes before the app's shortcuts.
     if (gestureKey(e)) return;
     if (!e.isComposing && shortcut(e)) return;
+    // A chart's bands: ← → Home End move between them.
+    if (t.classList && t.classList.contains('band') && /^(ArrowLeft|ArrowRight|Home|End)$/.test(e.key)) {
+      const bands = Array.from(t.parentNode.querySelectorAll(':scope > .band'));
+      const i = bands.indexOf(t);
+      const j = e.key === 'Home' ? 0 : e.key === 'End' ? bands.length - 1 : Math.max(0, Math.min(bands.length - 1, i + (e.key === 'ArrowRight' ? 1 : -1)));
+      e.preventDefault();
+      bands[i].setAttribute('tabindex', '-1');
+      bands[j].setAttribute('tabindex', '0');
+      bands[j].focus();
+      return;
+    }
     const tree = t.closest && t.getAttribute && t.getAttribute('role') === 'treeitem' && t.closest('[role="tree"]');
     if (tree && !e.ctrlKey && !e.metaKey && !e.altKey && treeKey(e, tree, t)) return;
     if (e.key === 'Escape') {

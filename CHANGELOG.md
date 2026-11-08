@@ -4,6 +4,17 @@
 
 ### Added
 
+- **Rich interactions (ADR 0059):**
+  - **Swipe actions on rows** (`ui.swipe_row`, `ui.swiped`). Swipe a row toward the start to
+    reveal its actions, as in Mail. Tap to close; keyboard focus on an action reveals it too.
+  - **Dragging between containers and onto targets.** Containers that share a
+    `reorder_group` trade rows (`ui.board`, `ui.moved_between`), and anything with `drop`
+    takes a row let go over it. Alt with ← → moves a card to the next column.
+  - **`ui.carousel`.** It scrolls and snaps natively, with momentum, and has buttons and dots
+    that track the slide in view.
+  - **`ui.symbol`.** Icons bounce, wiggle, pulse or swap when their trigger changes.
+  - **Readable charts.** Hovering or focusing a line or bar chart shows a crosshair and the
+    values, in CSS, with ← → between points.
 - **Motion v3 (ADR 0058):**
   - **Container transforms.** A tile opening into its card is revealed by a clip that grows
     from the tile's box, so nothing stretches. The tile fades out as a ghost of itself moving

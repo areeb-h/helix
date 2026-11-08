@@ -4818,7 +4818,7 @@ fn the_component_gallery_replays_identically_on_every_engine() {
     }
     assert!(seen.windows(2).all(|w| w[0] == w[1]), "engines disagree on the replayed UI");
     let s: Vec<&str> = seen[0].lines().collect();
-    assert_eq!(s.len(), 27, "one screen per event");
+    assert_eq!(s.len(), 31, "one screen per event");
     let has = |i: usize, what: &str| assert!(s[i].contains(what), "screen {i} lacks {what}");
     // Gestures (ADR 0057): what the page sends when something is let go, and what the app makes
     // of it. A size is kept; a move that fits the list moves it, and a stale one is ignored.
@@ -4837,6 +4837,13 @@ fn the_component_gallery_replays_identically_on_every_engine() {
     has(23, "aria-label=\"Back to Inbox\"");
     has(24, "class=\"album-open\" role=\"group\" data-key=\"open-2\" data-share=\"album-2\"");
     assert!(!s[25].contains("stack-beneath") && !s[26].contains("album-open"), "back, and closed");
+    // Rich interactions: a row swiped open, a card moved to another column, one dropped on the
+    // bin, and a symbol replayed by its trigger.
+    has(27, "class=\"swipe-row open\" role=\"listitem\" data-key=\"swipe-n2\"");
+    let col = |i: usize, id: &str| s[i].split(&format!("data-value=\"{id}\"")).nth(1).unwrap_or("").split("</section>").next().unwrap_or("").matches("class=\"board-card ").count();
+    assert_eq!((col(28, "todo"), col(28, "doing")), (1, 2), "a card moved between columns");
+    assert_eq!(col(29, "done"), 0, "a card dropped on the bin is gone");
+    has(30, "data-key=\"sym-bell-1\" data-enter=\"bounce\"");
     // An empty submit: every error shows, tied to its field.
     has(0, "aria-describedby=\"name-error\" aria-invalid=\"true\"");
     has(0, "<p class=\"error\" id=\"name-error\" data-key=\"error\" data-enter=\"rise\" data-exit=\"fade\">Enter your name.</p>");
