@@ -456,6 +456,7 @@ fn is_unary_minus(line: &[&Token], at: usize) -> bool {
             | BigInt(..)
             | Str(_)
             | InterpStr(_)
+            | Markup(_)
             | True
             | False
             | Missing

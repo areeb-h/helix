@@ -1,0 +1,90 @@
+# Markup (ADR 0061): `<li class="row">{x}</li>` is the record `ui.el` builds, decided by the
+# parser, so every engine sees only records, arrays and calls. Elements and their props, text
+# and whitespace, holes of every kind, components, fragments, and the `<` that still compares.
+import std.ui
+
+# The same record `ui.el` builds, prop for prop.
+a = <button class="btn primary" click="save" value={7} aria-label="Save the draft">Save</button>
+b = ui.el("button", {class: "btn primary", click: "save", value: 7, aria: {label: "Save the draft"}}, [ui.text("Save")])
+print(a == b)
+print(view_html(a))
+
+# HTML attributes: bare ones are true, `data-*` and other dashed names keep their spelling, and
+# a form control's `value` is HTML's.
+print(view_html(<input type="checkbox" checked disabled={false} data-row-id="r1" value="on" />))
+print(view_html(<a href="https://example.org" target="_blank">out</a>))
+print(view_html(<a href="javascript:alert(1)">still inert</a>))
+
+# Gesture and motion props by their own names; a `-` is a `_`.
+print(view_html(<div drag="moved" drag-axis="x" enter="fade" layout key="k1" />))
+
+# Strings interpolate; `class` takes a list (missing and false drop out); `style` takes a
+# string or a record.
+n = 3
+on = false
+print(view_html(<p class={["note", if on then "on" else missing, "", "muted"]} title="{n} items" style="--fill: 40%">x</p>))
+print(view_html(<p style={{border_radius: "4px"}}>y</p>))
+
+# Text: indentation and line breaks fold as in JSX, spaces next to tags stay, and entities
+# decode (and are escaped again on the way out).
+print(view_html(<p>
+    Hello,
+    <b>you</b> and
+    me &amp; &lt;them&gt; &#x2192; &nope
+  </p>))
+
+# Holes: a string, a number, a node, a list of nodes, missing and Bools (nothing), nested
+# markup inside a hole, and a comment-only hole.
+items = ["one", "two"]
+busy = false
+print(view_html(<ul>
+  {# the rows}
+  {items.map((s) => <li>{s}</li>)}
+  {if busy then <li>loading</li> else missing}
+  {busy}
+  <li>{n * 2} and {"text"}</li>
+</ul>))
+
+# Fragments are arrays, and flatten into their parent.
+pair = <><dt>k</dt><dd>v</dd></>
+print(pair.count())
+print(view_html(<dl>{pair}</dl>))
+
+# Spreads: a record of props, then the explicit ones (a later one wins).
+base = {class: "card", role: "group"}
+print(view_html(<section {...base} class="card wide" id="s1">z</section>))
+
+# Components: a capitalised tag calls the function (`TodoItem` is `todo_item`), attributes
+# are its named arguments, and children are `children`.
+fn todo_item(label, done = false) = <li class={["todo", if done then "done" else missing]}>{label}</li>
+fn panel(title, children) = <section class="panel"><h3>{title}</h3>{children}</section>
+print(view_html(<Panel title="Today">
+  <TodoItem label="Write the ADR" done />
+  <TodoItem label="Ship it" />
+</Panel>))
+
+# A module's components: `<ui.Badge>` is `ui.badge(…)`.
+print(view_html(<ui.Badge s="new" tone="accent" />))
+print(view_html(<ui.Column gap={2}><p>a</p><p>b</p></ui.Column>))
+
+# Markup goes wherever an expression does: after `=>`, `then`/`else`, in a match arm, in a list.
+fn cell(v) = match v {
+  0 => <td class="zero">-</td>,
+  _ => <td>{v}</td>
+}
+print(view_html(<tr>{[0, 5].map(cell)}</tr>))
+
+# `<` after a value still compares.
+x = 2
+limit = 5
+print(x < limit)
+print([1, 9].filter((v) => v < limit))
+print(if x < limit then "under" else "over")
+
+# A diff between two markup trees is the runtime's ordinary diff.
+v1 = <ul>{[1, 2].map((i) => <li key={i}>{i}</li>)}</ul>
+v2 = <ul>{[2, 1].map((i) => <li key={i}>{i}</li>)}</ul>
+print(view_diff(v1, v2))
+
+# The utilities a markup view uses are found as for any view.
+print(view_classes(<div class="p-4 md:grid-cols-3"><span class="text-muted" /></div>))

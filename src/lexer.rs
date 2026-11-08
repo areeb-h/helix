@@ -20,7 +20,13 @@ use crate::token::{StrSeg, Tok, Token};
 /// A thin filter over [`lex_trivia`] rather than a second scan — ONE scanner, so `helix fmt`
 /// can never disagree with the parser about what a program's tokens are.
 pub fn lex(src: &str) -> Result<Vec<Token>, HelixError> {
-    let raw = lex_trivia(src)?;
+    lex_at(src, 1, 1)
+}
+
+/// [`lex`] for source that starts at `line`, `col` of a file — a `{…}` hole in markup, so
+/// its tokens (and every error and AST position from them) are where the person wrote them.
+pub fn lex_at(src: &str, line: usize, col: usize) -> Result<Vec<Token>, HelixError> {
+    let raw = lex_trivia_from(src, line, col)?;
     Ok(cook_newlines(
         raw.into_iter()
             .filter_map(|t| match &t.tok {
@@ -46,6 +52,10 @@ pub fn lex(src: &str) -> Result<Vec<Token>, HelixError> {
 /// original spelling. The formatter copies `src[tok.start..tok.end]` for each token and
 /// decides only what goes BETWEEN them, which is what makes it unable to change a program.
 pub fn lex_trivia(src: &str) -> Result<Vec<Token>, HelixError> {
+    lex_trivia_from(src, 1, 1)
+}
+
+fn lex_trivia_from(src: &str, line0: usize, col0: usize) -> Result<Vec<Token>, HelixError> {
     let chars: Vec<char> = src.chars().collect();
     let n = chars.len();
     // Char index -> byte offset, with a sentinel at `n` for end-of-input. Built once: the
@@ -62,8 +72,8 @@ pub fn lex_trivia(src: &str) -> Result<Vec<Token>, HelixError> {
         v
     };
     let mut i = 0;
-    let mut line = 1;
-    let mut col = 1;
+    let mut line = line0;
+    let mut col = col0;
     let mut raw: Vec<Token> = Vec::new();
 
     macro_rules! push {
@@ -344,6 +354,16 @@ pub fn lex_trivia(src: &str) -> Result<Vec<Token>, HelixError> {
                         .hint("Helix uses the word `not` for negation, e.g. `not done`."));
                 }
             }
+            // Markup (ADR 0061): a `<` followed by a letter or `>` opens an element, unless a
+            // value has just ended — then it compares, so `a <b` and `xs[0]<limit` mean what
+            // they always have. A line that starts with `<p>` is markup.
+            '<' if crate::markup::opens(&chars, i) && !value_ended(&raw) => {
+                let (node, end, end_line, end_col) = crate::markup::scan(&chars, i, line, start_col)?;
+                push!(Tok::Markup(std::rc::Rc::new(node)), start_col);
+                i = end;
+                line = end_line;
+                col = end_col;
+            }
             '<' => {
                 if i + 1 < n && chars[i + 1] == '<' {
                     push!(Tok::Shl, start_col);
@@ -509,6 +529,28 @@ pub fn lex_trivia(src: &str) -> Result<Vec<Token>, HelixError> {
     Ok(raw)
 }
 
+/// Whether the last token (comments aside) ends a value, so a `<` after it is a comparison.
+fn value_ended(raw: &[Token]) -> bool {
+    matches!(
+        raw.iter().rev().find(|t| !matches!(t.tok, Tok::Comment(_))).map(|t| &t.tok),
+        Some(
+            Tok::Ident(_)
+                | Tok::Int(_)
+                | Tok::Float(_)
+                | Tok::BigInt(..)
+                | Tok::Str(_)
+                | Tok::InterpStr(_)
+                | Tok::Markup(_)
+                | Tok::True
+                | Tok::False
+                | Tok::Missing
+                | Tok::RParen
+                | Tok::RBracket
+                | Tok::RBrace
+        )
+    )
+}
+
 fn single(
     tok: Tok,
     raw: &mut Vec<Token>,
@@ -605,7 +647,7 @@ fn lex_number(chars: &[char], start: usize) -> (Tok, usize) {
 /// regex backslashes, Windows paths, and prose all go in verbatim. May span lines and
 /// contain single or double quotes (anything but three in a row). Returns
 /// `(content, chars_consumed, newlines_inside, end_col)` to match [`lex_string`].
-fn lex_raw_string(
+pub(crate) fn lex_raw_string(
     chars: &[char],
     start: usize,
     line: usize,
@@ -652,7 +694,7 @@ fn lex_raw_string(
 /// raw is the right default for a triple-quoted block holding CSS, JSON, regexes or
 /// Windows paths, so `"""` keeps it, and `'''` is the interpolating multi-line form. Two
 /// delimiters, two jobs, and neither had to change meaning.
-fn lex_string(
+pub(crate) fn lex_string(
     chars: &[char],
     start: usize,
     line: usize,

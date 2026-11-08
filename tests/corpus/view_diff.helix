@@ -31,6 +31,8 @@ print(view_diff(el("ul", {}, [t("1"), t("2"), t("3")]), el("ul", {}, [t("one")])
 # A changed tag is a replace.
 print(view_diff(el("ul", {}, [el("li", {}, [])]), el("ul", {}, [el("dd", {}, [])])))
 
-# A node that is not an element or text is refused, by name.
-r = try view_html(el("p", {}, [42]))
+# A number among the children is text (ADR 0061); a value that is neither a node nor text is
+# refused, by name.
+print(view_html(el("p", {}, [42])))
+r = try view_html(el("p", {}, [(x) => x]))
 print(r.ok, r.error)

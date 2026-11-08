@@ -8,5 +8,6 @@ exit: 0
 [{at: 1, node: "2", op: "insert", path: []}, {at: 2, node: "3", op: "insert", path: []}]
 [{op: "text", path: [0], text: "one"}, {at: 2, op: "remove", path: []}, {at: 1, op: "remove", path: []}]
 [{node: ["dd", [], []], op: "replace", path: [0]}]
-false a view node must be an element record {tag, props, children} or text; found an Int
+<p>42</p>
+false a view node must be an element record {tag, props, children} or text; found a Function
 --- stderr ---
