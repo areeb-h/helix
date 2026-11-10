@@ -575,20 +575,14 @@ fn the_four_order_domains_disagree_today() {
 
     // (b) ANSWERED — b1 taken: `min`/`max` widened to `sort`'s domain (numbers, strings,
     // DNA), so the three spellings of "which is smallest" finally agree about WHAT can be
-    // asked. Tuples remain outside every sort/reduction spelling — only `<` orders them —
-    // which the ADR's own "tuple claim, verified" section already established.
+    // asked. TUPLES joined them in the 2026-11-10 addendum (several sort keys): every
+    // spelling now orders them as `<` does, part by part.
     assert_eq!(render("[\"b\", \"a\"].min()", env, "q_b1"), "a");
     assert_eq!(render("[\"b\", \"a\"].min_by(it)", env, "q_b2"), "a");
     assert_eq!(render("[\"b\", \"a\"].sort()", env, "q_b3"), "[\"a\", \"b\"]");
     assert_eq!(render("(1, 2) < (2, 1)", env, "q_b4"), "true");
-    assert_eq!(
-        render("[(2, 1), (1, 2)].min()", env, "q_b5"),
-        "error: `min` needs an array of all numbers, all strings, all DNA, or all Bytes"
-    );
-    assert_eq!(
-        render("[(2, 1), (1, 2)].sort()", env, "q_b6"),
-        "error: `sort` needs an array of all numbers, all strings, all DNA, or all Bytes"
-    );
+    assert_eq!(render("[(2, 1), (1, 2)].min()", env, "q_b5"), "(1, 2)");
+    assert_eq!(render("[(2, 1), (1, 2)].sort()", env, "q_b6"), "[(1, 2), (2, 1)]");
     assert_eq!(render("[(2, 1), (1, 2)].min_by(it)", env, "q_b7"), "(1, 2)");
 
     // (c) ANSWERED — c1 taken: the `_by` family and the method `argmin`/`argmax` adopted

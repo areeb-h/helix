@@ -711,7 +711,10 @@ pub fn ast_to_colexpr(
         // is not a query form yet. Say which one, and the route that works today: map the
         // rows and rebuild the frame.
         Ast::Method { recv, name, line, col, .. } if matches!(**recv, Ast::Column { .. }) => {
-            let Ast::Column { name: c, .. } = &**recv else { unreachable!() };
+            let c = match &**recv {
+                Ast::Column { name, .. } => name.as_str(),
+                _ => "column",
+            };
             Err(HelixError::new(
                 format!("`@{c}.{name}(…)` isn't supported inside a DataFrame query yet"),
                 *line,

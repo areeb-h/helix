@@ -1896,16 +1896,16 @@ fn fits_shape(shape: &mut Option<KeyShape>, v: &Value) -> bool {
             for (i, p) in parts.iter().enumerate() {
                 if i == cols.len() {
                     let mut fresh = None;
-                    if !fits_shape(&mut fresh, p) {
-                        return false;
+                    match (fits_shape(&mut fresh, p), fresh) {
+                        (true, Some(f)) => cols.push(f),
+                        _ => return false,
                     }
-                    cols.push(fresh.expect("set by fits_shape"));
                 } else {
                     let mut have = Some(std::mem::replace(&mut cols[i], KeyShape::Num));
                     let ok = fits_shape(&mut have, p);
-                    cols[i] = have.expect("kept by fits_shape");
-                    if !ok {
-                        return false;
+                    match (ok, have) {
+                        (true, Some(h)) => cols[i] = h,
+                        _ => return false,
                     }
                 }
             }
