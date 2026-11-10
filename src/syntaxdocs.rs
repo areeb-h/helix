@@ -338,7 +338,8 @@ pub static SYNTAX: &[SyntaxDoc] = &[
                 replays its `enter`. GESTURES: `drag=\"msg\"` (`drag_axis`, `drag_commit`), `reorder=\"msg\"` on a \
                 list of keyed children (`reorder_group` to trade between lists), `drop=\"msg\"`, `resize=\"msg\"`, \
                 `handle`. TIMERS: `subscriptions: (m) => [ui.every(1000, \"tick\")]` sends `{msg: \"tick\", value: \
-                <seconds since 1970>}` every second while the model asks for it; `ui.after(800, \"flip-back\")` \
+                <seconds since 1970>}` every second while the model asks for it (the first \
+                one period after it first asks; clicks and keys carry no time, so keep the last tick's); `ui.after(800, \"flip-back\")` \
                 is sent ONCE, 800 ms after the model first lists it (stop listing it and ask again to rerun \
                 it). A `value` reaches `update` as the type \
                 the view gave it — `value={7}` is 7, `value={true}` is true, text is text — in a browser as \

@@ -3054,6 +3054,38 @@ fn lint_source(shown: &str, src: &str) -> Vec<String> {
     {
         for s in &stmts {
             crate::visit::walk_stmt(s, &mut |e| {
+                // HTML that nests what it cannot: a browser repairs it in ways the view did not
+                // say, and a screen reader reads a button full of list items as one blob. Only
+                // literal tags are checked (markup's), and only the rules that always hold.
+                if let Expr::Record(fields) = e
+                    && let Some((_, Expr::Str(tag))) = fields.iter().find(|(k, _)| k == "tag")
+                    && let Some((_, Expr::Array(kids))) = fields.iter().find(|(k, _)| k == "children")
+                {
+                    let kid_tag = |k: &Expr| -> Option<String> {
+                        match k {
+                            Expr::Record(f) => f.iter().find(|(n, _)| n == "tag").and_then(|(_, v)| match v {
+                                Expr::Str(t) if t != "#text" => Some(t.clone()),
+                                _ => None,
+                            }),
+                            _ => None,
+                        }
+                    };
+                    const INTERACTIVE: [&str; 6] = ["button", "a", "input", "select", "textarea", "details"];
+                    const BLOCK: [&str; 12] = ["div", "p", "ul", "ol", "li", "section", "article", "header", "footer", "h1", "h2", "table"];
+                    for k in kids {
+                        let Some(t) = kid_tag(k) else { continue };
+                        let bad = match tag.as_str() {
+                            "button" | "a" if INTERACTIVE.contains(&t.as_str()) => Some(format!("a `<{t}>` inside a `<{tag}>`: interactive content cannot nest — make them siblings")),
+                            "button" if BLOCK.contains(&t.as_str()) => Some(format!("a `<{t}>` inside a `<button>`: a button holds phrasing content only — use `<span>`s (with `block`/`flex` classes for layout)")),
+                            "ul" | "ol" if t != "li" && t != "template" => Some(format!("a `<{t}>` directly inside a `<{tag}>`: a list's children are `<li>`s")),
+                            "p" if BLOCK.contains(&t.as_str()) => Some(format!("a `<{t}>` inside a `<p>`: a paragraph cannot hold blocks — the browser closes the `<p>` early")),
+                            _ => None,
+                        };
+                        if let Some(b) = bad {
+                            notes.push((0, format!("{shown}: {b}.")));
+                        }
+                    }
+                }
                 // A class that looks like a utility but is not one renders unstyled, silently
                 // (an unknown class produces nothing, as in Tailwind): `bg-blu-500`, or a
                 // utility Helix does not have.

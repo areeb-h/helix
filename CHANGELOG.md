@@ -55,6 +55,14 @@
     - an app's own `<main>` root no longer nests inside the runtime's.
 
     `AGENTS.md` has a new "Building an app" section with a complete small app.
+  - **More checks and help:**
+    - `helix check --lint` flags HTML that cannot nest: a list or a block inside a
+      `<button>`, a non-`<li>` child of a list, a block inside a `<p>`, interactive content
+      inside a link or button.
+    - A `fn main` tool's `--help` puts each `## --name: …` doc line beside that option, and
+      shows a `missing` default as "(optional)".
+    - ADR 0062 records the study and the rule it set: make the guess work, else refuse it with
+      the fix, else note it.
 
 - **Orbit (`examples/apps/orbit.helix`)**, an app written only in markup and utility classes:
   - a focus timer with a live ring;
