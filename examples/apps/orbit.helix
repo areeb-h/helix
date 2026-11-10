@@ -355,7 +355,7 @@ fn habits(m) = <Panel title="Habits" aside={<span class="text-xs text-muted">Thi
         <div class="min-w-0 flex-1">
           <p class={["truncate text-sm font-medium", if done then "text-fg" else "text-fg/80"]}>{h.name}</p>
           <div class="mt-1.5 flex gap-1" aria-hidden>
-            {range(0, 7).map((i) => <span key="d{i}" class={["h-1.5 flex-1 rounded-full transition", if h.week[i] then "bg-accent" else if i > m.today then "bg-surface-3/50" else "bg-surface-3", if i == m.today then "scale-y-150" else missing]} />)}
+            {range(0, 7).map((i) => <span key="d{i}" class={["h-1.5 flex-1 rounded-full transition", if h.week[i] then "bg-accent" else if i > m.today then "bg-surface-3/50" else "bg-surface-3"]} class:scale-y-150={i == m.today} />)}
           </div>
         </div>
         <span class="w-10 text-right text-xs font-semibold tabular-nums text-muted" title="Streak">{streak(h, m.today)}d</span>
@@ -411,7 +411,7 @@ fn card(it, col) = <div key={it.key} role="listitem" tabindex="0" layout click="
       {range(0, it.est).map((i) => <span key="e{i}" class="size-1.5 rounded-full bg-accent/50" />)}
     </span>
   </div>
-  <p class={["mt-2 text-sm font-medium leading-snug break-words", if col == "done" then "text-muted line-through" else missing]}>{it.title}</p>
+  <p class="mt-2 text-sm font-medium leading-snug break-words" class:text-muted={col == "done"} class:line-through={col == "done"}>{it.title}</p>
 </div>
 
 fn column(c) = <section key="col-{c.id}" aria-label={c.title} class="flex min-w-0 flex-col rounded-card bg-surface-2/60 p-3 ring-1 ring-line">
@@ -421,7 +421,7 @@ fn column(c) = <section key="col-{c.id}" aria-label={c.title} class="flex min-w-
   </header>
   <div role="list" aria-label={c.title} reorder="move" reorder-group="board" value={c.id} class="flex min-h-24 flex-1 flex-col gap-2">
     {c.items.map((it) => card(it, c.id))}
-    {if c.items.count() == 0 then <p class="grid flex-1 place-items-center rounded-control border-2 border-dashed border-line py-6 text-xs text-muted">Drop a card here</p> else missing}
+    {if c.items.count() == 0 then <p class="grid flex-1 place-items-center rounded-control border-2 border-dashed border-line py-6 text-xs text-muted">Drop a card here</p>}
   </div>
 </section>
 

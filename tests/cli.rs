@@ -5169,6 +5169,36 @@ fn open_window_shows_only_the_apps_own_page() {
 /// a frame with no new classes carries none. A class from data that tries to break out of its
 /// rule produces nothing.
 #[test]
+fn an_app_whose_port_is_taken_starts_on_the_next_free_one() {
+    use std::io::{BufRead, BufReader};
+    // Another server already holds the port (a dev server on 8080, say).
+    let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = held.local_addr().unwrap().port();
+    struct Running(std::process::Child);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut run = Running(
+        Command::new(env!("CARGO_BIN_EXE_helix"))
+            .args(["run", "examples/apps/stopwatch.helix", "--port", &port.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut err = BufReader::new(run.0.stderr.take().unwrap());
+    let (mut notice, mut link) = (String::new(), String::new());
+    err.read_line(&mut notice).unwrap();
+    err.read_line(&mut link).unwrap();
+    assert_eq!(notice.trim(), format!("port {port} is in use, so Stopwatch is on port {}", port + 1), "{notice}{link}");
+    assert!(link.contains(&format!("http://127.0.0.1:{}/?token=", port + 1)), "{link}");
+    drop(held);
+}
+
+#[test]
 fn an_apps_utility_classes_are_generated_as_its_view_uses_them() {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpStream;

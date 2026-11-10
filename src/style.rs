@@ -246,7 +246,7 @@ fn one(p: &str, v: impl Into<String>) -> Option<Rule> {
 }
 
 const SHADOW_STACK: &str = "var(--tw-inset-shadow, 0 0 #0000), var(--tw-inset-ring-shadow, 0 0 #0000), var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow, 0 0 #0000)";
-const FILTER_STACK: &str = "var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-saturate,) var(--tw-drop-shadow,)";
+const FILTER_STACK: &str = "var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,)";
 const BACKDROP_STACK: &str = "var(--tw-backdrop-blur,) var(--tw-backdrop-brightness,) var(--tw-backdrop-saturate,)";
 const TRANSITION_DEFAULT: &str = "color, background-color, border-color, outline-color, text-decoration-color, fill, stroke, --tw-gradient-from, --tw-gradient-via, --tw-gradient-to, opacity, box-shadow, transform, translate, scale, rotate, filter, -webkit-backdrop-filter, backdrop-filter";
 
@@ -410,6 +410,35 @@ fn utility(u: &str, negative: bool) -> Option<Rule> {
         "overscroll-contain" | "overscroll-none" | "overscroll-auto" => one("overscroll-behavior", &u[11..]),
         "divide-y" => Some(Rule { suffix: " > :not(:last-child)", ..rule(&[("border-bottom-width", "1px".into()), ("border-style", "solid".into()), ("border-color", "var(--tw-divide, var(--line))".into())])? }),
         "divide-x" => Some(Rule { suffix: " > :not(:last-child)", ..rule(&[("border-right-width", "1px".into()), ("border-style", "solid".into()), ("border-color", "var(--tw-divide, var(--line))".into())])? }),
+        "table-caption" | "table-cell" | "table-column" | "table-column-group" | "table-footer-group" | "table-header-group" | "table-row-group" | "table-row" => one("display", u),
+        "grid-flow-row-dense" => one("grid-auto-flow", "row dense"),
+        "grid-flow-col-dense" => one("grid-auto-flow", "column dense"),
+        "overline" => one("text-decoration-line", "overline"),
+        "normal-nums" => one("font-variant-numeric", "normal"),
+        "ordinal" | "lining-nums" | "oldstyle-nums" | "diagonal-fractions" | "stacked-fractions" => one("font-variant-numeric", u),
+        "bg-clip-border" | "bg-clip-padding" | "bg-clip-content" => one("background-clip", format!("{}-box", &u[8..])),
+        "bg-clip-text" => rule(&[("-webkit-background-clip", "text".into()), ("background-clip", "text".into())]),
+        "shadow-inner" => rule(&[("--tw-inset-shadow", "inset 0 2px 4px rgb(0 0 0 / 0.05)".into()), ("box-shadow", SHADOW_STACK.into())]),
+        "blur" => filter_of("--tw-blur", "blur(8px)"),
+        "invert" => filter_of("--tw-invert", "invert(100%)"),
+        "sepia" => filter_of("--tw-sepia", "sepia(100%)"),
+        "backdrop-blur" => backdrop_of("--tw-backdrop-blur", "blur(8px)"),
+        "transform-gpu" => one("transform", "translateZ(0)"),
+        "transform-cpu" | "transform-none" => one("transform", "none"),
+        "will-change-auto" | "will-change-scroll" | "will-change-contents" | "will-change-transform" => {
+            one("will-change", match &u[12..] { "scroll" => "scroll-position", other => other })
+        }
+        "break-inside-auto" | "break-inside-avoid" | "break-inside-avoid-page" | "break-inside-avoid-column" => one("break-inside", &u[13..]),
+        "break-before-auto" | "break-before-page" | "break-before-column" | "break-after-auto" | "break-after-page" | "break-after-column" => {
+            let (prop, val) = u.split_at(if u.starts_with("break-before") { 12 } else { 11 });
+            one(prop, &val[1..])
+        }
+        "isolation-auto" => one("isolation", "auto"),
+        "collapse" => one("visibility", "collapse"),
+        // `before:` and `after:` draw only when given content, and the only content a class may
+        // give is none at all: a decorative box, never text from a class name.
+        "content-['']" => rule(&[("--tw-content", "\"\"".into()), ("content", "var(--tw-content)".into())]),
+        "content-none" => rule(&[("--tw-content", "none".into()), ("content", "none".into())]),
         "grayscale" => filter_of("--tw-grayscale", "grayscale(100%)"),
         "grayscale-0" => filter_of("--tw-grayscale", "grayscale(0%)"),
         _ => return valued(u, negative, &neg),
@@ -471,6 +500,16 @@ fn valued(u: &str, negative: bool, neg: &dyn Fn(String) -> String) -> Option<Rul
             return Some(Rule { decls, suffix: "", keyframes: None, rank });
         }
     }
+    if let Some(rest) = u.strip_prefix("scroll-").filter(|r| r.starts_with('m') || r.starts_with('p')) {
+        let pre = &rest[..1];
+        let (side, v) = rest[1..].split_once('-')?;
+        if side.len() > 1 || (negative && pre == "p") {
+            return None;
+        }
+        let (props, rank) = sides(pre, side)?;
+        let val = neg(spacing(v)?);
+        return Some(Rule { decls: props.iter().map(|p| (format!("scroll-{p}"), val.clone())).collect(), suffix: "", keyframes: None, rank });
+    }
     let (head, v) = split_value(u)?;
     match head {
         "w" => one("width", size(v, 'w')?),
@@ -481,7 +520,13 @@ fn valued(u: &str, negative: bool, neg: &dyn Fn(String) -> String) -> Option<Rul
         }
         "min-w" => one("min-width", size(v, 'w')?),
         "min-h" => one("min-height", size(v, 'h')?),
-        "max-w" => one("max-width", if v == "none" { "none".into() } else { size(v, 'w')? }),
+        "max-w" => one("max-width", match v {
+            "none" => "none".into(),
+            _ => match v.strip_prefix("screen-") {
+                Some(bp) => lookup(BREAKPOINTS, bp)?,
+                None => size(v, 'w')?,
+            },
+        }),
         "max-h" => one("max-height", if v == "none" { "none".into() } else { size(v, 'h')? }),
         "basis" => one("flex-basis", size(v, 'w')?),
         "gap" => one("gap", spacing(v)?),
@@ -564,7 +609,8 @@ fn valued(u: &str, negative: bool, neg: &dyn Fn(String) -> String) -> Option<Rul
         }
         "indent" => one("text-indent", neg(spacing(v)?)),
         "bg" => {
-            if let Some(dir) = v.strip_prefix("linear-to-") {
+            // Tailwind v3's name for the same thing, which half the examples on the web still use.
+            if let Some(dir) = v.strip_prefix("linear-to-").or_else(|| v.strip_prefix("gradient-to-")) {
                 let to = match dir { "t" => "top", "tr" => "top right", "r" => "right", "br" => "bottom right", "b" => "bottom", "bl" => "bottom left", "l" => "left", "tl" => "top left", _ => return None };
                 return one("background-image", format!("linear-gradient(to {to}, var(--tw-gradient-stops))"));
             }
@@ -575,10 +621,21 @@ fn valued(u: &str, negative: bool, neg: &dyn Fn(String) -> String) -> Option<Rul
             if v == "radial" {
                 return one("background-image", "radial-gradient(var(--tw-gradient-stops))");
             }
+            if v == "conic" {
+                return one("background-image", "conic-gradient(var(--tw-gradient-stops))");
+            }
+            if let Some(angle) = v.strip_prefix("conic-") {
+                let deg = int(angle).filter(|n| *n <= 360)?;
+                return one("background-image", format!("conic-gradient(from {}deg, var(--tw-gradient-stops))", if negative { -deg } else { deg }));
+            }
             one("background-color", colour(v)?)
         }
-        "from" => ranked(rule(&[("--tw-gradient-from", colour(v)?), ("--tw-gradient-stops", "var(--tw-gradient-from), var(--tw-gradient-to, transparent)".into())]), 0),
-        "via" => ranked(rule(&[("--tw-gradient-via", colour(v)?), ("--tw-gradient-stops", "var(--tw-gradient-from, transparent), var(--tw-gradient-via), var(--tw-gradient-to, transparent)".into())]), 1),
+        "from" | "via" | "to" if v.ends_with('%') => {
+            let pct = int(&v[..v.len() - 1]).filter(|n| *n <= 100)?;
+            ranked(one(&format!("--tw-gradient-{head}-position"), format!("{pct}%")), 3)
+        }
+        "from" => ranked(rule(&[("--tw-gradient-from", colour(v)?), ("--tw-gradient-stops", "var(--tw-gradient-from) var(--tw-gradient-from-position,), var(--tw-gradient-to, transparent) var(--tw-gradient-to-position,)".into())]), 0),
+        "via" => ranked(rule(&[("--tw-gradient-via", colour(v)?), ("--tw-gradient-stops", "var(--tw-gradient-from, transparent) var(--tw-gradient-from-position,), var(--tw-gradient-via) var(--tw-gradient-via-position,), var(--tw-gradient-to, transparent) var(--tw-gradient-to-position,)".into())]), 1),
         "to" => ranked(one("--tw-gradient-to", colour(v)?), 2),
         "border" | "border-x" | "border-y" | "border-t" | "border-r" | "border-b" | "border-l" => {
             let side = head.strip_prefix("border").unwrap_or("").trim_start_matches('-');
@@ -589,6 +646,10 @@ fn valued(u: &str, negative: bool, neg: &dyn Fn(String) -> String) -> Option<Rul
                 return ranked(rule(&[("--tw-border", colour(v)?), ("border-color", colour(v)?)]), 3);
             }
             None
+        }
+        "rounded-ss" | "rounded-se" | "rounded-es" | "rounded-ee" => {
+            let prop = match head { "rounded-ss" => "border-start-start-radius", "rounded-se" => "border-start-end-radius", "rounded-es" => "border-end-start-radius", _ => "border-end-end-radius" };
+            ranked(one(prop, radius(v)?), 2)
         }
         "rounded" | "rounded-t" | "rounded-r" | "rounded-b" | "rounded-l" | "rounded-tl" | "rounded-tr" | "rounded-br" | "rounded-bl" | "rounded-s" | "rounded-e" => {
             let r = radius(v)?;
@@ -670,7 +731,36 @@ fn valued(u: &str, negative: bool, neg: &dyn Fn(String) -> String) -> Option<Rul
         }
         "accent" => one("accent-color", colour(v)?),
         "caret" => one("caret-color", colour(v)?),
-        "decoration" => one("text-decoration-color", colour(v)?),
+        "decoration" => match v {
+            "solid" | "double" | "dotted" | "dashed" | "wavy" => one("text-decoration-style", v),
+            "auto" | "from-font" => one("text-decoration-thickness", v),
+            _ => match int(v) {
+                Some(n) if n <= 16 => one("text-decoration-thickness", format!("{n}px")),
+                _ => one("text-decoration-color", colour(v)?),
+            },
+        },
+        "underline-offset" => one("text-underline-offset", if v == "auto" { "auto".into() } else { neg(format!("{}px", int(v).filter(|n| *n <= 32)?)) }),
+        "drop-shadow" => filter_of("--tw-drop-shadow", match v {
+            "xs" => "drop-shadow(0 1px 1px rgb(0 0 0 / 0.05))",
+            "sm" => "drop-shadow(0 1px 2px rgb(0 0 0 / 0.15))",
+            "md" => "drop-shadow(0 3px 3px rgb(0 0 0 / 0.12))",
+            "lg" => "drop-shadow(0 4px 4px rgb(0 0 0 / 0.15))",
+            "xl" => "drop-shadow(0 9px 7px rgb(0 0 0 / 0.1))",
+            "2xl" => "drop-shadow(0 25px 25px rgb(0 0 0 / 0.15))",
+            "none" => "drop-shadow(0 0 #0000)",
+            _ => return None,
+        }),
+        "hue-rotate" => filter_of("--tw-hue-rotate", &format!("hue-rotate({})", neg(format!("{}deg", int(v).filter(|n| *n <= 360)?)))),
+        "invert" | "sepia" | "grayscale" => filter_of(&format!("--tw-{head}"), &format!("{head}({}%)", int(v).filter(|n| *n <= 100)?)),
+        "skew-x" | "skew-y" => {
+            let d = neg(format!("{}deg", int(v).filter(|n| *n <= 90)?));
+            let var = if head == "skew-x" { "--tw-skew-x" } else { "--tw-skew-y" };
+            rule(&[(var, d), ("transform", "skewX(var(--tw-skew-x, 0)) skewY(var(--tw-skew-y, 0))".into())])
+        }
+        "mix-blend" | "bg-blend" => {
+            let ok = ["normal", "multiply", "screen", "overlay", "darken", "lighten", "color-dodge", "color-burn", "hard-light", "soft-light", "difference", "exclusion", "hue", "saturation", "color", "luminosity", "plus-lighter"];
+            one(if head == "mix-blend" { "mix-blend-mode" } else { "background-blend-mode" }, v.to_string()).filter(|_| ok.contains(&v))
+        }
         "placeholder" => one("color", colour(v)?).map(|r| Rule { suffix: "::placeholder", ..r }),
         "aspect" => one("aspect-ratio", fraction_ratio(v).or_else(|| arbitrary(v))?),
         "columns" => one("columns", int(v).filter(|n| (1..=12).contains(n)).map(|n| n.to_string()).or_else(|| lookup(CONTAINERS, v))?),
@@ -707,7 +797,8 @@ fn align_value(v: &str) -> Option<&'static str> {
 /// (`bg`, `red-500/50`). The family is the longest known prefix that is followed by `-`.
 fn split_value(u: &str) -> Option<(&'static str, &str)> {
     const HEADS: &[&str] = &[
-        "backdrop-brightness", "backdrop-saturate", "backdrop-blur", "pointer-events", "outline-offset", "justify-items", "justify-self",
+        "backdrop-brightness", "backdrop-saturate", "backdrop-blur", "underline-offset", "pointer-events", "drop-shadow", "hue-rotate",
+        "rounded-ss", "rounded-se", "rounded-es", "rounded-ee", "mix-blend", "bg-blend", "skew-x", "skew-y", "invert", "sepia", "grayscale", "outline-offset", "justify-items", "justify-self",
         "place-content", "place-items", "place-self", "inset-shadow", "ring-offset", "line-clamp", "overflow-x", "overflow-y", "grid-cols",
         "grid-rows", "col-span", "row-span", "col-start", "col-end", "row-start", "row-end", "auto-cols", "auto-rows", "translate-x",
         "translate-y", "decoration", "placeholder", "brightness", "rounded-tl", "rounded-tr", "rounded-br", "rounded-bl", "rounded-t",
@@ -731,6 +822,66 @@ struct Shape {
     prefix: Vec<String>,
     suffix: String,
     order: u32,
+    /// `before:`/`after:`: the rule also says `content: var(--tw-content)`, as Tailwind's do.
+    content: bool,
+}
+
+/// The states `not-`, `has-`, `group-` and `peer-` may name, as a selector.
+fn state(v: &str) -> Option<&'static str> {
+    Some(match v {
+        "hover" => ":hover",
+        "focus" => ":focus",
+        "focus-visible" => ":focus-visible",
+        "focus-within" => ":focus-within",
+        "active" => ":active",
+        "disabled" => ":disabled",
+        "enabled" => ":enabled",
+        "checked" => ":checked",
+        "required" => ":required",
+        "invalid" => ":invalid",
+        "valid" => ":valid",
+        "empty" => ":empty",
+        "first" => ":first-child",
+        "last" => ":last-child",
+        "only" => ":only-child",
+        "odd" => ":nth-child(odd)",
+        "even" => ":nth-child(even)",
+        "open" => ":is([open], :popover-open)",
+        "placeholder-shown" => ":placeholder-shown",
+        _ => return None,
+    })
+}
+
+/// A bracketed selector a variant may hold (`has-[:checked]`, `data-[state=open]`), checked:
+/// a state, a tag name, or one `data-`/`aria-` attribute with a plain value. Nothing else, so a
+/// class cannot reach outside its rule.
+fn simple_selector(inner: &str) -> Option<String> {
+    if let Some(p) = inner.strip_prefix(':') {
+        return state(p).map(str::to_string);
+    }
+    if let Some(attr) = inner.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+        let (k, val) = match attr.split_once('=') {
+            Some((k, v)) => (k, Some(v)),
+            None => (attr, None),
+        };
+        if !(k.starts_with("data-") || k.starts_with("aria-")) || !ident(k) || !val.is_none_or(ident) {
+            return None;
+        }
+        return Some(match val {
+            Some(v) => format!("[{k}=\"{v}\"]"),
+            None => format!("[{k}]"),
+        });
+    }
+    (inner.len() <= 20 && inner.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) && inner.starts_with(|c: char| c.is_ascii_lowercase()))
+        .then(|| inner.to_string())
+}
+
+/// `data-[state=open]`, `data-[open]` and `data-active` as an attribute selector.
+fn data_attr(rest: &str) -> Option<String> {
+    if let Some(inner) = rest.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+        return simple_selector(&format!("[data-{inner}]"));
+    }
+    ident(rest).then(|| format!("[data-{rest}]"))
 }
 
 fn apply_variant(v: &str, s: &mut Shape) -> Option<()> {
@@ -764,6 +915,21 @@ fn apply_variant(v: &str, s: &mut Shape) -> Option<()> {
         "open" => pseudo(s, ":is([open], :popover-open)", 6),
         "placeholder" => pseudo(s, "::placeholder", 7),
         "selection" => pseudo(s, " ::selection", 7),
+        "file" => pseudo(s, "::file-selector-button", 7),
+        "marker" => pseudo(s, " ::marker", 7),
+        "first-letter" => pseudo(s, "::first-letter", 7),
+        "first-line" => pseudo(s, "::first-line", 7),
+        "backdrop" => pseudo(s, "::backdrop", 7),
+        "before" | "after" => {
+            pseudo(s, if v == "before" { "::before" } else { "::after" }, 7);
+            s.content = true;
+        }
+        "inert" => pseudo(s, ":is([inert], [inert] *)", 8),
+        "rtl" | "ltr" => {
+            s.suffix.push_str(&format!(":where(:dir({v}), [dir=\"{v}\"], [dir=\"{v}\"] *)"));
+            s.order += 8;
+        }
+        "forced-colors" => s.at.push("@media (forced-colors: active)".into()),
         "*" => {
             s.suffix.push_str(" > *");
             s.order += 4;
@@ -810,22 +976,50 @@ fn apply_variant(v: &str, s: &mut Shape) -> Option<()> {
                 s.order += 3000;
                 return Some(());
             }
-            // `data-[state=open]` and `data-active`: an attribute, checked like any arbitrary value.
+            // `data-[state=open]`, `data-[open]` and `data-active`: an attribute, checked.
             if let Some(rest) = v.strip_prefix("data-") {
-                let attr = if let Some(inner) = rest.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
-                    let (k, val) = inner.split_once('=')?;
-                    if !ident(k) || !ident(val) {
-                        return None;
-                    }
-                    format!("[data-{k}=\"{val}\"]")
-                } else {
-                    if !ident(rest) {
-                        return None;
-                    }
-                    format!("[data-{rest}]")
-                };
-                s.suffix.push_str(&attr);
+                s.suffix.push_str(&data_attr(rest)?);
                 s.order += 8;
+                return Some(());
+            }
+            // `not-first:`, `not-hover:`: the state's opposite.
+            if let Some(p) = v.strip_prefix("not-") {
+                s.suffix.push_str(&format!(":not({})", state(p)?));
+                s.order += 6;
+                return Some(());
+            }
+            // `has-checked:`, `has-[:focus-visible]:`, `has-[img]:`: something inside.
+            if let Some(p) = v.strip_prefix("has-") {
+                let sel = match p.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+                    Some(inner) => simple_selector(inner)?,
+                    None => state(p)?.to_string(),
+                };
+                s.suffix.push_str(&format!(":has({sel})"));
+                s.order += 7;
+                return Some(());
+            }
+            // `group-data-[open]:`, `group-aria-expanded:`, `peer-data-[on]:`: the group's or peer's state.
+            for (pre, before, after) in [("group-", ".group", " "), ("peer-", ".peer", " ~ ")] {
+                if let Some(p) = v.strip_prefix(pre) {
+                    let sel = if let Some(d) = p.strip_prefix("data-") {
+                        data_attr(d)?
+                    } else if let Some(a) = p.strip_prefix("aria-") {
+                        ident(a).then(|| format!("[aria-{a}=\"true\"]"))?
+                    } else {
+                        state(p)?.to_string()
+                    };
+                    s.prefix.push(format!("{before}{sel}{after}"));
+                    s.order += 10;
+                    return Some(());
+                }
+            }
+            // `supports-[display:grid]:`: a property and a plain value.
+            if let Some(inner) = v.strip_prefix("supports-[").and_then(|r| r.strip_suffix(']')) {
+                let (k, val) = inner.split_once(':')?;
+                if !ident(k) || !ident(val) {
+                    return None;
+                }
+                s.at.push(format!("@supports ({k}: {val})"));
                 return Some(());
             }
             return None;
@@ -907,7 +1101,10 @@ fn compile(class: &str) -> Option<(SortKey, String, Option<&'static str>)> {
     }
     let r = utility(u, negative)?;
     let bang = if important { " !important" } else { "" };
-    let decls = r.decls.iter().map(|(p, v)| format!("{p}: {v}{bang};")).collect::<Vec<_>>().join(" ");
+    let mut decls = r.decls.iter().map(|(p, v)| format!("{p}: {v}{bang};")).collect::<Vec<_>>().join(" ");
+    if shape.content && !r.decls.iter().any(|(p, _)| p == "content") {
+        decls.push_str(" content: var(--tw-content);");
+    }
     let selector = format!("{}.{}{}{}", shape.prefix.join(""), escape(class), shape.suffix, r.suffix);
     let mut css = format!("{selector} {{ {decls} }}");
     for at in shape.at.iter().rev() {
@@ -942,7 +1139,14 @@ pub fn css_for(classes: &BTreeSet<String>) -> String {
     if rules.is_empty() {
         return String::new();
     }
-    let mut out = String::from("@layer hx-utilities { :root { --spacing: 0.25rem; ");
+    // `before:`/`after:` draw with `content: var(--tw-content)`, empty unless a class says
+    // `content-none` — and not inherited, so one element's choice stays its own.
+    let mut out = if rules.values().any(|c| c.contains("var(--tw-content)")) {
+        String::from("@property --tw-content { syntax: \"*\"; inherits: false; initial-value: \"\"; } ")
+    } else {
+        String::new()
+    };
+    out.push_str("@layer hx-utilities { :root { --spacing: 0.25rem; ");
     for (n, v) in CONTAINERS {
         let _ = write!(out, "--container-{n}: {v}; ");
     }
@@ -994,6 +1198,37 @@ mod tests {
         has(&["truncate"], "text-overflow: ellipsis;");
         has(&["animate-spin"], "@keyframes spin");
         has(&["space-y-2"], ".space-y-2 > :not(:last-child) { margin-block-end: calc(var(--spacing) * 2); }");
+    }
+
+    #[test]
+    fn the_classes_people_copy_from_tailwind_examples() {
+        has(&["decoration-2"], "text-decoration-thickness: 2px;");
+        has(&["underline-offset-4"], "text-underline-offset: 4px;");
+        has(&["from-10%"], "--tw-gradient-from-position: 10%;");
+        has(&["bg-gradient-to-r"], "linear-gradient(to right, var(--tw-gradient-stops))");
+        has(&["bg-clip-text"], "background-clip: text;");
+        has(&["drop-shadow-md"], "--tw-drop-shadow: drop-shadow(");
+        has(&["scroll-mt-16"], "scroll-margin-top: calc(var(--spacing) * 16);");
+        has(&["max-w-screen-lg"], "max-width: 64rem;");
+        has(&["rounded-ee-xl"], "border-end-end-radius: 0.75rem;");
+        has(&["not-first:mt-4"], ":not(:first-child) {");
+        has(&["has-[:checked]:bg-accent"], ":has(:checked) {");
+        has(&["data-[open]:block"], "[data-open] {");
+        has(&["group-data-[state=open]:rotate-180"], ".group[data-state=\"open\"] .group-data");
+        has(&["supports-[display:grid]:grid"], "@supports (display: grid)");
+        has(&["before:content-['']"], "::before { --tw-content: \"\"; content: var(--tw-content); }");
+        has(&["after:absolute"], "@property --tw-content");
+    }
+
+    #[test]
+    fn bracketed_variants_cannot_leave_their_rule() {
+        for c in [
+            "has-[a]{}body{color:red}:p-1", "has-[:checked,*]:p-1", "data-[x=\"y\"]:p-1", "supports-[x:y;}body{]:p-1",
+            "content-['x']", "content-[attr(title)]", "before:content-['a']", "has-[img_onerror]:p-1",
+            "group-data-[a=b]c]:p-1", "has-[[class=x]]:p-1", "not-[a]:p-1", "peer-data-[x]y]:p-1",
+        ] {
+            assert!(!is_utility(c), "{c} must produce nothing");
+        }
     }
 
     #[test]

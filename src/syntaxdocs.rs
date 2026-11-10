@@ -305,6 +305,9 @@ pub static SYNTAX: &[SyntaxDoc] = &[
                 a COMPONENT, any function: `<TodoItem label=\"x\" done />` calls `todo_item(label: \"x\", done: \
                 true)`, children are its `children`, and `<ui.Button caption=\"Save\" msg=\"save\" />` calls \
                 `ui.button`. `onClick` is refused: a view sends messages (`click=\"save\"`). \
+                `class:done={it.done}` adds one class while the condition holds; inside markup an `if` \
+                may leave out `else` (`{if busy then <Spinner />}` renders nothing when false); and \
+                `{items.map(<li>{it}</li>)}` loops without a lambda. \
                 Keywords: jsx, tsx, html, markup, element, tag, template, component, props, children, react, view.",
     },
     SyntaxDoc {

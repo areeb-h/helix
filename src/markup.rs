@@ -134,13 +134,27 @@ impl Scan<'_> {
             };
             return Err(self.err(format!("expected {what}, found {found}")));
         }
+        let mut brackets = 0usize;
         while let Some(c) = self.peek(0) {
-            if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '.') {
-                out.push(c);
-                self.bump();
-            } else {
+            // After `class:` comes a class name, which may be any utility: `class:bg-accent/10`,
+            // `class:w-[42%]`, `class:data-[state=open]:block`. It ends at a space, `=`, `>` or `/>`
+            // (a `=` inside brackets is part of it).
+            let in_class = out.starts_with("class:");
+            let ok = c.is_ascii_alphanumeric()
+                || matches!(c, '_' | '-' | ':' | '.')
+                || (in_class && (matches!(c, '[' | ']' | '(' | ')' | '%' | '#' | ',' | '!' | '*' | '@' | '&' | '+')
+                    || (c == '/' && self.peek(1) != Some('>'))
+                    || (c == '=' && brackets > 0)));
+            if !ok {
                 break;
             }
+            match c {
+                '[' => brackets += 1,
+                ']' => brackets = brackets.saturating_sub(1),
+                _ => {}
+            }
+            out.push(c);
+            self.bump();
         }
         Ok(out)
     }

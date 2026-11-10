@@ -3387,9 +3387,12 @@ fn adopt(spec, kept) = if kept.is_missing() then spec.init else do {
 }
 
 export fn app(spec) = do {
-  port = if spec.get("port").is_missing() then 8080 else spec.port
-  l = listen(port)
+  wanted = if spec.get("port").is_missing() then 8080 else spec.port
+  bound = listen_from(wanted, wanted, 20)
+  l = bound.l
+  port = bound.port
   generation = dev_generation()
+  moved = if port == wanted or (generation ?? 1) > 1 then false else elog("port {wanted} is in use, so {spec.title} is on port {port}")
   reload = if generation.is_missing() then false else generation > 1
   d0 = design_of(spec, spec.init, missing)
   rt0 = {...session(port), dev: not generation.is_missing(), design: d0, css: css_with(spec, d0), title: "{spec.title}", client: sha256(CLIENT), known: {"": true}, util: ""}
@@ -3408,6 +3411,15 @@ export fn app(spec) = do {
   wants_open = if spec.get("open").is_missing() then false else spec.open
   opened = if in_window or reload then false else if windowed or wants_open then open_url(url) else false
   serve(l, spec, rt, spec.init, (spec.view)(spec.init), [], [], schedule([], subs_of(spec, spec.init), clock_monotonic()))
+}
+
+# The first free port from `port`: another dev server on 8080 should not stop an app starting.
+# A reload under `--watch` searches the same way, so it lands where the first start did.
+fn listen_from(first, port, tries) = do {
+  r = try listen(port)
+  if r.ok then {l: r.value, port: port} else if tries > 1 and "{r.error}".contains("in use") then listen_from(first, port + 1, tries - 1) else
+    if port == first then raise("{r.error}", "the port may already be in use — try another with `--port`, or stop the process holding it.") else
+    raise("ports {first} to {port} are all in use", "pass a free one with `--port`, or stop what holds them.")
 }
 
 # Replay a list of events through `update` and return every screen as HTML — the property a

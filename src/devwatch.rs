@@ -198,9 +198,18 @@ pub fn run_watch(script: &Path, argv: &[String], check: &dyn Fn(&Path) -> Check)
                     {
                         *found.lock().unwrap() = Some(l.clone());
                         let mut b = shown_link.lock().unwrap();
-                        if b.is_none() {
-                            *b = Some(l);
-                            eprintln!("{line}");
+                        match b.as_ref() {
+                            None => {
+                                *b = Some(l);
+                                eprintln!("{line}");
+                            }
+                            // The port the page uses was taken while the app restarted, so this
+                            // start is on another one: the open page cannot follow, so say so.
+                            Some(open) if open.port != l.port => {
+                                eprintln!("hot reload: port {} was taken during the reload; reopen the app at this link:", open.port);
+                                eprintln!("{line}");
+                            }
+                            Some(_) => {}
                         }
                         continue;
                     }

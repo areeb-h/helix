@@ -31,6 +31,27 @@
     `onClick` are refused with the Helix spelling.
   - **Comparisons are unchanged.** `a <b` still compares, because markup starts only where a
     value cannot have just ended.
+- **Shorter markup:**
+  - `class:done={it.done}` adds a class while a condition holds;
+  - `{if busy then <Spinner />}` needs no `else` inside markup;
+  - `{items.map(<li>{it}</li>)}` loops without a lambda;
+  - a component may be defined below its first use.
+- **More of Tailwind.** About 50 more of the classes people copy from Tailwind examples now
+  work, for instance:
+  - `decoration-2`, `underline-offset-4`, gradient stop positions (`from-10%`);
+  - the v3 names `bg-gradient-to-*`, plus `bg-conic`, `bg-clip-text` and `drop-shadow-*`;
+  - `scroll-mt-*`, `skew-*`, `max-w-screen-*`, logical corners, table display values and
+    blend modes;
+  - the variants `not-*`, `has-*`, `group-data-[…]`, bare `data-[open]`, `inert`, `rtl`/`ltr`,
+    `supports-[…]`, `forced-colors`, `file:`, `marker:`, and `before:`/`after:`.
+
+  `before:`/`after:` accept only empty content (`content-['']`), so a class can never put text
+  on the page. Bracketed variants accept only a state, a tag, or one `data-`/`aria-`
+  attribute, and the tests try to break out of them.
+- **A busy port no longer stops an app.** If 8080 (or the `--port` asked for) is taken,
+  `ui.app` uses the next free port and says so. Under `--watch` each reload finds the same
+  port, and if the port has been taken in the meantime, the supervisor prints the app's new
+  link.
 - **Views are easier to build without markup too.**
   - A child may be a string, a number, a list or `missing`.
   - `class` takes a list, as `clsx` does.

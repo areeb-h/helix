@@ -22,4 +22,9 @@ true
 under
 [{from: 1, op: "move", path: [], to: 0}]
 ["md:grid-cols-3", "p-4", "text-muted"]
+<li class="row on bg-accent/10 data-[state=open]:block"></li>
+<li class="only"></li>
+<p><b>shown</b></p>
+<ol><li class="first">x</li><li>y</li></ol>
+<i>3</i>
 --- stderr ---

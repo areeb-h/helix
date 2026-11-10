@@ -78,6 +78,26 @@ too.
 and skips `missing`, Bools and empty strings, as `clsx` does. `style` also takes a string:
 `style="--fill: 40%"`.
 
+### Shorter forms (added after the first release of markup)
+
+Writing a real app in markup (Orbit) showed three things people write constantly:
+
+- **`class:name={cond}`** adds one class while `cond` holds, as in Svelte:
+  - `<li class="row" class:done={it.done}>`.
+  - The name may be any utility, brackets and slashes included: `class:bg-accent/10={on}`.
+  - It joins `class` when there is one.
+  - With a spread and no `class`, it is refused, because it would replace the spread's class
+    without a word.
+- **`{if c then <X />}`** needs no `else` inside markup's holes: false renders nothing, as
+  `{c && <X />}` does in JSX.
+  - Only markup's holes allow this. Elsewhere an `if` still needs its `else`, so a forgotten
+    branch in ordinary code is still an error.
+- **`{items.map(<li>{it}</li>)}`**: the implicit `it` Helix already had works inside
+  markup, so a loop needs no lambda.
+
+A component may also be used above its definition, as any function can: every signature is
+read before the first call is parsed.
+
 ### Errors
 
 A hole is parsed from the line and column where it was written, so errors point into the

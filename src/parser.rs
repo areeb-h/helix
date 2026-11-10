@@ -78,14 +78,15 @@ fn parse_expression(
     sigs: &HashMap<String, FnSig>,
     imports: &std::collections::HashSet<String>,
 ) -> Result<(Expr, Vec<DoBinding>), HelixError> {
-    parse_expression_at(src, (1, 1), depth, sigs, imports)
+    parse_expression_at(src, (1, 1, false), depth, sigs, imports)
 }
 
 /// [`parse_expression`] for source that starts at `at` (line, column) of the file: a hole in
-/// markup, whose positions are then the ones the person sees.
+/// markup, whose positions are then the ones the person sees. The third field says whether it
+/// is markup's (see [`Parser::markup`]).
 fn parse_expression_at(
     src: &str,
-    at: (usize, usize),
+    at: (usize, usize, bool),
     depth: usize,
     sigs: &HashMap<String, FnSig>,
     imports: &std::collections::HashSet<String>,
@@ -103,6 +104,7 @@ fn parse_expression_at(
         pending: Vec::new(),
         temps: 0,
         pinned_keys_at: None,
+        markup: at.2,
     };
     p.skip_newlines();
     let e = p.expr()?;
@@ -937,6 +939,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Stmt>, HelixError> {
         pending: Vec::new(),
         temps: 0,
         pinned_keys_at: None,
+        markup: false,
     };
     // EVERY SIGNATURE BEFORE THE FIRST CALL IS PARSED — a function may be called above
     // its definition, and its defaults and parameter names must be known there too.
@@ -1069,6 +1072,10 @@ struct Parser {
     /// the one escape the defining position lacked. Anywhere else an `@` key is refused
     /// at parse time, so it can only ever reach a frame verb or a runtime refusal.
     pinned_keys_at: Option<usize>,
+    /// Whether this parser reads a hole inside markup (ADR 0061), where `if c then <X />` with no
+    /// `else` is `missing` — nothing rendered — as `{c && <X />}` is in JSX. Anywhere else an
+    /// `if` still needs its `else`.
+    markup: bool,
 }
 
 impl Parser {
@@ -3502,7 +3509,7 @@ impl Parser {
 
     /// A hole's expression, parsed where it was written.
     fn markup_src(&mut self, s: &crate::markup::Src) -> Result<Expr, HelixError> {
-        let (e, binds) = parse_expression_at(&s.text, (s.line, s.col), self.depth, &self.fn_sigs, &self.imports)?;
+        let (e, binds) = parse_expression_at(&s.text, (s.line, s.col, true), self.depth, &self.fn_sigs, &self.imports)?;
         self.do_bindings.extend(binds);
         Ok(e)
     }
@@ -3530,6 +3537,9 @@ impl Parser {
         let mut aria: Vec<(String, Expr)> = Vec::new();
         let mut raw: Vec<(String, Expr)> = Vec::new();
         let mut seen: Vec<&str> = Vec::new();
+        // `class:on={cond}`: the class `on` while `cond` holds, added to `class`.
+        let mut toggles: Vec<Expr> = Vec::new();
+        let mut class_at: Option<usize> = None;
         for a in attrs {
             if let MValue::Spread(_) = a.value {
                 let e = self.markup_value(a)?;
@@ -3553,7 +3563,24 @@ impl Parser {
                 return Err(HelixError::new(format!("`{name}` would be a script handler, which a view cannot carry"), a.line, a.col)
                     .hint(format!("a view sends a message instead: `{ev}=\"save\"` posts {{msg: \"save\"}} to `update`.")));
             }
+            if let Some(class) = name.strip_prefix("class:") {
+                if class.is_empty() {
+                    return Err(HelixError::new("`class:` needs a class name: `class:active={on}`", a.line, a.col));
+                }
+                let cond = self.markup_value(a)?;
+                toggles.push(Expr::If {
+                    cond: Box::new(cond),
+                    then_branch: Box::new(Expr::Str(class.to_string())),
+                    else_branch: Box::new(Expr::Missing),
+                    line: a.line,
+                    col: a.col,
+                });
+                continue;
+            }
             let value = self.markup_value(a)?;
+            if name == "class" {
+                class_at = Some(parts.len());
+            }
             if let Some(rest) = name.strip_prefix("aria-") {
                 aria.push((rest.replace('-', "_"), value));
                 continue;
@@ -3567,6 +3594,22 @@ impl Parser {
                 parts.push(RecordPart::Field(prop, value));
             } else {
                 raw.push((name.to_string(), value));
+            }
+        }
+        if !toggles.is_empty() {
+            match class_at {
+                Some(i) => {
+                    if let RecordPart::Field(_, base) = &mut parts[i] {
+                        let b = std::mem::replace(base, Expr::Missing);
+                        *base = Expr::Array(std::iter::once(b).chain(toggles).collect());
+                    }
+                }
+                // With a spread, the spread's own `class` would be replaced without a word.
+                None if spread => {
+                    return Err(HelixError::new(format!("`class:…` on `<{tag}>` with a spread needs a `class` attribute too"), line, col)
+                        .hint("write the base classes as `class=\"…\"` (or `class={props.class}`) so the toggles have something to add to."));
+                }
+                None => parts.push(RecordPart::Field("class".into(), Expr::Array(toggles))),
             }
         }
         if !aria.is_empty() {
@@ -3633,6 +3676,10 @@ impl Parser {
                 return Err(HelixError::new(format!("`<{tag}>` is a function, so it takes named arguments, not a spread"), a.line, a.col)
                     .hint("pass the record as one argument (`props={p}`), or spread it onto an element."));
             }
+            if a.name.starts_with("class:") {
+                return Err(HelixError::new(format!("`{}` belongs on an element; `<{tag}>` is a function", a.name), a.line, a.col)
+                    .hint("pass the condition as an argument, or put `class:…` on the element the function returns."));
+            }
             let name = a.name.replace('-', "_");
             if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
                 return Err(HelixError::new(format!("`{}` is not a parameter name", a.name), a.line, a.col)
@@ -3665,9 +3712,9 @@ impl Parser {
             [f] => {
                 let name = if self.fn_sigs.contains_key(*f) { (*f).to_string() } else { snake(f) };
                 if !self.fn_sigs.contains_key(&name) && !crate::registry::is_builtin_name(&name) {
-                    return Err(HelixError::new(format!("`<{tag}>` needs a function `{name}`, defined above it"), line, col).hint(
-                        "a capitalised tag is a component: a function, defined before its first use, whose \
-                         parameters are the tag's attributes (and `children`).",
+                    return Err(HelixError::new(format!("`<{tag}>` needs a function `{name}`"), line, col).hint(
+                        "a capitalised tag is a component: a function whose parameters are the tag's \
+                         attributes (and `children`). A library's is written with its name: `<ui.Badge />`.",
                     ));
                 }
                 let args = self.resolve_call_args(&name, vec![], named, line, col)?;
@@ -3823,8 +3870,17 @@ impl Parser {
                     }
                 })?;
                 let then_branch = self.expr()?;
+                if self.markup && !matches!(self.peek(), Tok::Else) {
+                    return Ok(Expr::If {
+                        cond: Box::new(cond),
+                        then_branch: Box::new(then_branch),
+                        else_branch: Box::new(Expr::Missing),
+                        line: l,
+                        col: c,
+                    });
+                }
                 self.eat(&Tok::Else, "after the `then` branch").map_err(|e| {
-                    e.hint("`if` is an expression, so it always needs an `else` branch that yields a value.")
+                    e.hint("`if` is an expression, so it always needs an `else` branch that yields a value (inside markup's `{…}` it may leave it out, and renders nothing).")
                 })?;
                 let else_branch = self.expr()?;
                 Ok(Expr::If {
