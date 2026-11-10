@@ -2132,7 +2132,7 @@ Tests: `*_test.helix` files and `## >>>` doc examples, run by `helix test` (add 
 
 `fn test_parses() = assert_eq(parse("a=1").a, 1)`
 
-**Note:** A TEST FILE is any `*_test.helix`: its top level runs, `assert`, `assert_eq`, `assert_close` and `assert_error` check things, and a file that asserts nothing fails. Each `fn test_…()` it defines and does not call runs too, as a test of its own. To test an app's functions, mark them `export fn` and `import app.{name, other}` in the test file. A DOC EXAMPLE is a `## >>>` line above a function; the `##` lines after it, up to a line that is not `##`, are what it must print (so leave a blank line before more prose). A file with `fn main` is fine: its main does not run for its doc examples. `helix test --json` gives one document of results. Keywords: test, tests, unit test, testing, assert, doctest, doc test, doc example, pytest, spec, check.
+**Note:** A TEST FILE is any `*_test.helix`: its top level runs, `assert`, `assert_eq`, `assert_close` and `assert_error` check things, and a file that asserts nothing fails. Each `fn test_…()` it defines and does not call runs too, as a test of its own. To test an app's functions, mark them `export fn` and `import app.{name, other}` in the test file. A DOC EXAMPLE is a `## >>>` line above a function; the `##` lines after it, up to an empty `##` line, are what it must print (so put a bare `##` line before more prose). A file with `fn main` is fine: its main does not run for its doc examples. `helix test --json` gives one document of results. Keywords: test, tests, unit test, testing, assert, doctest, doc test, doc example, pytest, spec, check.
 
 ```
 >>> assert_eq(1 + 1, 2)
@@ -2495,7 +2495,7 @@ Transform every element with the function, keeping order and length.
 
 ### `max()`
 
-The largest element of all numbers, all strings, all DNA, or all Bytes.
+The largest element of all numbers, all strings, all DNA, all Bytes, or all tuples of those.
 
 **Note:** An array containing missing reduces to missing, where sort refuses instead.
 
@@ -2685,6 +2685,8 @@ Ascending sort of an all-number, all-string, or all-DNA array.
 ### `sort_by(key)`
 
 Ascending stable sort by key(element).
+
+**Note:** SEVERAL KEYS: return a TUPLE, compared part by part as `<` compares tuples — `people.sort_by(p => (p.team, -p.score))` sorts by team, then by score descending within a team. Each position must hold the same kind in every item (numbers, Strings, DNA or Bytes); a Bool or `missing` in a key is refused, so write `if p.pinned then 0 else 1`. An Array is not a key (`<` does not order Arrays). Descending is a minus on a number; `sort` and `min`/`max` order tuples the same way. Keywords: multiple keys, multi-key, secondary sort, tie-break, then by, compound key, descending.
 
 ```
 >>> ["bb", "a", "ccc"].sort_by(s => s.length())

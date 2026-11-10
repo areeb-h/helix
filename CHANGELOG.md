@@ -66,7 +66,9 @@
   - **Second round** (three new agents: a quiz, an expense tracker, a notes app):
     - `ui.Segmented`, `ui.RadioGroup` and `ui.Chips` take plain strings (`options={["a", "b"]}`)
       as well as `(value, label)` pairs. Plain strings used to render as letters.
-    - `sort_by` takes a list key, `sort_by([it.done, -it.due])`, to sort by several things.
+    - Several sort keys: `sort_by(p => (p.team, -p.score))`. `sort`, `min` and `max` now order
+      tuples as `<` always has, so `xs.enumerate().sort()` works (ADR 0025 addendum). A list
+      key is refused with the tuple spelling.
     - `{price:.2f}` inside markup text formats the value, as it does in a string.
     - A failing replay points at the line in your `update`, not into the library.
     - An unknown `variant` on a component is an error that lists the variants.

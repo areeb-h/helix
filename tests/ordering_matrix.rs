@@ -253,11 +253,11 @@ const CASES: &[(&str, &str, &str)] = &[
     // ================================== Bool =========================================
     // Every spelling refuses — but with four different sentences, two of which name an
     // operator (`<`, `>`) the user never typed.
-    ("bool/sort", "[true, false].sort()", "error: `sort` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    ("bool/argsort", "[true, false].argsort()", "error: `argsort` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    ("bool/sort_by", "[true, false].sort_by(it)", "error: `argsort` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    ("bool/min", "[true, false].min()", "error: `min` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    ("bool/max", "[true, false].max()", "error: `max` needs an array of all numbers, all strings, all DNA, or all Bytes"),
+    ("bool/sort", "[true, false].sort()", "error: `sort` needs an array of all numbers, all strings, all DNA, all Bytes, or all tuples of those"),
+    ("bool/argsort", "[true, false].argsort()", "error: sort keys must be all numbers, all strings, all DNA, all Bytes, or all tuples of those"),
+    ("bool/sort_by", "[true, false].sort_by(it)", "error: sort keys must be all numbers, all strings, all DNA, all Bytes, or all tuples of those"),
+    ("bool/min", "[true, false].min()", "error: `min` needs an array of all numbers, all strings, all DNA, all Bytes, or all tuples of those"),
+    ("bool/max", "[true, false].max()", "error: `max` needs an array of all numbers, all strings, all DNA, all Bytes, or all tuples of those"),
     ("bool/min_by", "[true, false].min_by(it)", "error: `<` cannot order a Bool — it compares two numbers, two strings, two DNA sequences, or two tuples of those"),
     ("bool/max_by", "[true, false].max_by(it)", "error: `>` cannot order a Bool — it compares two numbers, two strings, two DNA sequences, or two tuples of those"),
     ("bool/argmin", "[true, false].argmin()", "error: `<` cannot order a Bool — it compares two numbers, two strings, two DNA sequences, or two tuples of those"),
@@ -284,11 +284,11 @@ const CASES: &[(&str, &str, &str)] = &[
 
     // ============================= Mixed Int/Str — refused ===========================
     // All four domains refuse, with four different sentences.
-    ("mixed_int_str/sort", "[1, \"a\"].sort()", "error: `sort` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    ("mixed_int_str/argsort", "[1, \"a\"].argsort()", "error: `argsort` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    ("mixed_int_str/sort_by", "[1, \"a\"].sort_by(it)", "error: `argsort` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    ("mixed_int_str/min", "[1, \"a\"].min()", "error: `min` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    ("mixed_int_str/max", "[1, \"a\"].max()", "error: `max` needs an array of all numbers, all strings, all DNA, or all Bytes"),
+    ("mixed_int_str/sort", "[1, \"a\"].sort()", "error: `sort` needs an array of all numbers, all strings, all DNA, all Bytes, or all tuples of those"),
+    ("mixed_int_str/argsort", "[1, \"a\"].argsort()", "error: sort keys must be all numbers, all strings, all DNA, all Bytes, or all tuples of those"),
+    ("mixed_int_str/sort_by", "[1, \"a\"].sort_by(it)", "error: sort keys must be all numbers, all strings, all DNA, all Bytes, or all tuples of those"),
+    ("mixed_int_str/min", "[1, \"a\"].min()", "error: `min` needs an array of all numbers, all strings, all DNA, all Bytes, or all tuples of those"),
+    ("mixed_int_str/max", "[1, \"a\"].max()", "error: `max` needs an array of all numbers, all strings, all DNA, all Bytes, or all tuples of those"),
     ("mixed_int_str/min_by", "[1, \"a\"].min_by(it)", "error: cannot order a String and an Int — `<` compares two numbers, two strings, two DNA sequences, or two tuples of those"),
     ("mixed_int_str/max_by", "[1, \"a\"].max_by(it)", "error: cannot order a String and an Int — `>` compares two numbers, two strings, two DNA sequences, or two tuples of those"),
     ("mixed_int_str/argmin", "[1, \"a\"].argmin()", "error: cannot order a String and an Int — `<` compares two numbers, two strings, two DNA sequences, or two tuples of those"),
@@ -361,16 +361,14 @@ const CASES: &[(&str, &str, &str)] = &[
 
     // ===================================== Tuples ====================================
     // `<` orders tuples lexicographically (src/interp/ops.rs, `compare`'s Tuple arm),
-    // and the `<`-reduce family therefore does too — but `sort`, `argsort`, `sort_by`,
-    // `min` and `max` all refuse. Same value, same order relation, five refusals and
-    // four answers.
-    ("tuple/sort", "[(2, 1), (1, 2)].sort()", "error: `sort` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    ("tuple/argsort", "[(2, 1), (1, 2)].argsort()", "error: `argsort` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    ("tuple/sort_by", "[(2, 1), (1, 2)].sort_by(it)", "error: `argsort` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    // DISAGREE (`<` vs min): `(1, 2) < (2, 1)` is `true`, yet `min` refuses the array.
-    ("tuple/min", "[(2, 1), (1, 2)].min()", "error: `min` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    ("tuple/max", "[(2, 1), (1, 2)].max()", "error: `max` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    // DISAGREE (min vs min_by): `min_by(it)` — `min` with the identity key — answers.
+    // and so does every spelling: `sort`, `argsort`, `sort_by`, `min` and `max` refused
+    // until the second agent study (ADR 0025, addendum 2026-11-10), which needed them for
+    // several sort keys, `sort_by(p => (p.team, -p.score))`.
+    ("tuple/sort", "[(2, 1), (1, 2)].sort()", "[(1, 2), (2, 1)]"),
+    ("tuple/argsort", "[(2, 1), (1, 2)].argsort()", "[1, 0]"),
+    ("tuple/sort_by", "[(2, 1), (1, 2)].sort_by(it)", "[(1, 2), (2, 1)]"),
+    ("tuple/min", "[(2, 1), (1, 2)].min()", "(1, 2)"),
+    ("tuple/max", "[(2, 1), (1, 2)].max()", "(2, 1)"),
     ("tuple/min_by", "[(2, 1), (1, 2)].min_by(it)", "(1, 2)"),
     ("tuple/max_by", "[(2, 1), (1, 2)].max_by(it)", "(2, 1)"),
     ("tuple/argmin", "[(2, 1), (1, 2)].argmin()", "1"),
@@ -382,11 +380,11 @@ const CASES: &[(&str, &str, &str)] = &[
 
     // ==================================== Records ====================================
     // Records have no order in any domain — the one shape all four agree on refusing.
-    ("record/sort", "[{a: 2}, {a: 1}].sort()", "error: `sort` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    ("record/argsort", "[{a: 2}, {a: 1}].argsort()", "error: `argsort` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    ("record/sort_by", "[{a: 2}, {a: 1}].sort_by(it)", "error: `argsort` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    ("record/min", "[{a: 2}, {a: 1}].min()", "error: `min` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    ("record/max", "[{a: 2}, {a: 1}].max()", "error: `max` needs an array of all numbers, all strings, all DNA, or all Bytes"),
+    ("record/sort", "[{a: 2}, {a: 1}].sort()", "error: `sort` needs an array of all numbers, all strings, all DNA, all Bytes, or all tuples of those"),
+    ("record/argsort", "[{a: 2}, {a: 1}].argsort()", "error: sort keys must be all numbers, all strings, all DNA, all Bytes, or all tuples of those"),
+    ("record/sort_by", "[{a: 2}, {a: 1}].sort_by(it)", "error: sort keys must be all numbers, all strings, all DNA, all Bytes, or all tuples of those"),
+    ("record/min", "[{a: 2}, {a: 1}].min()", "error: `min` needs an array of all numbers, all strings, all DNA, all Bytes, or all tuples of those"),
+    ("record/max", "[{a: 2}, {a: 1}].max()", "error: `max` needs an array of all numbers, all strings, all DNA, all Bytes, or all tuples of those"),
     ("record/min_by", "[{a: 2}, {a: 1}].min_by(it)", "error: `<` cannot order a Record — it compares two numbers, two strings, two DNA sequences, or two tuples of those"),
     ("record/max_by", "[{a: 2}, {a: 1}].max_by(it)", "error: `>` cannot order a Record — it compares two numbers, two strings, two DNA sequences, or two tuples of those"),
     ("record/argmin", "[{a: 2}, {a: 1}].argmin()", "error: `<` cannot order a Record — it compares two numbers, two strings, two DNA sequences, or two tuples of those"),
@@ -397,14 +395,13 @@ const CASES: &[(&str, &str, &str)] = &[
     ("record/fn_max", "max([{a: 2}, {a: 1}])", "error: `max` takes 2 arguments, got 1"),
 
     // ================================= Nested arrays =================================
-    // Also refused everywhere — but note that unlike Tuple, `<` refuses Arrays too, so
-    // the `<`-reduce family is CONSISTENT with `sort` here. It is the Tuple arm of
-    // `compare` that creates the tuple asymmetry, not arrays.
-    ("nested_array/sort", "[[2], [1]].sort()", "error: `sort` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    ("nested_array/argsort", "[[2], [1]].argsort()", "error: `argsort` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    ("nested_array/sort_by", "[[2], [1]].sort_by(it)", "error: `argsort` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    ("nested_array/min", "[[2], [1]].min()", "error: `min` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    ("nested_array/max", "[[2], [1]].max()", "error: `max` needs an array of all numbers, all strings, all DNA, or all Bytes"),
+    // Refused everywhere: unlike Tuple, `<` refuses Arrays, so `sort` does too. A sort
+    // key with several parts is a tuple; the refusal says so.
+    ("nested_array/sort", "[[2], [1]].sort()", "error: `sort` needs an array of all numbers, all strings, all DNA, all Bytes, or all tuples of those"),
+    ("nested_array/argsort", "[[2], [1]].argsort()", "error: sort keys must be all numbers, all strings, all DNA, all Bytes, or all tuples of those"),
+    ("nested_array/sort_by", "[[2], [1]].sort_by(it)", "error: sort keys must be all numbers, all strings, all DNA, all Bytes, or all tuples of those"),
+    ("nested_array/min", "[[2], [1]].min()", "error: `min` needs an array of all numbers, all strings, all DNA, all Bytes, or all tuples of those"),
+    ("nested_array/max", "[[2], [1]].max()", "error: `max` needs an array of all numbers, all strings, all DNA, all Bytes, or all tuples of those"),
     ("nested_array/min_by", "[[2], [1]].min_by(it)", "error: `<` cannot order an Array — it compares two numbers, two strings, two DNA sequences, or two tuples of those"),
     ("nested_array/max_by", "[[2], [1]].max_by(it)", "error: `>` cannot order an Array — it compares two numbers, two strings, two DNA sequences, or two tuples of those"),
     ("nested_array/argmin", "[[2], [1]].argmin()", "error: `<` cannot order an Array — it compares two numbers, two strings, two DNA sequences, or two tuples of those"),
@@ -431,15 +428,13 @@ const CASES: &[(&str, &str, &str)] = &[
     ("lazy_range/fn_max", "max(range(3))", "error: `max` takes 2 arguments, got 1"),
 
     // ================================ Lazy: enumerate ================================
-    // `enumerate` yields Tuples, so it inherits the tuple split exactly: the very verb
-    // the language hands you for "index alongside value" cannot be sorted by `sort`,
-    // only by `min_by`/`argmin`.
-    ("lazy_enumerate/sort", "[10, 20].enumerate().sort()", "error: `sort` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    ("lazy_enumerate/argsort", "[10, 20].enumerate().argsort()", "error: `argsort` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    ("lazy_enumerate/sort_by", "[10, 20].enumerate().sort_by(it)", "error: `argsort` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    ("lazy_enumerate/min", "[10, 20].enumerate().min()", "error: `min` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    ("lazy_enumerate/max", "[10, 20].enumerate().max()", "error: `max` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    // DISAGREE (min vs min_by), same as `tuple/`.
+    // `enumerate` yields Tuples, so it orders as tuples do — the verb for "index
+    // alongside value" sorts, and `max()` finds the last index with its value.
+    ("lazy_enumerate/sort", "[10, 20].enumerate().sort()", "[(0, 10), (1, 20)]"),
+    ("lazy_enumerate/argsort", "[10, 20].enumerate().argsort()", "[0, 1]"),
+    ("lazy_enumerate/sort_by", "[10, 20].enumerate().sort_by(it)", "[(0, 10), (1, 20)]"),
+    ("lazy_enumerate/min", "[10, 20].enumerate().min()", "(0, 10)"),
+    ("lazy_enumerate/max", "[10, 20].enumerate().max()", "(1, 20)"),
     ("lazy_enumerate/min_by", "[10, 20].enumerate().min_by(it)", "(0, 10)"),
     ("lazy_enumerate/max_by", "[10, 20].enumerate().max_by(it)", "(1, 20)"),
     ("lazy_enumerate/argmin", "[10, 20].enumerate().argmin()", "0"),
@@ -450,11 +445,11 @@ const CASES: &[(&str, &str, &str)] = &[
     ("lazy_enumerate/fn_max", "max([10, 20].enumerate())", "error: `max` takes 2 arguments, got 1"),
 
     // =================================== Lazy: zip ===================================
-    ("lazy_zip/sort", "[1, 2].zip([3, 4]).sort()", "error: `sort` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    ("lazy_zip/argsort", "[1, 2].zip([3, 4]).argsort()", "error: `argsort` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    ("lazy_zip/sort_by", "[1, 2].zip([3, 4]).sort_by(it)", "error: `argsort` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    ("lazy_zip/min", "[1, 2].zip([3, 4]).min()", "error: `min` needs an array of all numbers, all strings, all DNA, or all Bytes"),
-    ("lazy_zip/max", "[1, 2].zip([3, 4]).max()", "error: `max` needs an array of all numbers, all strings, all DNA, or all Bytes"),
+    ("lazy_zip/sort", "[1, 2].zip([3, 4]).sort()", "[(1, 3), (2, 4)]"),
+    ("lazy_zip/argsort", "[1, 2].zip([3, 4]).argsort()", "[0, 1]"),
+    ("lazy_zip/sort_by", "[1, 2].zip([3, 4]).sort_by(it)", "[(1, 3), (2, 4)]"),
+    ("lazy_zip/min", "[1, 2].zip([3, 4]).min()", "(1, 3)"),
+    ("lazy_zip/max", "[1, 2].zip([3, 4]).max()", "(2, 4)"),
     ("lazy_zip/min_by", "[1, 2].zip([3, 4]).min_by(it)", "(1, 3)"),
     ("lazy_zip/max_by", "[1, 2].zip([3, 4]).max_by(it)", "(2, 4)"),
     ("lazy_zip/argmin", "[1, 2].zip([3, 4]).argmin()", "0"),

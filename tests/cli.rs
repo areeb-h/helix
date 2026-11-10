@@ -7549,7 +7549,8 @@ fn helix_doc_reverse_looks_up_methods_and_builtins() {
 
     let (out, _, code) = run(&["doc", "sqrt"], &[], "");
     assert_eq!(code, Some(0));
-    assert!(out.contains("`sqrt` is a free function"), "{out}");
+    // The entry itself, not a pointer to it: what it is, what it does, an example.
+    assert!(out.contains("`sqrt(x)` — free function") && out.contains("e.g."), "{out}");
 
     let (out, _, code) = run(&["doc", "max"], &[], "");
     assert_eq!(code, Some(0));
@@ -18313,4 +18314,56 @@ print(b0({where: @age > V and @id < V and @age < 90}).s)\n";
         assert_eq!(code, Some(0), "{label}: {err}");
         assert_eq!(out, want, "{label}");
     }
+}
+
+/// The second agent study's hints, each where the agent hit the mistake (ADR 0062).
+#[test]
+fn agent_study_round_two_hints() {
+    let dir = std::env::temp_dir().join("helix_agent_round_two");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Prose under a doc example was read as more expected output: the failure says how to
+    // end the output.
+    let lib = dir.join("lib.helix");
+    std::fs::write(
+        &lib,
+        "## >>> double(2)\n## 4\n## Works for negatives too.\nexport fn double(x) = x * 2\n",
+    )
+    .unwrap();
+    let (out, _, code) = run(&["test", dir.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(1), "out:\n{out}");
+    assert!(out.contains("put a line that is just `##` after its output"), "out:\n{out}");
+    std::fs::write(
+        &lib,
+        "## >>> double(2)\n## 4\n##\n## Works for negatives too.\nexport fn double(x) = x * 2\n",
+    )
+    .unwrap();
+    let (out, _, code) = run(&["test", dir.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "out:\n{out}");
+    std::fs::remove_file(&lib).unwrap();
+
+    // A String method that computes a value is not a query form; the error names the
+    // row-by-row route.
+    let q = dir.join("q.helix");
+    std::fs::write(
+        &q,
+        "df = dataframe({date: [\"2026-01-02\"]})\nprint(df.with({month: @date.take(7)}))\n",
+    )
+    .unwrap();
+    let (_, err, code) = run(&["run", q.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(1), "stderr:\n{err}");
+    assert!(err.contains("`@date.take(…)` isn't supported") && err.contains("df.records().map("), "stderr:\n{err}");
+
+    // A keyword as a name says it is reserved.
+    std::fs::write(&q, "fn f(then) = 1\n").unwrap();
+    let (out, err, _) = run(&["check", q.to_str().unwrap()], &[], "");
+    assert!(format!("{out}{err}").contains("`then` is a reserved word"), "out:\n{out}\nerr:\n{err}");
+
+    // How tests are written is answered by the binary.
+    let (out, _, code) = run(&["describe", "test"], &[], "");
+    assert_eq!(code, Some(0));
+    assert!(out.contains("fn test_") && out.contains(">>>"), "out:\n{out}");
+    let (out, _, _) = run(&["search", "doctest"], &[], "");
+    assert!(out.contains("[syntax]"), "out:\n{out}");
 }

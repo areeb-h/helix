@@ -556,3 +556,31 @@ Two rules change here:
 The red line this file drew at :132 — that Helix does not adopt pandas' `skipna`
 default — was being crossed in the frame world by both backends, which skipped NaN in
 `group().max()`. ADR 0036 policy 4 stops that; `.drop_nan()` is the visible opt-out.
+
+## Addendum (2026-11-10): tuples are ordered by every spelling — several sort keys
+
+The second agent study (ADR 0062) had an agent sort notes "pinned first, newest first". It
+wrote a list key, `sort_by([it.pinned, -it.edited])`, and was refused with a message naming
+`argsort`, a method it never called. Sorting by several keys is ordinary work, and the open
+question above ("does `sort` accepting tuples want a key direction?") is answered by the
+minus that already makes a numeric key descend.
+
+**Decision.** `sort`, `argsort` (so `sort_by`), `min` and `max` order **tuples**, part by
+part, exactly as `<` does: `people.sort_by(p => (p.team, -p.score))`. This closes the
+tuple split recorded in "The tuple claim, verified": the five refusals now answer, and agree
+with `<`, `min_by` and `argmin`.
+
+- **One shape check, one comparator** (`all_list_keys` and `list_key_cmp` in
+  `src/interp/methods/array.rs`), used by all four, so they cannot drift. Each position must
+  hold the same kind in every item (numbers, Strings, DNA, Bytes, or nested tuples). That
+  makes the comparator total, which Rust's sort needs (ADR 0024).
+- **Arrays stay refused**, because `<` refuses them. `sort` ordering something `<` does not
+  would open the gap this ADR exists to close. The refusal's hint shows the tuple spelling,
+  so the agent's list key is answered with the fix.
+- **`missing` and Bool stay refused inside a key**, as they are outside one. The hint says to
+  write `if p.pinned then 0 else 1`; whether Bool is orderable stays an open question.
+- **Wording.** The domain sentence gains "or all tuples of those", and the `argsort`/`sort_by`
+  refusal says "sort keys must be …" instead of naming `argsort`. `tests/ordering_matrix.rs`
+  was re-pinned in the same commit: 35 cells, 20 of them the new wording and 15 tuple cells
+  (`tuple/`, `lazy_enumerate/`, `lazy_zip/`) that now answer.
+- The free `argmin(xs)`/`argmax(xs)` stay numeric reductions and still refuse tuples.

@@ -1816,7 +1816,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
         DocEntry {
             name: "max",
             sig: "max()",
-            doc: "The largest element of all numbers, all strings, all DNA, or all Bytes.",
+            doc: "The largest element of all numbers, all strings, all DNA, all Bytes, or all tuples of those.",
             example: "[3, 9, 5].max()",
             example_out: "9",
             notes: "An array containing missing reduces to missing, where sort refuses instead.",
@@ -2039,7 +2039,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
             doc: "Ascending stable sort by key(element).",
             example: "[\"bb\", \"a\", \"ccc\"].sort_by(s => s.length())",
             example_out: "[\"a\", \"bb\", \"ccc\"]",
-            notes: "",
+            notes: "SEVERAL KEYS: return a TUPLE, compared part by part as `<` compares tuples — `people.sort_by(p => (p.team, -p.score))` sorts by team, then by score descending within a team. Each position must hold the same kind in every item (numbers, Strings, DNA or Bytes); a Bool or `missing` in a key is refused, so write `if p.pinned then 0 else 1`. An Array is not a key (`<` does not order Arrays). Descending is a minus on a number; `sort` and `min`/`max` order tuples the same way. Keywords: multiple keys, multi-key, secondary sort, tie-break, then by, compound key, descending.",
         },
     ),
     (

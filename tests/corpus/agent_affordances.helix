@@ -1,3 +1,4 @@
+import std.ui
 # What the 2026-11 agent study found missing or wrong, kept fixed on every engine: array spread,
 # descending sorts, a record's field in a query, assert_eq's quoting, markup spacing between
 # holes, and a click value that keeps its type.
@@ -20,3 +21,15 @@ n = 2
 print(view_html(<p>{n} {n}</p>))
 print(view_html(<button click="go" value={3}>x</button>))
 print(view_html(<button click="go" value={true}>x</button>))
+
+# The second study: several sort keys (a tuple, as `<` orders them), plain-string options, `{x:.1f}` in markup text, and
+# an unknown variant named.
+people = [{n: "b", age: 30}, {n: "a", age: 30}, {n: "c", age: 20}]
+print(people.sort_by(p => (-p.age, p.n)).map(it.n))
+print([10, 30, 20].enumerate().max())
+bad = try people.sort_by(p => [-p.age, p.n])
+print(bad.error)
+print(view_html(ui.segmented("s", "Pick", "a", ["a", "bb"], "pick")).contains(">bb<"))
+price = 3.14159
+print(view_html(<p>{price:.2f}</p>))
+print((try ui.button("Go", "go", "primry")).error)
