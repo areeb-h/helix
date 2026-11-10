@@ -23,6 +23,7 @@ PROJECTS = [
   {id: "studio", name: "Studio", dot: "bg-rose-500"},
 ]
 DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 # Minutes of focus on the days before today, so the week has a shape on the first run.
 HISTORY = [52, 78, 31, 96, 64, 40, 58]
 
@@ -279,18 +280,22 @@ fn header(m) = <header class="sticky top-0 z-20 border-b border-line bg-surface/
       <span class="text-lg font-bold tracking-tight">Orbit</span>
     </div>
     <button type="button" click="palette" aria-label="Search or run a command (Ctrl+K)"
-      class="ml-2 hidden min-w-64 items-center gap-2 rounded-full bg-surface-2 px-4 py-2 text-sm text-muted ring-1 ring-line transition hover:text-fg hover:ring-line-strong md:flex">
+      class="ml-2 hidden w-72 items-center gap-2 whitespace-nowrap rounded-full bg-surface-2 px-4 py-2 text-sm text-muted ring-1 ring-line transition hover:text-fg hover:ring-line-strong lg:flex">
       <ui.Icon name="search" size="sm" />
       <span class="flex-1 text-left">Search or run a command</span>
       <kbd class="rounded-md bg-surface px-1.5 py-0.5 font-mono text-xs ring-1 ring-line">⌘K</kbd>
     </button>
-    <div class="ml-auto flex items-center gap-3">
-      <div role="group" aria-label="Accent colour" class="hidden items-center gap-1.5 sm:flex">
+    <div class="ml-auto flex shrink-0 items-center gap-2 sm:gap-3">
+      <button type="button" click="palette" aria-label="Search or run a command (Ctrl+K)"
+        class="grid size-9 place-items-center rounded-full text-muted ring-1 ring-line transition hover:bg-hover hover:text-fg lg:hidden">
+        <ui.Icon name="search" size="sm" />
+      </button>
+      <div role="group" aria-label="Accent colour" class="hidden items-center gap-1.5 md:flex">
         {ACCENTS.map((a) => <button type="button" key={a[0]} click="accent" value={a[0]} aria-label="{a[1]} accent" aria-pressed={m.accent == a[0]}
           style="background: {a[0]}"
           class={["size-6 rounded-full shadow-1 ring-offset-2 ring-offset-surface transition ease-spring hover:scale-110", if m.accent == a[0] then "ring-2 ring-fg/70 scale-110" else "ring-1 ring-black/10"]} />)}
       </div>
-      <ui.Segmented id="material" label="Material" value={m.material} options={MATERIALS} msg="material" size="sm" />
+      <div class="hidden sm:block"><ui.Segmented id="material" label="Material" value={m.material} options={MATERIALS} msg="material" size="sm" /></div>
       <button type="button" click="dark" aria-label={if m.dark then "Light appearance (D)" else "Dark appearance (D)"}
         class="grid size-9 place-items-center rounded-full text-muted ring-1 ring-line transition hover:bg-hover hover:text-fg">
         <ui.Symbol name={if m.dark then "sun" else "moon"} effect="swap" trigger={if m.dark then 1 else 0} size="sm" />
@@ -350,7 +355,7 @@ fn habits(m) = <Panel title="Habits" aside={<span class="text-xs text-muted">Thi
         <div class="min-w-0 flex-1">
           <p class={["truncate text-sm font-medium", if done then "text-fg" else "text-fg/80"]}>{h.name}</p>
           <div class="mt-1.5 flex gap-1" aria-hidden>
-            {range(0, 7).map((i) => <span key="d{i}" class={["h-1.5 flex-1 rounded-full transition", if h.week[i] then "bg-accent" else if i > m.today then "bg-surface-3/50" else "bg-surface-3", if i == m.today then "ring-1 ring-accent/50 ring-offset-1 ring-offset-surface" else missing]} />)}
+            {range(0, 7).map((i) => <span key="d{i}" class={["h-1.5 flex-1 rounded-full transition", if h.week[i] then "bg-accent" else if i > m.today then "bg-surface-3/50" else "bg-surface-3", if i == m.today then "scale-y-150" else missing]} />)}
           </div>
         </div>
         <span class="w-10 text-right text-xs font-semibold tabular-nums text-muted" title="Streak">{streak(h, m.today)}d</span>
@@ -366,7 +371,7 @@ fn stats(m) = do {
     ["Focus today", "{m.minutes}", "min", "clock"],
     ["This week", "{week.sum() // 60}h {week.sum() % 60}", "min", "chart"],
     ["Done", "{done_count(m)}", if done_count(m) == 1 then "task" else "tasks", "check"],
-    ["Best streak", "{best}", "days", "star"],
+    ["Best streak", "{best}", if best == 1 then "day" else "days", "star"],
   ]
   <div class="grid grid-cols-2 gap-4 xl:grid-cols-4">
     {tiles.map((t) => <div key={t[0]} class="rounded-card bg-card p-card shadow-1 ring-1 ring-line">
@@ -406,7 +411,7 @@ fn card(it, col) = <div key={it.key} role="listitem" tabindex="0" layout click="
       {range(0, it.est).map((i) => <span key="e{i}" class="size-1.5 rounded-full bg-accent/50" />)}
     </span>
   </div>
-  <p class={["mt-2 text-sm font-medium leading-snug", if col == "done" then "text-muted line-through decoration-accent/50" else missing]}>{it.title}</p>
+  <p class={["mt-2 text-sm font-medium leading-snug break-words", if col == "done" then "text-muted line-through" else missing]}>{it.title}</p>
 </div>
 
 fn column(c) = <section key="col-{c.id}" aria-label={c.title} class="flex min-w-0 flex-col rounded-card bg-surface-2/60 p-3 ring-1 ring-line">
@@ -423,7 +428,7 @@ fn column(c) = <section key="col-{c.id}" aria-label={c.title} class="flex min-w-
 fn board(m) = <Panel title="Board" label="Board" aside={<span class="hidden text-xs text-muted sm:inline">Drag cards, or Alt + arrows</span>}>
   <form submit="add" class="mb-4 flex flex-wrap items-center gap-2">
     <input key="new-{m.focus}" input="draft" value={m.draft} placeholder="Add a task and press Enter" aria-label="New task" autocomplete="off" autofocus={m.focus > 0}
-      class="min-w-0 flex-1 rounded-full border-0 bg-surface-2 px-4 py-2 text-sm ring-1 ring-line transition placeholder:text-muted focus:bg-surface focus:outline-none focus:ring-2 focus:ring-focus" />
+      class="min-w-0 basis-full rounded-full border-0 bg-surface-2 px-4 sm:basis-0 sm:flex-1 py-2 text-sm ring-1 ring-line transition placeholder:text-muted focus:bg-surface focus:outline-none focus:ring-2 focus:ring-focus" />
     <div role="group" aria-label="Project" class="flex gap-1">
       {PROJECTS.map((p) => <button type="button" key={p.id} click="pick" value={p.id} aria-pressed={m.pick == p.id}
         class={["flex items-center gap-1.5 rounded-full px-3 py-2 text-xs font-medium ring-1 transition", if m.pick == p.id then "bg-surface text-fg ring-line-strong shadow-1" else "text-muted ring-transparent hover:text-fg"]}>
@@ -463,7 +468,7 @@ fn view(m) = <div keydown="key" shortcuts={KEYS} class="relative min-h-screen ov
   {header(m)}
   <div class="mx-auto max-w-7xl px-4 py-8 md:px-8">
     <div class="mb-8">
-      <p class="text-sm font-medium text-accent-text">{DAYS[m.today]}day, and {m.minutes} minutes in</p>
+      <p class="text-sm font-medium text-accent-text">{WEEKDAYS[m.today]}, and {m.minutes} minutes in</p>
       <h1 class="mt-1 text-4xl font-bold tracking-tight md:text-5xl">Make it a good one.</h1>
     </div>
     <div class="grid gap-6 lg:grid-cols-[22rem_1fr]">
