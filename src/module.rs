@@ -828,9 +828,21 @@ impl Loader {
                                 // shipped and `clamp` simply needs no import. The
                                 // diagnostic was true and still produced a false
                                 // negative, so it now says where the name really lives.
+                                // Every name that is not exported, at once: fixing nine of them
+                                // one run at a time is eight runs too many.
+                                let missing_all: Vec<&String> = names
+                                    .iter()
+                                    .filter(|m| !self.modules[dep_idx].exports.contains(*m) && !crate::registry::is_builtin_name(m))
+                                    .collect();
                                 let hint = if crate::registry::is_builtin_name(n) {
                                     format!(
                                         "`{n}` is a builtin — it is already available everywhere, with no import."
+                                    )
+                                } else if missing_all.len() > 1 {
+                                    format!(
+                                        "none of {} is exported: write `export fn` for each in that module (a test file importing \
+                                         an app's functions needs them exported).",
+                                        missing_all.iter().map(|m| format!("`{m}`")).collect::<Vec<_>>().join(", ")
                                     )
                                 } else {
                                     format!(

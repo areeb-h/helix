@@ -349,6 +349,21 @@ pub static SYNTAX: &[SyntaxDoc] = &[
                 change, input, animation, animate, transition, enter, exit, timer, interval, timeout, delay.",
     },
     SyntaxDoc {
+        name: "test",
+        form: "fn test_parses() = assert_eq(parse(\"a=1\").a, 1)",
+        doc: "Tests: `*_test.helix` files and `## >>>` doc examples, run by `helix test` (add `--engines` to check all three).",
+        example: "assert_eq(1 + 1, 2)\nprint(\"ok\")",
+        example_out: "ok",
+        notes: "A TEST FILE is any `*_test.helix`: its top level runs, `assert`, `assert_eq`, `assert_close` \
+                and `assert_error` check things, and a file that asserts nothing fails. Each `fn test_…()` it \
+                defines and does not call runs too, as a test of its own. To test an app's functions, mark them \
+                `export fn` and `import app.{name, other}` in the test file. A DOC EXAMPLE is a `## >>>` line \
+                above a function; the `##` lines after it, up to an empty `##` line, are what it must \
+                print (so put a bare `##` line before more prose). A file with `fn main` is fine: its main does \
+                not run for its doc examples. `helix test --json` gives one document of results. \
+                Keywords: test, tests, unit test, testing, assert, doctest, doc test, doc example, pytest, spec, check.",
+    },
+    SyntaxDoc {
         name: "main",
         form: "fn main(seq: String, threads: Int = 1) = ...",
         doc: "If a program defines `fn main`, its parameters ARE the command line.",

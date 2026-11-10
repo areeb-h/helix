@@ -2126,6 +2126,20 @@ Every prop a view can carry: the events it sends to `update`, keys, motion, gest
 <button data-click="save" data-value="7" data-value-type="number">Save</button>
 ```
 
+### `test`
+
+Tests: `*_test.helix` files and `## >>>` doc examples, run by `helix test` (add `--engines` to check all three).
+
+`fn test_parses() = assert_eq(parse("a=1").a, 1)`
+
+**Note:** A TEST FILE is any `*_test.helix`: its top level runs, `assert`, `assert_eq`, `assert_close` and `assert_error` check things, and a file that asserts nothing fails. Each `fn test_…()` it defines and does not call runs too, as a test of its own. To test an app's functions, mark them `export fn` and `import app.{name, other}` in the test file. A DOC EXAMPLE is a `## >>>` line above a function; the `##` lines after it, up to a line that is not `##`, are what it must print (so leave a blank line before more prose). A file with `fn main` is fine: its main does not run for its doc examples. `helix test --json` gives one document of results. Keywords: test, tests, unit test, testing, assert, doctest, doc test, doc example, pytest, spec, check.
+
+```
+>>> assert_eq(1 + 1, 2)
+>>> print("ok")
+ok
+```
+
 ### `main`
 
 If a program defines `fn main`, its parameters ARE the command line.

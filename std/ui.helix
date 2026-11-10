@@ -138,6 +138,9 @@ ICONS = {
 }
 
 export fn icon_names() = ICONS.keys()
+# One of the library's icons by name (`ui.icon_names()` lists them: home, search, plus, close,
+# check, star, heart, trash, pen, doc, folder, clock, bell, settings, user, sun, moon, …). `size`
+# is xs, sm, md or lg; give `label` when the icon alone carries meaning.
 export fn icon(name, size = "md", label = missing) = do {
   paths = ICONS.get(name) ?? raise("`{name}` is not one of std.ui's icons", "`ui.icon_names()` lists them.")
   el("svg", {class: "ic {size}", role: if label.is_missing() then missing else "img", aria: {hidden: if label.is_missing() then true else missing, label: label},
@@ -229,7 +232,12 @@ export fn slider(msg, lo, hi, value, label = missing, step = 1) = do {
 
 # One choice of several, as radio buttons: arrow keys move and choose, Tab enters and leaves.
 # `options` is `[[value, caption], …]`.
-export fn radio_group(id, label, value, options, msg) = el("fieldset", {class: "radios", attrs: {id: id}}, [el("legend", {class: "field-label"}, [text(label)])].concat(options.map((o) =>
+# An option of a list component: `[value, caption]`, or a plain value that is its own caption
+# (`["Week", "Month"]`). A string used to be indexed as if it were a pair, and rendered as its
+# letters with no error.
+fn opt(o) = if type_of(o) == "Array" or type_of(o) == "Tuple" then [o[0], o[1]] else [o, "{o}"]
+
+export fn radio_group(id, label, value, options0, msg) = el("fieldset", {class: "radios", attrs: {id: id}}, [el("legend", {class: "field-label"}, [text(label)])].concat(options0.map(opt).map((o) =>
   el("label", {class: "check"}, [
     el("input", {change: msg, attrs: {type: "radio", name: id, value: "{o[0]}", checked: o[0] == value}}, []),
     el("span", {class: "box round", aria: {hidden: true}}, []),
@@ -239,7 +247,8 @@ export fn radio_group(id, label, value, options, msg) = el("fieldset", {class: "
 # A segmented control: one of a few choices, side by side, the chosen one raised. A radio
 # group: arrow keys, Home and End move and choose; only the chosen one is in the Tab order.
 # The selection glides between options (`share`). Clicking sends `{msg, value: <value>}`.
-export fn segmented(id, label, value, options, msg, size = "md") = el("div", {id: id, class: "segmented {size}", role: "radiogroup", aria: {label: label}}, options.map((o) => do {
+# One of a few choices, as a row of buttons. `options` are `[value, caption]` pairs or plain values.
+export fn segmented(id, label, value, options, msg, size = "md") = el("div", {id: id, class: "segmented {size}", role: "radiogroup", aria: {label: label}}, options.map(opt).map((o) => do {
   on = o[0] == value
   el("button", {class: if on then "seg on" else "seg", role: "radio", click: msg, value: "{o[0]}", aria: {checked: on}, attrs: {type: "button", tabindex: if on then "0" else "-1"}}, present([
     if on then el("span", {class: "seg-thumb", share: "{id}-thumb", aria: {hidden: true}}, []) else missing,
@@ -247,8 +256,8 @@ export fn segmented(id, label, value, options, msg, size = "md") = el("div", {id
   ]))
 }))
 
-# Filter chips: one of a few, each a toggle button. `options` is `[[value, caption], …]`.
-export fn chips(id, label, value, options, msg) = el("div", {id: id, class: "chips", role: "group", aria: {label: label}}, options.map((o) => do {
+# Filter chips: one of a few, each a toggle button. `options` are `[value, caption]` pairs or plain values.
+export fn chips(id, label, value, options, msg) = el("div", {id: id, class: "chips", role: "group", aria: {label: label}}, options.map(opt).map((o) => do {
   on = o[0] == value
   el("button", {class: if on then "chip on" else "chip", click: msg, value: "{o[0]}", aria: {pressed: on}, attrs: {type: "button"}}, present([if on then icon("check", "xs") else missing, text(o[1])]))
 }))
@@ -274,13 +283,17 @@ export fn kbd(keys) = el("kbd", {class: "kbd"}, [text(keys)])
 # reloads the page. Fields are named by their ids.
 export fn form(submit, children) = el("form", {class: "form", submit: submit, attrs: {novalidate: true}}, children)
 export fn submit_button(caption, variant = "primary") = el("button", {class: "btn {variant_class(variant)}", attrs: {type: "submit"}}, [text(caption)])
-fn variant_class(v) = if v == "outline" then "outlined" else v
+fn variant_class(v) = if not ["default", "primary", "tonal", "outline", "ghost", "danger"].contains(v) then raise("a button's `variant` is default, primary, tonal, outline, ghost or danger — not \"{v}\"", "e.g. `variant: \"danger\"`.") else if v == "outline" then "outlined" else v
 
 # Validators: each is a function from a value to missing (fine) or a message.
 export fn required(message) = (v) => if v.is_missing() or "{v}".trim() == "" then message else missing
 export fn min_length(n, message) = (v) => if "{v}".trim().count() < n then message else missing
 export fn max_length(n, message) = (v) => if "{v}".count() > n then message else missing
 export fn pattern(regex, message) = (v) => if "{v}".re_match(regex) then missing else message
+# The first message from `rules` that `value` fails, or `missing` when it passes them all:
+# `ui.check(m.email, [ui.required("Enter an email."), ui.pattern("""^[^@]+@[^@]+$""", "That is not an email.")])`.
+# Give the result to a field's `error`. The rules are `required`, `min_length`, `max_length`,
+# `pattern`, or any function from a value to `missing` or a message.
 export fn check(value, rules) = rules.reduce(missing, (err, rule) => if err.is_missing() then rule(value) else err)
 
 # --- Feedback. ---------------------------------------------------------------------------
@@ -3403,6 +3416,12 @@ fn adopt(spec, kept) = if kept.is_missing() then spec.init else do {
   }
 }
 
+# Run an app: `spec` is a record — `title`, `init` (the first model), `update: (model, event) =>
+# model`, `view: (model) => tree`, and optionally `theme: (m) => "dark" | "light"`, `design:` (a
+# `ui.design(…)`, or a function of the model returning one), `subscriptions: (m) => [ui.every(ms,
+# msg), ui.after(ms, msg)]`, `style:` (extra CSS), `port` (8080; the next free one if taken),
+# `open: true` (open the browser), `window: true` (a native window where the build has one). It
+# prints its link and serves until stopped. Test it with `ui.replay(spec, events)`.
 export fn app(spec) = do {
   wanted = if spec.get("port").is_missing() then 8080 else spec.port
   bound = listen_from(wanted, wanted, 20)
@@ -3442,9 +3461,17 @@ fn listen_from(first, port, tries) = do {
 # Replay a list of events through `update` and return every screen as HTML — the property a
 # model–update–view app buys: its UI is a pure function of its event log, testable without a
 # browser, and the same on every engine.
+# Every screen of an app, as HTML: `update` applied to each event in turn, and the view of the
+# model AFTER each one (one screen per event; `init` alone is not a screen). Timers do not run in
+# a replay: send their messages as events (`{msg: "tick", value: 100.0}`).
 export fn replay(spec, events) = range(0, events.count()).scan(spec.init, (m, i) => do {
   # Which scripted event failed, and what it was: a replay of fifty events that says only
   # "index 3 is out of bounds" leaves the reader to bisect the script.
+  # Said first, on stderr; then `update` runs again WITHOUT `try`, so the error is the original
+  # one, at the line in the app that raised it (re-raising it from here pointed into this file).
   r = try (spec.update)(m, events[i])
-  if r.ok then r.value else raise("while handling event #{i + 1} of the replay, {events[i]}: {r.error}", "it is number {i + 1} in the list given to `ui.replay`, and the error came from `update`.")
+  if r.ok then r.value else do {
+    logged = elog("ui.replay: event #{i + 1} of {events.count()} failed in `update`: {events[i]}")
+    (spec.update)(m, events[i])
+  }
 }).map((m) => render((spec.view)(m)))

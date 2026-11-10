@@ -125,13 +125,17 @@ cmp a.out b.out && cmp a.out c.out
   `helix check` refuses that), a Windows path, or any text with braces or backslashes.
 - Strings have no `+`: use interpolation `"{a}{b}"` or `parts.join("")`. Both are linear.
 - `{ }` in a string is interpolation; a literal brace is `{{`.
+- **`/` always gives a Float**: `7 / 2` is `3.5` and `10 / 2` is `5.0`, so a score printed as
+  `"{right / total}"` shows `0.5`. `//` is integer division (`7 // 2` is `3`) and `%` the
+  remainder; `round(x, 1)` or `"{x:.1f}"` formats a Float.
 - `try` binds tighter than operators: `try (a + b)`, never `try a + b`.
 - One binding per line; `do { }` separates statements by newline, never `;`.
 - `fn` is item-level only — inside `do { }` bind a lambda: `f = (x) => …`.
 - A function value in a record field is called parenthesized: `(rec.f)(x)`.
 - Imports are `import lib.stats` (for `lib/stats.helix`), `import lib.stats as st`, or
   `import lib.stats.{mean, sd}` to bring names in unqualified. Not `use`, not
-  `from … import …`. **`import std.ui`** is built in (bound as `ui`): the app library —
+  `from … import …`. **Only `export fn` / `export` names can be imported**: mark what a
+  test file or another module needs (`export fn total(xs) = …`). **`import std.ui`** is built in (bound as `ui`): the app library —
   `helix describe app` for the whole surface, `examples/apps/gallery.helix` for every component.
 - **`mut` is top-level only, and this is a design question, not a spelling one.** A
   function body evolves state by *rebinding* — `do { n = 0` / `n = n + 1` / `n }`, each
@@ -153,9 +157,10 @@ cmp a.out b.out && cmp a.out c.out
 
 ## Footguns — wrong answers, not errors
 
-1. **Filtering on `missing` finds nothing, silently.** `where(@v == missing)` returns
-   0 rows because `missing == missing` is `missing`. The keep-non-missing idiom is
-   `where(@v == @v)`; `drop_missing` (on Array and DataFrame) is the explicit form.
+1. **`missing` never equals anything, itself included** (`missing == missing` is `missing`).
+   Comparing against the literal, `x == missing`, is refused with the fix: `x.is_missing()`,
+   `where(@v.is_missing())`, or `drop_missing` (on Array and DataFrame). A *field* that may be
+   missing still compares as missing, so give it a default first: `(m.plan ?? "") == "pro"`.
 2. **i64 arithmetic wraps silently** — `9223372036854775807 + 1` is min-i64, exit 0.
    Deliberate; see `docs/integer-semantics.md`.
 3. **`sum()` and its `reduce` spelling diverge at the i64 edge**: `sum()` widens to

@@ -122,13 +122,23 @@ pub fn functions() -> Vec<UiFn> {
         }
         let Some(end) = end else { continue };
         let params = rest[open + 1..end].to_string();
-        // The comment block directly above (a blank line ends it).
+        // The comment block directly above — or above one blank line, where a block describes
+        // a section of components (`# Variants: …`, then a blank, then `export fn button`).
+        // A `--- Section ---` rule is a heading, not the doc.
         let mut doc_lines = Vec::new();
         let mut k = i;
+        if k > 1 && lines[k - 1].trim().is_empty() && lines[k - 2].trim_start().starts_with('#') {
+            k -= 1;
+        }
         while k > 0 {
             let l = lines[k - 1].trim();
             match l.strip_prefix('#') {
-                Some(c) if !l.starts_with("#[") => doc_lines.push(c.trim().to_string()),
+                Some(c) if !l.starts_with("#[") => {
+                    let c = c.trim();
+                    if !c.starts_with("---") {
+                        doc_lines.push(c.to_string());
+                    }
+                }
                 _ => break,
             }
             k -= 1;

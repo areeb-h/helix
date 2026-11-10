@@ -582,11 +582,23 @@ fn cli_doc(args: &[String]) -> ExitCode {
                     }
                     if let Some(b) = registry::lookup(query) {
                         let eff = capability::effect_of(b.path).label();
-                        println!(
-                            "`{query}` is a free function (effect: {eff}, category: {}) — \
-                             see `helix doc builtins`",
-                            registry::category_of(b.path)
-                        );
+                        // The entry itself, not a pointer to a list that does not have it.
+                        match crate::docs::builtin_doc(b.path) {
+                            Some(d) => {
+                                println!("`{}` — free function (effect: {eff}): {}", d.sig, d.doc);
+                                if !d.example.is_empty() {
+                                    println!("  e.g. `{}` => {}", d.example, if d.example_out.is_empty() { "…" } else { d.example_out });
+                                }
+                                if !d.notes.is_empty() {
+                                    println!("  NOTE: {}", d.notes);
+                                }
+                            }
+                            None => println!(
+                                "`{query}` is a free function (effect: {eff}, category: {}) — \
+                                 see `helix doc builtins`",
+                                registry::category_of(b.path)
+                            ),
+                        }
                         found = true;
                     }
                     if found {
@@ -595,6 +607,23 @@ fn cli_doc(args: &[String]) -> ExitCode {
                     // Unknown everywhere: the same suggester every "is not defined"
                     // error routes through (foreign aliases first, then one-edit typos),
                     // then the original unknown-type wording.
+                    // `ui.table`: a component name that is not one — name the near ones.
+                    if let Some(want) = query.strip_prefix("ui.") {
+                        let all = crate::uidocs::functions();
+                        let names: Vec<&str> = all.iter().map(|f| f.name.as_str()).collect();
+                        let mut near: Vec<String> = all.iter().filter(|f| f.name.contains(want) || want.contains(f.name.as_str())).map(|f| format!("ui.{}", f.name)).collect();
+                        if let Some(n) = crate::error::suggest(want, &names) {
+                            near.insert(0, format!("ui.{n}"));
+                        }
+                        near.dedup();
+                        eprintln!("error: std.ui has no `{want}`");
+                        if near.is_empty() {
+                            eprintln!("help: `helix doc ui` lists every component; `helix search <what it does>` finds one.");
+                        } else {
+                            eprintln!("help: did you mean {}? `helix doc ui` lists every component.", near.iter().take(4).map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", "));
+                        }
+                        return ExitCode::FAILURE;
+                    }
                     let known: Vec<&str> = tables.iter().map(|(t, _)| *t).collect();
                     eprintln!(
                         "error: unknown type `{}`. Try one of: {} (or `builtins`).",
@@ -2887,10 +2916,14 @@ fn run_test_roots(
                                     e["output"] = serde_json::Value::String(file_output.clone());
                                 }
                                 ev.push(e);
-                            } else if engines {
-                                println!("  ok    {shown}   (3 engines agree)");
                             } else {
-                                println!("  ok    {shown}");
+                                // With `fn test_…` below it, this line is the file's own top level.
+                                let top = if test_fns.is_empty() { "" } else { " (top level)" };
+                                if engines {
+                                    println!("  ok    {shown}{top}   (3 engines agree)");
+                                } else {
+                                    println!("  ok    {shown}{top}");
+                                }
                             }
                         }
                     }
@@ -3090,8 +3123,24 @@ fn lint_source(shown: &str, src: &str) -> Vec<String> {
                 // (an unknown class produces nothing, as in Tailwind): `bg-blu-500`, or a
                 // utility Helix does not have.
                 if let Expr::Record(fields) = e
-                    && let Some((_, Expr::Str(classes))) = fields.iter().find(|(k, _)| k == "class")
+                    && let Some((_, class_expr)) = fields.iter().find(|(k, _)| k == "class")
                 {
+                    // Every literal the class could be: a string, a list's items, either branch
+                    // of an `if` (`class={["row", if on then "bg-accent" else "bg-blu-500"]}`).
+                    fn literals(e: &Expr, out: &mut Vec<String>) {
+                        match e {
+                            Expr::Str(s) => out.push(s.clone()),
+                            Expr::Array(xs) => xs.iter().for_each(|x| literals(x, out)),
+                            Expr::If { then_branch, else_branch, .. } => {
+                                literals(then_branch, out);
+                                literals(else_branch, out);
+                            }
+                            _ => {}
+                        }
+                    }
+                    let mut strs = Vec::new();
+                    literals(class_expr, &mut strs);
+                    let classes = strs.join(" ");
                     for c in classes.split_whitespace() {
                         if crate::style::looks_like_utility(c) && !crate::style::is_utility(c) {
                             notes.push((0, format!(
@@ -3404,6 +3453,16 @@ fn run_doc_examples(
                         println!(
                             "        note: a doc example is ONE line — there is no `...` \
                              continuation. Write the call on a single line."
+                        );
+                    }
+                    // The expectation runs on past what was printed, and starts with it:
+                    // the `##` prose after the example was read as more expected output.
+                    let (w, g) = (norm(want.trim_end()), norm(got));
+                    if w.lines().count() > g.lines().count() && w.starts_with(&g) {
+                        println!(
+                            "        note: the expected output is every `##` line after the \
+                             `>>>`, up to an empty `##` line. To write more prose below an \
+                             example, put a line that is just `##` after its output."
                         );
                     }
                 }

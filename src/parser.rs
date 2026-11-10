@@ -1072,6 +1072,31 @@ const MARKUP_VALUE_TAGS: [&str; 5] = ["input", "option", "progress", "meter", "d
 
 /// `TodoItem` → `todo_item`: a component tag is written as React writes it, and names the
 /// Helix function as Helix writes it.
+/// Whether a hole's source has a `:` outside every bracket and string — a format spec
+/// (`pct:.1f`), since a record's or a call's colons are inside brackets.
+fn top_level_colon(src: &str) -> bool {
+    let (mut depth, mut quote) = (0i32, None::<char>);
+    let mut prev = ' ';
+    for c in src.chars() {
+        match quote {
+            Some(q) => {
+                if c == q && prev != '\\' {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '"' | '\'' => quote = Some(c),
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                ':' if depth == 0 => return true,
+                _ => {}
+            },
+        }
+        prev = c;
+    }
+    false
+}
+
 /// `todo_item` → `TodoItem`: how a function is written as a tag.
 fn pascal_case(name: &str) -> String {
     name.split('_').map(|w| {
@@ -1613,11 +1638,22 @@ impl Parser {
             }
             other => {
                 let (l, c) = self.pos();
-                Err(HelixError::new(
-                    format!("expected a name {}, found {}", ctx, other.describe()),
-                    l,
-                    c,
-                ))
+                let e = HelixError::new(format!("expected a name {}, found {}", ctx, other.describe()), l, c);
+                // A keyword where a name goes: say it is one, and which they are.
+                let kw = matches!(
+                    other,
+                    Tok::Mut | Tok::Fn | Tok::Import | Tok::And | Tok::Or | Tok::Not | Tok::If | Tok::Then | Tok::Else
+                        | Tok::Let | Tok::In | Tok::Missing | Tok::Try | Tok::Match | Tok::Do | Tok::True | Tok::False
+                );
+                Err(if kw {
+                    e.hint(format!(
+                        "{} is a reserved word, so it cannot be a name — pick another (`then_at`, `when`). The reserved \
+                         words are: and, do, else, false, fn, if, import, in, let, match, missing, mut, not, or, then, true, try.",
+                        other.describe()
+                    ))
+                } else {
+                    e
+                })
             }
         }
     }
@@ -3575,6 +3611,12 @@ impl Parser {
                 ("children".into(), Expr::Array(vec![])),
                 ("text".into(), Expr::Str(t.clone())),
             ])),
+            // `{pct:.1f}` among the children formats, as it does in a string: such a hole is the
+            // interpolated string `"{pct:.1f}"`, so the spec means exactly what it means there.
+            MNode::Hole(src) if top_level_colon(&src.text) => {
+                let as_string = crate::markup::Src { text: format!("'''{{{}}}'''", src.text), line: src.line, col: src.col.saturating_sub(4).max(1) };
+                self.markup_src(&as_string)
+            }
             MNode::Hole(src) => self.markup_src(src),
             MNode::Fragment { children, .. } => Ok(Expr::Array(self.markup_children(children)?)),
             MNode::Element { tag, attrs, children, line, col } => {

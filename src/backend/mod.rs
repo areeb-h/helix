@@ -707,6 +707,23 @@ pub fn ast_to_colexpr(
             validate_scalar(&v, *line, *col)?;
             Ok(ColExpr::Lit(v))
         }
+        // A METHOD that computes a new value down a column (`@date.take(7)`, `@name.upper()`)
+        // is not a query form yet. Say which one, and the route that works today: map the
+        // rows and rebuild the frame.
+        Ast::Method { recv, name, line, col, .. } if matches!(**recv, Ast::Column { .. }) => {
+            let Ast::Column { name: c, .. } = &**recv else { unreachable!() };
+            Err(HelixError::new(
+                format!("`@{c}.{name}(…)` isn't supported inside a DataFrame query yet"),
+                *line,
+                *col,
+            )
+            .hint(format!(
+                "compute it row by row and rebuild the frame: \
+                 `df.records().map((r) => {{...r, new: r.{c}.{name}(…)}}).to_dataframe()`. A query takes \
+                 column names, literals, arithmetic, comparisons, `.is_missing()` and the \
+                 String tests `starts_with`, `ends_with`, `contains` and `re_match`."
+            )))
+        }
         other => {
             let (line, col) = other.position();
             Err(HelixError::new(

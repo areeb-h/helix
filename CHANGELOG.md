@@ -63,6 +63,23 @@
       shows a `missing` default as "(optional)".
     - ADR 0062 records the study and the rule it set: make the guess work, else refuse it with
       the fix, else note it.
+  - **Second round** (three new agents: a quiz, an expense tracker, a notes app):
+    - `ui.Segmented`, `ui.RadioGroup` and `ui.Chips` take plain strings (`options={["a", "b"]}`)
+      as well as `(value, label)` pairs. Plain strings used to render as letters.
+    - `sort_by` takes a list key, `sort_by([it.done, -it.due])`, to sort by several things.
+    - `{price:.2f}` inside markup text formats the value, as it does in a string.
+    - A failing replay points at the line in your `update`, not into the library.
+    - An unknown `variant` on a component is an error that lists the variants.
+    - `helix doc len` prints the entry; `helix doc ui.table` suggests `ui.data_table`.
+    - A not-exported import names every missing name, not only the first.
+    - A keyword used as a name (`fn f(then)`) says it is reserved.
+    - `helix check --lint` also reads class names in lists and in `if` branches.
+    - `helix test` labels a test file's top level "(top level)", apart from its `test_…`
+      functions, and a doc example whose expected output swallowed the prose below it says
+      to end the output with a bare `##` line.
+    - `helix describe test` (and `helix search doctest`) explains test files, `fn test_…` and
+      doc examples. `ui.app`, `ui.replay`, `ui.check` and `ui.icon` are documented.
+    - `AGENTS.md`: `/` always gives a Float, and only `export`ed names can be imported.
 
 - **Orbit (`examples/apps/orbit.helix`)**, an app written only in markup and utility classes:
   - a focus timer with a live ring;

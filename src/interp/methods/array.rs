@@ -1561,6 +1561,35 @@ pub(crate) fn array_method(
                     (Value::Bytes(x), Value::Bytes(y)) => x.cmp(y),
                     _ => std::cmp::Ordering::Equal,
                 });
+            } else if items.iter().all(|v| matches!(v, Value::Array(_) | Value::Tuple(_)))
+                && items.iter().all(|v| key_parts(v).is_some_and(|p| p.iter().all(|x| x.as_f64().is_some() || matches!(x, Value::Str(_) | Value::Bool(_)))))
+            {
+                // SEVERAL KEYS: a list key compares part by part, as Python's tuples do —
+                // `xs.sort_by([if n.pinned then 0 else 1, -n.edited])` puts pinned first, newest
+                // first within each. The sort stays stable.
+                let keys: Vec<Vec<Value>> = items.iter().map(|v| key_parts(v).unwrap_or_default()).collect();
+                let mut bad = false;
+                idx.sort_by(|&a, &b| {
+                    for (x, y) in keys[a as usize].iter().zip(keys[b as usize].iter()) {
+                        let o = match (x, y) {
+                            (Value::Str(p), Value::Str(q)) => p.cmp(q),
+                            (Value::Bool(p), Value::Bool(q)) => p.cmp(q),
+                            _ if x.as_f64().is_some() && y.as_f64().is_some() => numeric_cmp(x, y),
+                            _ => {
+                                bad = true;
+                                std::cmp::Ordering::Equal
+                            }
+                        };
+                        if o != std::cmp::Ordering::Equal {
+                            return o;
+                        }
+                    }
+                    keys[a as usize].len().cmp(&keys[b as usize].len())
+                });
+                if bad {
+                    return Err(HelixError::new("sort keys disagree in type at the same position", line, col)
+                        .hint("each part of a list key must be the same kind across items: numbers with numbers, strings with strings."));
+                }
             } else if items.iter().any(|v| matches!(v, Value::Missing)) {
                 // `sort`'s wording and hint verbatim — one concept, one message.
                 return Err(HelixError::new(
@@ -1570,11 +1599,14 @@ pub(crate) fn array_method(
                 )
                 .hint("drop them explicitly first: `xs.drop_missing().sort()`."));
             } else {
+                // Said as what the person wrote — `sort_by` is this underneath, and a message
+                // naming `argsort` named something they never called.
                 return Err(HelixError::new(
-                    "`argsort` needs an array of all numbers, all strings, all DNA, or all Bytes",
+                    "sort keys must be all numbers, all strings, all DNA, all Bytes, or lists of numbers and strings",
                     line,
                     col,
-                ));
+                )
+                .hint("for several keys return a list, compared in order: `xs.sort_by([if it.pinned then 0 else 1, -it.edited])`."));
             }
             Ok(Value::int_array(idx))
         }
@@ -1826,3 +1858,11 @@ pub(crate) fn value_histogram(items: &[Value]) -> Vec<(Value, i64)> {
     counts
 }
 
+/// A list key's parts (`sort_by` returning `[a, b]` or `(a, b)`).
+fn key_parts(v: &Value) -> Option<Vec<Value>> {
+    match v {
+        Value::Array(a) => Some(a.to_values().to_vec()),
+        Value::Tuple(t) => Some(t.as_ref().clone()),
+        _ => None,
+    }
+}
