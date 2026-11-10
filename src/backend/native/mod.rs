@@ -373,8 +373,8 @@ impl DataHandle for NativeFrame {
         verbs::with_columns(self, cols, line, col).map(|f| Rc::new(f) as Df)
     }
 
-    fn sort(&self, names: &[String], line: usize, col: usize) -> Result<Df, HelixError> {
-        sort::sort(self, names, line, col).map(|f| Rc::new(f) as Df)
+    fn sort(&self, names: &[String], desc: &[bool], line: usize, col: usize) -> Result<Df, HelixError> {
+        sort::sort(self, names, desc, line, col).map(|f| Rc::new(f) as Df)
     }
 
     fn join(

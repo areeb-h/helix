@@ -325,9 +325,19 @@ pub(super) fn a_assert_eq(name: &str, args: Vec<Value>, line: usize, col: usize)
         if values_equal(&args[0], &args[1]) {
             Ok(Value::Unit)
         } else {
-            let a = crate::value::display_value(&args[0], line, col)?;
-            let b = crate::value::display_value(&args[1], line, col)?;
-            Err(HelixError::new(format!("assertion failed: {a} != {b}"), line, col))
+            // Shown as a list shows its items, so text is quoted: `"1" != 1`, not `1 != 1`. When
+            // the two still read alike, their types are what differs, so they are named.
+            let shown = |v: &Value| -> Result<String, HelixError> {
+                let s = crate::value::display_value(&Value::array(vec![v.clone()]), line, col)?;
+                Ok(s[1..s.len() - 1].to_string())
+            };
+            let (a, b) = (shown(&args[0])?, shown(&args[1])?);
+            let types = if a == b {
+                format!(" (a {} and a {})", args[0].type_name(), args[1].type_name())
+            } else {
+                String::new()
+            };
+            Err(HelixError::new(format!("assertion failed: {a} != {b}{types}"), line, col))
         }
     
 }

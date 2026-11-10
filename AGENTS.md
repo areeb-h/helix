@@ -45,6 +45,61 @@ actually make, **eleven named the exact fix** (`to_json(x)` answers "``to_json``
 method: `x.to_json()`"; a C-style body answers ``fn f(x) = x + 1``). Reading the error
 is usually faster than reading anything else, this file included.
 
+## Building an app (`import std.ui`)
+
+Ask the binary, not the examples: `helix doc ui` lists every component with its parameters,
+`helix doc ui.text_input` gives one in full (with the markup to write), `helix describe events`
+lists every event and prop, `helix describe markup` the markup rules. `helix search bar chart`
+finds components by what they do.
+
+```helix
+import std.ui
+
+fn update(m, e) = match e.msg {
+  "add" => {...m, items: m.items.concat([m.draft]), draft: ""},
+  "draft" => {...m, draft: e.value ?? ""},
+  "remove" => {...m, items: m.items.filter((x) => x != e.value)},
+  _ => m,
+}
+
+fn view(m) = <div class="mx-auto max-w-md space-y-4 p-6">
+  <form submit="add" class="flex gap-2">
+    <input input="draft" value={m.draft} aria-label="New item" class="flex-1 rounded-control bg-surface-2 px-3 py-2" />
+    <ui.Button caption="Add" msg="add" variant="primary" />
+  </form>
+  {if m.items.count() == 0 then <p class="text-muted">Nothing yet.</p>}
+  <ul>{m.items.map(<li key={it} class="flex justify-between">{it}<button click="remove" value={it} aria-label="Remove {it}">×</button></li>)}</ul>
+</div>
+
+SESSION = [{msg: "draft", value: "milk"}, {msg: "add", value: missing}]
+spec = {title: "List", init: {items: [], draft: ""}, update: update, view: view}
+fn main(replay: Bool = false, port: Int = 8080) = if replay then ui.replay(spec, SESSION).map((h) => print(h)) else ui.app({...spec, port: port})
+```
+
+- **The loop:** `helix check app.helix` → `helix run app.helix --replay` on all three engines
+  (outputs identical) → `helix run --watch app.helix --open` to look at it. A replay prints one
+  screen per event, the state AFTER it; an error names the event that caused it.
+- **Markup:** a lowercase tag is an element; a capitalised one calls a function by its parameter
+  names (`<TodoItem done />` calls `todo_item(done: true)`; children are `children`); a library's
+  is `<ui.TextInput …/>`. Attributes are HTML's lower-case names (`class`, `for`, `tabindex`),
+  `aria-*`, and Helix's props. `class:done={c}` adds a class when `c`; `{if c then <X />}` needs
+  no `else`; `{xs.map(<li>{it}</li>)}` loops. Mistyped props (`clik`), React names (`onClick`,
+  `className`, `htmlFor`) and events Helix does not have (`blur`, `onMouseEnter`) are errors that
+  name the fix.
+- **Events** carry a message, not a handler: `click="save" value={item.id}` sends `{msg: "save",
+  value: item.id}` to `update`, with the value's own type (a number stays a number). `input` is
+  every keystroke (React's `onChange`); `submit` sends the form's named fields; `dismiss` is a
+  press outside or Escape; keys are `keydown="key" shortcuts="Enter Escape Ctrl+K"`. Timers:
+  `subscriptions: (m) => [ui.every(1000, "tick")]`, and `ui.after(800, "flip-back")` once.
+- **Styling** is Tailwind's class names (v4), generated as the view renders, plus the design's
+  tokens: `bg-accent`, `text-muted`, `bg-card`, `ring-line`, `rounded-card`, `p-card`,
+  `shadow-1`. Dark mode is `theme: (m) => if m.dark then "dark" else "light"` and the tokens
+  follow it. An unknown class renders nothing, silently — `helix check --lint` names the ones
+  that look like utilities but are not.
+- **Footguns:** a comparison with a `missing` field is `missing`, not `false` — give it a
+  default first, `(m.plan ?? "") == "pro"`. The runtime supplies the page's `<main>`; it steps
+  aside if your view's root is one. A busy port moves to the next free one, and says so.
+
 ## The correctness model
 
 One program, one answer, on three engines: the tree-walker (`HELIX_NOVM=1`), the

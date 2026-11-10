@@ -438,6 +438,16 @@ fn lex_trivia_from(src: &str, line0: usize, col0: usize) -> Result<Vec<Token>, H
                 }
             }
             ':' => single(Tok::Colon, &mut raw, line, start_col, &mut i, &mut col),
+            // `&&` and `||` are other languages' words for `and` and `or`. Said here, at the
+            // operator, rather than as "unexpected `&`" where the second one happens to land.
+            '&' if i + 1 < n && chars[i + 1] == '&' => {
+                return Err(HelixError::new("Helix writes `and`, not `&&`", line, col)
+                    .hint("`a and b`. In markup, `{if ok then <Badge />}` shows the badge only when `ok` (no `else` needed)."));
+            }
+            '|' if i + 1 < n && chars[i + 1] == '|' => {
+                return Err(HelixError::new("Helix writes `or`, not `||`", line, col)
+                    .hint("`a or b`. For a default when a value is `missing`, write `x ?? fallback`."));
+            }
             '|' => single(Tok::Pipe, &mut raw, line, start_col, &mut i, &mut col),
             '&' => single(Tok::Amp, &mut raw, line, start_col, &mut i, &mut col),
             '^' => single(Tok::Caret, &mut raw, line, start_col, &mut i, &mut col),
@@ -928,6 +938,14 @@ pub(crate) fn lex_string(
     // Name the delimiter the string actually opened with — reporting `"` for an
     // unterminated `'…'` sends the reader hunting for the wrong character.
     let d: String = std::iter::repeat_n(quote, delim).collect();
+    // A raw `"""…"""` whose text ENDS in a quote closes at the first three quotes, and the
+    // leftover quote opens this string: `"""say "hi""""`. Adding a quote does not help.
+    if quote == '"' && start >= 3 && chars[start - 3..start].iter().all(|c| *c == '"') {
+        return Err(HelixError::new("unterminated string literal", line, col).hint(
+            "a raw `\"\"\"…\"\"\"` string ends at the first three quotes, so text that ends in `\"` closes it early. \
+             End the text with something else (a space, then `.trim()`), or use an ordinary string with `\\\"`: `\"say \\\"hi\\\"\"`.",
+        ));
+    }
     Err(HelixError::new("unterminated string literal", line, col)
         .hint(format!("add a closing `{d}` to end the string.")))
 }

@@ -180,6 +180,21 @@ pub fn typo_distance(name: &str, cand: &str) -> Option<usize> {
 /// Ties break on the smallest name so the answer never depends on the order the
 /// caller collected its candidates (several arrive from hash maps) — the three
 /// engines must render byte-identical errors.
+/// For a file that is not there: a RELATIVE path is read from where `helix` was started, not
+/// from beside the program — which is how an app works in its own folder and breaks when
+/// launched from anywhere else.
+pub fn missing_file(path: &str, what: &str, line: usize, col: usize) -> HelixError {
+    let e = HelixError::new(format!("could not open {what}`{path}`: No such file or directory"), line, col);
+    if std::path::Path::new(path).is_relative() {
+        e.hint(format!(
+            "a relative path is read from the directory `helix` was started in, not the program's. \
+             For a file beside the program, write `source_path(\"{path}\")`."
+        ))
+    } else {
+        e
+    }
+}
+
 pub fn suggest(name: &str, candidates: &[&str]) -> Option<String> {
     let mut best: Option<(usize, &str)> = None;
     for c in candidates {

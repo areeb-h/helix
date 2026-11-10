@@ -5568,11 +5568,16 @@ fn helix_test_fails_a_file_that_asserts_nothing() {
         "fn test_reverse() = assert([1, 2].reverse() == [2, 1], \"reversed\")\n",
     )
     .unwrap();
+    // `fn test_…()` that nothing calls now RUNS, each as a test of its own (the agent study:
+    // pytest's and Go's habit, skipped in silence, was the commonest testing mistake).
+    let (out, err, code) = run(&["test", dir.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "stderr: {err}\nout: {out}");
+    assert!(out.contains("habit_test.helix › test_reverse"), "out:\n{out}");
+    // A file that truly asserts nothing still fails.
+    std::fs::write(dir.join("habit_test.helix"), "x = [1, 2].reverse()\n").unwrap();
     let (out, err, code) = run(&["test", dir.to_str().unwrap()], &[], "");
     assert_eq!(code, Some(1), "stderr: {err}\nout: {out}");
     assert!(out.contains("without asserting anything"), "out:\n{out}");
-    // The diagnostic names the actual mistake rather than a generic one.
-    assert!(out.contains("nothing calls them"), "out:\n{out}");
 
     // Calling it passes, and so does asserting at the top level.
     std::fs::write(
@@ -7680,11 +7685,10 @@ df = dataframe({g: ["a", "b", "c", "d"], v: [1.0, missing, 3.0, missing], w: [10
 print(df.where(@v.is_missing()).column("g"))
 print(df.where(not @v.is_missing()).count())
 print(df.drop_missing().column("g"))
-print(df.where(@v == missing).count())
 r = try df.drop_missing(@v)
 print(r.ok)
 "#;
-    let want = "[\"b\", \"d\"]\n2\n[\"a\"]\n0\nfalse\n";
+    let want = "[\"b\", \"d\"]\n2\n[\"a\"]\nfalse\n";
     for (name, env) in ENGINES {
         let (out, err, code) = run_source(src, env, &format!("missing_query_{name}"));
         assert_eq!(code, Some(0), "{name}: {err}");

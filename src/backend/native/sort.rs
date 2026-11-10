@@ -15,16 +15,19 @@ use super::NativeFrame;
 pub fn sort(
     frame: &NativeFrame,
     names: &[String],
+    desc: &[bool],
     line: usize,
     col: usize,
 ) -> Result<NativeFrame, HelixError> {
     let key_cols: Vec<&Col> =
         names.iter().map(|n| frame.col(n, line, col)).collect::<Result<_, _>>()?;
     let mut idx: Vec<usize> = (0..frame.len()).collect();
+    let descending = |k: usize| desc.get(k).copied().unwrap_or(false);
     // A single key sorts on the typed column directly — no Value per comparison.
     // Missing first, then the same orders `cell_cmp` uses (floats by total_cmp),
     // and `sort_by` is stable, so the bits match the generic path exactly.
-    if let [c] = key_cols.as_slice() {
+    // A descending key takes the comparator path below: the packed paths are ascending only.
+    if let ([c], false) = (key_cols.as_slice(), descending(0)) {
         match c {
             Col::I64 { vals, valid } => {
                 // Packed (valid, key, row): sorting owned tuples walks memory
@@ -76,8 +79,10 @@ pub fn sort(
         }
     }
     idx.sort_by(|&a, &b| {
-        for c in &key_cols {
-            let ord = cell_cmp(&c.get(a), &c.get(b));
+        for (k, c) in key_cols.iter().enumerate() {
+            // Descending is the ascending order reversed, whole: missing last, NaN first. The
+            // row-index permutation and a stable sort keep ties in input order either way.
+            let ord = if descending(k) { cell_cmp(&c.get(b), &c.get(a)) } else { cell_cmp(&c.get(a), &c.get(b)) };
             if ord != Ordering::Equal {
                 return ord;
             }

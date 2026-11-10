@@ -243,6 +243,15 @@ fn parse(v: &Value, line: usize, col: usize) -> Result<Node, HelixError> {
                 continue;
             }
             attrs.push((out.to_string(), t));
+            // A number or a Bool comes back from the page as itself, not as its text: `value={7}`
+            // reaches `update` as 7 in a browser, as it does in `ui.replay`.
+            if prop == "value" {
+                match v {
+                    Value::Int(_) | Value::Float(_) => attrs.push(("data-value-type".into(), "number".into())),
+                    Value::Bool(_) => attrs.push(("data-value-type".into(), "bool".into())),
+                    _ => {}
+                }
+            }
         }
     }
     // `aria` is a record of ARIA states and properties: `{label: "Close", expanded: false}` is

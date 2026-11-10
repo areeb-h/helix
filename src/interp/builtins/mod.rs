@@ -695,8 +695,15 @@ fn http_timeout_ms(req: &Value, line: usize, col: usize) -> Result<Option<u64>, 
 /// clean error rather than an allocator abort. Shared by `read_text` and `read_json`.
 fn read_text_file(path: &str, line: usize, col: usize) -> Result<String, HelixError> {
     let meta = std::fs::metadata(path).map_err(|e| {
-        HelixError::new(format!("could not read `{path}`: {e}"), line, col)
-            .hint("check the path exists and is readable.")
+        let hint = if e.kind() == std::io::ErrorKind::NotFound && std::path::Path::new(path).is_relative() {
+            format!(
+                "a relative path is read from the directory `helix` was started in, not the program's. \
+                 For a file beside the program, write `source_path(\"{path}\")`."
+            )
+        } else {
+            "check the path exists and is readable.".to_string()
+        };
+        HelixError::new(format!("could not read `{path}`: {e}"), line, col).hint(hint)
     })?;
     if meta.len() as usize > crate::interp::MAX_STRING_LEN {
         return Err(HelixError::new(

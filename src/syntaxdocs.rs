@@ -311,6 +311,43 @@ pub static SYNTAX: &[SyntaxDoc] = &[
                 Keywords: jsx, tsx, html, markup, element, tag, template, component, props, children, react, view.",
     },
     SyntaxDoc {
+        name: "events",
+        form: "<button click=\"save\" value={item.id}>",
+        doc: "Every prop a view can carry: the events it sends to `update`, keys, motion, gestures and focus.",
+        example: "print(view_html(<button click=\"save\" value={7}>Save</button>))",
+        example_out: "<button data-click=\"save\" data-value=\"7\" data-value-type=\"number\">Save</button>",
+        notes: "EVENTS (each names the message; `update` gets `{msg, value}`): `click` (with `value={…}` as \
+                its payload), `dblclick`, `contextmenu` (value `{value, x, y}`), `input` (every keystroke; \
+                value is the text, a number for `type=\"number\"`/`\"range\"`, a Bool for a checkbox), `change` (a \
+                committed field: checkbox, select, radio), `submit` (a `<form>`; value is a record of its \
+                named fields), `dismiss` (a press outside the node, or Escape: how to close a menu, cancel an \
+                edit, close a dialog), `scroll` (value is the offset in px). KEYS: `keydown=\"key\" \
+                shortcuts=\"Enter Escape Space ArrowUp ArrowDown Ctrl+K Alt+ArrowLeft /\"` sends the chord typed as \
+                `value`; a chord is modifiers (`Ctrl` — Command on a Mac counts —, `Alt`, `Shift` only for \
+                keys that print nothing) then the key: a letter in upper case (`S`, `Ctrl+K`), a printed \
+                character as itself (`/`, `?`), `Space`, `Enter`, `Escape`, `Tab`, `Backspace`, `Delete`, \
+                `ArrowUp`…, `Home`, `End`, `F2`. The nearest node with `keydown` listing the chord gets it; in \
+                a text field only Ctrl/Alt chords, Escape, Enter and the vertical arrows do; inside \
+                `role=\"tree\"`, `\"menu\"`, `\"tablist\"` or `\"radiogroup\"` the arrows, Home, End and Enter belong to \
+                the widget. There are NO focus, blur, hover, key-up or mouse-move events: use `dismiss`, \
+                `hover:` utilities and `ui.tooltip`. FOCUS: `autofocus` focuses a node when it appears \
+                (change its `key` to focus it again). MOTION: `enter=` and `exit=` play a preset when a node \
+                arrives or leaves — `fade`, `rise`, `pop`, `grow`, `sheet`, `push`, and the emphasis \
+                presets `bounce`, `wiggle`, `pulse`; `layout` animates a node to its new place; `share=\"name\"` \
+                morphs a node into the next one with the same name. A re-keyed node (`key=\"n{count}\"`) \
+                replays its `enter`. GESTURES: `drag=\"msg\"` (`drag_axis`, `drag_commit`), `reorder=\"msg\"` on a \
+                list of keyed children (`reorder_group` to trade between lists), `drop=\"msg\"`, `resize=\"msg\"`, \
+                `handle`. TIMERS: `subscriptions: (m) => [ui.every(1000, \"tick\")]` sends `{msg: \"tick\", value: \
+                <seconds since 1970>}` every second while the model asks for it; `ui.after(800, \"flip-back\")` \
+                is sent ONCE, 800 ms after the model first lists it (stop listing it and ask again to rerun \
+                it). A `value` reaches `update` as the type \
+                the view gave it — `value={7}` is 7, `value={true}` is true, text is text — in a browser as \
+                in `ui.replay`. \
+                Keywords: event, events, onclick, on click, handler, listener, dblclick, double click, keydown, \
+                key, keyboard, shortcut, shortcuts, hotkey, chord, blur, focus, hover, mouse, escape, submit, \
+                change, input, animation, animate, transition, enter, exit, timer, interval, timeout, delay.",
+    },
+    SyntaxDoc {
         name: "main",
         form: "fn main(seq: String, threads: Int = 1) = ...",
         doc: "If a program defines `fn main`, its parameters ARE the command line.",

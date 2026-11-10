@@ -3172,10 +3172,10 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
         DocEntry {
             name: "sort",
             sig: "sort(@col, ...)",
-            doc: "Rows sorted ascending by the named column(s).",
-            example: "dataframe({a: [2, 1], b: [3.0, 4.5]}).sort(@a).column(\"a\")",
-            example_out: "[1, 2]",
-            notes: "Missing rows sort FIRST here — unlike Array sort, which refuses missing. A BINDING IN SCOPE WINS OVER A COLUMN OF THE SAME NAME (ADR 0028), and its String value names the column: `k = \"price\"` then `df.sort(k)` uses `price`. That is also how a column is named at RUN TIME, which this position had no way to express before. Write `@k` for the column literally called `k`; a String literal works too (`df.sort(\"price\")`). Until 0.8.1 a bare name here was taken literally, so a library's own parameter names were reserved words in data it had never seen — `fn top(frame, key) = frame.select(key)` returned the frame's `key` column and ignored the argument, with no error. Keywords: column name, binding, shadow, runtime, dynamic, scope, ADR 0028.",
+            doc: "Rows sorted by the named column(s), ascending; `-@col` (or `\"-col\"`) sorts that column descending.",
+            example: "dataframe({a: [2, 1, 3], b: [3.0, 4.5, 1.0]}).sort(-@a).column(\"a\")",
+            example_out: "[3, 2, 1]",
+            notes: "DESCENDING is a minus: `df.sort(-@price)`, `df.sort(\"-price\")`, or a binding holding `\"-price\"` (a column whose name really starts with `-` keeps it). A descending key is the ascending order reversed, so `missing` comes LAST there; ties keep their input order either way. A field of a record names a column as a binding does: `df.sort(m.sort_col)`. Missing rows sort FIRST in ascending order — unlike Array sort, which refuses missing. A BINDING IN SCOPE WINS OVER A COLUMN OF THE SAME NAME (ADR 0028), and its String value names the column: `k = \"price\"` then `df.sort(k)` uses `price`. That is also how a column is named at RUN TIME, which this position had no way to express before. Write `@k` for the column literally called `k`; a String literal works too (`df.sort(\"price\")`). Until 0.8.1 a bare name here was taken literally, so a library's own parameter names were reserved words in data it had never seen — `fn top(frame, key) = frame.select(key)` returned the frame's `key` column and ignored the argument, with no error. Keywords: column name, binding, shadow, runtime, dynamic, scope, ADR 0028.",
         },
     ),
     (

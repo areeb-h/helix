@@ -115,6 +115,7 @@ mod serve;
 mod simd;
 mod stats;
 mod view;
+mod uidocs;
 mod style;
 mod style_palette;
 mod devwatch;
@@ -480,6 +481,33 @@ fn cli_doc(args: &[String]) -> ExitCode {
             print!("{}", reference_markdown());
             ExitCode::SUCCESS
         }
+        // The app library: every component, with its parameters (read from the library itself).
+        Some("ui") | Some("app") | Some("std.ui") | Some("components") => {
+            let all = crate::uidocs::functions();
+            println!("std.ui — {} functions (`import std.ui`; in markup, `ui.text_input` is `<ui.TextInput …/>`):\n", all.len());
+            for f in &all {
+                println!("  {}", f.signature());
+                let first = crate::uidocs::first_sentence(&f.doc);
+                if !first.is_empty() {
+                    println!("      {first}");
+                }
+            }
+            println!("\nOne component in full: `helix doc ui.<name>`. Markup and events: `helix describe markup`.");
+            ExitCode::SUCCESS
+        }
+        Some(q) if crate::uidocs::find(q).is_some() && (q.starts_with("ui.") || registry::lookup(q).is_none()) && !tables.iter().any(|(_, ms)| ms.contains(&q)) => {
+            let f = crate::uidocs::find(q).expect("checked");
+            println!("{}", f.signature());
+            if !f.doc.is_empty() {
+                println!("\n  {}", f.doc);
+            }
+            let req = f.required();
+            println!("\n  required: {}", if req.is_empty() { "nothing".to_string() } else { req.join(", ") });
+            println!("  markup:   {}", f.example());
+            println!("  call:     ui.{}({})", f.name, req.iter().filter(|p| *p != "children").map(|p| format!("{p}: …")).collect::<Vec<_>>().join(", "));
+            println!("\nEvery attribute is a parameter by name; children are `children`. All components: `helix doc ui`.");
+            ExitCode::SUCCESS
+        }
         // The free-function builtins (sqrt, read_csv, …).
         Some("builtins") | Some("functions") => {
             let names: Vec<&'static str> = registry::BUILTINS.iter().map(|b| b.path).collect();
@@ -821,6 +849,17 @@ fn cli_describe_one(query: &str) -> ExitCode {
     if registry::UNIVERSAL_METHODS.contains(&query) {
         found.push(serde_json::json!({ "kind": "universal_method", "name": query }));
     }
+    // A COMPONENT of the app library: `ui.text_input`, `text_input`, `TextInput`.
+    if let Some(f) = crate::uidocs::find(query) {
+        found.push(serde_json::json!({
+            "kind": "ui_component",
+            "name": format!("ui.{}", f.name),
+            "signature": f.signature(),
+            "required": f.required(),
+            "markup": f.example(),
+            "doc": f.doc,
+        }));
+    }
     // A LANGUAGE FORM. `match`, `try` and `missing` are not builtins, so every one of
     // them answered "is not a builtin, method, or type name" — the reader who typed the
     // thing they saw in a program got told it does not exist.
@@ -876,7 +915,8 @@ fn cli_describe_one(query: &str) -> ExitCode {
     }
     if found.is_empty() {
         eprintln!(
-            "error: `{query}` is not a builtin, method, type name, language form, or              environment variable."
+            "error: `{query}` is not a builtin, method, type name, language form, ui component or \
+             environment variable."
         );
         if let Some(h) = suggest::hint(query, suggest::Site::Function, &[]) {
             eprintln!("help: {h}");
@@ -1020,11 +1060,15 @@ fn cli_search(args: &[String]) -> ExitCode {
         eprintln!("error: unknown option `{bad}` for `helix search` (the only flag is `--json`)");
         return ExitCode::FAILURE;
     }
-    let Some(query) = terms.first() else {
+    if terms.is_empty() {
         eprintln!("error: `helix search` needs a term, e.g. `helix search header`");
         eprintln!("help: it looks at names, signatures, docs and notes — a plain word works best.");
         return ExitCode::FAILURE;
-    };
+    }
+    // Every word is the query, quoted or not: `helix search text input` is "text input".
+    // (Only the first word used to count, and the rest were dropped without a word.)
+    let joined = terms.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(" ");
+    let query = &joined;
     let hits = apisearch::search(query);
     if json {
         match serde_json::to_string_pretty(&apisearch::to_json(query, &hits)) {
@@ -1228,6 +1272,25 @@ fn pkg_result(r: Result<(), crate::error::HelixError>) -> ExitCode {
 fn run_eval(code: &str) -> ExitCode {
     // The whole pipeline runs on the big stack so deeply-nested source can't
     // overflow the parser/type-checker/compiler before the depth guard fires.
+    //
+    // A one-liner that IMPORTS goes through the module loader, as a file in the current
+    // directory would: `helix eval 'import std.ui …'` used to answer "`ui` is not defined",
+    // because the import was never read.
+    if code.lines().any(|l| l.trim_start().starts_with("import ")) {
+        return run_on_big_stack(|| match module::load_source(code, "<eval>") {
+            Ok(mut loaded) => match run_program(&mut loaded.stmts, &loaded.spans, loaded.multi_module) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(rendered) => {
+                    eprint!("{rendered}");
+                    ExitCode::FAILURE
+                }
+            },
+            Err(d) => {
+                eprint!("{}", d.rendered);
+                ExitCode::FAILURE
+            }
+        });
+    }
     run_on_big_stack(|| run_source(code, "<eval>"))
 }
 
@@ -2289,7 +2352,10 @@ fn run_file_capture_args(
     // The borrow of `stmts` ends with this match, so the call it produces can be pushed
     // afterwards. (`drop(sig)` to release it early is what clippy's `drop_non_drop`
     // catches, correctly: `MainSig` has no destructor and dropping it means nothing.)
-    let appended = match climain::find(&stmts, entry_prefix.as_deref()) {
+    // A doc example (`helix test`) is the file plus the example: the file's `main` is its own
+    // business, and calling it would fail every example of a tool whose main takes arguments.
+    let doc_example = std::env::var_os("HELIX_DOC_EXAMPLE").is_some();
+    let appended = match climain::find(&stmts, entry_prefix.as_deref()).filter(|_| !doc_example) {
         Some(sig) => {
             // `--help` is answered from the DECLARATION, without running anything. A
             // script's top level is its program, so running it to print help would run
@@ -2469,6 +2535,12 @@ fn lint_units(
         if !seen.insert(sp.filename.clone()) {
             continue;
         }
+        // The library compiled into `helix` (`std.ui`) is not the user's to fix: its notes
+        // buried theirs (four agents in a row asked for lints and got a hundred lines about
+        // `std/ui.helix`).
+        if sp.filename.starts_with(module::EMBED_ROOT) && i != entry {
+            continue;
+        }
         let name = if i == entry {
             shown.to_string()
         } else {
@@ -2511,6 +2583,25 @@ fn climain_violation(
     )
 }
 
+/// The `fn test_…()` functions (no parameters) a test file defines and never calls itself.
+fn uncalled_test_fns(src: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in src.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("fn test_") else { continue };
+        let Some(open) = rest.find('(') else { continue };
+        let name = format!("test_{}", &rest[..open]);
+        if !name.chars().all(|c| c.is_alphanumeric() || c == '_') || !rest[open..].starts_with("()") {
+            continue;
+        }
+        // Called anywhere but its own definition? Then the file runs it, and so do we not.
+        let calls = src.matches(&format!("{name}(")).count();
+        if calls == 1 && !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    out
+}
+
 /// `helix test [path]` — discover and run test files (any file named `*_test.helix`
 /// under `path`, default the current directory), each in isolation through the normal
 /// pipeline. A file passes if it runs to completion without raising — `assert`,
@@ -2533,6 +2624,23 @@ fn cli_test(args: &[String]) -> ExitCode {
     // child processes per file; worth it in CI, where a divergence is the most expensive
     // class of bug this language can have.
     let engines = args[2..].iter().any(|a| a == "--engines");
+    if args[2..].iter().any(|a| a == "--help" || a == "-h") {
+        print!(
+            "helix test [path…] [--engines] [--json]\n\n\
+             Runs every `*_test.helix` file under the paths (default: here), and every `## >>>` doc example.\n\n\
+             A test file is a script: its top level runs, and `assert`, `assert_eq`, `assert_close` and\n\
+             `assert_error` check things (a file that asserts nothing fails). Each `fn test_…()` it defines\n\
+             and does not call itself also runs, as a test of its own:\n\n\
+             \x20   fn test_parses() = assert_eq(parse(\"a=1\").a, 1)\n\n\
+             A doc example is a `## >>>` line above a function, and the lines after it are what it prints:\n\n\
+             \x20   ## >>> double(2)\n\
+             \x20   ## 4\n\
+             \x20   fn double(x) = x * 2\n\n\
+             --engines  also run each passing file on the VM and the tree-walker, and fail if they disagree\n\
+             --json     one JSON document of results on stdout\n"
+        );
+        return ExitCode::SUCCESS;
+    }
     const FLAGS: [&str; 2] = ["--json", "--engines"];
     if let Some(bad) =
         args[2..].iter().find(|a| a.starts_with('-') && !FLAGS.contains(&a.as_str()))
@@ -2684,6 +2792,8 @@ fn run_test_roots(
             println!("running {} test file{}", files.len(), plural(files.len()));
         }
         let mut failed = 0usize;
+        // The `fn test_…()` functions run as tests of their own (counted in the totals).
+        let mut fn_tests = 0usize;
         for f in &files {
             let shown = f.strip_prefix(base).unwrap_or(f).display();
             // Per file, so one file's assertions can't vouch for the next one's.
@@ -2695,11 +2805,15 @@ fn run_test_roots(
             crate::interp::capture_begin();
             let file_result = run_file_capture(f);
             let file_output = crate::interp::capture_take();
+            // `fn test_…()` that the file never calls: pytest's and Go's habit, run as tests of
+            // their own below rather than passed over in silence.
+            let test_fns = std::fs::read_to_string(f).map(|src| uncalled_test_fns(&src)).unwrap_or_default();
             match file_result {
                 Ok(())
                     if crate::interp::ASSERTIONS_RUN
                         .load(std::sync::atomic::Ordering::Relaxed)
-                        == 0 =>
+                        == 0
+                        && test_fns.is_empty() =>
                 {
                     // Ran clean and checked nothing. Reporting `ok` here is how a whole
                     // suite of `fn test_*` definitions that nobody calls reads as green.
@@ -2806,6 +2920,59 @@ fn run_test_roots(
                     println!("        | {line}");
                 }
             }
+            // Each uncalled `fn test_…()`: the file with a call to it appended, run on its own,
+            // so one failing test does not hide the next and each has its own line.
+            if !test_fns.is_empty() {
+                let src = std::fs::read_to_string(f).unwrap_or_default();
+                let dir = f.parent().unwrap_or(std::path::Path::new("."));
+                for name in &test_fns {
+                    let tmp = dir.join(format!(".helix_test_{}_{name}.helix", std::process::id()));
+                    if std::fs::write(&tmp, format!("{src}\n{name}()\n")).is_err() {
+                        continue;
+                    }
+                    fn_tests += 1;
+                    crate::interp::ASSERTIONS_RUN.store(0, std::sync::atomic::Ordering::Relaxed);
+                    crate::interp::capture_begin();
+                    let r = run_file_capture(&tmp);
+                    let out = crate::interp::capture_take();
+                    let _ = std::fs::remove_file(&tmp);
+                    let asserted = crate::interp::ASSERTIONS_RUN.load(std::sync::atomic::Ordering::Relaxed) > 0;
+                    let verdict = match (&r, asserted) {
+                        (Ok(()), true) => None,
+                        (Ok(()), false) => Some(format!("`{name}` asserted nothing")),
+                        (Err(rendered), _) => Some(rendered.replace(&tmp.display().to_string(), &shown.to_string())),
+                    };
+                    if verdict.is_some() {
+                        failed += 1;
+                    }
+                    if json {
+                        let mut e = serde_json::json!({
+                            "kind": "test", "file": shown.to_string(), "test": name,
+                            "status": if verdict.is_none() { "ok" } else { "fail" },
+                        });
+                        if let Some(v) = &verdict {
+                            e["detail"] = serde_json::Value::String(v.clone());
+                        }
+                        if !out.is_empty() {
+                            e["output"] = serde_json::Value::String(out.clone());
+                        }
+                        ev.push(e);
+                    } else {
+                        match &verdict {
+                            None => println!("  ok    {shown} › {name}"),
+                            Some(v) => {
+                                println!("  FAIL  {shown} › {name}");
+                                for line in v.lines() {
+                                    println!("        {line}");
+                                }
+                            }
+                        }
+                        for line in out.lines() {
+                            println!("        | {line}");
+                        }
+                    }
+                }
+            }
         }
         // Then the documented examples. `docs/comments-and-docs.md` promises that a
         // documented example is executed and must still say what it says — a promise that
@@ -2826,7 +2993,7 @@ fn run_test_roots(
         let (doc_ok, doc_failed, skipped) = run_doc_examples(doc_sources, base, json, &mut ev);
         // A doc example is a test: it counts in the same totals, so the summary never
         // reads `0 passed` over a screen of green.
-        let passed = (files.len() - failed) + doc_ok;
+        let passed = (files.len() + fn_tests).saturating_sub(failed) + doc_ok;
         let failed = failed + doc_failed;
         if json {
             emit_test_json(passed, failed, skipped, ev);
@@ -2887,6 +3054,22 @@ fn lint_source(shown: &str, src: &str) -> Vec<String> {
     {
         for s in &stmts {
             crate::visit::walk_stmt(s, &mut |e| {
+                // A class that looks like a utility but is not one renders unstyled, silently
+                // (an unknown class produces nothing, as in Tailwind): `bg-blu-500`, or a
+                // utility Helix does not have.
+                if let Expr::Record(fields) = e
+                    && let Some((_, Expr::Str(classes))) = fields.iter().find(|(k, _)| k == "class")
+                {
+                    for c in classes.split_whitespace() {
+                        if crate::style::looks_like_utility(c) && !crate::style::is_utility(c) {
+                            notes.push((0, format!(
+                                "{shown}: class `{c}` looks like a utility but produces no CSS — a misspelling, or one Helix \
+                                 does not have (`helix eval 'print(utility_css([\"{c}\"]))'` shows what a class makes). \
+                                 If it is your own CSS class, ignore this."
+                            )));
+                        }
+                    }
+                }
                 match e {
                     // `xs.reduce(dict(), …)` — the fold that stands in for
                     // `to_dict()`, with the last-wins rule attached so a
@@ -3289,7 +3472,7 @@ const TEST_ENGINES: [(&str, &[(&str, &str)]); 3] = [
 fn run_example_once(path: &std::path::Path, env: &[(&str, &str)]) -> String {
     let Ok(exe) = std::env::current_exe() else { return String::new() };
     let mut cmd = std::process::Command::new(exe);
-    cmd.arg("run").arg(path).stdin(std::process::Stdio::null());
+    cmd.arg("run").arg(path).stdin(std::process::Stdio::null()).env("HELIX_DOC_EXAMPLE", "1");
     for (k, v) in env {
         cmd.env(k, v);
     }

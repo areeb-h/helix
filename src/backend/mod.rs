@@ -474,7 +474,8 @@ pub trait DataHandle {
         line: usize,
         col: usize,
     ) -> Result<Df, HelixError>;
-    fn sort(&self, names: &[String], line: usize, col: usize) -> Result<Df, HelixError>;
+    /// Rows sorted by `names`, stably; `desc[i]` reverses key `i` wholly (missing last).
+    fn sort(&self, names: &[String], desc: &[bool], line: usize, col: usize) -> Result<Df, HelixError>;
     fn join(
         &self,
         right: &Df,
@@ -531,6 +532,19 @@ pub trait DataHandle {
 /// (for predicates like `where(age > threshold)`). This is the verb→engine seam's
 /// front half — it owns the friendly "no column or variable" diagnostic, so every
 /// backend reports identical errors.
+/// The value of `a.b.c` when `a` is a bound record (not a column): what a query reads a field
+/// of an app's model as.
+pub(crate) fn field_value(e: &Ast, resolve_var: &dyn Fn(&str) -> Option<Value>) -> Option<Value> {
+    match e {
+        Ast::Ident { name, .. } => resolve_var(name),
+        Ast::Field { recv, name, .. } => match field_value(recv, resolve_var)? {
+            Value::Record(r) => r.iter().find(|(k, _)| k.as_str() == name).map(|(_, v)| v.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 pub fn ast_to_colexpr(
     e: &Ast,
     columns: &[String],
@@ -685,6 +699,14 @@ pub fn ast_to_colexpr(
         // line 1 of their program — pointing at nothing, in the exact place they need to
         // be told WHERE. `lower` on the polars side carries a comment about having fixed
         // the same bug on its own errors; this is the front half of it.
+        // A FIELD OF A BOUND RECORD is a value, as the record's variable is: `where(@region ==
+        // m.region)` in an app's view, or `cfg.limits.max`. It used to pass `helix check` and
+        // fail when it ran, with the advice to bind it to a variable first.
+        Ast::Field { line, col, .. } if field_value(e, resolve_var).is_some() => {
+            let v = field_value(e, resolve_var).unwrap_or(Value::Missing);
+            validate_scalar(&v, *line, *col)?;
+            Ok(ColExpr::Lit(v))
+        }
         other => {
             let (line, col) = other.position();
             Err(HelixError::new(

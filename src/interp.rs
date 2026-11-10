@@ -1146,7 +1146,7 @@ impl Interp {
                         *line,
                         *col,
                     )
-                    .hint("handle the missing case first, e.g. `if x.is_missing() then ... else ...`."));
+                    .hint("a comparison with a value that is `missing` is `missing` too (`m.plan == \"pro\"` while `plan` is missing): give it a default first, `(m.plan ?? \"\") == \"pro\"`, or test `x.is_missing()`."));
                 }
                 let taken = as_bool(&c, *line, *col).map_err(|e| {
                     e.hint("an `if` condition must be a boolean, e.g. `if x > 0 then ... else ...`.")
@@ -1499,7 +1499,7 @@ impl Interp {
                         *line,
                         *col,
                     )
-                    .hint("handle the missing case first, e.g. `if x.is_missing() then ... else ...`."));
+                    .hint("a comparison with a value that is `missing` is `missing` too (`m.plan == \"pro\"` while `plan` is missing): give it a default first, `(m.plan ?? \"\") == \"pro\"`, or test `x.is_missing()`."));
                 }
                 let taken = as_bool(&c, *line, *col).map_err(|e| {
                     e.hint("an `if` condition must be a boolean, e.g. `if x > 0 then ... else ...`.")

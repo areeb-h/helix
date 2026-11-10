@@ -248,6 +248,9 @@ fn one(p: &str, v: impl Into<String>) -> Option<Rule> {
 const SHADOW_STACK: &str = "var(--tw-inset-shadow, 0 0 #0000), var(--tw-inset-ring-shadow, 0 0 #0000), var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow, 0 0 #0000)";
 const FILTER_STACK: &str = "var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,)";
 const BACKDROP_STACK: &str = "var(--tw-backdrop-blur,) var(--tw-backdrop-brightness,) var(--tw-backdrop-saturate,)";
+/// The 3D rotations and skews, composed in one `transform` so they combine (`rotate-y-180
+/// skew-x-6`); an unset one is empty.
+const TRANSFORM_STACK: &str = "var(--tw-rotate-x,) var(--tw-rotate-y,) var(--tw-rotate-z,) var(--tw-skew-x,) var(--tw-skew-y,)";
 const TRANSITION_DEFAULT: &str = "color, background-color, border-color, outline-color, text-decoration-color, fill, stroke, --tw-gradient-from, --tw-gradient-via, --tw-gradient-to, opacity, box-shadow, transform, translate, scale, rotate, filter, -webkit-backdrop-filter, backdrop-filter";
 
 const KF_SPIN: &str = "@keyframes spin { to { transform: rotate(360deg); } }";
@@ -754,9 +757,27 @@ fn valued(u: &str, negative: bool, neg: &dyn Fn(String) -> String) -> Option<Rul
         "invert" | "sepia" | "grayscale" => filter_of(&format!("--tw-{head}"), &format!("{head}({}%)", int(v).filter(|n| *n <= 100)?)),
         "skew-x" | "skew-y" => {
             let d = neg(format!("{}deg", int(v).filter(|n| *n <= 90)?));
-            let var = if head == "skew-x" { "--tw-skew-x" } else { "--tw-skew-y" };
-            rule(&[(var, d), ("transform", "skewX(var(--tw-skew-x, 0)) skewY(var(--tw-skew-y, 0))".into())])
+            let (var, f) = if head == "skew-x" { ("--tw-skew-x", "skewX") } else { ("--tw-skew-y", "skewY") };
+            rule(&[(var, format!("{f}({d})")), ("transform", TRANSFORM_STACK.into())])
         }
+        // 3D: a card that flips is `transform-3d` on the card, `rotate-y-180` when it is turned,
+        // and `backface-hidden` on each face, with `perspective-midrange` on the parent.
+        "rotate-x" | "rotate-y" | "rotate-z" => {
+            let d = neg(int(v).map(|n| format!("{n}deg")).or_else(|| arbitrary(v))?);
+            let (var, f) = match head { "rotate-x" => ("--tw-rotate-x", "rotateX"), "rotate-y" => ("--tw-rotate-y", "rotateY"), _ => ("--tw-rotate-z", "rotateZ") };
+            rule(&[(var, format!("{f}({d})")), ("transform", TRANSFORM_STACK.into())])
+        }
+        "perspective" => one("perspective", match v {
+            "dramatic" => "100px".into(),
+            "near" => "300px".into(),
+            "normal" => "500px".into(),
+            "midrange" => "800px".into(),
+            "distant" => "1200px".into(),
+            "none" => "none".into(),
+            _ => arbitrary(v)?,
+        }),
+        "backface" => one("backface-visibility", v.to_string()).filter(|_| v == "hidden" || v == "visible"),
+        "transform" => one("transform-style", match v { "3d" => "preserve-3d", "flat" => "flat", _ => return None }),
         "mix-blend" | "bg-blend" => {
             let ok = ["normal", "multiply", "screen", "overlay", "darken", "lighten", "color-dodge", "color-burn", "hard-light", "soft-light", "difference", "exclusion", "hue", "saturation", "color", "luminosity", "plus-lighter"];
             one(if head == "mix-blend" { "mix-blend-mode" } else { "background-blend-mode" }, v.to_string()).filter(|_| ok.contains(&v))
@@ -798,7 +819,8 @@ fn align_value(v: &str) -> Option<&'static str> {
 fn split_value(u: &str) -> Option<(&'static str, &str)> {
     const HEADS: &[&str] = &[
         "backdrop-brightness", "backdrop-saturate", "backdrop-blur", "underline-offset", "pointer-events", "drop-shadow", "hue-rotate",
-        "rounded-ss", "rounded-se", "rounded-es", "rounded-ee", "mix-blend", "bg-blend", "skew-x", "skew-y", "invert", "sepia", "grayscale", "outline-offset", "justify-items", "justify-self",
+        "rounded-ss", "rounded-se", "rounded-es", "rounded-ee", "mix-blend", "bg-blend", "skew-x", "skew-y", "invert", "sepia", "grayscale",
+        "rotate-x", "rotate-y", "rotate-z", "perspective", "backface", "transform", "outline-offset", "justify-items", "justify-self",
         "place-content", "place-items", "place-self", "inset-shadow", "ring-offset", "line-clamp", "overflow-x", "overflow-y", "grid-cols",
         "grid-rows", "col-span", "row-span", "col-start", "col-end", "row-start", "row-end", "auto-cols", "auto-rows", "translate-x",
         "translate-y", "decoration", "placeholder", "brightness", "rounded-tl", "rounded-tr", "rounded-br", "rounded-bl", "rounded-t",
@@ -1164,9 +1186,20 @@ pub fn css_for(classes: &BTreeSet<String>) -> String {
 }
 
 /// Whether a class name is a utility this engine writes CSS for.
-#[cfg(test)]
 pub fn is_utility(class: &str) -> bool {
     compile(class).is_some()
+}
+
+/// Whether a class name LOOKS like a utility — a variant (`hover:…`) or a utility family's
+/// prefix (`bg-…`, `rotate-…`) — so one that produces nothing is probably a misspelling or a
+/// utility Helix lacks, rather than the app's own class (`card`, `row`, `drift`).
+pub fn looks_like_utility(class: &str) -> bool {
+    let parts = split_variants(class);
+    if parts.len() > 1 {
+        return true;
+    }
+    let u = class.trim_start_matches('!').trim_start_matches('-');
+    split_value(u).is_some()
 }
 
 #[cfg(test)]

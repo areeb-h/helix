@@ -1,7 +1,7 @@
 exit: 0
 --- stdout ---
 true
-<button class="btn primary" data-click="save" data-value="7" aria-label="Save the draft">Save</button>
+<button class="btn primary" data-click="save" data-value="7" data-value-type="number" aria-label="Save the draft">Save</button>
 <input checked="" data-row-id="r1" type="checkbox" value="on">
 <a href="https://example.org" target="_blank">out</a>
 <a href="about:blank#blocked">still inert</a>

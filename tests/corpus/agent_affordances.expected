@@ -1,0 +1,13 @@
+exit: 0
+--- stdout ---
+[1, 2, 3, 4] [2, 3] [2, 3, 2, 3]
+1 [2, 3]
+["x", "z", "y", "w", "v"]
+["x", "z", "w", "y", "v"]
+["v", "w", "x", "y", "z"]
+1 2
+assertion failed: "1" != 1
+<p>2 2</p>
+<button data-click="go" data-value="3" data-value-type="number">x</button>
+<button data-click="go" data-value="true" data-value-type="bool">x</button>
+--- stderr ---

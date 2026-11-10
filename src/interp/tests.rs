@@ -1365,8 +1365,13 @@
     fn missing_equality_propagates() {
         // missing == missing is missing, NOT true — so `==` can't test for it
         assert!(matches!(last("missing == missing").unwrap(), Value::Missing));
-        assert!(matches!(last("missing == 5").unwrap(), Value::Missing));
+        // Through a value it still propagates: a field that holds `missing` compares as one.
+        assert!(matches!(last("x = missing\nx == 5").unwrap(), Value::Missing));
         assert!(matches!(last("missing < 3").unwrap(), Value::Missing));
+        // Written against the literal, it is refused where it is written: it can never be true
+        // or false, so it is a mistake every time, and the hint names `.is_missing()`.
+        let err = crate::lexer::lex("x = 1\nprint(x == missing)\n").and_then(crate::parser::parse).expect_err("refused");
+        assert!(err.message.contains("never true or false"), "{}", err.message);
     }
 
     #[test]

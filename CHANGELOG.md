@@ -4,6 +4,58 @@
 
 ### Added
 
+- **Made for AI agents to get right (from a study of five agents building apps).**
+
+  Five fresh agents built a todo app, a dashboard, a signup wizard, a memory game and a CLI tool
+  using only the binary, `AGENTS.md` and the examples, and logged every mistake. All five
+  finished, and four had a first full draft that checked. Their friction was finding things,
+  and failures that made no noise. Changes:
+
+  - **Finding things:**
+    - `helix doc ui` lists every app component with its parameters, read from the library
+      itself, and `helix doc ui.text_input` gives one in full with the markup to write.
+    - `describe` and `search` find components too.
+    - `helix describe events` lists every event and prop, the key-chord names and the motion
+      presets.
+    - `helix search` uses every word, and when nothing has them all it shows the closest
+      matches instead of silently dropping words.
+    - `helix check --lint` no longer buries the user's notes under a hundred about the built-in
+      library.
+    - `helix eval` honours `import`.
+    - `helix test --help` explains test files.
+  - **Errors that were silent, or gave the wrong advice:**
+    - A mistyped prop (`clik="save"`) or a React spelling (`onDoubleClick`, `onChange`,
+      `htmlFor`, `tabIndex`) is an error that names the Helix one. `onChange` explains that
+      Helix's `input` is every keystroke.
+    - An event Helix doesn't have (`blur`, `onMouseEnter`, `onKeyUp`) says so, and what to use
+      instead.
+    - `x == missing` is refused, with `.is_missing()` and `??` named; the run-time error for a
+      `missing` condition explains the comparison.
+    - `&&` and `||` say "Helix writes `and`/`or`".
+    - A raw string ending in a quote is explained.
+    - `assert_eq("1", 1)` shows `"1" != 1`.
+    - A misspelled component gets "did you mean", and an unknown `ui.` name gets "did you mean"
+      or `helix doc ui`.
+    - A relative file path that is missing suggests `source_path(…)`.
+    - `--lint` names classes that look like utilities but produce no CSS.
+    - A failing replay names the event that caused it.
+  - **Behaviour fixes:**
+    - Markup kept two spaces between holes (`{a} {b}`).
+    - A click's `value={7}` reached `update` as the text `"7"` in a browser but as `7` in a
+      replay; it is now `7` in both.
+    - Doc examples in a file with `fn main` ran `main`.
+    - An uncalled `fn test_…()` in a test file was skipped silently; each now runs as a test
+      of its own.
+  - **Things agents expected and Helix lacked:**
+    - array spread `[head, ...rest]`;
+    - descending DataFrame sort `df.sort(-@price)` (both backends);
+    - a record field inside a query (`where(@region == m.region)`, `sort(m.sort_col)`);
+    - a one-shot timer `ui.after(ms, msg)`;
+    - 3D utilities (`rotate-y-180`, `perspective-*`, `backface-hidden`, `transform-3d`);
+    - an app's own `<main>` root no longer nests inside the runtime's.
+
+    `AGENTS.md` has a new "Building an app" section with a complete small app.
+
 - **Orbit (`examples/apps/orbit.helix`)**, an app written only in markup and utility classes:
   - a focus timer with a live ring;
   - a board whose cards drag between columns (or move with Alt + arrows);

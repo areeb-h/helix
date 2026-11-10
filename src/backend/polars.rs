@@ -846,6 +846,9 @@ fn schema_names(lf: &LazyFrame, line: usize, col: usize) -> Result<Vec<String>, 
 }
 
 pub fn read_csv(path: &str, line: usize, col: usize) -> Result<Df, HelixError> {
+    if !std::path::Path::new(path).exists() {
+        return Err(crate::error::missing_file(path, "CSV ", line, col));
+    }
     let lf = pl(
         LazyCsvReader::new(path.into())
             .with_has_header(true)
@@ -1017,7 +1020,7 @@ impl DataHandle for PolarsFrame {
     /// frame would pair values from two different orderings — and ties are the common
     /// case (categories, chromosomes, group keys). `maintain_order: true` makes the
     /// stability ADR 0025 (ordering) assumes a guarantee instead of an accident.
-    fn sort(&self, names: &[String], line: usize, col: usize) -> Result<Df, HelixError> {
+    fn sort(&self, names: &[String], desc: &[bool], line: usize, col: usize) -> Result<Df, HelixError> {
         // A FLOAT column sorts by `ops::float_key`, not by polars' own float order.
         // Polars places every NaN last (right) but canonicalises `-0.0` and `0.0` to
         // equal (wrong — ADR 0025 orders them, and the native engine does). There is
@@ -1059,7 +1062,11 @@ impl DataHandle for PolarsFrame {
         }
         Ok(self.derive(self.lf.clone().sort_by_exprs(
             exprs,
-            SortMultipleOptions::default().with_maintain_order(true),
+            // Descending reverses a key whole, as the native engine does: missing goes last.
+            SortMultipleOptions::default()
+                .with_maintain_order(true)
+                .with_order_descending_multi(names.iter().enumerate().map(|(i, _)| desc.get(i).copied().unwrap_or(false)))
+                .with_nulls_last_multi(names.iter().enumerate().map(|(i, _)| desc.get(i).copied().unwrap_or(false))),
         )))
     }
 

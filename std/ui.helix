@@ -826,12 +826,17 @@ fn fmt_cell(v) = match type_of(v) {
 # while the model asks for it — a stopwatch that is stopped has none, and nothing polls.
 export fn every(ms, msg) = if not ((type_of(ms) == "Int" or type_of(ms) == "Float") and is_finite(ms) and ms > 0) then raise("a timer's period is a positive number of milliseconds, not {ms}", "`ui.every(1000, \"tick\")`") else if type_of(msg) != "String" then raise("a timer's message is a string, not {type_of(msg)}", "`ui.every(1000, \"tick\")`") else {every: ms, msg: msg}
 
+# A one-shot: `msg` is sent once, `ms` after the model first asks for it — a card that turns
+# back after a moment, a toast that leaves. While the model keeps listing it nothing more is
+# sent; stop listing it and ask again, and it runs again.
+export fn after(ms, msg) = {...every(ms, msg), once: true}
+
 # No timer is faster than this, so a period of 0 cannot spin the loop.
 FASTEST_MS = 10
 fn timer_ok(x) = type_of(x) == "Record" and (type_of(x.get("every")) == "Int" or type_of(x.get("every")) == "Float") and is_finite(x.every) and type_of(x.get("msg")) == "String"
 fn subs_of(spec, model) = if spec.get("subscriptions").is_missing() then [] else do {
   s = try (spec.subscriptions)(model)
-  if s.ok and type_of(s.value) == "Array" then s.value.filter(timer_ok).map((x) => {every: max(x.every, FASTEST_MS), msg: x.msg}) else do {
+  if s.ok and type_of(s.value) == "Array" then s.value.filter(timer_ok).map((x) => {every: max(x.every, FASTEST_MS), msg: x.msg, once: x.get("once") ?? false}) else do {
     logged = elog(if s.ok then "subscriptions returned {type_of(s.value)}, not a list of `ui.every(…)`; no timers until the model changes" else "subscriptions failed: {s.error}; no timers until the model changes")
     []
   }
@@ -841,21 +846,24 @@ fn subs_of(spec, model) = if spec.get("subscriptions").is_missing() then [] else
 # wanted keeps its next due time (so re-rendering does not reset it); a new one is due one
 # period from `t`; one the model no longer lists is dropped.
 fn schedule(timers, subs, t) = subs.map((s) => do {
-  old = timers.filter((x) => x.msg == s.msg and x.every == s.every)
-  if old.count() == 0 then {every: s.every, msg: s.msg, due: t + s.every / 1000.0} else old[0]
+  old = timers.filter((x) => x.msg == s.msg and x.every == s.every and x.once == s.once)
+  if old.count() == 0 then {every: s.every, msg: s.msg, once: s.once, fired: false, due: t + s.every / 1000.0} else old[0]
 })
 
 # The next due time after a timer fires. A timer that fell behind — the machine slept, or an
 # `update` took longer than the period — fires ONCE and is rescheduled from now: catching up
 # on every missed tick would replay a burst of stale events into `update`.
-fn advance(x, t) = do {
+fn advance(x, t) = if x.once then {...x, fired: true} else do {
   next = x.due + x.every / 1000.0
   {...x, due: if next <= t then t + x.every / 1000.0 else next}
 }
 
 # How long the loop may sleep: until the next timer, at most a second (so a closed client is
 # still noticed), never negative.
-fn sleep_ms(timers, t) = if timers.count() == 0 then 1000 else clamp(round((timers.map((x) => x.due).min() - t) * 1000.0), 0, 1000)
+fn sleep_ms(timers0, t) = do {
+  timers = timers0.filter((x) => not x.fired)
+  if timers.count() == 0 then 1000 else clamp(round((timers.map((x) => x.due).min() - t) * 1000.0), 0, 1000)
+}
 
 # --- Motion. -----------------------------------------------------------------------------
 
@@ -2608,15 +2616,22 @@ CLIENT = """
   // Which modifier keys a click carried — "ctrl", "shift", "ctrl+shift" or "" — for the
   // selection gestures of a desktop list. Command on a Mac counts as Ctrl.
   const mods = (e) => [(e.ctrlKey || e.metaKey) && 'ctrl', e.altKey && 'alt', e.shiftKey && 'shift'].filter(Boolean).join('+');
+  // A node's `value`, as the type the view gave it: text, or a number or Bool marked as one.
+  const valueAt = (t) => {
+    const v = t.dataset.value;
+    if (v == null) return null;
+    const k = t.dataset.valueType;
+    return k === 'number' && v.trim() !== '' && Number.isFinite(Number(v)) ? Number(v) : k === 'bool' ? v === 'true' : v;
+  };
   document.addEventListener('click', (e) => {
     const cp = e.target.closest('[data-copy]');
     if (cp && navigator.clipboard) navigator.clipboard.writeText(cp.dataset.copy).catch(() => {});
     const t = e.target.closest('[data-click]');
-    if (t && !t.disabled) post({ msg: t.dataset.click, value: t.dataset.value ?? null, mods: mods(e) }, false);
+    if (t && !t.disabled) post({ msg: t.dataset.click, value: valueAt(t), mods: mods(e) }, false);
   });
   document.addEventListener('dblclick', (e) => {
     const t = e.target.closest('[data-dblclick]');
-    if (t) { e.preventDefault(); post({ msg: t.dataset.dblclick, value: t.dataset.value ?? null, mods: mods(e) }, false); }
+    if (t) { e.preventDefault(); post({ msg: t.dataset.dblclick, value: valueAt(t), mods: mods(e) }, false); }
   });
   // A right click (or the menu key) where the view asked for one: the node's value and where
   // the pointer is, so the app can put its menu there.
@@ -2626,7 +2641,7 @@ CLIENT = """
     e.preventDefault();
     let x = e.clientX, y = e.clientY;
     if (!x && !y) { const r = t.getBoundingClientRect(); x = r.left + 24; y = r.bottom; }
-    post({ msg: t.dataset.contextmenu, value: { value: t.dataset.value ?? null, x: Math.round(x), y: Math.round(y) }, mods: mods(e) }, false);
+    post({ msg: t.dataset.contextmenu, value: { value: valueAt(t), x: Math.round(x), y: Math.round(y) }, mods: mods(e) }, false);
   });
   document.addEventListener('input', (e) => {
     const t = e.target.closest('[data-input]');
@@ -2910,7 +2925,7 @@ CLIENT = """
     let ev = null;
     if (!cancel && G.kind === 'reorder') {
       // Let go over a drop target: the target's message, its value, and which row it was given.
-      if (G.drop) ev = { msg: G.drop.dataset.drop, value: G.drop.dataset.value ?? null, dropped: el.dataset.key };
+      if (G.drop) ev = { msg: G.drop.dataset.drop, value: valueAt(G.drop), dropped: el.dataset.key };
       // Into another container of the group: the move names both lists (each container's `value`).
       else if (G.over && G.over !== G.box) ev = { msg: G.box.dataset.reorder, value: { key: el.dataset.key, from: G.from, to: G.to, from_list: G.box.dataset.value ?? null, to_list: G.over.dataset.value ?? null } };
       else if (G.to !== G.from) ev = { msg: G.box.dataset.reorder, value: { key: el.dataset.key, from: G.from, to: G.to } };
@@ -2921,7 +2936,7 @@ CLIENT = """
       const s = SIGN[G.dir];
       const far = s ? reach[0] * s[0] + reach[1] * s[1] : Math.hypot(reach[0], reach[1]);
       const commit = Number(el.dataset.dragCommit || 0);
-      if (!commit || far >= commit) ev = { msg: el.dataset.drag, value: el.dataset.value ?? null, drag: { dx: Math.round(G.d[0]), dy: Math.round(G.d[1]), vx: Math.round(v[0]), vy: Math.round(v[1]) } };
+      if (!commit || far >= commit) ev = { msg: el.dataset.drag, value: valueAt(el), drag: { dx: Math.round(G.d[0]), dy: Math.round(G.d[1]), vx: Math.round(v[0]), vy: Math.round(v[1]) } };
     }
     const held = G.seen ? [...new Set([...G.seen.values()].flatMap((t) => t.items))] : G.items;
     const s = { els: held, dragged: el, v, host: G.kind === 'drag' ? el.parentElement : null };
@@ -3200,7 +3215,9 @@ fn page(spec, rt, model) = do {
   theme = theme_of(spec, model)
   effects = rt.design.effects
   fx = if effects == "auto" then "" else " data-effects=\"{effects}\""
-  "<!doctype html><html lang=\"en\" data-theme=\"{theme}\"{fx} data-client=\"{rt.client}\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{title}</title><style id=\"hx-style\">{rt.css}</style><style id=\"hx-util\">{util}</style></head><body><main id=\"root\">{body}</main><script>{CLIENT}</script></body></html>"
+  # The page's main landmark — unless the app's view is one itself, when two would nest.
+  shell = if type_of(tree) == "Record" and (tree.get("tag") ?? "") == "main" then "div" else "main"
+  "<!doctype html><html lang=\"en\" data-theme=\"{theme}\"{fx} data-client=\"{rt.client}\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{title}</title><style id=\"hx-style\">{rt.css}</style><style id=\"hx-util\">{util}</style></head><body><{shell} id=\"root\">{body}</{shell}><script>{CLIENT}</script></body></html>"
 }
 fn theme_of(spec, model) = if spec.get("theme").is_missing() then "light" else do {
   t = try (spec.theme)(model)
@@ -3306,7 +3323,7 @@ fn serve(l, spec, rt, model, tree, conns, streams, timers) = do {
   live = if fresh.is_missing() then conns else conns.concat([fresh])
   st = live.reduce({model: model, rt: rt, keep: [], streams: [], changed: false, acks: []}, (s, c) => handle(spec, s, c))
   t = clock_monotonic()
-  due = timers.filter((x) => x.due <= t)
+  due = timers.filter((x) => x.due <= t and not x.fired)
   ticked = due.reduce(st.model, (m, x) => step(spec, m, {msg: x.msg, value: now()}))
   changed_now = st.changed or due.count() > 0
   # A view that raises must not end the app either. The events of this round are undone — the
@@ -3425,4 +3442,9 @@ fn listen_from(first, port, tries) = do {
 # Replay a list of events through `update` and return every screen as HTML — the property a
 # model–update–view app buys: its UI is a pure function of its event log, testable without a
 # browser, and the same on every engine.
-export fn replay(spec, events) = events.scan(spec.init, (m, e) => (spec.update)(m, e)).map((m) => render((spec.view)(m)))
+export fn replay(spec, events) = range(0, events.count()).scan(spec.init, (m, i) => do {
+  # Which scripted event failed, and what it was: a replay of fifty events that says only
+  # "index 3 is out of bounds" leaves the reader to bisect the script.
+  r = try (spec.update)(m, events[i])
+  if r.ok then r.value else raise("while handling event #{i + 1} of the replay, {events[i]}: {r.error}", "it is number {i + 1} in the list given to `ui.replay`, and the error came from `update`.")
+}).map((m) => render((spec.view)(m)))
