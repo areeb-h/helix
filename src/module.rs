@@ -571,6 +571,8 @@ pub const EMBED_ROOT: &str = "<helix>";
 pub const EMBEDDED: &[(&str, &str)] = &[
     // The app runtime and component library (ADR 0055): `import std.ui`.
     ("std/ui.helix", include_str!("../std/ui.helix")),
+    // Exhaustive checking of rules (ADR 0065): `import std.model`.
+    ("std/model.helix", include_str!("../std/model.helix")),
 ];
 
 /// The embedded source at `p`, when `p` is under [`EMBED_ROOT`].

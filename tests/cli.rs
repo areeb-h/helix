@@ -5156,6 +5156,75 @@ fn run_cmd(args: &[&str]) -> (String, String, Option<i32>) {
     run(args, &[], "")
 }
 
+/// `helix emit rust` (ADR 0065): the freezer rule becomes Rust that compiles on its own (`std`
+/// only), passes its generated replay tests — call sequences run through the Helix rule when it
+/// was emitted — and is the same every time it is emitted, so CI can `--check` it.
+#[test]
+fn emit_rust_makes_a_rule_that_compiles_and_agrees_with_helix() {
+    let dir = std::env::temp_dir().join(format!("helix_emit_rust_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let rule = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/rules/freezer.helix");
+    let out = dir.join("freezer_policy.rs");
+    let (_, err, code) = run(&["emit", "rust", rule, "-o", out.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    let rust = std::fs::read_to_string(&out).unwrap();
+    for want in [
+        "pub fn update(&mut self, now_ms: u64, open: &[String], visible: Option<&str>) -> Vec<Action>",
+        "pub fn next_deadline(&self) -> Option<u64>",
+        "pub fn thaw(&mut self, id: &str, now_ms: u64) -> bool",
+        "helix effects: no authority",
+        "fn trace_000()",
+    ] {
+        assert!(rust.contains(want), "missing `{want}`");
+    }
+    assert!(!rust.contains("unsafe"), "no unsafe in emitted code");
+    // The same every time: CI regenerates and compares.
+    let (_, err, code) = run(&["emit", "rust", rule, "-o", out.to_str().unwrap(), "--check"], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    std::fs::write(&out, rust.replace("frozen: due", "frozen: !due")).unwrap();
+    let (_, err, code) = run(&["emit", "rust", rule, "-o", out.to_str().unwrap(), "--check"], &[], "");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("is not what"), "{err}");
+    std::fs::write(&out, &rust).unwrap();
+    // It compiles with nothing but rustc, and its replay tests pass.
+    if Command::new("rustc").arg("--version").output().is_ok_and(|o| o.status.success()) {
+        let bin = dir.join("replays");
+        let c = Command::new("rustc")
+            .args(["--edition", "2024", "--test", "-D", "warnings", out.to_str().unwrap(), "-o", bin.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(c.status.success(), "rustc:\n{}", String::from_utf8_lossy(&c.stderr));
+        let t = Command::new(&bin).output().unwrap();
+        let report = String::from_utf8_lossy(&t.stdout);
+        assert!(t.status.success() && report.contains("48 passed"), "{report}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What `helix emit rust` refuses, each with the line and what to do.
+#[test]
+fn emit_rust_refuses_what_it_cannot_emit_exactly() {
+    let dir = std::env::temp_dir().join(format!("helix_emit_refuse_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let cases = [
+        ("fn f(x) = x + 1\n", "has no `## rust: fn f(…)` signature"),
+        ("## rust: fn f(x: Option<i64>) -> i64\nfn f(x) = x + 1\n", "arithmetic"),
+        ("## rust: fn f(x: Option<i64>) -> bool\nfn f(x) = x == 3\n", "may be missing"),
+        ("## rust: fn f(p: String) -> String\nfn f(p) = read_text(p)\n", "must not reach files"),
+        ("## rust: fn g(x: i64) -> i64\nfn f(x) = x\n", "must sit directly above `fn g(…)`"),
+    ];
+    for (i, (src, want)) in cases.iter().enumerate() {
+        let f = dir.join(format!("r{i}.helix"));
+        std::fs::write(&f, src).unwrap();
+        let (_, err, code) = run(&["emit", "rust", f.to_str().unwrap(), "--no-tests"], &[], "");
+        assert_eq!(code, Some(1), "{src}");
+        assert!(err.contains(want), "{src}\n{err}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// One bad request or one failing view must not end an app. A body that is not an event
 /// record used to raise out of `parse_json` and stop the server for everyone using it; a view
 /// that raised did the same. Now the bad body is a 400, and the event that broke the view is

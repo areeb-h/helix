@@ -26,6 +26,18 @@
     access (Files). A reach the analysis cannot follow is named at build time. A `[capabilities]`
     block in `helix.toml` stays an upper bound: code that needs more fails the build.
   - `has_feature("desktop")` answers; it was missing from the list.
+- **Rules written and proved in Helix, shipped as Rust (ADR 0065).**
+  - `helix emit rust rule.helix -o policy.rs` writes plain Rust from a rule: `std` only, no
+    `unsafe`, formatted, clippy-clean, one Rust function per Helix function. The public API is
+    declared in `## rust:` lines in Rust's own syntax. Generated call sequences are run through
+    the Helix rule and written as Rust `#[test]`s, so the Rust is checked against the Helix it
+    came from; `--check` makes CI fail when the checked-in file differs.
+  - `import std.model`: `model.explore(init, inputs, step, check)` visits every state a rule
+    can reach over a finite set of inputs, checks a property on every step, and returns a
+    shortest failing sequence when one breaks.
+  - `examples/rules/freezer.helix` is mobile-os's app freezer, with its Rust API. Its eight
+    safety properties hold on all 80 reachable states (7,040 steps), and three planted bugs
+    were each caught with a 1- to 3-step counterexample.
 - **Helix on mobile-os (ADR 0064).**
   - A built app's Linux bundle carries a Flatpak manifest whose sandbox is generated from the
     code: Orbit and the gallery get no network and no files; Files gets the home folder. The

@@ -1,0 +1,58 @@
+# The shell's own freezer tests (mobile-os shell/src/freezer.rs), on the Helix rules.
+import freezer.{new, update, next_deadline, not_frozen, thaw}
+
+AFTER = 10000
+
+fn test_hidden_apps_freeze_after_the_wait_and_thaw_when_shown() = do {
+  p = new(AFTER)
+  open = ["mail", "maps"]
+  a = update(p, 0, open, "maps")
+  checked1 = assert_eq(a[1], [{Background: "mail"}])
+  checked2 = assert_eq(next_deadline(a[0]), AFTER)
+  b = update(a[0], AFTER, open, "maps")
+  checked3 = assert_eq(b[1], [{Freeze: "mail"}])
+  c = update(b[0], AFTER, open, "maps")
+  checked4 = assert_eq(c[1], [])
+  checked5 = assert(next_deadline(c[0]).is_missing())
+  d = update(c[0], AFTER + 1000, open, "mail")
+  checked6 = assert_eq(d[1], [{Thaw: "mail"}, {Foreground: "mail"}, {Background: "maps"}])
+  assert_eq(next_deadline(d[0]), AFTER + 1000 + AFTER)
+}
+
+fn test_home_and_the_lock_screen_hide_every_app() = do {
+  a = update(new(AFTER), 0, ["maps"], "maps")
+  checked1 = assert_eq(a[1], [])
+  b = update(a[0], 0, ["maps"], missing)
+  checked2 = assert_eq(b[1], [{Background: "maps"}])
+  assert_eq(update(b[0], AFTER, ["maps"], missing)[1], [{Freeze: "maps"}])
+}
+
+fn test_closed_apps_are_thawed_and_forgotten() = do {
+  a = update(new(AFTER), 0, ["mail"], missing)
+  b = update(a[0], AFTER, ["mail"], missing)
+  c = update(b[0], AFTER, [], missing)
+  checked = assert_eq(c[1], [{Thaw: "mail"}])
+  assert(next_deadline(c[0]).is_missing())
+}
+
+fn test_apps_that_cant_freeze_wait_again() = do {
+  a = update(new(AFTER), 0, ["music"], missing)
+  b = update(a[0], AFTER, ["music"], missing)
+  assert_eq(next_deadline(not_frozen(b[0], "music", AFTER)), AFTER * 2)
+}
+
+fn test_thawing_before_a_request() = do {
+  a = update(new(AFTER), 0, ["mail"], missing)
+  b = update(a[0], AFTER, ["mail"], missing)
+  t1 = thaw(b[0], "mail", AFTER)
+  checked1 = assert(t1[1])
+  checked2 = assert(not thaw(t1[0], "mail", AFTER)[1])
+  assert(not thaw(b[0], "unknown", 0)[1])
+}
+
+# Several apps closing at once thaw in one order, every time.
+fn test_closing_several_apps_thaws_them_in_order() = do {
+  a = update(new(AFTER), 0, ["c", "a", "b"], missing)
+  b = update(a[0], AFTER, ["c", "a", "b"], missing)
+  assert_eq(update(b[0], AFTER, [], missing)[1], [{Thaw: "a"}, {Thaw: "b"}, {Thaw: "c"}])
+}

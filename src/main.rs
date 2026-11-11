@@ -77,6 +77,7 @@ mod lexer;
 mod localnet;
 mod tape;
 mod appbuild;
+mod emit_rust;
 mod markup;
 mod ufcs;
 mod managed;
@@ -427,6 +428,8 @@ fn run() -> ExitCode {
         // `helix emit-hbc <script> [--entry NAME] [-o out.hbc]` — compile to a `.hbc`
         // Helix Bytecode Container for ctype's ring-0 `hvm` (ADR 0023).
         Some("emit-hbc") => run_emit_hbc(&args),
+        // `helix emit rust <rule.helix> [-o out.rs]` — a rule as plain Rust (ADR 0065).
+        Some("emit") if args.get(2).map(String::as_str) == Some("rust") => run_emit_rust(&args),
         // `helix python <…>` — manage CPython runtimes for interop.
         Some("python") => run_python_cli(&args),
         // `helix new <name>` — initialize a `helix.toml`.
@@ -2201,6 +2204,7 @@ fn print_help() {
          helix build <script>     bundle a program + its runtime into one executable\n    \
          helix build <app> --app  a native app whose permissions are inferred from its code\n    \
          helix replay <app> <s>   reproduce a recorded app session exactly\n    \
+         helix emit rust <rule>   a rule as plain Rust, checked against the Helix (ADR 0065)\n    \
          helix emit-hbc <script>  compile to a .hbc bytecode container (for ctype's hvm)\n    \
          helix repl               start an interactive session\n    \
          helix new <name>         create a helix.toml in the current directory\n    \
@@ -2365,6 +2369,162 @@ fn run_build_app(entry: String, out: Option<String>, runtime: Option<String>, na
             }
         }
     })
+}
+
+/// `helix emit rust rule.helix [-o out.rs] [--no-tests]`: the rule as plain Rust, with generated
+/// call sequences run through the Helix rule and written as Rust tests the output must pass.
+fn run_emit_rust(args: &[String]) -> ExitCode {
+    let mut path: Option<&String> = None;
+    let mut out: Option<&String> = None;
+    let mut with_tests = true;
+    let mut check = false;
+    let mut i = 3;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-o" | "--output" => {
+                out = args.get(i + 1);
+                i += 2;
+            }
+            // CI: emit again and fail if the checked-in file is not exactly that.
+            "--check" => {
+                check = true;
+                i += 1;
+            }
+            "--no-tests" => {
+                with_tests = false;
+                i += 1;
+            }
+            p if !p.starts_with('-') && path.is_none() => {
+                path = Some(&args[i]);
+                i += 1;
+            }
+            other => {
+                eprintln!("error: unknown option `{other}` for `helix emit rust`");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    let Some(path) = path else {
+        eprintln!("error: `helix emit rust` needs a rule file, e.g. `helix emit rust policies/freezer.helix -o src/freezer_policy.rs`");
+        return ExitCode::FAILURE;
+    };
+    let src = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read `{path}`: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let report = |e: emit_rust::EmitError| {
+        if e.line > 0 {
+            eprintln!("error: {path}:{}: {}", e.line, e.message);
+        } else {
+            eprintln!("error: {path}: {}", e.message);
+        }
+        ExitCode::FAILURE
+    };
+    // The check: run generated call sequences through the Helix rule, in a child helix.
+    let run = if with_tests {
+        let plan = match emit_rust::plan_traces(&src) {
+            Ok(p) => p,
+            Err(e) => return report(e),
+        };
+        let program = match emit_rust::driver(&src, &plan) {
+            Ok(p) => p,
+            Err(e) => return report(e),
+        };
+        let dir = std::env::temp_dir().join(format!("helix-emit-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("rule_traces.helix");
+        if let Err(e) = std::fs::write(&file, program) {
+            eprintln!("error: cannot write the trace program: {e}");
+            return ExitCode::FAILURE;
+        }
+        let result = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).arg("run").arg(&file).stdin(std::process::Stdio::null()).output());
+        match result {
+            Ok(o) if o.status.success() => {
+                let _ = std::fs::remove_dir_all(&dir);
+                Some(format!("{{\"traces\": {plan}, \"outputs\": {}}}", String::from_utf8_lossy(&o.stdout).trim()))
+            }
+            Ok(o) => {
+                // Kept, so the failing sequence can be read and run again.
+                eprintln!("error: the rule failed on a generated call sequence (the program is kept at {}):\n{}", file.display(), String::from_utf8_lossy(&o.stderr));
+                return ExitCode::FAILURE;
+            }
+            Err(e) => {
+                eprintln!("error: could not run the rule: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        None
+    };
+    let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.clone());
+    let code = match emit_rust::emit(&src, &name, run.as_deref()) {
+        Ok(c) => c,
+        Err(e) => return report(e),
+    };
+    // Formatted as `cargo fmt` would, so the emitted file passes `cargo fmt --check`.
+    let formatted = std::process::Command::new("rustfmt")
+        .args(["--edition", "2024", "--emit", "stdout", "--quiet"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write as _;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(code.as_bytes())?;
+            }
+            child.wait_with_output()
+        });
+    let code = match formatted {
+        Ok(o) if o.status.success() && !o.stdout.is_empty() => String::from_utf8_lossy(&o.stdout).into_owned(),
+        Ok(o) => {
+            eprintln!("error: the emitted Rust does not parse (a bug in `helix emit rust`):\n{}", String::from_utf8_lossy(&o.stderr));
+            return ExitCode::FAILURE;
+        }
+        Err(_) => {
+            eprintln!("warning: rustfmt was not found; the Rust is unformatted");
+            code
+        }
+    };
+    if check {
+        let Some(o) = out else {
+            eprintln!("error: `--check` compares with a file: add `-o <the checked-in .rs>`");
+            return ExitCode::FAILURE;
+        };
+        return match std::fs::read_to_string(o) {
+            Ok(have) if have == code => {
+                eprintln!("ok: {o} is what {path} emits");
+                ExitCode::SUCCESS
+            }
+            Ok(_) => {
+                eprintln!("error: {o} is not what {path} emits; run `helix emit rust {path} -o {o}` and commit the result");
+                ExitCode::FAILURE
+            }
+            Err(e) => {
+                eprintln!("error: cannot read `{o}`: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    match out {
+        Some(o) => match std::fs::write(o, &code) {
+            Ok(()) => {
+                eprintln!("emitted {o} from {path}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("error: cannot write `{o}`: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        None => {
+            print!("{code}");
+            ExitCode::SUCCESS
+        }
+    }
 }
 
 /// `helix replay app.helix session.jsonl [--engines]`: run the app with `HELIX_REPLAY` set, so

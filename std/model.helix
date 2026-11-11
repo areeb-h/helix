@@ -1,0 +1,41 @@
+# Exhaustive checking of a rule (ADR 0065): every state a rule can reach, every input in every
+# state, and a property checked on every step — the reachable graph, not a sample of it.
+#
+# Tests check the cases someone thought of. A rule's world can be made small enough to visit
+# entirely: two apps instead of fifty, four clock readings instead of all of them. The rule's
+# code is the same code; only the inputs are few. If a property holds on every step reachable
+# from the start over those inputs, no sequence of those inputs can break it — and when one
+# does, the search is breadth-first, so the sequence it reports is a SHORTEST one.
+#
+#     import std.model
+#     r = model.explore(new(10), INPUTS, step, check)
+#     assert(r.failure.is_missing())
+#
+# `step(state, input)` returns `{state, out}`. `check(before, input, after, out)` returns "" when
+# the step is right, or a sentence saying what is wrong. A state is identified by its JSON,
+# which is canonical: records keep their field order and Dicts are sorted.
+
+# Explore everything reachable from `init`. The result: `{states, transitions, failure}`, with
+# `failure` missing, or `{path, problem}` — the inputs from `init` to the first wrong step.
+export fn explore(init, inputs, step, check, limit = 200000) = do {
+  seen = [(init.to_json(), true)].to_dict()
+  search([{state: init, path: []}], seen, inputs, step, check, 0, limit)
+}
+
+fn search(frontier, seen, inputs, step, check, transitions, limit) = if frontier.count() == 0 then {states: seen.count(), transitions: transitions, failure: missing} else do {
+  level = frontier.reduce({next: [], seen: seen, transitions: transitions, failure: missing}, (acc, node) => if acc.failure.is_missing() then visit(acc, node, inputs, step, check) else acc)
+  if not level.failure.is_missing() then {states: level.seen.count(), transitions: level.transitions, failure: level.failure} else if level.seen.count() > limit then raise("more than {limit} states are reachable", "make the world smaller: fewer ids, fewer clock readings — or pass a larger `limit`.") else search(level.next, level.seen, inputs, step, check, level.transitions, limit)
+}
+
+fn visit(acc, node, inputs, step, check) = inputs.reduce(acc, (a, input) => if not a.failure.is_missing() then a else do {
+  r = step(node.state, input)
+  problem = check(node.state, input, r.state, r.out)
+  path = node.path.concat([input])
+  if problem != "" then {...a, transitions: a.transitions + 1, failure: {path: path, problem: problem}} else do {
+    key = r.state.to_json()
+    if a.seen.has(key) then {...a, transitions: a.transitions + 1} else {...a, transitions: a.transitions + 1, seen: a.seen.insert(key, true), next: a.next.concat([{state: r.state, path: path}])}
+  }
+})
+
+# A failure as lines a person can follow: each input from the start, then what went wrong.
+export fn explain(failure) = if failure.is_missing() then "every reachable step holds" else (["a shortest sequence that breaks it ({failure.path.count()} step{if failure.path.count() == 1 then "" else "s"}):"].concat(failure.path.map((i) => "  {i.to_json()}")).concat(["  -> {failure.problem}"])).join("\n")

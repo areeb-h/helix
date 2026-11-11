@@ -106,6 +106,16 @@ fn main(replay: Bool = false, port: Int = 8080) = if replay then ui.replay(spec,
   default first, `(m.plan ?? "") == "pro"`. The runtime supplies the page's `<main>`; it steps
   aside if your view's root is one. A busy port moves to the next free one, and says so.
 
+## Rules shipped as Rust (`helix emit rust`)
+
+A rule is pure functions over records, maps, lists, options, integers, strings and booleans.
+Declare its Rust shapes in `## rust:` lines (Rust syntax: `pub struct`, `pub enum`, `impl Name`,
+and a `## rust: pub fn …` signature directly above each `fn`), then `helix emit rust rule.helix
+-o policy.rs`. `&mut self` means the Helix function takes the state first and returns
+`(new_state, output)`; an enum variant is written `{Freeze: id}`; `missing` is `None`. Prove
+properties with `import std.model` (`model.explore(init, inputs, step, check)`), and see
+`examples/rules/freezer.helix` and ADR 0065.
+
 ## The correctness model
 
 One program, one answer, on three engines: the tree-walker (`HELIX_NOVM=1`), the
