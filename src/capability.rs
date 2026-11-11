@@ -515,6 +515,8 @@ mod tests {
             // in `HELIX_RECORD`, which the person running the program chose — the program
             // cannot name it. Replaying reads the file `helix replay` was given. Nothing else.
             "session_tape",
+            // Reads one flag the executable's own bundle set at start-up.
+            "built_app",
         ];
         for b in crate::registry::BUILTINS {
             if b.pure || effect_of(b.path).gated() {

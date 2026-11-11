@@ -17,6 +17,15 @@
     `helix replay app.helix s.jsonl` plays it back without reading, writing or sending anything —
     the tape answers — and says whether every screen came out identical, on any machine. Add
     `--engines` to check all three. A bug report becomes a file that reproduces the bug.
+  - **`helix build app.helix --app`: a native app whose permissions come from its code.** It
+    produces the platform's own bundle (an AppDir with a `.desktop` file on Linux, a `.app`
+    with an entitlements file on macOS, an `.exe` on Windows) that always opens in its own
+    window. Its permissions are INFERRED from the code by the same analysis as `helix effects`,
+    printed with the code that needs each one, written to `permissions.json`, and enforced by
+    the capability sandbox. The examples need nothing (Orbit, the gallery) or exactly file
+    access (Files). A reach the analysis cannot follow is named at build time. A `[capabilities]`
+    block in `helix.toml` stays an upper bound: code that needs more fails the build.
+  - `has_feature("desktop")` answers; it was missing from the list.
 
 - **Made for AI agents to get right (from a study of five agents building apps).**
 

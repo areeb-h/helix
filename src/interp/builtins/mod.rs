@@ -164,6 +164,7 @@ impl super::Interp {
             "open_window" => return crate::desktop::open_window(&args, line, col),
             "app_window" => return crate::desktop::app_window(&args, line, col),
             "session_tape" => return crate::tape::session_tape(&args, line, col),
+            "built_app" => return crate::desktop::built_app(&args, line, col),
             "url_encode" => return encoding::a_url_encode(args, line, col),
             "url_decode" => return encoding::a_url_decode(name, args, line, col),
             "url_decode_lenient" => return encoding::a_url_decode_lenient(name, args, line, col),

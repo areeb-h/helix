@@ -58,7 +58,7 @@ pub fn category_of(name: &str) -> &'static str {
         "chr" | "ord" | "to_float" | "to_int" | "numerator" | "denominator"
         | "from_hex" | "from_base64" | "html_escape" => "conversion",
         // An app's view tree, rendered and diffed (ADR 0055).
-        "view_html" | "view_diff" | "view_classes" | "utility_css" | "dev_generation" | "open_window" | "app_window" | "session_tape" => "ui",
+        "view_html" | "view_diff" | "view_classes" | "utility_css" | "dev_generation" | "open_window" | "app_window" | "session_tape" | "built_app" => "ui",
         // Math — elementwise, broadcasting, missing-propagating.
         "sqrt" | "cbrt" | "abs" | "exp" | "ln" | "log10" | "log2" | "log" | "sin" | "cos"
         | "tan" | "asin" | "acos" | "atan" | "atan2" | "sinh" | "cosh" | "tanh" | "floor"
@@ -191,6 +191,7 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "open_window", pure: false },
     BuiltinDef { path: "app_window", pure: false },
     BuiltinDef { path: "session_tape", pure: false },
+    BuiltinDef { path: "built_app", pure: false },
     BuiltinDef { path: "read_bytes", pure: false },
     BuiltinDef { path: "read_bytes_at", pure: false },
     BuiltinDef { path: "from_hex", pure: true },
@@ -675,13 +676,14 @@ mod tests {
         // 170 as of `view_classes` and `utility_css` (ADR 0060), pure Rust, in every build.
         // 171 as of `app_window` (ADR 0063), which like `open_window` exists in every build and
         // answers `missing` where there is no window to open. 172 as of `session_tape` (the
-        // black box, ADR 0063), plain std in every build. 163 as of `postgres_execute`; 162 as of `has_feature`, which needs NO feature and must not have one: a build
+        // black box, ADR 0063), plain std in every build. 173 as of `built_app` (ADR 0063
+        // D4), a flag read, in every build. 163 as of `postgres_execute`; 162 as of `has_feature`, which needs NO feature and must not have one: a build
             // without regex is exactly where a program needs to ask, so gating the question
             // on the thing being asked about would make it unanswerable precisely when it
             // matters. That is the decision this count exists to force.
             assert_eq!(
             BUILTINS.len(),
-            172,
+            173,
             "a builtin was added or removed — decide whether it needs a Cargo feature, add it \
              to `feature_of` if it does, and update this count in the same change"
         );

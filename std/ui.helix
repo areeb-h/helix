@@ -3496,14 +3496,17 @@ export fn app(spec) = if TAPE == "replay" then replay_session(spec) else do {
   recording = if TAPE == "record" then session_tape("start", {app: "{spec.title}", init: spec.init}) else false
   generation = dev_generation()
   win = spec.get("window")
-  windowed = if win.is_missing() then false else if type_of(win) == "Bool" then win else true
+  # An app made by `helix build --app` always has its own window (ADR 0063 D4).
+  windowed = built_app() or (if win.is_missing() then false else if type_of(win) == "Bool" then win else true)
   size = if type_of(win) == "Record" then win else {}
   # In its own window the app opens NO PORT (ADR 0063): the window's web view is the only
   # thing that can reach it, so nothing else on the machine can. Under `--watch` a reload is a
   # new process, and its window would close and reopen on every save, so a watched app is
   # served to the browser instead.
   local = if windowed and generation.is_missing() then app_window("{spec.title}", size.get("width") ?? 1100, size.get("height") ?? 760) else missing
-  if local.is_missing() then serve_tcp(spec, windowed, generation) else do {
+  # A built app was granted what its window needs and nothing more: it has no network
+  # permission to serve a browser with, so with no display it says so and stops.
+  if local.is_missing() and built_app() then raise("{spec.title} needs a display to open its window", "a built app runs in its own window; run it in a desktop session.") else if local.is_missing() then serve_tcp(spec, windowed, generation) else do {
     logged = elog("{spec.title} is open in its own window (no port)")
     rt = runtime(spec, 0, generation)
     serve(local, spec, {...rt, transport: "window"}, spec.init, (spec.view)(spec.init), [], [], schedule([], subs_of(spec, spec.init), clock_monotonic()))

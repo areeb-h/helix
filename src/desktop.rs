@@ -90,6 +90,18 @@ pub fn app_window(args: &[Value], line: usize, col: usize) -> Result<Value, Heli
     })
 }
 
+/// Set at start-up when this executable was made by `helix build --app` (ADR 0063 D4).
+pub static BUILT_APP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `built_app()` — whether this program is a built app, which runs in its own window and
+/// never falls back to serving a browser (it was given no network permission to).
+pub fn built_app(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
+    if !args.is_empty() {
+        return Err(HelixError::new(format!("`built_app` takes no arguments, got {}", args.len()), line, col));
+    }
+    Ok(Value::Bool(BUILT_APP.load(std::sync::atomic::Ordering::Relaxed)))
+}
+
 /// The address a window loads its app from. WebKitGTK and WKWebView show a custom scheme as
 /// itself; WebView2 (and Android) map it onto `http://<scheme>.<host>`.
 #[cfg_attr(not(feature = "desktop"), allow(dead_code))]

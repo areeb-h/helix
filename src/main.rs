@@ -76,6 +76,7 @@ mod lattice;
 mod lexer;
 mod localnet;
 mod tape;
+mod appbuild;
 mod markup;
 mod ufcs;
 mod managed;
@@ -1820,9 +1821,26 @@ fn run_build(args: &[String]) -> ExitCode {
     // Optional `-o <name>` / `--output <name>`, and `--runtime <path>`.
     let mut out: Option<String> = None;
     let mut runtime: Option<String> = None;
+    // `--app [--name "Display Name"]`: a native app bundle (ADR 0063 D3, D4).
+    let mut app = false;
+    let mut app_name: Option<String> = None;
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
+            "--app" => {
+                app = true;
+                i += 1;
+            }
+            "--name" => match args.get(i + 1) {
+                Some(n) => {
+                    app_name = Some(n.clone());
+                    i += 2;
+                }
+                None => {
+                    eprintln!("error: `--name` needs the app's display name, e.g. `--name \"Habit Tracker\"`");
+                    return ExitCode::FAILURE;
+                }
+            },
             "-o" | "--output" => match args.get(i + 1) {
                 Some(name) => {
                     out = Some(name.clone());
@@ -1859,6 +1877,13 @@ fn run_build(args: &[String]) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         }
+    }
+    if app_name.is_some() && !app {
+        eprintln!("error: `--name` names an app bundle; add `--app`");
+        return ExitCode::FAILURE;
+    }
+    if app {
+        return run_build_app(entry, out, runtime, app_name);
     }
     run_on_big_stack(move || {
         match bundle::build(
@@ -2174,6 +2199,8 @@ fn print_help() {
          helix effects <script>   what each function reaches (authority + reproducibility)\n    \
          helix fmt <script>…      format (no options; `--check` reports instead of writing)\n    \
          helix build <script>     bundle a program + its runtime into one executable\n    \
+         helix build <app> --app  a native app whose permissions are inferred from its code\n    \
+         helix replay <app> <s>   reproduce a recorded app session exactly\n    \
          helix emit-hbc <script>  compile to a .hbc bytecode container (for ctype's hvm)\n    \
          helix repl               start an interactive session\n    \
          helix new <name>         create a helix.toml in the current directory\n    \
@@ -2274,6 +2301,64 @@ fn run_watch(path: &str, argv: &[String]) -> ExitCode {
 }
 
 /// `helix run <script> [args…]` — the script's own command line is `argv` (ADR 0037 D1).
+/// `helix build app.helix --app [--name N] [-o dir] [--runtime path]`: a native app bundle
+/// whose permissions are inferred from its code and enforced (ADR 0063 D3, D4).
+fn run_build_app(entry: String, out: Option<String>, runtime: Option<String>, name: Option<String>) -> ExitCode {
+    // A built app runs in its own window, so its runtime must have one.
+    let windowed = match &runtime {
+        None => cfg!(feature = "desktop"),
+        Some(r) => std::process::Command::new(r)
+            .args(["eval", "print(has_feature(\"desktop\"))"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
+            .unwrap_or(false),
+    };
+    if !windowed {
+        eprintln!(
+            "error: `helix build --app` needs a runtime with native windows, and {} was built without them\n\
+             help: build helix with `cargo build --release --features desktop` and run `helix build --app` from it, or pass it as `--runtime`.",
+            runtime.as_deref().unwrap_or("this helix")
+        );
+        return ExitCode::FAILURE;
+    }
+    let stem = std::path::Path::new(&entry).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "app".into());
+    let display = name.unwrap_or_else(|| appbuild::display_name(&stem));
+    let out_dir = std::path::PathBuf::from(out.unwrap_or_else(|| ".".into()));
+    run_on_big_stack(move || {
+        match bundle::build_app(std::path::Path::new(&entry), &out_dir, runtime.as_deref().map(std::path::Path::new), &display) {
+            Ok((built, inferred, written)) => {
+                let bundle_root = written.first().map(|p| {
+                    // The bundle is the first path component under the output directory.
+                    let rel = p.strip_prefix(&out_dir).unwrap_or(p);
+                    out_dir.join(rel.components().next().map(|c| c.as_os_str().to_owned()).unwrap_or_default())
+                });
+                println!("built {} ({}, {})", bundle_root.as_deref().unwrap_or(&out_dir).display(), appbuild::host_os(), report::bytes(built.bytes));
+                println!("  it opens in its own window, with no network port");
+                if inferred.grants.is_empty() {
+                    println!("  permissions: none — it reads no files, uses no network and runs no programs");
+                } else {
+                    println!("  permissions, inferred from the code and enforced:");
+                    for (e, path) in &inferred.grants {
+                        println!("    {:<20} {}", appbuild::plain(*e), appbuild::path_text(path));
+                    }
+                }
+                for (what, path) in &inferred.unresolved {
+                    println!("  note: not followed: `{}` at {} — if a call there needs a permission not listed above, it is refused when it runs", appbuild::base_name(what), appbuild::path_text(path));
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("error: {}", e.message);
+                if let Some(h) = &e.hint {
+                    eprintln!("help: {h}");
+                }
+                ExitCode::FAILURE
+            }
+        }
+    })
+}
+
 /// `helix replay app.helix session.jsonl [--engines]`: run the app with `HELIX_REPLAY` set, so
 /// `ui.app` plays the recorded session instead of serving, and report what it says. Each run is
 /// a child process — the same isolation `helix test --engines` relies on — and with `--engines`
@@ -2400,6 +2485,9 @@ fn run_embedded(emb: bundle::Embedded) -> ExitCode {
     // the artifact is the thing that reaches production.
     if let Some(caps) = emb.capabilities.clone() {
         capability::install_ceiling(caps);
+    }
+    if emb.app.is_some() {
+        desktop::BUILT_APP.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     // The program's own arguments, not `helix`'s: argv[0] is this artifact's name.
     let argv: Vec<String> = std::env::args().skip(1).collect();

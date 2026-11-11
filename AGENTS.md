@@ -100,6 +100,8 @@ fn main(replay: Bool = false, port: Int = 8080) = if replay then ui.replay(spec,
   session (events, plus what `update`/`view` read: clock, files, responses);
   `helix replay app.helix s.jsonl --engines` replays it with nothing read from the world and says
   whether every screen is identical. `window: true` runs in a native window with no port open.
+- **Shipping:** `helix build app.helix --app` (from a `--features desktop` helix) makes the
+  platform's app bundle; its permissions are inferred from the code, printed, and enforced.
 - **Footguns:** a comparison with a `missing` field is `missing`, not `false` — give it a
   default first, `(m.plan ?? "") == "pro"`. The runtime supplies the page's `<main>`; it steps
   aside if your view's root is one. A busy port moves to the next free one, and says so.

@@ -1589,6 +1589,17 @@ Open a native window and return a listener fed by it — no port — or missing 
 >>> app_window("My app", 1100, 760)
 ```
 
+### `built_app()`
+
+Whether this program is an app made by `helix build --app`.
+
+**Note:** ADR 0063 D4. `ui.app` asks: a built app always opens in its own window and never falls back to serving a browser, because its permissions were inferred for a window — it has no network grant to serve with. Keywords: app, bundle, build, desktop, packaged.
+
+```
+>>> built_app()
+false
+```
+
 ### `dev_generation()`
 
 Under `helix run --watch`, which start of the program this is (1 for the first); otherwise missing.

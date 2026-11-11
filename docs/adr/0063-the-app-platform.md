@@ -75,7 +75,7 @@ records its session, and the recording reproduces the bug on any machine and any
   DataFrame) is recorded as opaque, and a session that needs one says it cannot replay that
   step. Methods on handles (`db.query`) are not on the tape yet.
 
-### D3 — Permissions are inferred from the code and enforced *(next)*
+### D3 — Permissions are inferred from the code and enforced *(done)*
 
 `helix build --app` will run the same effects analysis as `helix effects`. It writes the app's
 manifest from it: the files, directories, hosts and programs the code can reach. The built
@@ -88,7 +88,20 @@ binary enforces exactly that set through the ADR 0021 capability gate.
 - **A widening is visible.** An app that starts reaching a new host fails its build check
   until the manifest diff is accepted.
 
-### D4 — One command builds a native app *(next)*
+**What shipped.** `helix build app.helix --app` (`src/appbuild.rs`) unions the reach of every
+function in the app's own files and its top-level code — the `does` and `carries` buckets of
+`effects::closure` — into the ceiling. The library's browser fallback (`serve_tcp`) and event
+loop (`serve`) are left out: a built app never serves a browser, and the loop's connection
+verbs act on the window's link, which is not network. The categories are those the gate
+enforces today (files read/write, network, programs, database writes); per-path and per-host
+grants wait on ADR 0021's finer model. Measured on the examples: Orbit and the gallery need no
+permissions at all; Files needs file read and write, and the build prints the call path for each.
+A call the analysis cannot resolve in the app's own code is printed as a note; the gate refuses
+it if it ever reaches past the ceiling. Two attempts to hide a file read from the inference —
+a builtin passed as a value, a lambda passed through a record — failed: the first does not
+type-check, and the second is counted.
+
+### D4 — One command builds a native app *(done: Linux tested, macOS and Windows layouts unit-tested; signing and native menus next)*
 
 `helix build --app app.helix` produces, per OS, the thing a user double-clicks:
 - a `.app` bundle on macOS;

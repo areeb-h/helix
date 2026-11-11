@@ -1200,6 +1200,14 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         notes: "ADR 0063: how `ui.app({…, window: true})` runs in a window. The page loads through a private URL scheme and the page's events and frames travel through the web view's own message channel, so the app OPENS NO PORT: no other process on the machine has anything to connect to, and the program needs no `net` authority to show its own window. The listener answers the same verbs as `listen`'s (`accept_poll`, `wait`, and on a connection `poll_request`, `respond`, `sse`, `send`), and each request carries `transport: \"window\"`, a field a socket's request never has. Only the runtime's own messages are accepted from the page. Answers missing in a build without `--features desktop` or on a machine with no display. Keywords: window, desktop, native, ipc, no port, in-process, app.",
     },
     DocEntry {
+        name: "built_app",
+        sig: "built_app()",
+        doc: "Whether this program is an app made by `helix build --app`.",
+        example: "built_app()",
+        example_out: "false",
+        notes: "ADR 0063 D4. `ui.app` asks: a built app always opens in its own window and never falls back to serving a browser, because its permissions were inferred for a window — it has no network grant to serve with. Keywords: app, bundle, build, desktop, packaged.",
+    },
+    DocEntry {
         name: "session_tape",
         sig: "session_tape(op, value?)",
         doc: "The black box's controls, used by `std.ui` to record and replay an app session.",
