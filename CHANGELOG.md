@@ -35,6 +35,15 @@
   - `import std.model`: `model.explore(init, inputs, step, check)` visits every state a rule
     can reach over a finite set of inputs, checks a property on every step, and returns a
     shortest failing sequence when one breaks.
+  - State that survives a restart: `Save<T>` in a signature makes the emitter write a versioned,
+    checksummed text format for a struct. `load` refuses anything `save` did not write, and
+    the emitted tests prove every cut and every changed byte is refused.
+  - Rules also get top-level integer and boolean constants, enum variants with no value
+    (`{Accepted: true}`), `Default` for a no-argument `new`, and their `##` docs as `///`.
+  - `examples/rules/lockout.helix` is the PIN lockout mobile-os's auth service needs. A
+    restart can't reset the count or shorten the wait, a damaged save gives the longest wait,
+    and a guess is never accepted during a wait. All of this is checked on 951 reachable
+    states; three planted bugs were each caught in one or two steps.
   - `examples/rules/freezer.helix` is mobile-os's app freezer, with its Rust API. Its eight
     safety properties hold on all 80 reachable states (7,040 steps), and three planted bugs
     were each caught with a 1- to 3-step counterexample.

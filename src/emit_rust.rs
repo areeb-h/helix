@@ -113,6 +113,25 @@ struct Api {
     inner: Ty,
 }
 
+impl Api {
+    /// `Save<T>`'s T.
+    fn saved(&self) -> Option<&str> {
+        self.text.strip_prefix("Save<")?.strip_suffix('>')
+    }
+    /// How the public method writes this type.
+    fn public_text(&self, as_param: bool) -> String {
+        match self.saved() {
+            Some(_) if as_param => "Option<&str>".into(),
+            Some(_) => "String".into(),
+            None => self.text.clone(),
+        }
+    }
+    /// The type the rule's function takes for it.
+    fn param_ty(&self) -> Ty {
+        if self.saved().is_some() { Ty::Opt(Box::new(self.inner.clone())) } else { self.inner.clone() }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Sig {
     public: bool,
@@ -120,6 +139,8 @@ struct Sig {
     recv: Recv,
     params: Vec<(String, Api)>,
     ret: Option<Api>,
+    /// The `##` comment above the signature: the method's documentation.
+    doc: Vec<String>,
 }
 
 /// Tokens of the `## rust:` mini-syntax.
@@ -226,6 +247,12 @@ impl TyParser<'_> {
                 Ty::Map(Box::new(k), Box::new(v))
             }
             ("Self", 0) => Ty::Named(self.self_ty.ok_or("`Self` needs a `## rust: impl Name` line above")?.to_string()),
+            // `Save<T>`: T as text that survives a restart. A result is the text; a parameter
+            // is the text that was read back, if any — `None` when it was missing or damaged.
+            ("Save", 1) => match one(&mut args)? {
+                Ty::Named(n) => Ty::Named(n),
+                _ => return Err("`Save<T>` saves a declared struct".into()),
+            },
             (n, 0) if n.chars().next().is_some_and(char::is_uppercase) => Ty::Named(n.to_string()),
             (n, _) => return Err(format!("`{n}` is not a type a rule can use: i64/u64, bool, String/&str, Option, Vec/&[T], BTreeMap, tuples, and declared structs and enums")),
         })
@@ -353,7 +380,17 @@ fn parse_contract(src: &str) -> Result<Contract, EmitError> {
                 let Some(helix) = helix.filter(|h| *h == name) else {
                     return err(n, format!("`## rust: fn {name}` must sit directly above `fn {name}(…)`"));
                 };
-                c.sigs.insert(helix, Sig { public, name, recv, params, ret });
+                // Its documentation: the `##` lines just above, other than `## rust` ones.
+                let mut doc: Vec<String> = lines[..i]
+                    .iter()
+                    .rev()
+                    .map(|l| l.trim())
+                    .take_while(|l| l.starts_with("##"))
+                    .filter(|l| !l.starts_with("## rust"))
+                    .map(|l| l.trim_start_matches('#').trim().to_string())
+                    .collect();
+                doc.reverse();
+                c.sigs.insert(helix, Sig { public, name, recv, params, ret, doc });
             }
             _ => return err(n, "a `## rust:` line declares a `struct`, an `enum`, an `impl`, or a `fn` signature"),
         }
@@ -1099,6 +1136,9 @@ fn is_simple(c: &str) -> bool {
 
 /// `x` (a parameter as the API takes it) as the type the rule uses inside.
 fn into_inner(name: &str, api: &Api) -> String {
+    if let Some(t) = api.saved() {
+        return format!("{name}.and_then({t}::load)");
+    }
     let t = api.text.replace(' ', "");
     match t.as_str() {
         "u64" | "u32" | "usize" | "i32" | "isize" => format!("{name} as i64"),
@@ -1113,6 +1153,9 @@ fn into_inner(name: &str, api: &Api) -> String {
 
 /// A rule's result, as the API returns it.
 fn from_inner(code: &str, api: &Api) -> String {
+    if api.saved().is_some() {
+        return format!("{code}.save()");
+    }
     let t = api.text.replace(' ', "");
     match t.as_str() {
         "u64" | "u32" | "usize" => format!("{code} as {t}"),
@@ -1144,6 +1187,27 @@ pub fn emit(src: &str, source_name: &str, traces_json: Option<&str>) -> Result<S
     let effects = effects_line(&stmts).map_err(|m| EmitError { line: 0, message: m })?;
 
     let mut tx = Tx { c: &c, fns: BTreeMap::new(), narrowed: Vec::new() };
+    // Top-level integer and boolean constants (`WIPE_AT = 10`) are Rust `const`s.
+    let mut consts: Vec<(String, String, Ty)> = Vec::new();
+    let mut const_env = Env::default();
+    for st in &stmts {
+        let Stmt::Assign { name, value, line, .. } = st else { continue };
+        let (v, ty) = match value {
+            Expr::Int(n) => (n.to_string(), Ty::Int),
+            Expr::Unary { op: UnOp::Neg, expr, .. } if matches!(expr.as_ref(), Expr::Int(_)) => {
+                let Expr::Int(n) = expr.as_ref() else { continue };
+                (format!("-{n}"), Ty::Int)
+            }
+            Expr::Bool(b) => (b.to_string(), Ty::Bool),
+            Expr::Lambda { .. } => continue,
+            _ => return err(*line, format!("`{name}`: a rule's top-level values are integer or boolean constants")),
+        };
+        if name.chars().any(|ch| ch.is_lowercase()) {
+            return err(*line, format!("`{name}`: a rule's constants are written in capitals, as Rust's are (`{}`)", name.to_uppercase()));
+        }
+        const_env = const_env.with(name, Var { rust: name.clone(), ty: ty.clone(), refs: 0 });
+        consts.push((name.clone(), v, ty));
+    }
     let self_ty = c.self_ty.clone();
     let self_named = || Ty::Named(self_ty.clone().unwrap_or_default());
     // Every function's internal types, from its signature.
@@ -1152,7 +1216,7 @@ pub fn emit(src: &str, source_name: &str, traces_json: Option<&str>) -> Result<S
         if sig.recv != Recv::None {
             ps.push(self_named());
         }
-        ps.extend(sig.params.iter().map(|(_, a)| a.inner.clone()));
+        ps.extend(sig.params.iter().map(|(_, a)| a.param_ty()));
         let out = sig.ret.as_ref().map(|r| r.inner.clone()).unwrap_or(Ty::Unit);
         let ret = match sig.recv {
             Recv::Mut if out == Ty::Unit => self_named(),
@@ -1175,8 +1239,15 @@ pub fn emit(src: &str, source_name: &str, traces_json: Option<&str>) -> Result<S
         let _ = writeln!(out, "//! {d}").map(|_| ());
     }
     out = out.replace("//! \n", "//!\n");
-    let _ = writeln!(out, "\nuse std::collections::BTreeMap;\n");
+    // Filled in at the end, when it is known whether a map is used.
+    out.push_str("\n__IMPORTS__\n");
 
+    for (name, v, ty) in &consts {
+        let _ = writeln!(out, "const {name}: {} = {v};", ty.rust());
+    }
+    if !consts.is_empty() {
+        out.push('\n');
+    }
     for d in &c.decls {
         match d {
             Decl::Struct { name, public, fields } => {
@@ -1213,7 +1284,7 @@ pub fn emit(src: &str, source_name: &str, traces_json: Option<&str>) -> Result<S
         if params.len() != ptys.len() {
             return err(*line, format!("`{name}` has {} parameters and its signature {}", params.len(), ptys.len()));
         }
-        let mut env = Env::default();
+        let mut env = const_env.clone();
         let mut heads = Vec::new();
         for ((p, _), t) in params.iter().zip(&ptys) {
             let r = rust_name(p);
@@ -1245,9 +1316,9 @@ pub fn emit(src: &str, source_name: &str, traces_json: Option<&str>) -> Result<S
                 Recv::Ref => "&self, ".into(),
                 Recv::Mut => "&mut self, ".into(),
             };
-            let params: Vec<String> = sig.params.iter().map(|(n, a)| format!("{n}: {}", a.text)).collect();
+            let params: Vec<String> = sig.params.iter().map(|(n, a)| format!("{n}: {}", a.public_text(true))).collect();
             let ret_text = match &sig.ret {
-                Some(r) => format!(" -> {}", r.text),
+                Some(r) => format!(" -> {}", r.public_text(false)),
                 None => String::new(),
             };
             let mut args: Vec<String> = Vec::new();
@@ -1264,14 +1335,135 @@ pub fn emit(src: &str, source_name: &str, traces_json: Option<&str>) -> Result<S
             };
             let recv_text = recv.trim_end_matches(", ");
             let all = if recv_text.is_empty() { params.join(", ") } else if params.is_empty() { recv_text.to_string() } else { format!("{recv}{}", params.join(", ")) };
+            for d in &sig.doc {
+                let _ = writeln!(out, "    ///{}{d}", if d.is_empty() { "" } else { " " });
+            }
             let _ = writeln!(out, "    pub fn {}({all}){ret_text} {{\n{body}\n}}\n", sig.name);
         }
         let _ = writeln!(out, "}}");
     }
 
+    // The save format, for each struct a signature saves or restores.
+    let saved: std::collections::BTreeSet<String> = c
+        .sigs
+        .values()
+        .flat_map(|s| s.params.iter().map(|(_, a)| a).chain(s.ret.iter()))
+        .filter_map(|a| a.saved().map(str::to_string))
+        .collect();
+    for t in &saved {
+        out.push_str(&save_format(&c, t)?);
+    }
+    if !saved.is_empty() {
+        out.push_str(SAVE_HELPERS);
+    }
+    // `new()` with no arguments: clippy (rightly) wants `Default` too.
+    if let Some(st) = &self_ty
+        && c.sigs.values().any(|s| s.public && s.recv == Recv::None && s.name == "new" && s.params.is_empty())
+    {
+        let _ = writeln!(out, "\nimpl Default for {st} {{\n    fn default() -> Self {{\n        Self::new()\n    }}\n}}");
+    }
     if let Some(json) = traces_json {
         out.push_str(&tests(&c, json)?);
+        if !saved.is_empty() {
+            out.push_str(&save_tests(&c, &saved)?);
+        }
     }
+    let imports = if out.contains("BTreeMap") { "use std::collections::BTreeMap;\n" } else { "" };
+    Ok(out.replacen("\n__IMPORTS__\n", &format!("\n{imports}"), 1))
+}
+
+// --- The save format. ---------------------------------------------------------------------
+//
+// Text, one field per line, with a version and a checksum:
+//
+//     helix-save 1 Saved
+//     failures 3
+//     wait_left 60000
+//     check 9f0c…
+//
+// `load` takes exactly what `save` writes and nothing else: the header and version, every field
+// in order, valid values, no extra lines, and a checksum (64-bit FNV-1a) of everything above
+// it. A file that is missing, cut short, edited or damaged reads as `None`, and the rule
+// decides what `None` means — for a lockout, the longest wait.
+
+const SAVE_HELPERS: &str = r#"
+/// The checksum on the last line of a saved state: 64-bit FNV-1a of everything above it.
+fn save_checksum(body: &str) -> u64 {
+    body.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3))
+}
+
+/// The value on a saved line `name value`.
+fn save_field<'a>(line: Option<&'a str>, name: &str) -> Option<&'a str> {
+    line?.strip_prefix(name)?.strip_prefix(' ')
+}
+"#;
+
+fn save_format(c: &Contract, t: &str) -> Result<String, EmitError> {
+    let Some(fields) = c.decls.iter().find_map(|d| match d {
+        Decl::Struct { name, fields, .. } if name == t => Some(fields.clone()),
+        _ => None,
+    }) else {
+        return err(0, format!("`Save<{t}>`: `{t}` is not a declared struct"));
+    };
+    let mut writes = String::new();
+    let mut reads = String::new();
+    for (f, ty) in &fields {
+        if f == "check" {
+            return err(0, format!("`{t}`: a saved struct cannot have a field named `check` (the format uses it)"));
+        }
+        let parse = match ty {
+            Ty::Int => "i64",
+            Ty::Bool => "bool",
+            other => return err(0, format!("`Save<{t}>`: field `{f}` is {}; a saved struct holds integers and booleans", other.rust())),
+        };
+        let _ = writeln!(writes, "        body.push_str(&format!(\"{f} {{}}\\n\", self.{f}));");
+        let _ = writeln!(reads, "        let {f} = save_field(lines.next(), \"{f}\")?.parse::<{parse}>().ok()?;");
+    }
+    let names: Vec<&str> = fields.iter().map(|(f, _)| f.as_str()).collect();
+    Ok(format!(
+        "\nimpl {t} {{\n    /// This state as text that survives a restart (`helix emit rust`'s save format, version 1).\n    \
+         pub fn save(&self) -> String {{\n        let mut body = String::from(\"helix-save 1 {t}\\n\");\n{writes}        \
+         format!(\"{{body}}check {{:016x}}\\n\", save_checksum(&body))\n    }}\n\n    \
+         /// What `save` wrote, or `None` if the text is missing a part, edited or damaged.\n    \
+         pub fn load(text: &str) -> Option<Self> {{\n        let at = text.rfind(\"check \")?;\n        let (body, tail) = text.split_at(at);\n        \
+         if tail != format!(\"check {{:016x}}\\n\", save_checksum(body)) {{\n            return None;\n        }}\n        \
+         let mut lines = body.lines();\n        if lines.next()? != \"helix-save 1 {t}\" {{\n            return None;\n        }}\n{reads}        \
+         if lines.next().is_some() {{\n            return None;\n        }}\n        Some(Self {{ {} }})\n    }}\n}}\n",
+        names.join(", ")
+    ))
+}
+
+/// Round trips, and every damaged copy refused: each single byte changed, and each cut.
+fn save_tests(c: &Contract, saved: &std::collections::BTreeSet<String>) -> Result<String, EmitError> {
+    let mut out = String::from("\n#[cfg(test)]\nmod helix_save_format {\n    use super::*;\n");
+    for t in saved {
+        let Some(fields) = c.decls.iter().find_map(|d| match d {
+            Decl::Struct { name, fields, .. } if name == t => Some(fields.clone()),
+            _ => None,
+        }) else {
+            continue;
+        };
+        let sample: Vec<String> = fields
+            .iter()
+            .enumerate()
+            .map(|(i, (f, ty))| match ty {
+                Ty::Bool => format!("{f}: {}", i % 2 == 0),
+                _ => format!("{f}: {}", 60_000 * (i as i64 + 1) - 7),
+            })
+            .collect();
+        let lower = t.to_lowercase();
+        let _ = writeln!(
+            out,
+            "\n    #[test]\n    fn {lower}_round_trips_and_damage_is_refused() {{\n        let x = {t} {{ {} }};\n        let text = x.save();\n        \
+             assert_eq!({t}::load(&text), Some(x.clone()));\n        assert_eq!({t}::load(\"\"), None);\n        \
+             for cut in 0..text.len() {{\n            assert_eq!({t}::load(&text[..cut]), None, \"cut at {{cut}}\");\n        }}\n        \
+             for i in 0..text.len() {{\n            for b in *b\"09x \\n-\" {{\n                let mut bytes = text.clone().into_bytes();\n                \
+             if bytes[i] == b {{\n                    continue;\n                }}\n                bytes[i] = b;\n                \
+             let damaged = String::from_utf8(bytes).unwrap_or_default();\n                assert_eq!({t}::load(&damaged), None, \"byte {{i}} set to {{b}}\");\n            }}\n        }}\n    }}",
+            sample.join(", ")
+        );
+    }
+    out.push_str("}\n");
     Ok(out)
 }
 
@@ -1310,10 +1502,16 @@ fn gen_arg(api: &Api, c: &Contract, r: &mut Lcg) -> serde_json::Value {
     }
 }
 
+/// The constructor the traces start from: `new` if there is one, else the first.
+fn constructor(c: &Contract) -> Option<&Sig> {
+    let mut ctors = c.sigs.values().filter(|s| s.recv == Recv::None && s.public);
+    c.sigs.values().find(|s| s.recv == Recv::None && s.public && s.name == "new").or_else(|| ctors.next())
+}
+
 /// The call sequences to run: `[{init: [args], steps: [{call, args}]}]`.
 pub fn plan_traces(src: &str) -> Result<String, EmitError> {
     let c = parse_contract(src)?;
-    let Some(ctor) = c.sigs.values().find(|s| s.recv == Recv::None && s.public) else {
+    let Some(ctor) = constructor(&c) else {
         return Ok("[]".into());
     };
     let methods: Vec<&Sig> = c.sigs.values().filter(|s| s.public && s.recv != Recv::None).collect();
@@ -1337,7 +1535,7 @@ pub fn plan_traces(src: &str) -> Result<String, EmitError> {
 /// A Helix program that runs every trace through the rule and prints the outputs as JSON.
 pub fn driver(src: &str, traces: &str) -> Result<String, EmitError> {
     let c = parse_contract(src)?;
-    let ctor = c.sigs.iter().find(|(_, s)| s.recv == Recv::None && s.public).map(|(h, _)| h.clone()).unwrap_or_else(|| "new".into());
+    let ctor = c.sigs.iter().find(|(_, s)| constructor(&c).is_some_and(|k| k.name == s.name)).map(|(h, _)| h.clone()).unwrap_or_else(|| "new".into());
     let mut arms = Vec::new();
     for (helix, s) in c.sigs.iter().filter(|(_, s)| s.public && s.recv != Recv::None) {
         let args: Vec<String> = (0..s.params.len()).map(|i| format!("step.args[{i}]")).collect();
@@ -1385,6 +1583,16 @@ fn lit(v: &serde_json::Value, api_inner: &Ty, api_text: Option<&str>, c: &Contra
                 format!("vec![{}]", items.join(", "))
             }
         }
+        (Ty::Named(n), J::Object(o)) if c.decls.iter().any(|d| matches!(d, Decl::Struct { name, .. } if name == n)) => {
+            let Some(Decl::Struct { fields, .. }) = c.decls.iter().find(|d| matches!(d, Decl::Struct { name, .. } if name == n)) else {
+                return err(0, format!("`{n}` is not a declared struct"));
+            };
+            let mut parts = Vec::new();
+            for (f, ty) in fields {
+                parts.push(format!("{f}: {}", lit(o.get(f).unwrap_or(&J::Null), ty, None, c)?));
+            }
+            format!("{n} {{ {} }}", parts.join(", "))
+        }
         (Ty::Named(n), J::Object(o)) if o.len() == 1 => {
             let (variant, payload) = o.iter().next().map(|(k, v)| (k.clone(), v.clone())).unwrap_or_default();
             let Some(Decl::Enum { variants, .. }) = c.decls.iter().find(|d| matches!(d, Decl::Enum { name, .. } if name == n)) else {
@@ -1405,7 +1613,7 @@ fn tests(c: &Contract, run: &str) -> Result<String, EmitError> {
     let traces = parsed.get("traces").and_then(|t| t.as_array()).cloned().unwrap_or_default();
     let outputs = parsed.get("outputs").and_then(|t| t.as_array()).cloned().unwrap_or_default();
     let Some(st) = &c.self_ty else { return Ok(String::new()) };
-    let Some(ctor) = c.sigs.values().find(|s| s.recv == Recv::None && s.public) else { return Ok(String::new()) };
+    let Some(ctor) = constructor(c) else { return Ok(String::new()) };
     let mut out = String::new();
     let _ = writeln!(
         out,
@@ -1414,8 +1622,12 @@ fn tests(c: &Contract, run: &str) -> Result<String, EmitError> {
     for (i, (t, outs)) in traces.iter().zip(&outputs).enumerate() {
         let init = t.get("init").and_then(|v| v.as_array()).cloned().unwrap_or_default();
         let args: Vec<String> = ctor.params.iter().zip(&init).map(|((_, a), v)| lit(v, &a.inner, Some(&a.text), c)).collect::<Result<_, _>>()?;
-        let mut body = format!("let mut p = {st}::{}({});\n", ctor.name, args.join(", "));
         let steps = t.get("steps").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let mutates = steps.iter().any(|st| {
+            let name = st.get("call").and_then(|v| v.as_str()).unwrap_or("");
+            c.sigs.values().any(|s| s.name == name && s.recv == Recv::Mut)
+        });
+        let mut body = format!("let {}p = {st}::{}({});\n", if mutates { "mut " } else { "" }, ctor.name, args.join(", "));
         let outs = outs.as_array().cloned().unwrap_or_default();
         for (step, o) in steps.iter().zip(&outs) {
             let name = step.get("call").and_then(|v| v.as_str()).unwrap_or("");
@@ -1424,6 +1636,11 @@ fn tests(c: &Contract, run: &str) -> Result<String, EmitError> {
             let a: Vec<String> = sig.params.iter().zip(&sargs).map(|((_, api), v)| lit(v, &api.inner, Some(&api.text), c)).collect::<Result<_, _>>()?;
             let call = format!("p.{name}({})", a.join(", "));
             match &sig.ret {
+                Some(r) if r.saved().is_some() => {
+                    let t = r.saved().unwrap_or_default();
+                    let want = lit(o, &r.inner, None, c)?;
+                    let _ = writeln!(body, "assert_eq!({t}::load(&{call}), Some({want}));");
+                }
                 Some(r) if r.inner == Ty::Bool => {
                     let bang = if o.as_bool() == Some(true) { "" } else { "!" };
                     let _ = writeln!(body, "assert!({bang}{call});");

@@ -5202,6 +5202,45 @@ fn emit_rust_makes_a_rule_that_compiles_and_agrees_with_helix() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The PIN lockout (ADR 0065): a rule with a SAVE FORMAT. The emitted save text round-trips and
+/// every damaged copy — each byte changed, each cut — reads as nothing, which the rule turns into
+/// the longest wait. Compiled with rustc alone; its replays and save-format test pass.
+#[test]
+fn emit_rust_lockout_has_a_damage_proof_save_format() {
+    let dir = std::env::temp_dir().join(format!("helix_emit_lockout_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let rule = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/rules/lockout.helix");
+    let out = dir.join("lockout_policy.rs");
+    let (_, err, code) = run(&["emit", "rust", rule, "-o", out.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    let rust = std::fs::read_to_string(&out).unwrap();
+    for want in [
+        "pub fn restore(saved: Option<&str>, now_ms: u64) -> Self",
+        "pub fn save(&self, now_ms: u64) -> String",
+        "pub fn guess(&mut self, now_ms: u64, correct: bool) -> Guess",
+        "const WIPE_AT: i64 = 10;",
+        "impl Default for Lockout",
+        "fn saved_round_trips_and_damage_is_refused()",
+        "/// Whether the service may check a PIN now.",
+    ] {
+        assert!(rust.contains(want), "missing `{want}`");
+    }
+    assert!(!rust.contains("use std::collections::BTreeMap"), "no unused import");
+    if Command::new("rustc").arg("--version").output().is_ok_and(|o| o.status.success()) {
+        let bin = dir.join("replays");
+        let c = Command::new("rustc")
+            .args(["--edition", "2024", "--test", "-D", "warnings", out.to_str().unwrap(), "-o", bin.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(c.status.success(), "rustc:\n{}", String::from_utf8_lossy(&c.stderr));
+        let t = Command::new(&bin).output().unwrap();
+        let report = String::from_utf8_lossy(&t.stdout);
+        assert!(t.status.success() && report.contains("49 passed"), "{report}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// What `helix emit rust` refuses, each with the line and what to do.
 #[test]
 fn emit_rust_refuses_what_it_cannot_emit_exactly() {

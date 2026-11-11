@@ -107,6 +107,55 @@ outputs Helix gave. Then:
 This is the technique mobile-os's plan wants for the lock screen (its item 4), available now
 for every rule.
 
+### D4 — State that survives a restart: `Save<T>`
+
+A signature can save and restore a declared struct:
+- `-> Save<Saved>` returns it as text;
+- `saved: Save<Saved>` takes the text that was read back, as `Option<&str>`. The rule's
+  function sees `missing` when it was absent, damaged or edited.
+
+The format is generated Rust. It has a header and version, one field per line, and a 64-bit
+FNV-1a checksum of everything above it:
+
+```text
+helix-save 1 Saved
+failures 3
+wait_left 60000
+check 8e1f…
+```
+
+`load` takes exactly what `save` writes and nothing else, and what `None` means is the rule's
+decision. The emitted tests check this: a round trip, and `None` for every cut of the text and
+for every single byte changed to `0`, `9`, `x`, a space, a newline or `-`.
+
+### The PIN lockout (`examples/rules/lockout.helix`)
+
+**What the rule does:**
+- A guess is checked only when no wait is left. During a wait it is refused: not counted, and
+  never accepted, right or not.
+- The waits are 0 for the first four wrong PINs, then 1, 5, 15, 15 and 60 minutes. At ten, the
+  phone must be wiped.
+- Time is a monotonic clock the service passes in. `helix effects` proves the rule reads no
+  clock itself, so setting the wall clock forward can't end a wait.
+- A restart keeps the count and restarts the wait that was left. A missing or damaged save
+  gives the longest wait and one guess before the wipe, never a fresh start.
+
+**Properties**, checked on all 951 reachable states (11,412 steps):
+- guesses right and wrong at several times, including a clock that runs backwards;
+- restarts that keep, lose or damage the save.
+
+**Mutations caught:** accepting a right PIN during a wait (two steps, found through a clock
+that ran backwards), a damaged save giving a fresh start (one step), and a restart dropping
+the wait (two steps).
+
+**The emitted `Lockout`:**
+- `new`, `restore(saved: Option<&str>, now_ms)`, `save(now_ms) -> String`, `wait_left`,
+  `may_check`, `wipe_due` and `guess(now_ms, correct) -> Guess`;
+- `Guess` is `Accepted | Rejected(wait) | Refused(wait)`;
+- the constants, `Default`, and the Helix doc comments as `///` docs.
+
+It is clippy- and fmt-clean, and its 48 replays and save-format test pass.
+
 ## Results on the freezer
 
 - **The emitted `Policy`** matches the API mobile-os specified (`new`, `update`,

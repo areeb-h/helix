@@ -1,0 +1,52 @@
+# The PIN lockout's guarantees, checked on EVERY reachable step (std.model, ADR 0065): guesses
+# right and wrong at many times, and restarts that keep, lose or damage the saved state, with
+# the monotonic clock starting again after each.
+import std.model
+import lockout.{new, restore, save, wait_left, may_check, wipe_due, guess, WIPE_AT, LONGEST}
+
+TIMES = [0, 61000, 5000000]
+BOOTS = [0]
+INPUTS = TIMES.flat_map((t) => [{call: "guess", now: t, correct: true}, {call: "guess", now: t, correct: false}]).concat(TIMES.flat_map((t) => BOOTS.flat_map((b) => [{call: "restart", at: t, boot: b, kept: true}, {call: "restart", at: t, boot: b, kept: false}])))
+
+fn step(s, i) = if i.call == "guess" then do {
+  r = guess(s, i.now, i.correct)
+  {state: r[0], out: r[1]}
+} else {state: restore(if i.kept then save(s, i.at) else missing, i.boot), out: missing}
+
+fn first_problem(ps) = do {
+  bad = ps.filter((p) => p != "")
+  if bad.count() == 0 then "" else bad[0]
+}
+
+fn check(before, i, after, out) = if i.call == "guess" then on_guess(before, i, after, out) else on_restart(before, i, after)
+
+fn on_guess(before, i, after, out) = do {
+  left = wait_left(before, i.now)
+  kind = out.keys()[0]
+  first_problem([
+    if may_check(before, i.now) == (left == 0) then "" else "may_check disagrees with the wait left",
+    if kind == "Accepted" and left > 0 then "a guess was accepted with {left} ms of wait left" else "",
+    if kind == "Accepted" and wipe_due(before) then "a guess was accepted after the wipe was due" else "",
+    if kind == "Accepted" and not i.correct then "a wrong PIN was accepted" else "",
+    if kind == "Refused" and after != before then "a refused guess changed the state (it must not count)" else "",
+    if kind != "Accepted" and after.failures < before.failures then "the count went down from {before.failures} to {after.failures} without a right PIN" else "",
+    if kind == "Rejected" and out.Rejected != wait_left(after, i.now) then "it reported a wait of {out.Rejected} ms, but the wait is {wait_left(after, i.now)} ms" else "",
+    if kind == "Rejected" and after.failures != before.failures + 1 then "a wrong PIN did not count exactly once" else "",
+  ])
+}
+
+fn on_restart(before, i, after) = do {
+  was = wait_left(before, i.at)
+  now = wait_left(after, i.boot)
+  if i.kept then first_problem([
+    if after.failures == before.failures then "" else "a restart changed the count from {before.failures} to {after.failures}",
+    if now >= was then "" else "a restart shortened the wait from {was} ms to {now} ms",
+  ]) else first_problem([
+    if now == LONGEST then "" else "a lost or damaged save gave a wait of {now} ms, not the longest",
+    if after.failures >= WIPE_AT - 1 then "" else "a lost or damaged save reset the count to {after.failures}",
+  ])
+}
+
+RESULT = model.explore(new(), INPUTS, step, check)
+print("{RESULT.states} states, {RESULT.transitions} steps checked")
+assert(RESULT.failure.is_missing(), model.explain(RESULT.failure))

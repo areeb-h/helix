@@ -1,0 +1,63 @@
+## How long the lock screen refuses PIN guesses after wrong ones (mobile-os auth). These are
+## the rules only: the auth service checks the PIN, saves the state, and wipes the phone when
+## told to. `helix emit rust` turns this file into the service's `Lockout`.
+##
+## - A guess is checked only when no wait is left. During a wait it is refused: not counted,
+##   and never accepted, right or not.
+## - The wait grows with each wrong PIN; at ten the phone must be wiped.
+## - Times are a MONOTONIC clock in milliseconds, which the service passes in. The rules never
+##   read a clock themselves, so setting the phone's time forward cannot end a wait.
+## - What survives a restart is the count and the wait still left, so a restart neither resets
+##   the count nor shortens the wait. A saved state that is missing or damaged gives the
+##   longest wait and one guess before the wipe — never a fresh start.
+##
+## rust: pub enum Guess { Accepted, Rejected(i64), Refused(i64) }
+## rust: pub struct Lockout { failures: i64, wait_until: i64 }
+## rust: pub struct Saved { failures: i64, wait_left: i64 }
+## rust: impl Lockout
+
+## Wrong PINs at which the phone must be wiped.
+export WIPE_AT = 10
+## The longest wait, in milliseconds: an hour.
+export LONGEST = 3600000
+
+## The wait after `failures` wrong PINs in a row: none for the first four, then a minute, five
+## minutes, fifteen (twice), and an hour.
+## rust: fn wait_for(failures: i64) -> i64
+fn wait_for(failures) = if failures < 5 then 0 else if failures == 5 then 60000 else if failures == 6 then 300000 else if failures < 9 then 900000 else LONGEST
+
+## A lockout for a newly set PIN: no wrong guesses yet.
+## rust: pub fn new() -> Self
+export fn new() = {failures: 0, wait_until: 0}
+
+## After a restart: the saved state, with its wait starting again now. Missing or damaged: the
+## longest wait, and one guess before the wipe.
+## rust: pub fn restore(saved: Save<Saved>, now_ms: u64) -> Self
+export fn restore(saved, now_ms) = if saved.is_missing() then {failures: WIPE_AT - 1, wait_until: now_ms + LONGEST} else {failures: max(saved.failures, 0), wait_until: now_ms + max(saved.wait_left, 0)}
+
+## What to keep across a restart: the count, and the wait still left.
+## rust: pub fn save(&self, now_ms: u64) -> Save<Saved>
+export fn save(self, now_ms) = {failures: self.failures, wait_left: wait_left(self, now_ms)}
+
+## How long until a guess may be checked.
+## rust: pub fn wait_left(&self, now_ms: u64) -> u64
+export fn wait_left(self, now_ms) = if self.failures >= WIPE_AT then LONGEST else max(self.wait_until - now_ms, 0)
+
+## Whether the service may check a PIN now. It must not check one otherwise.
+## rust: pub fn may_check(&self, now_ms: u64) -> bool
+export fn may_check(self, now_ms) = wait_left(self, now_ms) == 0
+
+## Whether the phone must be wiped now.
+## rust: pub fn wipe_due(&self) -> bool
+export fn wipe_due(self) = self.failures >= WIPE_AT
+
+## A guess the service checked, and whether it was right.
+## rust: pub fn guess(&mut self, now_ms: u64, correct: bool) -> Guess
+export fn guess(self, now_ms, correct) = do {
+  left = wait_left(self, now_ms)
+  if left > 0 then (self, {Refused: left}) else if correct then ({failures: 0, wait_until: 0}, {Accepted: true}) else do {
+    failures = self.failures + 1
+    wait = wait_for(failures)
+    ({failures: failures, wait_until: now_ms + wait}, {Rejected: wait})
+  }
+}
