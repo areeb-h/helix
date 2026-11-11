@@ -22,6 +22,17 @@ impl super::Interp {
         line: usize,
         col: usize,
     ) -> Result<Value, HelixError> {
+        // The black box (ADR 0063 D2, `src/tape.rs`): while an app records, an impure builtin's
+        // result goes on the tape; while it replays, the tape answers and the builtin does not
+        // run at all — so a replay reads, writes and sends nothing, and needs no authority.
+        if crate::tape::wants(name) {
+            if let Some(r) = crate::tape::replayed(name, line, col) {
+                return r;
+            }
+            let out = self.call_builtin_arm(name, args, line, col);
+            crate::tape::record(name, &out);
+            return out;
+        }
         let out = self.call_builtin_arm(name, args, line, col)?;
         // The folding sandbox pays for what a builtin PRODUCES as well as what it is
         // handed (ADR 0050): `to_array(range(0, n))` costs `n`, so no attempt holds more
@@ -152,6 +163,7 @@ impl super::Interp {
             "dev_generation" => return crate::devwatch::dev_generation(&args, line, col),
             "open_window" => return crate::desktop::open_window(&args, line, col),
             "app_window" => return crate::desktop::app_window(&args, line, col),
+            "session_tape" => return crate::tape::session_tape(&args, line, col),
             "url_encode" => return encoding::a_url_encode(args, line, col),
             "url_decode" => return encoding::a_url_decode(name, args, line, col),
             "url_decode_lenient" => return encoding::a_url_decode_lenient(name, args, line, col),

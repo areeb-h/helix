@@ -5063,6 +5063,99 @@ fn dev_generation_is_missing_in_an_ordinary_run() {
     assert_eq!(out, "missing\n");
 }
 
+/// THE BLACK BOX (ADR 0063 D2): a recorded app session replays exactly. The app's `update`
+/// reads the clock and a file; the session is recorded over real HTTP, then the file is
+/// changed and deleted — and the replay still reproduces every screen and the error, on all
+/// three engines, because the tape answers what the app read. Changing the app's code makes
+/// the replay fail, naming where it first went another way.
+#[test]
+fn a_recorded_session_replays_exactly() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    const PORT: u16 = 18478;
+    let dir = std::env::temp_dir().join(format!("helix_blackbox_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let app = dir.join("app.helix");
+    let source = format!(
+        "import std.ui\n\
+         fn update(m, e) = match e.msg {{\n\
+           \"stamp\" => {{...m, at: \"{{now()}}\", note: read_text(source_path(\"note.txt\"))}},\n\
+           \"inc\" => {{...m, n: m.n + 1}},\n\
+           \"boom\" => raise(\"the boom button\"),\n\
+           _ => m,\n\
+         }}\n\
+         fn view(m) = <div><p>{{m.n}}</p><p>{{m.note ?? \"-\"}}</p><p>{{m.at ?? \"-\"}}</p></div>\n\
+         ui.app({{title: \"BB\", init: {{n: 0, at: missing, note: missing}}, update: update, view: view, port: {PORT}}})\n"
+    );
+    std::fs::write(&app, &source).unwrap();
+    std::fs::write(dir.join("note.txt"), "first note\n").unwrap();
+    let session = dir.join("session.jsonl");
+
+    struct Running(std::process::Child);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut run = Running(
+        Command::new(env!("CARGO_BIN_EXE_helix"))
+            .args(["run", app.to_str().unwrap()])
+            .env("HELIX_RECORD", &session)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut lines = BufReader::new(run.0.stderr.take().unwrap()).lines();
+    let banner = lines.next().unwrap().unwrap();
+    let token = banner.split("token=").nth(1).unwrap().trim().to_string();
+    let cookie = format!("Cookie: helix_app_{PORT}={token}\r\n");
+    let post = |body: &str| {
+        let mut s = TcpStream::connect(("127.0.0.1", PORT)).expect("the app has stopped");
+        s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        s.write_all(
+            format!("POST /event HTTP/1.0\r\nHost: 127.0.0.1:{PORT}\r\n{cookie}Content-Length: {}\r\n\r\n{body}", body.len())
+                .as_bytes(),
+        )
+        .unwrap();
+        let mut out = String::new();
+        let _ = s.read_to_string(&mut out);
+        std::thread::sleep(Duration::from_millis(150));
+    };
+    for m in ["inc", "stamp", "inc", "boom", "inc"] {
+        post(&format!(r#"{{"msg":"{m}"}}"#));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    drop(run);
+    let tape = std::fs::read_to_string(&session).unwrap();
+    assert!(tape.contains(r#""fn":"read_text""#) && tape.contains(r#""fn":"now""#), "the reads are on the tape:\n{tape}");
+
+    // The world changes: the file the app read is rewritten, then gone. The replay reads nothing.
+    std::fs::write(dir.join("note.txt"), "changed\n").unwrap();
+    std::fs::remove_file(dir.join("note.txt")).unwrap();
+    let (out, err, code) = run_cmd(&["replay", app.to_str().unwrap(), session.to_str().unwrap(), "--engines"]);
+    assert_eq!(code, Some(0), "out:\n{out}\nerr:\n{err}");
+    assert!(out.contains("replayed 5 events: 5 of 5 screens identical, update raised 1 time (1 as recorded)"), "{out}");
+    assert!(out.contains("(3 engines agree)"), "{out}");
+    assert!(err.contains(r#"event #4 {"msg":"boom"}: update raised: the boom button"#), "{err}");
+
+    // The app's code changed: the replay fails and says where it first went another way.
+    std::fs::write(&app, source.replace("<p>{m.n}</p>", "<p>Count {m.n}</p>")).unwrap();
+    let (out, err, code) = run_cmd(&["replay", app.to_str().unwrap(), session.to_str().unwrap()]);
+    assert_eq!(code, Some(1), "out:\n{out}\nerr:\n{err}");
+    assert!(err.contains("the replay differs from the recording, first at screen #1"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `helix <args>` with no stdin and no extra environment.
+fn run_cmd(args: &[&str]) -> (String, String, Option<i32>) {
+    run(args, &[], "")
+}
+
 /// One bad request or one failing view must not end an app. A body that is not an event
 /// record used to raise out of `parse_json` and stop the server for everyone using it; a view
 /// that raised did the same. Now the bad body is a 400, and the event that broke the view is
@@ -6553,7 +6646,11 @@ fn no_new_panicking_calls_on_user_reachable_paths() {
         // them, never calling back into the interpreter. `close` was rewritten to take one
         // guard instead of two for exactly this reason — not because two was a bug, but
         // because each extra borrow is somewhere a later edit can nest one.
-        ("src/serve.rs", 22),
+        // 22 -> 25 (ADR 0063, the window's connections): `request.borrow()` in `request`,
+        // `request.borrow_mut()` in `poll_request` and `reply.borrow_mut()` in `respond`. Each
+        // is a one-expression borrow of a cell only that arm touches, released before any
+        // other call — the reply closure runs AFTER `take()` has ended the borrow.
+        ("src/serve.rs", 25),
         ("src/cookiejar.rs", 7),
         ("src/autodiff.rs", 13),
         ("src/regexes.rs", 2),

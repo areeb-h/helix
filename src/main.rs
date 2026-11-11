@@ -75,6 +75,7 @@ mod json;
 mod lattice;
 mod lexer;
 mod localnet;
+mod tape;
 mod markup;
 mod ufcs;
 mod managed;
@@ -410,6 +411,9 @@ fn run() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        // `helix replay <app> <session> [--engines]` — reproduce a recorded app session
+        // (the black box, ADR 0063 D2).
+        Some("replay") => run_replay(&args),
         // `helix check <script>…` — load + type-check, produce nothing, run nothing.
         Some("check") => run_check(&args),
         // `helix effects <script> [--json]` — the authority and reproducibility closure of
@@ -2270,6 +2274,71 @@ fn run_watch(path: &str, argv: &[String]) -> ExitCode {
 }
 
 /// `helix run <script> [args…]` — the script's own command line is `argv` (ADR 0037 D1).
+/// `helix replay app.helix session.jsonl [--engines]`: run the app with `HELIX_REPLAY` set, so
+/// `ui.app` plays the recorded session instead of serving, and report what it says. Each run is
+/// a child process — the same isolation `helix test --engines` relies on — and with `--engines`
+/// all three engines replay it and must print the same thing.
+fn run_replay(args: &[String]) -> ExitCode {
+    if args.iter().skip(2).any(|a| a == "--help" || a == "-h") {
+        println!(
+            "helix replay <app.helix> <session.jsonl> [--engines]\n\n\
+             Reproduce a recorded app session (ADR 0063). Record one with\n\n    \
+             HELIX_RECORD=session.jsonl helix run app.helix\n\n\
+             The replay sends the recorded events through the app's `update` and `view`. What they\n\
+             read from the world (the clock, files, responses) comes from the recording, so nothing\n\
+             is read, written or sent, and the result is the same on any machine. It reports how\n\
+             many screens came out identical and fails if any differ.\n\n\
+             --engines  replay on all three engines and fail if they disagree"
+        );
+        return ExitCode::SUCCESS;
+    }
+    let engines = args.iter().skip(2).any(|a| a == "--engines");
+    let pos: Vec<&String> = args.iter().skip(2).filter(|a| !a.starts_with("--")).collect();
+    let (Some(app), Some(session)) = (pos.first(), pos.get(1)) else {
+        eprintln!(
+            "error: `helix replay` needs an app and a recorded session, e.g. `helix replay app.helix session.jsonl`\n\
+             help: record one with `HELIX_RECORD=session.jsonl helix run app.helix`"
+        );
+        return ExitCode::FAILURE;
+    };
+    if !std::path::Path::new(session.as_str()).is_file() {
+        eprintln!("error: no session file `{session}`\nhelp: record one with `HELIX_RECORD={session} helix run {app}`");
+        return ExitCode::FAILURE;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        eprintln!("error: cannot find this helix binary to run the replay");
+        return ExitCode::FAILURE;
+    };
+    let which: &[(&str, &[(&str, &str)])] = if engines { &TEST_ENGINES } else { &TEST_ENGINES[..1] };
+    let mut outs: Vec<(&str, std::process::Output)> = Vec::new();
+    for (name, env) in which {
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg("run").arg(app.as_str()).env("HELIX_REPLAY", session.as_str()).env_remove("HELIX_RECORD").stdin(std::process::Stdio::null());
+        for (k, v) in *env {
+            cmd.env(k, v);
+        }
+        match cmd.output() {
+            Ok(o) => outs.push((name, o)),
+            Err(e) => {
+                eprintln!("error: could not run the replay: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    let first = &outs[0].1;
+    print!("{}", String::from_utf8_lossy(&first.stdout));
+    eprint!("{}", String::from_utf8_lossy(&first.stderr));
+    if engines {
+        let key = |o: &std::process::Output| (o.status.code(), o.stdout.clone(), o.stderr.clone());
+        if let Some((name, _)) = outs.iter().find(|(_, o)| key(o) != key(first)) {
+            eprintln!("error: the engines disagree: {} and {name} replayed this session differently", outs[0].0);
+            return ExitCode::FAILURE;
+        }
+        println!("(3 engines agree)");
+    }
+    if first.status.success() { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+}
+
 fn run_file_with_args(path: &str, argv: &[String]) -> ExitCode {
     let path = &match resolve_script(path) {
         Ok(p) => p.to_string_lossy().into_owned(),

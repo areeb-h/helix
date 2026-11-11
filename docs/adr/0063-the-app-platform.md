@@ -56,7 +56,7 @@ Consequences:
   frame reaches the page: the button moves after the first click, and a second click lands
   only where the new frame put it.
 
-### D2 — Every session is a black box that replays exactly *(next)*
+### D2 — Every session is a black box that replays exactly *(done)*
 
 A bug report today is a description and maybe a stack trace. Helix can do better: the app
 records its session, and the recording reproduces the bug on any machine and any engine.

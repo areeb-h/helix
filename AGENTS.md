@@ -96,6 +96,10 @@ fn main(replay: Bool = false, port: Int = 8080) = if replay then ui.replay(spec,
   `shadow-1`. Dark mode is `theme: (m) => if m.dark then "dark" else "light"` and the tokens
   follow it. An unknown class renders nothing, silently — `helix check --lint` names the ones
   that look like utilities but are not.
+- **Bug reports reproduce exactly:** `HELIX_RECORD=s.jsonl helix run app.helix` records a
+  session (events, plus what `update`/`view` read: clock, files, responses);
+  `helix replay app.helix s.jsonl --engines` replays it with nothing read from the world and says
+  whether every screen is identical. `window: true` runs in a native window with no port open.
 - **Footguns:** a comparison with a `missing` field is `missing`, not `false` — give it a
   default first, `(m.plan ?? "") == "pro"`. The runtime supplies the page's `<main>`; it steps
   aside if your view's root is one. A busy port moves to the next free one, and says so.

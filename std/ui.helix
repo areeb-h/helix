@@ -84,6 +84,10 @@ export fn stat(name, value) = el("div", {class: "stat"}, [el("span", {class: "st
 # its colour from what it sits in. `icon(name)` is decorative (hidden from screen readers);
 # give `label` when the icon alone carries meaning. `icon_names()` lists them.
 
+# Whether this run records its session, replays one, or neither (`"off"`): the black box, ADR
+# 0063 D2, described with `step` below.
+TAPE = session_tape("mode") ?? "off"
+
 ICONS = {
   home: ["M4 10.5 12 4l8 6.5V19a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z"],
   search: ["M10.5 4a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13z", "M20 20l-4.6-4.6"],
@@ -3306,11 +3310,63 @@ fn ack_of(ev) = do {
 # One event through `update`. An update that raises is logged and the model kept: one bad
 # event must not take the app down with it.
 fn step(spec, model, ev) = do {
+  # With a recording running, what `update` reads is taped with the event (the black box).
+  taping = TAPE == "record"
+  began = if taping then session_tape("begin") else ()
   next = try (spec.update)(model, ev)
+  taped = if taping then session_tape("event", {event: ev, error: if next.ok then missing else "{next.error}"}) else ()
   if next.ok then next.value else do {
     logged = elog("update failed on {ev.to_json()}: {next.error}")
     model
   }
+}
+
+# --- The black box (ADR 0063 D2). ------------------------------------------------------------
+#
+# `HELIX_RECORD=session.jsonl helix run app.helix` records the session: every event that reaches
+# `update`, what `update` and `view` read from the world while handling it (the clock, a file,
+# a response — taped at the builtin they called), and a hash of every screen drawn.
+# `helix replay app.helix session.jsonl` plays it back: no event is sent and nothing is read —
+# the tape answers instead — so the session reproduces exactly, on any machine and engine, and
+# the replay says whether every screen came out the same.
+
+# One screen as a hash, the way it is recorded and compared.
+fn screen_hash(tree) = sha256(render(tree))
+
+# Play a recorded session through this app's `update` and `view`, and report.
+fn replay_session(spec) = do {
+  entries = session_tape("entries")
+  starts = entries.filter((e) => e.kind == "start")
+  first = if starts.count() == 0 then missing else starts[0]
+  recorded_init = if first.is_missing() then missing else first.get("init")
+  init = recorded_init ?? spec.init
+  out = range(0, entries.count()).reduce({model: init, events: 0, screens: 0, same: 0, diverged: missing, errors: 0, reproduced: 0}, (st, i) => do {
+    e = entries[i]
+    match e.kind {
+      "event" => do {
+        played = session_tape("play", i)
+        r = try (spec.update)(st.model, e.event)
+        clean = session_tape("done")
+        n = st.events + 1
+        was = e.get("error")
+        logged = if r.ok then false else elog("event #{n} {e.event.to_json()}: update raised: {r.error}")
+        {...st, model: if r.ok then r.value else st.model, events: n, errors: st.errors + (if r.ok then 0 else 1), reproduced: st.reproduced + (if not r.ok and not was.is_missing() then 1 else 0), diverged: if st.diverged.is_missing() and (r.ok != was.is_missing() or not clean) then "event #{n} {e.event.to_json()}" else st.diverged}
+      },
+      "view" => do {
+        played = session_tape("play", i)
+        t = try (spec.view)(st.model)
+        clean = session_tape("done")
+        h = if t.ok then screen_hash(t.value) else "view failed: {t.error}"
+        same = h == e.screen and clean
+        k = st.screens + 1
+        {...st, screens: k, same: st.same + (if same then 1 else 0), diverged: if st.diverged.is_missing() and not same then "screen #{k} (after event #{st.events})" else st.diverged}
+      },
+      _ => st,
+    }
+  })
+  errors = if out.errors == 0 then "" else ", update raised {out.errors} time{if out.errors == 1 then "" else "s"} ({out.reproduced} as recorded)"
+  print("replayed {out.events} event{if out.events == 1 then "" else "s"}: {out.same} of {out.screens} screens identical{errors}")
+  if out.diverged.is_missing() then out else raise("the replay differs from the recording, first at {out.diverged}", "the app's code changed since the session was recorded, or it reads something the tape does not hold: a method on a handle (`db.query`), or a value computed at the top level from a file.")
 }
 
 # A frame is the patch operations that bring a client's page up to date, and the theme.
@@ -3354,7 +3410,9 @@ fn serve(l, spec, rt, model, tree, conns, streams, timers) = do {
   # A view that raises must not end the app either. The events of this round are undone — the
   # model goes back to what the screen shows — and the error is logged; the screen stays
   # consistent with the model, and the next event starts from there.
+  began = if changed_now and TAPE == "record" then session_tape("begin") else ()
   drawn = if changed_now then try (spec.view)(ticked) else {ok: true, value: tree}
+  taped = if changed_now and TAPE == "record" then session_tape("view", if drawn.ok then screen_hash(drawn.value) else "view failed: {drawn.error}") else ()
   logged_view = if drawn.ok then false else elog("view failed: {drawn.error}; the events that led to it were undone")
   ticked = if drawn.ok then ticked else model
   changed = changed_now and drawn.ok
@@ -3434,7 +3492,8 @@ fn adopt(spec, kept) = if kept.is_missing() then spec.init else do {
 # msg), ui.after(ms, msg)]`, `style:` (extra CSS), `port` (8080; the next free one if taken),
 # `open: true` (open the browser), `window: true` (a native window where the build has one). It
 # prints its link and serves until stopped. Test it with `ui.replay(spec, events)`.
-export fn app(spec) = do {
+export fn app(spec) = if TAPE == "replay" then replay_session(spec) else do {
+  recording = if TAPE == "record" then session_tape("start", {app: "{spec.title}", init: spec.init}) else false
   generation = dev_generation()
   win = spec.get("window")
   windowed = if win.is_missing() then false else if type_of(win) == "Bool" then win else true

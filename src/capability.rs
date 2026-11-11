@@ -511,6 +511,10 @@ mod tests {
             // through a private URL scheme and the web view's message channel. Showing your
             // own window needs no `net`.
             "app_window",
+            // The black box (ADR 0063). It reads two variables and writes ONE file: the path
+            // in `HELIX_RECORD`, which the person running the program chose — the program
+            // cannot name it. Replaying reads the file `helix replay` was given. Nothing else.
+            "session_tape",
         ];
         for b in crate::registry::BUILTINS {
             if b.pure || effect_of(b.path).gated() {

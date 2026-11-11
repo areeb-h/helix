@@ -1200,6 +1200,14 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         notes: "ADR 0063: how `ui.app({…, window: true})` runs in a window. The page loads through a private URL scheme and the page's events and frames travel through the web view's own message channel, so the app OPENS NO PORT: no other process on the machine has anything to connect to, and the program needs no `net` authority to show its own window. The listener answers the same verbs as `listen`'s (`accept_poll`, `wait`, and on a connection `poll_request`, `respond`, `sse`, `send`), and each request carries `transport: \"window\"`, a field a socket's request never has. Only the runtime's own messages are accepted from the page. Answers missing in a build without `--features desktop` or on a machine with no display. Keywords: window, desktop, native, ipc, no port, in-process, app.",
     },
     DocEntry {
+        name: "session_tape",
+        sig: "session_tape(op, value?)",
+        doc: "The black box's controls, used by `std.ui` to record and replay an app session.",
+        example: "session_tape(\"mode\")",
+        example_out: "",
+        notes: "ADR 0063 D2. Apps do not call this; `ui.app` does. `HELIX_RECORD=s.jsonl helix run app.helix` records every event, what `update` and `view` read from the world (the result of every impure builtin they called, or the error it raised), and a hash of each screen. `helix replay app.helix s.jsonl` plays it back: impure builtins do NOT run — the tape answers — so a replay touches no file, network or clock, and reports whether every screen came out identical. Operations: mode, start, begin, event, view, entries, play, done. Keywords: record, replay, session, black box, bug report, reproduce, time travel, deterministic.",
+    },
+    DocEntry {
         name: "dev_generation",
         sig: "dev_generation()",
         doc: "Under `helix run --watch`, which start of the program this is (1 for the first); otherwise missing.",

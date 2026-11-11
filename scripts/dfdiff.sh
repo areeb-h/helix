@@ -61,7 +61,7 @@ fi
 # fixtures are generated rather than tracked, examples/api blocks or needs the
 # network, examples/apps serves until stopped, examples/python is feature-gated.
 mapfile -t files < <(git ls-files '*.helix' \
-  | grep -vE '^bench/' | grep -vE '^examples/(api|python|apps)/')
+  | grep -vE '^bench/' | grep -vE '^examples/(api|python|apps)/' | grep -vE '^tests/ui/')
 
 if [ "$LIST_ONLY" = 1 ]; then printf '%s\n' "${files[@]}"; exit 0; fi
 

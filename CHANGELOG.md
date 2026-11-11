@@ -4,6 +4,20 @@
 
 ### Added
 
+- **Apps (ADR 0063: compete by being different).**
+  - **A windowed app opens no port.** `ui.app({window: true})` runs in a native window whose
+    page loads through a private `helix:` URL scheme, with events and frames going through the
+    web view's own message channel. Nothing listens on the network: no other process can reach
+    the app, and it needs no network permission. Before, it served on `127.0.0.1` behind a token.
+    `tests/ui/window.sh` checks a real window: no listening socket, a click reaches `update`,
+    and the frame reaches the page.
+  - **The black box: sessions that replay exactly.** `HELIX_RECORD=s.jsonl helix run app.helix`
+    records every event, what `update` and `view` read from the world while handling it (each
+    impure builtin's result or error: the clock, files, responses), and a hash of every screen.
+    `helix replay app.helix s.jsonl` plays it back without reading, writing or sending anything —
+    the tape answers — and says whether every screen came out identical, on any machine. Add
+    `--engines` to check all three. A bug report becomes a file that reproduces the bug.
+
 - **Made for AI agents to get right (from a study of five agents building apps).**
 
   Five fresh agents built a todo app, a dashboard, a signup wizard, a memory game and a CLI tool

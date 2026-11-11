@@ -57,6 +57,8 @@ fn passes_through(name: &str) -> bool {
     matches!(
         name,
         "print" | "emit" | "write" | "elog" | "raise" | "assert" | "assert_eq" | "assert_close" | "assert_error"
+            // The tape's own controls.
+            | "session_tape"
     )
 }
 
@@ -169,7 +171,12 @@ pub fn session_tape(args: &[Value], line: usize, col: usize) -> Result<Value, He
                 _ => Vec::new(),
             });
             let entry = if op == "event" {
-                json!({"kind": "event", "event": encode(&arg), "effects": effects})
+                // `{event, error}`: the event, and what `update` raised on it, if anything.
+                let field = |name: &str| match &arg {
+                    Value::Record(r) => r.iter().find(|(k, _)| k.as_str() == name).map(|(_, v)| v.clone()).unwrap_or(Value::Missing),
+                    _ => Value::Missing,
+                };
+                json!({"kind": "event", "event": encode(&field("event")), "error": encode(&field("error")), "effects": effects})
             } else {
                 json!({"kind": "view", "screen": encode(&arg), "effects": effects})
             };

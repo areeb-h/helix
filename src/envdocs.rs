@@ -141,6 +141,20 @@ pub static ENV: &[EnvDoc] = &[
         notes: "A doc example runs as the file plus the example's lines, so a file with `fn main` used to run its main as well — and a main with a required parameter failed every example in the file. `helix test` sets this for the examples it runs; nothing else needs to. Keywords: doctest, doc example, main, test.",
     },
     EnvDoc {
+        name: "HELIX_RECORD",
+        values: "a file path",
+        default: "unset",
+        doc: "Record an app session to this file (JSON Lines), to replay with `helix replay`.",
+        notes: "ADR 0063's black box. Each event that reaches `update` is written as it happens, with what `update` and `view` read from the world while handling it (the clock, files, responses — each impure builtin's result or error) and a hash of every screen. The file is the bug report: `helix replay app.helix session.jsonl` reproduces it exactly, on any machine and engine. A program cannot choose this path; only the person running it can. Keywords: record, session, black box, bug report, reproduce.",
+    },
+    EnvDoc {
+        name: "HELIX_REPLAY",
+        values: "a session file, set by `helix replay`",
+        default: "unset",
+        doc: "Replay this recorded session instead of serving the app.",
+        notes: "Set by `helix replay app.helix session.jsonl`; nothing else needs to. `ui.app` plays the session through the app's `update` and `view` with the tape answering every impure builtin, prints how many screens came out identical, and fails if any differ. Keywords: replay, session, reproduce.",
+    },
+    EnvDoc {
         name: "HELIX_THREADS",
         values: "a positive integer; `1` runs fully serial",
         default: "unset — one worker per core",

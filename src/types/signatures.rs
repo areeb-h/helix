@@ -393,6 +393,13 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Bool)
         }
+        // The black box (ADR 0063): an operation name and maybe one value; answers vary by op.
+        "session_tape" => {
+            if args.is_empty() || args.len() > 2 {
+                return Err(arity_err(name, 1, 2, args.len(), line, col));
+            }
+            Ok(Type::Unknown)
+        }
         // A native window fed to the app's loop (ADR 0063): a listener, or `missing`.
         "app_window" => {
             if args.is_empty() || args.len() > 3 {

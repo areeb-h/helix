@@ -867,7 +867,9 @@ pub fn respond(handle: &Rc<NetHandle>, value: &Value, line: usize, col: usize) -
     // answer. Either way the connection is done.
     if let NetHandle::LocalConn(c) = &**handle {
         let (status, headers, body) = build_response(value, line, col)?;
-        if let Some(reply) = c.reply.borrow_mut().take() {
+        // The borrow ends with `take()`: the reply runs with no borrow held.
+        let reply = c.reply.borrow_mut().take();
+        if let Some(reply) = reply {
             let content_type = headers
                 .iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
