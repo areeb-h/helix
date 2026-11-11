@@ -324,13 +324,20 @@ pub fn layout(os: &str, display: &str, exe: Vec<u8>, inf: &Inferred, version: &s
             Entry { path: format!("{display}/{id}.svg"), bytes: icon_svg(display).into_bytes(), executable: false },
         ],
         _ => {
-            // An AppDir: what AppImage packs, and runnable as it is (`AppRun`).
+            // An AppDir: what AppImage packs, and runnable as it is (`AppRun`). It also carries
+            // a Flatpak manifest, whose sandbox is generated from the same inference.
             let root = format!("{display}.AppDir");
-            let desktop = format!(
-                "[Desktop Entry]\nType=Application\nName={display}\nExec=AppRun\nIcon={id}\nCategories=Utility;\nTerminal=false\n\
-                 X-Helix-Permissions={summary}\n"
-            );
+            let entry = |exec: &str, icon: &str| {
+                format!(
+                    "[Desktop Entry]\nType=Application\nName={display}\nExec={exec}\nIcon={icon}\nCategories=Utility;\nTerminal=false\n\
+                     X-Purism-FormFactor=Workstation;Mobile;\nX-Helix-Permissions={summary}\n"
+                )
+            };
+            let desktop = entry("AppRun", &id);
+            let fid = flatpak_id(&id);
             vec![
+                Entry { path: format!("{root}/{fid}.flatpak.json"), bytes: flatpak_manifest(&id, inf).into_bytes(), executable: false },
+                Entry { path: format!("{root}/{fid}.desktop"), bytes: entry(&id, &fid).into_bytes(), executable: false },
                 Entry { path: format!("{root}/AppRun"), bytes: exe, executable: true },
                 Entry { path: format!("{root}/{id}.desktop"), bytes: desktop.into_bytes(), executable: false },
                 Entry { path: format!("{root}/{id}.svg"), bytes: icon_svg(display).into_bytes(), executable: false },
@@ -339,6 +346,56 @@ pub fn layout(os: &str, display: &str, exe: Vec<u8>, inf: &Inferred, version: &s
             ]
         }
     }
+}
+
+/// The Flatpak application id for an app: reverse-DNS, as Flatpak requires.
+pub fn flatpak_id(id: &str) -> String {
+    format!("app.helix.{}", id.replace('-', "_"))
+}
+
+/// The Flatpak sandbox an app gets: what every windowed app needs to draw, plus exactly what
+/// its code reaches (ADR 0064). Flatpak's file grants are by place, not by kind, so a file
+/// reader gets the home folder read-only and a writer gets it read-write; finer places wait
+/// on ADR 0021's per-path grants. Running programs needs no grant — programs inside the
+/// sandbox run — and the host is never opened to it (`flatpak-spawn --host` would be an
+/// escape, not a permission).
+pub fn finish_args(inf: &Inferred) -> Vec<&'static str> {
+    let mut a = vec!["--socket=wayland", "--socket=fallback-x11", "--share=ipc", "--device=dri"];
+    if inf.caps.net_on() {
+        a.push("--share=network");
+    }
+    if inf.caps.fs_write() {
+        a.push("--filesystem=home");
+    } else if inf.caps.fs_read() {
+        a.push("--filesystem=home:ro");
+    }
+    a
+}
+
+/// A `flatpak-builder` manifest that packs this AppDir, with the sandbox from `finish_args`.
+/// The GNOME runtime carries WebKitGTK, which the window uses.
+pub fn flatpak_manifest(id: &str, inf: &Inferred) -> String {
+    let fid = flatpak_id(id);
+    let doc = serde_json::json!({
+        "app-id": fid,
+        "runtime": "org.gnome.Platform",
+        "runtime-version": "48",
+        "sdk": "org.gnome.Sdk",
+        "command": id,
+        "finish-args": finish_args(inf),
+        "modules": [{
+            "name": id,
+            "buildsystem": "simple",
+            "build-commands": [
+                format!("install -Dm755 AppRun /app/bin/{id}"),
+                format!("install -Dm644 {fid}.desktop /app/share/applications/{fid}.desktop"),
+                format!("install -Dm644 {id}.svg /app/share/icons/hicolor/scalable/apps/{fid}.svg"),
+                "install -Dm644 permissions.json /app/share/helix/permissions.json".to_string(),
+            ],
+            "sources": [{"type": "dir", "path": "."}],
+        }],
+    });
+    serde_json::to_string_pretty(&doc).unwrap_or_default()
 }
 
 /// The host's bundle kind.
@@ -393,6 +450,14 @@ mod tests {
         assert!(ent.contains("app-sandbox") && ent.contains("read-write") && !ent.contains("network.client"), "{ent}");
         assert!(mac.iter().any(|e| e.path == "Habit Tracker.app/Contents/MacOS/habit-tracker" && e.executable));
         assert!(paths("windows").contains(&"Habit Tracker/habit-tracker.exe".to_string()));
+        // The Flatpak sandbox is the inference: a writer gets home read-write, no network.
+        assert!(linux.contains(&"Habit Tracker.AppDir/app.helix.habit_tracker.flatpak.json".to_string()), "{linux:?}");
+        assert_eq!(finish_args(&inf), ["--socket=wayland", "--socket=fallback-x11", "--share=ipc", "--device=dri", "--filesystem=home"]);
+        let none = infer_src("fn update(m, e) = m\n");
+        assert!(!finish_args(&none).iter().any(|a| a.starts_with("--share=network") || a.starts_with("--filesystem")));
+        let m: serde_json::Value = serde_json::from_str(&flatpak_manifest("habit-tracker", &inf)).unwrap();
+        assert_eq!(m["app-id"], "app.helix.habit_tracker");
+        assert_eq!(m["command"], "habit-tracker");
         assert_eq!(display_name("habit_tracker"), "Habit Tracker");
         assert_eq!(slug("Ünïcode App!"), "n-code-app");
         assert_eq!(base_name("m0$serve_tcp$265"), "serve_tcp");

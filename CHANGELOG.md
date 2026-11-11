@@ -26,6 +26,14 @@
     access (Files). A reach the analysis cannot follow is named at build time. A `[capabilities]`
     block in `helix.toml` stays an upper bound: code that needs more fails the build.
   - `has_feature("desktop")` answers; it was missing from the list.
+- **Helix on mobile-os (ADR 0064).**
+  - A built app's Linux bundle carries a Flatpak manifest whose sandbox is generated from the
+    code: Orbit and the gallery get no network and no files; Files gets the home folder. The
+    `.desktop` entry is marked for phone mode.
+  - `ui.tokens(design, "gtk" | "css" | "json", mode)` exports a design's colours, sizes and
+    springs, with how many contrast pairs were checked. `examples/tools/design_tokens.helix`
+    writes them from the command line and fails if any pair is below WCAG — a shell can
+    generate its palette in CI. GTK's own CSS parser accepts the `gtk` output.
 
 - **Made for AI agents to get right (from a study of five agents building apps).**
 

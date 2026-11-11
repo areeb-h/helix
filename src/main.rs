@@ -2343,6 +2343,14 @@ fn run_build_app(entry: String, out: Option<String>, runtime: Option<String>, na
                         println!("    {:<20} {}", appbuild::plain(*e), appbuild::path_text(path));
                     }
                 }
+                if let Some(fp) = written.iter().find(|p| p.to_string_lossy().ends_with(".flatpak.json")) {
+                    let extra: Vec<&str> = appbuild::finish_args(&inferred).into_iter().skip(4).collect();
+                    println!(
+                        "  flatpak: {} (sandbox: {})",
+                        fp.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                        if extra.is_empty() { "display only".to_string() } else { extra.join(" ") }
+                    );
+                }
                 for (what, path) in &inferred.unresolved {
                     println!("  note: not followed: `{}` at {} — if a call there needs a permission not listed above, it is refused when it runs", appbuild::base_name(what), appbuild::path_text(path));
                 }
