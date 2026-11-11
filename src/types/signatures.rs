@@ -393,6 +393,13 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Bool)
         }
+        // A native window fed to the app's loop (ADR 0063): a listener, or `missing`.
+        "app_window" => {
+            if args.is_empty() || args.len() > 3 {
+                return Err(arity_err(name, 1, 3, args.len(), line, col));
+            }
+            Ok(Type::Unknown)
+        }
         // Hot reload (`helix run --watch`): which start this is, or `missing` — so `Unknown`.
         "dev_generation" => {
             if !args.is_empty() {

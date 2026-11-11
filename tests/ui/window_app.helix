@@ -1,0 +1,14 @@
+# A windowed app for tests/ui/window.sh (ADR 0063). The button MOVES after the first click, so a
+# second click at the new place lands only if the first click's frame reached the page: it
+# proves the round trip — page -> app -> page — through the window's channel, with no port.
+import std.ui
+
+fn update(m, e) = do {
+  logged = elog("event: {e.msg}")
+  {...m, n: m.n + 1}
+}
+
+fn view(m) = if m.n == 0 then <div class="p-4"><button click="first" class="h-20 w-60 bg-accent text-white">First</button></div>
+  else <div class="p-4"><div class="h-[150px]"></div><button click="second" class="h-20 w-60 bg-accent text-white">Second {m.n}</button></div>
+
+ui.app({title: "Window app", init: {n: 0}, update: update, view: view, window: {width: 500, height: 400}})

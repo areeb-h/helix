@@ -1421,6 +1421,8 @@ impl fmt::Display for Value {
             Value::Net(h) => match &**h {
                 crate::serve::NetHandle::Listener(_) => write!(f, "<listener>"),
                 crate::serve::NetHandle::Conn { .. } => write!(f, "<connection>"),
+                crate::serve::NetHandle::Local(_) => write!(f, "<window listener>"),
+                crate::serve::NetHandle::LocalConn(_) => write!(f, "<window connection>"),
                 crate::serve::NetHandle::HttpStream { .. } => write!(f, "<http-stream>"),
                 crate::serve::NetHandle::CookieJar(j) => write!(f, "<cookie-jar: {} cookies>", j.len()),
             },

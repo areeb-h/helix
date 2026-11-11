@@ -2587,17 +2587,23 @@ CLIENT = """
     }
   }
   const built = document.documentElement.dataset.client;
+  // In the app's own native window (ADR 0063) there is no server to talk to: frames arrive as
+  // calls to `__hx_frame` and events leave through the web view's message channel. The page
+  // was told which by the runtime that served it, not by sniffing the browser.
+  const LOCAL = document.documentElement.dataset.transport === 'window' && !!window.ipc;
+  // Frames are applied on the next animation frame, all that arrived since the last one
+  // together: a burst of frames (a slider dragged, a list filling) is one layout and one
+  // paint per display refresh, never several per refresh.
+  function receive(text) {
+    pending.push(JSON.parse(text));
+    if (document.hidden) drain();
+    else if (!scheduled) { scheduled = true; requestAnimationFrame(drain); }
+  }
   function connect() {
+    if (LOCAL) { window.__hx_frame = receive; window.ipc.postMessage(JSON.stringify({ path: '/events' })); return; }
     const es = new EventSource('/events');
     es.onopen = () => { delay = 100; };
-    // Frames are applied on the next animation frame, all that arrived since the last one
-    // together: a burst of frames (a slider dragged, a list filling) is one layout and one
-    // paint per display refresh, never several per refresh.
-    es.onmessage = (e) => {
-      pending.push(JSON.parse(e.data));
-      if (document.hidden) drain();
-      else if (!scheduled) { scheduled = true; requestAnimationFrame(drain); }
-    };
+    es.onmessage = (e) => receive(e.data);
     es.onerror = () => { es.close(); setTimeout(connect, delay); delay = Math.min(delay * 2, 2000); };
   }
   connect();
@@ -2610,6 +2616,8 @@ CLIENT = """
   let inflight = null, fieldSeq = 0;
   const busy = (msg) => !!msg && ((inflight && inflight.msg === msg) || queue.some((q) => q.ev.msg === msg));
   function flush() {
+    // The window's channel is in order and never busy: everything waiting goes now.
+    if (LOCAL) { while (queue.length) window.ipc.postMessage(JSON.stringify({ path: '/event', body: JSON.stringify(queue.shift().ev) })); return; }
     if (inflight || queue.length === 0) return;
     const ev = queue.shift().ev;
     inflight = ev;
@@ -3227,7 +3235,8 @@ fn page(spec, rt, model) = do {
   util = utility_css(rt.known.keys().concat(view_classes(tree)))
   theme = theme_of(spec, model)
   effects = rt.design.effects
-  fx = if effects == "auto" then "" else " data-effects=\"{effects}\""
+  fx0 = if effects == "auto" then "" else " data-effects=\"{effects}\""
+  fx = if (rt.get("transport") ?? "") == "window" then "{fx0} data-transport=\"window\"" else fx0
   # The page's main landmark — unless the app's view is one itself, when two would nest.
   shell = if type_of(tree) == "Record" and (tree.get("tag") ?? "") == "main" then "div" else "main"
   "<!doctype html><html lang=\"en\" data-theme=\"{theme}\"{fx} data-client=\"{rt.client}\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{title}</title><style id=\"hx-style\">{rt.css}</style><style id=\"hx-util\">{util}</style></head><body><{shell} id=\"root\">{body}</{shell}><script>{CLIENT}</script></body></html>"
@@ -3250,7 +3259,10 @@ fn handle(spec, st, c) = do {
 # the request must carry the cookie — or, on the one link the app printed, the token itself.
 fn guard(spec, st, c, req) = do {
   rt = st.rt
-  if not local_host(rt, req) then refuse(st, c, 421, "this app answers only on 127.0.0.1") else if req.method != "GET" and not same_origin(req) then refuse(st, c, 403, "this app takes changes only from its own page") else if same_token(rt, cookie_token(rt, req)) then (if rt.dev and req.path.starts_with("/__dev/") then dev_route(spec, st, c, req) else route(spec, st, c, req)) else if req.method == "GET" and same_token(rt, query_token(req.query)) then do {
+  # A request from the app's own window (ADR 0063) came through no socket: `transport` is set
+  # only by the window's link, never parsed from anything a peer sent, and a windowed app has
+  # no port open at all. The session below defends a port; there is none to defend.
+  if (req.get("transport") ?? "") == "window" then route(spec, st, c, req) else if not local_host(rt, req) then refuse(st, c, 421, "this app answers only on 127.0.0.1") else if req.method != "GET" and not same_origin(req) then refuse(st, c, 403, "this app takes changes only from its own page") else if same_token(rt, cookie_token(rt, req)) then (if rt.dev and req.path.starts_with("/__dev/") then dev_route(spec, st, c, req) else route(spec, st, c, req)) else if req.method == "GET" and same_token(rt, query_token(req.query)) then do {
     sent = c.respond({status: 303, headers: {"Set-Cookie": set_cookie(rt), "Location": "/", "Cache-Control": "no-store"}})
     {...st, keep: st.keep.concat([c])}
   } else refuse(st, c, 403, "open the link this app printed when it started; it carries the session")
@@ -3423,29 +3435,45 @@ fn adopt(spec, kept) = if kept.is_missing() then spec.init else do {
 # `open: true` (open the browser), `window: true` (a native window where the build has one). It
 # prints its link and serves until stopped. Test it with `ui.replay(spec, events)`.
 export fn app(spec) = do {
+  generation = dev_generation()
+  win = spec.get("window")
+  windowed = if win.is_missing() then false else if type_of(win) == "Bool" then win else true
+  size = if type_of(win) == "Record" then win else {}
+  # In its own window the app opens NO PORT (ADR 0063): the window's web view is the only
+  # thing that can reach it, so nothing else on the machine can. Under `--watch` a reload is a
+  # new process, and its window would close and reopen on every save, so a watched app is
+  # served to the browser instead.
+  local = if windowed and generation.is_missing() then app_window("{spec.title}", size.get("width") ?? 1100, size.get("height") ?? 760) else missing
+  if local.is_missing() then serve_tcp(spec, windowed, generation) else do {
+    logged = elog("{spec.title} is open in its own window (no port)")
+    rt = runtime(spec, 0, generation)
+    serve(local, spec, {...rt, transport: "window"}, spec.init, (spec.view)(spec.init), [], [], schedule([], subs_of(spec, spec.init), clock_monotonic()))
+  }
+}
+
+# What every page of this run shares: the session, the design and its stylesheet, the client.
+fn runtime(spec, port, generation) = do {
+  d0 = design_of(spec, spec.init, missing)
+  rt0 = {...session(port), dev: not generation.is_missing(), design: d0, css: css_with(spec, d0), title: "{spec.title}", client: sha256(CLIENT), known: {"": true}, util: ""}
+  with_classes(rt0, (spec.view)(spec.init)).rt
+}
+
+# Served on 127.0.0.1 to a browser, behind the session (see "The session").
+fn serve_tcp(spec, windowed, generation) = do {
   wanted = if spec.get("port").is_missing() then 8080 else spec.port
   bound = listen_from(wanted, wanted, 20)
   l = bound.l
   port = bound.port
-  generation = dev_generation()
   moved = if port == wanted or (generation ?? 1) > 1 then false else elog("port {wanted} is in use, so {spec.title} is on port {port}")
   reload = if generation.is_missing() then false else generation > 1
-  d0 = design_of(spec, spec.init, missing)
-  rt0 = {...session(port), dev: not generation.is_missing(), design: d0, css: css_with(spec, d0), title: "{spec.title}", client: sha256(CLIENT), known: {"": true}, util: ""}
-  rt = with_classes(rt0, (spec.view)(spec.init)).rt
+  rt = runtime(spec, port, generation)
   url = "http://127.0.0.1:{port}/?token={rt.token}"
   # Under `--watch` the supervisor reads this line and shows the link once, on the first start.
   logged = elog("{spec.title} on {url}")
-  # `window: true` (or `{width, height}`) shows the app in a native window (ADR 0055 Phase 4)
-  # where this build and machine can; otherwise it opens in the browser, as `open: true` does.
-  # Under `--watch` a reload is a new process, so a window would close and reopen on every
-  # save: a watched app opens in the browser, once.
-  win = spec.get("window")
-  windowed = if win.is_missing() then false else if type_of(win) == "Bool" then win else true
-  size = if type_of(win) == "Record" then win else {}
-  in_window = if windowed and generation.is_missing() then open_window(url, "{spec.title}", size.get("width") ?? 1100, size.get("height") ?? 760) else false
+  # A window that could not open (no `desktop` build, no display) leaves the browser: `window:
+  # true` opens it there, as `open: true` does. Under `--watch` it opens once, not per reload.
   wants_open = if spec.get("open").is_missing() then false else spec.open
-  opened = if in_window or reload then false else if windowed or wants_open then open_url(url) else false
+  opened = if reload then false else if windowed or wants_open then open_url(url) else false
   serve(l, spec, rt, spec.init, (spec.view)(spec.init), [], [], schedule([], subs_of(spec, spec.init), clock_monotonic()))
 }
 

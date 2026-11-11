@@ -1192,6 +1192,14 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         notes: "ADR 0055 PHASE 4: the platform's web view (WebView2, WKWebView, WebKitGTK) in a native window, instead of a browser tab. `std.ui` calls it for `ui.app({…, window: true})`. ONLY the app's own `http://127.0.0.1:<port>` origin: any other URL is refused, navigation away from it is refused inside the window, and pages cannot open more windows — a frame around what the app serves, not a browser. Closing the window ends the program. Answers false in a build without `--features desktop` or on a machine with no display, so the caller can open the browser instead (`open_url`). Keywords: window, desktop, native, gui, app, webview.",
     },
     DocEntry {
+        name: "app_window",
+        sig: "app_window(title, width?, height?)",
+        doc: "Open a native window and return a listener fed by it — no port — or missing where none can open.",
+        example: "app_window(\"My app\", 1100, 760)",
+        example_out: "",
+        notes: "ADR 0063: how `ui.app({…, window: true})` runs in a window. The page loads through a private URL scheme and the page's events and frames travel through the web view's own message channel, so the app OPENS NO PORT: no other process on the machine has anything to connect to, and the program needs no `net` authority to show its own window. The listener answers the same verbs as `listen`'s (`accept_poll`, `wait`, and on a connection `poll_request`, `respond`, `sse`, `send`), and each request carries `transport: \"window\"`, a field a socket's request never has. Only the runtime's own messages are accepted from the page. Answers missing in a build without `--features desktop` or on a machine with no display. Keywords: window, desktop, native, ipc, no port, in-process, app.",
+    },
+    DocEntry {
         name: "dev_generation",
         sig: "dev_generation()",
         doc: "Under `helix run --watch`, which start of the program this is (1 for the first); otherwise missing.",

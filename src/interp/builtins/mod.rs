@@ -151,6 +151,7 @@ impl super::Interp {
             "view_html" | "view_diff" | "view_classes" | "utility_css" => return a_view(name, args, line, col),
             "dev_generation" => return crate::devwatch::dev_generation(&args, line, col),
             "open_window" => return crate::desktop::open_window(&args, line, col),
+            "app_window" => return crate::desktop::app_window(&args, line, col),
             "url_encode" => return encoding::a_url_encode(args, line, col),
             "url_decode" => return encoding::a_url_decode(name, args, line, col),
             "url_decode_lenient" => return encoding::a_url_decode_lenient(name, args, line, col),

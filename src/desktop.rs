@@ -65,6 +65,44 @@ pub fn open_window(args: &[Value], line: usize, col: usize) -> Result<Value, Hel
     Ok(Value::Bool(imp::request(url, title, w, h)))
 }
 
+/// `app_window(title, width?, height?)` — open a native window for this app and return a
+/// listener fed by it (ADR 0063, `src/localnet.rs`): the page loads through the private
+/// `helix:` scheme and its events and frames travel through the web view's own message
+/// channel, so NO PORT is opened. `missing` where no window can open, so the caller serves
+/// over TCP instead.
+pub fn app_window(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
+    if args.is_empty() || args.len() > 3 {
+        return Err(HelixError::new(format!("`app_window` takes 1 to 3 arguments, got {}", args.len()), line, col));
+    }
+    let title = match &args[0] {
+        Value::Str(s) => s.to_string(),
+        other => other.to_string(),
+    };
+    let size = |i: usize, dflt: f64| match args.get(i) {
+        Some(Value::Int(n)) => *n as f64,
+        Some(Value::Float(f)) => *f,
+        _ => dflt,
+    };
+    let (w, h) = (size(1, 1100.0).clamp(200.0, 8000.0), size(2, 760.0).clamp(150.0, 8000.0));
+    Ok(match imp::request_app(title, w, h) {
+        Some(link) => Value::Net(std::rc::Rc::new(crate::serve::NetHandle::Local(std::rc::Rc::new(link)))),
+        None => Value::Missing,
+    })
+}
+
+/// The address a window loads its app from. WebKitGTK and WKWebView show a custom scheme as
+/// itself; WebView2 (and Android) map it onto `http://<scheme>.<host>`.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+pub const APP_URL: &str = if cfg!(any(target_os = "windows", target_os = "android")) { "http://helix.app/" } else { "helix://app/" };
+
+/// Whether `url` is on the app's own private origin — the only place its window may go, and
+/// the only page whose messages are read.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+pub fn on_app_origin(url: &str) -> bool {
+    url.strip_prefix(APP_URL).is_some_and(|rest| !rest.starts_with('/') && !rest.contains('@'))
+        || url == APP_URL.trim_end_matches('/')
+}
+
 /// Run `f` — a whole program — on a big-stack thread, keeping the main thread for a window if
 /// the program asks for one. Without the `desktop` feature this is exactly `run_on_big_stack`.
 pub fn run_main<F: FnOnce() -> std::process::ExitCode + Send>(stack: usize, f: F) -> std::process::ExitCode {
@@ -75,6 +113,9 @@ pub fn run_main<F: FnOnce() -> std::process::ExitCode + Send>(stack: usize, f: F
 mod imp {
     pub fn request(_url: String, _title: String, _w: f64, _h: f64) -> bool {
         false
+    }
+    pub fn request_app(_title: String, _w: f64, _h: f64) -> Option<crate::localnet::Link> {
+        None
     }
     pub fn run_main<F: FnOnce() -> std::process::ExitCode + Send>(stack: usize, f: F) -> std::process::ExitCode {
         std::thread::scope(|scope| match std::thread::Builder::new().stack_size(stack).spawn_scoped(scope, f) {
@@ -96,14 +137,21 @@ mod imp {
     use std::sync::{Mutex, OnceLock};
 
     use tao::event::{Event, WindowEvent};
-    use tao::event_loop::{ControlFlow, EventLoopBuilder};
-    use tao::window::WindowBuilder;
+    use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
+    use tao::window::{WindowBuilder, WindowId};
     use wry::{NewWindowResponse, WebViewBuilder};
+
+    use crate::localnet::{Incoming, Link, Reply};
 
     /// `reply` is answered `true` once the window is on screen, `false` if none could open —
     /// so `open_window` reports what happened, and the app falls back to the browser.
     pub enum Msg {
         Open { url: String, title: String, w: f64, h: f64, reply: Sender<bool> },
+        /// A window for the app's own loop (ADR 0063): its requests go to `to_app`, and the
+        /// reply says where to send frames — or `None` if no window opened.
+        OpenApp { title: String, w: f64, h: f64, to_app: Sender<Incoming>, reply: Sender<Option<(EventLoopProxy<Msg>, WindowId)>> },
+        /// One frame for a window's page.
+        Frame(WindowId, String),
         Done(bool),
     }
 
@@ -143,6 +191,22 @@ mod imp {
         opened
     }
 
+    /// Ask the main thread for an app window; the link its requests arrive on, or `None`.
+    pub fn request_app(title: String, w: f64, h: f64) -> Option<Link> {
+        if !has_display() {
+            return None;
+        }
+        let tx = LINE.get().and_then(|l| l.lock().ok()).map(|l| l.clone())?;
+        let (to_app, from_window) = channel();
+        let (reply, answer) = channel();
+        tx.send(Msg::OpenApp { title, w, h, to_app, reply }).ok()?;
+        // As for `request`: a first start can be slow, but a window that never answers is none.
+        let (proxy, id) = answer.recv_timeout(Duration::from_secs(30)).ok()??;
+        WINDOWED.store(true, std::sync::atomic::Ordering::SeqCst);
+        let push = move |frame: &str| proxy.send_event(Msg::Frame(id, frame.to_string())).is_ok();
+        Some(Link::new(from_window, Box::new(push)))
+    }
+
     /// Whether the windowing system can actually be reached — a `DISPLAY` that names no
     /// running server, or a Wayland socket nobody listens on, is caught here, where it is an
     /// answer, instead of inside tao, where it is a panic.
@@ -154,6 +218,102 @@ mod imp {
         #[cfg(not(target_os = "linux"))]
         {
             true
+        }
+    }
+
+    /// A window whose web view talks only to the app's loop (ADR 0063): the page comes from
+    /// the private `helix:` scheme, the page's messages are read only from that origin and
+    /// only in the runtime's own shapes, and navigation anywhere else is refused.
+    fn open_app(
+        target: &tao::event_loop::EventLoopWindowTarget<Msg>,
+        windows: &mut HashMap<WindowId, (tao::window::Window, wry::WebView)>,
+        title: String,
+        w: f64,
+        h: f64,
+        to_app: Sender<Incoming>,
+    ) -> Option<WindowId> {
+        let window = match WindowBuilder::new().with_title(title).with_inner_size(tao::dpi::LogicalSize::new(w, h)).build(target) {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("error: could not open a window: {e}");
+                return None;
+            }
+        };
+        let pages = to_app.clone();
+        let builder = WebViewBuilder::new()
+            .with_asynchronous_custom_protocol("helix".into(), move |_id, req, responder| {
+                let answer = move |status: u16, ctype: &str, body: Vec<u8>| {
+                    let resp = wry::http::Response::builder()
+                        .status(status)
+                        .header("Content-Type", ctype)
+                        .header("Cache-Control", "no-store")
+                        .body(body)
+                        .unwrap_or_else(|_| wry::http::Response::new(Vec::new()));
+                    responder.respond(resp);
+                };
+                // The page and nothing else comes through here: a GET on the app's own host.
+                let uri = req.uri();
+                let ours = uri.host().is_none_or(|h| h == "app") && req.method() == wry::http::Method::GET;
+                if !ours {
+                    return answer(405, "text/plain", b"not here".to_vec());
+                }
+                let path = uri.path().to_string();
+                let query = uri.query().unwrap_or("").to_string();
+                let (ret, back) = channel::<Reply>();
+                let asked = pages.send(Incoming::Request {
+                    method: "GET".into(),
+                    path,
+                    query,
+                    body: String::new(),
+                    reply: Some(Box::new(move |r| {
+                        let _ = ret.send(r);
+                    })),
+                });
+                if asked.is_err() {
+                    return answer(503, "text/plain", b"the app has stopped".to_vec());
+                }
+                // Waited for OFF the main thread, so the window stays live while the app renders.
+                std::thread::spawn(move || match back.recv_timeout(Duration::from_secs(60)) {
+                    Ok(r) => answer(r.status, &r.content_type, r.body),
+                    Err(_) => answer(504, "text/plain", b"the app did not answer".to_vec()),
+                });
+            })
+            .with_ipc_handler(move |req| {
+                if !super::on_app_origin(&req.uri().to_string()) {
+                    return;
+                }
+                if let Some(m) = crate::localnet::from_page(req.body()) {
+                    let _ = to_app.send(m);
+                }
+            })
+            .with_url(super::APP_URL)
+            .with_devtools(cfg!(debug_assertions))
+            .with_navigation_handler(|to| super::on_app_origin(&to))
+            .with_new_window_req_handler(|_, _| NewWindowResponse::Deny);
+        #[cfg(target_os = "linux")]
+        let view = {
+            use tao::platform::unix::WindowExtUnix;
+            use wry::WebViewBuilderExtUnix;
+            match window.default_vbox() {
+                Some(vbox) => builder.build_gtk(vbox),
+                None => {
+                    eprintln!("error: this window has no container for a web view");
+                    return None;
+                }
+            }
+        };
+        #[cfg(not(target_os = "linux"))]
+        let view = builder.build(&window);
+        match view {
+            Ok(v) => {
+                let id = window.id();
+                windows.insert(id, (window, v));
+                Some(id)
+            }
+            Err(e) => {
+                eprintln!("error: could not create the window's web view: {e}");
+                None
+            }
         }
     }
 
@@ -186,12 +346,21 @@ mod imp {
             // goes back to waiting: the program carries on in the browser.
             let first = loop {
                 match rx.recv() {
-                    Ok(Msg::Open { url, title, w, h, reply }) => {
+                    Ok(m @ (Msg::Open { .. } | Msg::OpenApp { .. })) => {
                         if display_opens() {
-                            break (url, title, w, h, reply);
+                            break m;
                         }
-                        let _ = reply.send(false);
+                        match m {
+                            Msg::Open { reply, .. } => {
+                                let _ = reply.send(false);
+                            }
+                            Msg::OpenApp { reply, .. } => {
+                                let _ = reply.send(None);
+                            }
+                            _ => {}
+                        }
                     }
+                    Ok(Msg::Frame(..)) => {}
                     Ok(Msg::Done(_)) | Err(_) => return worker.join().unwrap_or(ExitCode::FAILURE),
                 }
             };
@@ -206,9 +375,9 @@ mod imp {
                     }
                 }
             });
-            let mut windows: HashMap<tao::window::WindowId, (tao::window::Window, wry::WebView)> = HashMap::new();
+            let mut windows: HashMap<WindowId, (tao::window::Window, wry::WebView)> = HashMap::new();
             let open = |target: &tao::event_loop::EventLoopWindowTarget<Msg>,
-                        windows: &mut HashMap<tao::window::WindowId, (tao::window::Window, wry::WebView)>,
+                        windows: &mut HashMap<WindowId, (tao::window::Window, wry::WebView)>,
                         (url, title, w, h): (String, String, f64, f64)|
              -> bool {
                 let Some(origin) = super::local_origin(&url) else { return false };
@@ -254,16 +423,32 @@ mod imp {
                     }
                 }
             };
+            let frames = event_loop.create_proxy();
             let mut pending = Some(first);
             event_loop.run(move |event, target, control_flow| {
                 *control_flow = ControlFlow::Wait;
-                if let Some((url, title, w, h, reply)) = pending.take() {
-                    let _ = reply.send(open(target, &mut windows, (url, title, w, h)));
+                let handle = |m: Msg, windows: &mut HashMap<WindowId, (tao::window::Window, wry::WebView)>| match m {
+                    Msg::Open { url, title, w, h, reply } => {
+                        let _ = reply.send(open(target, windows, (url, title, w, h)));
+                    }
+                    Msg::OpenApp { title, w, h, to_app, reply } => {
+                        let id = open_app(target, windows, title, w, h, to_app);
+                        let _ = reply.send(id.map(|id| (frames.clone(), id)));
+                    }
+                    Msg::Frame(id, text) => {
+                        if let Some((_, view)) = windows.get(&id) {
+                            // The frame as a JS string literal: JSON's string syntax is JS's.
+                            let lit = serde_json::to_string(&text).unwrap_or_else(|_| "\"\"".into());
+                            let _ = view.evaluate_script(&format!("window.__hx_frame && window.__hx_frame({lit})"));
+                        }
+                    }
+                    Msg::Done(ok) => std::process::exit(if ok { 0 } else { 1 }),
+                };
+                if let Some(m) = pending.take() {
+                    handle(m, &mut windows);
                 }
                 match event {
-                    Event::UserEvent(Msg::Open { url, title, w, h, reply }) => {
-                        let _ = reply.send(open(target, &mut windows, (url, title, w, h)));
-                    }
+                    Event::UserEvent(m @ (Msg::Open { .. } | Msg::OpenApp { .. } | Msg::Frame(..))) => handle(m, &mut windows),
                     // The program ended: so does the app, window and all.
                     Event::UserEvent(Msg::Done(ok)) => std::process::exit(if ok { 0 } else { 1 }),
                     // Closing an app's window ends the app, as it does everywhere else.
@@ -304,5 +489,25 @@ mod tests {
         assert!(stays_home("http://127.0.0.1:8080", "http://127.0.0.1:8080/events"));
         assert!(!stays_home("http://127.0.0.1:8080", "http://127.0.0.1:9090/"));
         assert!(!stays_home("http://127.0.0.1:8080", "https://example.com/"));
+    }
+
+    #[test]
+    fn an_app_window_stays_on_its_private_origin() {
+        let base = APP_URL;
+        assert!(on_app_origin(base));
+        assert!(on_app_origin(&format!("{base}?x=1")));
+        assert!(on_app_origin(&format!("{base}page")));
+        for bad in [
+            "https://example.com/".to_string(),
+            "http://127.0.0.1:8080/".to_string(),
+            base.replace("app/", "app.evil.com/"),
+            base.replace("app/", "appx/"),
+            format!("{base}/evil.com"),
+            format!("{base}x@evil.com"),
+            "file:///etc/passwd".to_string(),
+            "javascript:alert(1)".to_string(),
+        ] {
+            assert!(!on_app_origin(&bad), "{bad}");
+        }
     }
 }

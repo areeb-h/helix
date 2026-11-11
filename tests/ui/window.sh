@@ -9,7 +9,9 @@
 #   2. under Xvfb + a window manager, `--window` opens a window titled with the app, at its size;
 #   3. the window's close button (WM_DELETE_WINDOW, as a person clicks it) ends the app and
 #      frees its port;
-#   4. a program that ends while its window is open exits with ITS exit code.
+#   4. a program that ends while its window is open exits with ITS exit code;
+#   5. an app in its own window opens NO port, and a click and its frame make the round trip
+#      through the web view's channel (ADR 0063).
 # A screenshot of the window lands in out-dir. Needs Xvfb, openbox, xdotool, wmctrl, curl,
 # ImageMagick's `import` and dbus-run-session (gdb, if present, explains a hang). Exits non-zero
 # on any failed check.
@@ -100,6 +102,40 @@ if [ -n "$wid" ]; then
   curl -s -m 1 -o /dev/null http://127.0.0.1:18961/ && bad "the port is still held" || ok "and frees its port"
 else
   bad "no window appeared"; cat "$work/win.log"; echo "windows on the display:"; xwininfo -root -tree | head -30; ps aux | grep -E 'helix|WebKit' | grep -v grep
+fi
+
+echo "— an app in its own window opens no port, and its page and loop talk in-process (ADR 0063)"
+in_session "$HELIX" run tests/ui/window_app.helix >"$work/local.log" 2>&1 &
+pid=$!
+wid=""
+for _ in $(seq 300); do wid=$(xdotool search --name '^Window app$' 2>/dev/null | head -1); [ -n "$wid" ] && break; sleep 0.1; done
+if [ -n "$wid" ]; then
+  # Every listening TCP socket of THIS process: there must be none.
+  socks=$(ss -ltnp 2>/dev/null | grep -c "pid=$pid," || true)
+  [ "$socks" = 0 ] && ok "no listening socket" || bad "the windowed app listens on $socks socket(s)"
+  # The page may still be loading on a slow first start; click until the app hears it.
+  for _ in $(seq 60); do
+    xdotool mousemove --window "$wid" 120 55 click 1 2>/dev/null
+    grep -q 'event: first' "$work/local.log" && break
+    sleep 0.5
+  done
+  grep -q 'event: first' "$work/local.log" && ok "a click reaches update" || bad "the click never reached update"
+  # The button moved: only a page that received the frame has it at the new place.
+  for _ in $(seq 20); do
+    xdotool mousemove --window "$wid" 120 205 click 1 2>/dev/null
+    grep -q 'event: second' "$work/local.log" && break
+    sleep 0.5
+  done
+  grep -q 'event: second' "$work/local.log" && ok "the frame reached the page (the moved button was clicked)" || bad "the page never showed the frame"
+  grep -q 'open in its own window (no port)' "$work/local.log" && ok "it says it runs with no port" || bad "no 'no port' line: $(cat "$work/local.log" | tail -3)"
+  import -window root "$OUT/desktop-local.png" 2>/dev/null && ok "screenshot: $OUT/desktop-local.png"
+  hex=$(printf '0x%08x' "$wid")
+  for _ in $(seq 100); do wmctrl -i -c "$hex" 2>/dev/null && break; sleep 0.1; done
+  for _ in $(seq 200); do kill -0 $pid 2>/dev/null || break; sleep 0.1; done
+  kill -0 $pid 2>/dev/null && { bad "the app outlived its window"; kill $pid; } || ok "closing it ends the app"
+  wait $pid 2>/dev/null
+else
+  bad "no window appeared"; cat "$work/local.log"
 fi
 
 echo "— a program that ends while its window is open"

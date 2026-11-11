@@ -1579,6 +1579,16 @@ Pause the program for ms milliseconds (wall clock; fractional ms honoured).
 
 ## ui
 
+### `app_window(title, width?, height?)`
+
+Open a native window and return a listener fed by it — no port — or missing where none can open.
+
+**Note:** ADR 0063: how `ui.app({…, window: true})` runs in a window. The page loads through a private URL scheme and the page's events and frames travel through the web view's own message channel, so the app OPENS NO PORT: no other process on the machine has anything to connect to, and the program needs no `net` authority to show its own window. The listener answers the same verbs as `listen`'s (`accept_poll`, `wait`, and on a connection `poll_request`, `respond`, `sse`, `send`), and each request carries `transport: "window"`, a field a socket's request never has. Only the runtime's own messages are accepted from the page. Answers missing in a build without `--features desktop` or on a machine with no display. Keywords: window, desktop, native, ipc, no port, in-process, app.
+
+```
+>>> app_window("My app", 1100, 760)
+```
+
 ### `dev_generation()`
 
 Under `helix run --watch`, which start of the program this is (1 for the first); otherwise missing.
