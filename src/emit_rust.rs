@@ -1352,10 +1352,10 @@ pub fn driver(src: &str, traces: &str) -> Result<String, EmitError> {
     let init_args: Vec<String> = (0..c.sigs.get(&ctor).map_or(0, |s| s.params.len())).map(|i| format!("t.init[{i}]")).collect();
     Ok(format!(
         "{src}\n\n# --- `helix emit rust`'s check: the generated traces, through the rule. ---\n\
-         HELIX_TRACES = \"\"\"{traces}\"\"\".parse_json()\n\
+         RULE_TRACES = \"\"\"{traces}\"\"\".parse_json()\n\
          fn helix_step(s, step) = match step.call {{\n{}\n  _ => raise(\"unknown call {{step.call}}\"),\n}}\n\
          fn helix_trace(t) = t.steps.scan({{s: {ctor}({}), out: missing}}, (acc, step) => helix_step(acc.s, step)).map((x) => x.out)\n\
-         print(HELIX_TRACES.map(helix_trace).to_json())\n",
+         print(RULE_TRACES.map(helix_trace).to_json())\n",
         arms.join("\n"),
         init_args.join(", ")
     ))
