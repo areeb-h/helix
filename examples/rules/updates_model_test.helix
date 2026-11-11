@@ -1,0 +1,47 @@
+# The update policy's guarantees, checked on EVERY reachable step (std.model, ADR 0065): every
+# combination of the phone's conditions, at the edges of each threshold, for an update at each
+# stage, at times before and after the three-day wait.
+import std.model
+import updates.{new, decide, may_restart, NIGHT_FROM, NIGHT_UNTIL, IDLE_FOR, ASK_AFTER}
+
+BOOLS = [false, true]
+PHONES = [0, 1, 4, 5].flat_map((h) => BOOLS.flat_map((ch) => [49, 50].flat_map((b) => BOOLS.flat_map((scr) => BOOLS.flat_map((call) => BOOLS.flat_map((media) => [1799999, 1800000].flat_map((idle) => BOOLS.map((met) => {hour: h, charging: ch, battery: b, screen_on: scr, in_call: call, media_playing: media, idle_ms: idle, metered: met}))))))))
+UPDATES = [{available: false, downloaded: false, installed: false}, {available: true, downloaded: false, installed: false}, {available: true, downloaded: true, installed: false}, {available: true, downloaded: true, installed: true}]
+TIMES = [0, ASK_AFTER - 1, ASK_AFTER]
+INPUTS = TIMES.flat_map((t) => UPDATES.flat_map((u) => PHONES.map((p) => {now: t, phone: p, update: u})))
+
+fn step(s, i) = do {
+  r = decide(s, i.now, i.phone, i.update)
+  {state: r[0], out: r[1]}
+}
+
+fn first_problem(ps) = do {
+  bad = ps.filter((p) => p != "")
+  if bad.count() == 0 then "" else bad[0]
+}
+
+fn check(before, i, after, out) = do {
+  p = i.phone
+  u = i.update
+  kind = out.keys()[0]
+  night = p.hour >= NIGHT_FROM and p.hour < NIGHT_UNTIL
+  first_problem([
+    if kind == "Restart" and not u.installed then "it restarted with no update installed" else "",
+    if kind == "Restart" and p.in_call then "it restarted during a call" else "",
+    if kind == "Restart" and p.screen_on then "it restarted with the screen on" else "",
+    if kind == "Restart" and p.media_playing then "it restarted while media played" else "",
+    if kind == "Restart" and not night then "it restarted at {p.hour}:00, outside the night window" else "",
+    if kind == "Restart" and not p.charging then "it restarted without charging" else "",
+    if kind == "Restart" and p.idle_ms < IDLE_FOR then "it restarted after only {p.idle_ms} ms idle" else "",
+    if kind == "Download" and p.metered then "it downloaded on a metered network" else "",
+    if kind == "Install" and p.in_call then "it installed during a call" else "",
+    if kind == "AskToRestart" and (p.in_call or not p.screen_on) then "it asked with the screen off or during a call" else "",
+    if kind == "AskToRestart" and i.now - (after.installed_since ?? i.now) < ASK_AFTER then "it asked before the update had waited three days" else "",
+    if u.installed and may_restart(p) and kind != "Restart" then "every condition allowed a restart, and it did not restart" else "",
+    if not u.installed and not after.installed_since.is_missing() then "it remembers an install that is not there" else "",
+  ])
+}
+
+RESULT = model.explore(new(), INPUTS, step, check)
+print("{RESULT.states} states, {RESULT.transitions} steps checked")
+assert(RESULT.failure.is_missing(), model.explain(RESULT.failure))

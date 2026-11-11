@@ -5241,6 +5241,42 @@ fn emit_rust_lockout_has_a_damage_proof_save_format() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The update policy (ADR 0065): input records with public fields (`&Phone`), per-field test
+/// domains, and an associated function (`Policy::may_restart`). Compiled with rustc alone; its
+/// replays pass.
+#[test]
+fn emit_rust_update_policy_takes_input_records() {
+    let dir = std::env::temp_dir().join(format!("helix_emit_updates_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let rule = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/rules/updates.helix");
+    let out = dir.join("updates_policy.rs");
+    let (_, err, code) = run(&["emit", "rust", rule, "-o", out.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    let rust = std::fs::read_to_string(&out).unwrap();
+    for want in [
+        "pub fn decide(&mut self, now_ms: u64, phone: &Phone, update: &Update) -> Step",
+        "pub fn may_restart(phone: &Phone) -> bool",
+        "pub struct Phone {",
+        "    pub in_call: bool,",
+        "const ASK_AFTER: i64 = 259200000;",
+    ] {
+        assert!(rust.contains(want), "missing `{want}`");
+    }
+    if Command::new("rustc").arg("--version").output().is_ok_and(|o| o.status.success()) {
+        let bin = dir.join("replays");
+        let c = Command::new("rustc")
+            .args(["--edition", "2024", "--test", "-D", "warnings", out.to_str().unwrap(), "-o", bin.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(c.status.success(), "rustc:\n{}", String::from_utf8_lossy(&c.stderr));
+        let t = Command::new(&bin).output().unwrap();
+        let report = String::from_utf8_lossy(&t.stdout);
+        assert!(t.status.success() && report.contains("48 passed"), "{report}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// What `helix emit rust` refuses, each with the line and what to do.
 #[test]
 fn emit_rust_refuses_what_it_cannot_emit_exactly() {

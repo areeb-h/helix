@@ -95,7 +95,7 @@ fn err<T>(line: usize, message: impl Into<String>) -> Result<T, EmitError> {
 
 #[derive(Debug, Clone)]
 enum Decl {
-    Struct { name: String, public: bool, fields: Vec<(String, Ty)> },
+    Struct { name: String, public: bool, fields: Vec<(String, Ty)>, open: Vec<String> },
     Enum { name: String, public: bool, variants: Vec<(String, Option<Ty>)> },
 }
 
@@ -216,7 +216,12 @@ impl TyParser<'_> {
             if self.eat("str") {
                 return Ok(Ty::Str);
             }
-            return Err("a reference is `&str` or `&[T]` here".into());
+            // `&Phone`: a declared struct the caller lends.
+            if let Some(n) = self.peek().filter(|n| n.chars().next().is_some_and(char::is_uppercase)).map(str::to_string) {
+                self.at += 1;
+                return Ok(Ty::Named(n));
+            }
+            return Err("a reference is `&str`, `&[T]` or `&Struct` here".into());
         }
         if self.eat("(") {
             let mut ts = Vec::new();
@@ -321,13 +326,19 @@ fn parse_contract(src: &str) -> Result<Contract, EmitError> {
                 let name = p.ident().map_err(fail)?;
                 p.expect("{").map_err(fail)?;
                 let mut fields = Vec::new();
+                let mut open = Vec::new();
                 while !p.eat("}") {
+                    // `pub field`: the caller builds this struct (an input record).
+                    let field_pub = p.eat("pub");
                     let f = p.ident().map_err(fail)?;
                     p.expect(":").map_err(fail)?;
-                    fields.push((f, p.ty().map_err(fail)?.inner));
+                    fields.push((f.clone(), p.ty().map_err(fail)?.inner));
+                    if field_pub {
+                        open.push(f);
+                    }
                     p.eat(",");
                 }
-                c.decls.push(Decl::Struct { name, public, fields });
+                c.decls.push(Decl::Struct { name, public, fields, open });
             }
             Some("enum") => {
                 p.at += 1;
@@ -1146,6 +1157,7 @@ fn into_inner(name: &str, api: &Api) -> String {
         "Option<&str>" => format!("{name}.map(str::to_string)"),
         "Option<u64>" | "Option<u32>" | "Option<usize>" => format!("{name}.map(|v| v as i64)"),
         _ if t.starts_with("&[") => format!("{name}.to_vec()"),
+        _ if t.starts_with('&') => format!("{name}.clone()"),
         _ if api.inner.copy() => name.to_string(),
         _ => name.to_string(),
     }
@@ -1250,10 +1262,10 @@ pub fn emit(src: &str, source_name: &str, traces_json: Option<&str>) -> Result<S
     }
     for d in &c.decls {
         match d {
-            Decl::Struct { name, public, fields } => {
+            Decl::Struct { name, public, fields, open } => {
                 let _ = writeln!(out, "#[derive(Debug, Clone, PartialEq, Eq)]\n{}struct {name} {{", if *public { "pub " } else { "" });
                 for (f, t) in fields {
-                    let _ = writeln!(out, "    {f}: {},", t.rust());
+                    let _ = writeln!(out, "    {}{f}: {},", if open.contains(f) { "pub " } else { "" }, t.rust());
                 }
                 let _ = writeln!(out, "}}\n");
             }
@@ -1498,7 +1510,31 @@ fn gen_arg(api: &Api, c: &Contract, r: &mut Lcg) -> serde_json::Value {
             let n = (r.next() % 4) as usize;
             serde_json::json!((0..n).map(|_| r.pick(&strings).clone()).collect::<Vec<_>>())
         }
-        _ => serde_json::Value::Null,
+        // A declared struct: each field from its own domain (`## rust-domain: Phone.hour = 0, 2, 12`)
+        // or its type's.
+        _ => match &api.inner {
+            Ty::Named(n) => {
+                let Some(Decl::Struct { fields, .. }) = c.decls.iter().find(|d| matches!(d, Decl::Struct { name, .. } if name == n)) else {
+                    return serde_json::Value::Null;
+                };
+                let mut o = serde_json::Map::new();
+                for (f, ty) in fields {
+                    let own = c.domains.get(&format!("{n}.{f}")).cloned();
+                    let v = match (ty, own) {
+                        (Ty::Int, Some(d)) => serde_json::json!(r.pick(&d).parse::<i64>().unwrap_or(0)),
+                        (Ty::Bool, Some(d)) => serde_json::json!(r.pick(&d) == "true"),
+                        (Ty::Str, Some(d)) => serde_json::json!(r.pick(&d)),
+                        (Ty::Int, None) => serde_json::json!(r.pick(&ints).parse::<i64>().unwrap_or(0)),
+                        (Ty::Bool, None) => serde_json::json!(r.next().is_multiple_of(2)),
+                        (Ty::Str, None) => serde_json::json!(r.pick(&strings)),
+                        _ => serde_json::Value::Null,
+                    };
+                    o.insert(f.clone(), v);
+                }
+                serde_json::Value::Object(o)
+            }
+            _ => serde_json::Value::Null,
+        },
     }
 }
 
@@ -1591,7 +1627,8 @@ fn lit(v: &serde_json::Value, api_inner: &Ty, api_text: Option<&str>, c: &Contra
             for (f, ty) in fields {
                 parts.push(format!("{f}: {}", lit(o.get(f).unwrap_or(&J::Null), ty, None, c)?));
             }
-            format!("{n} {{ {} }}", parts.join(", "))
+            let amp = if t.as_deref().is_some_and(|s| s.starts_with('&')) { "&" } else { "" };
+            format!("{amp}{n} {{ {} }}", parts.join(", "))
         }
         (Ty::Named(n), J::Object(o)) if o.len() == 1 => {
             let (variant, payload) = o.iter().next().map(|(k, v)| (k.clone(), v.clone())).unwrap_or_default();

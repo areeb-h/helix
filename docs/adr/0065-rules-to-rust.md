@@ -156,6 +156,31 @@ the wait (two steps).
 
 It is clippy- and fmt-clean, and its 48 replays and save-format test pass.
 
+### The update and restart policy (`examples/rules/updates.helix`)
+
+**What the rule does:**
+- **Download** on an unmetered network with enough charge.
+- **Install** into the other slot, waiting out calls and low battery.
+- **Restart** only between 01:00 and 05:00, charging, at 50% battery or more, with the screen
+  off, no call, nothing playing, and 30 minutes idle.
+- **Ask** after three days of waiting, only with the screen on and no call. It never restarts
+  on its own outside the window.
+- **Inputs** are input records (`&Phone`, `&Update`) with public fields, and the hour is passed
+  in.
+
+**Properties**, checked on every reachable step: 24,576 steps, covering every combination of
+conditions at the edge of each threshold, for an update at every stage. They include the
+liveness property "when every condition allows a restart, it restarts".
+
+**Mutations caught**, each in one step: restarting with the screen on, a night window one hour
+too long, and asking before three days.
+
+**Emitter support** this rule needed:
+- `pub` fields on a `## rust:` struct;
+- `&Struct` parameters;
+- per-field test domains (`## rust-domain: Phone.hour = 0, 1, 2, 4, 5, 12, 23`);
+- associated functions (`Policy::may_restart`).
+
 ## Results on the freezer
 
 - **The emitted `Policy`** matches the API mobile-os specified (`new`, `update`,

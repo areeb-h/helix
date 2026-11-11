@@ -44,6 +44,11 @@
     restart can't reset the count or shorten the wait, a damaged save gives the longest wait,
     and a guess is never accepted during a wait. All of this is checked on 951 reachable
     states; three planted bugs were each caught in one or two steps.
+  - `examples/rules/updates.helix` decides when the phone downloads, installs and restarts
+    into an update. On every reachable step it never restarts during a call, with the screen
+    on, while media plays, off charge, outside 01:00–05:00, or before 30 minutes idle, and it
+    always restarts when every condition allows. Rules can take input records with public
+    fields (`&Phone`), with per-field test domains.
   - `examples/rules/freezer.helix` is mobile-os's app freezer, with its Rust API. Its eight
     safety properties hold on all 80 reachable states (7,040 steps), and three planted bugs
     were each caught with a 1- to 3-step counterexample.
