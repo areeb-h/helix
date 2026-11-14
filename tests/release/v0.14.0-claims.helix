@@ -5,7 +5,8 @@
 # them from a binary would prove only that the binary agrees with itself. What only a window,
 # a browser or a Rust compiler can show (no listening socket, axe-core, `helix emit rust`'s
 # output compiling and passing its own tests, a built app's bundle) is pinned by `tests/cli.rs`,
-# `tests/ui/*.cjs` and `tests/ui/window.sh`; the cells here are the claims a program can check.
+# `tests/ui/*.cjs` and `tests/ui/window.sh`; "`a <b` still compares" is pinned in `src/markup.rs`,
+# because `helix fmt` spaces it; the cells here are the claims a program can check.
 # A release is built with default features, so nothing here needs `desktop`.
 
 import std.ui
@@ -76,10 +77,6 @@ print(view_html(<ul>{items.map(<li>{it}</li>)}</ul>))
 # calls `todo_item`.
 fn todo_item(label, done) = <li class:done={done}>{label}</li>
 print(view_html(<TodoItem label="x" done />))
-# "`a <b` still compares".
-c = 1
-k = 2
-print(c <k)
 
 # --- Added: "`class` takes a list, as `clsx` does." `missing` and `false` entries drop out.
 print(view_html(ui.el("p", {class: ["a", missing, false, "b"]}, [])))

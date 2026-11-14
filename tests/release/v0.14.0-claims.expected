@@ -25,7 +25,6 @@ true
 <div></div>
 <ul><li>p</li><li>q</li></ul>
 <li class="done">x</li>
-true
 <p class="a b"></p>
 true
 ["p-4", "rounded-xl", "text-muted"]
