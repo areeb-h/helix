@@ -338,7 +338,7 @@ fn spawn_shards(total: usize, line: usize, col: usize) -> Result<(), HelixError>
                         }
                     }
                     Rerun::Source(code, name) => {
-                        crate::run_source(&code, &name);
+                        let _ = crate::run_source(&code, &name);
                     }
                     Rerun::Archive(modules, entry) => {
                         if let Err(e) = crate::run_archive_capture(modules, entry) {
