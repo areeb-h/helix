@@ -51,15 +51,15 @@ fn present(xs) = xs.filter((x) => not x.is_missing())
 # Spacing is a scale, not pixels: `gap` is a step of the design system's spacing tokens
 # (1 = 4px, 2 = 8px, 3 = 12px, 4 = 16px, 5 = 24px, 6 = 32px, 7 = 48px).
 
-export fn column(children, gap = 4) = el("div", {class: "col gap-{gap}"}, children)
+export fn column(children, gap = 4) = el("div", {class: "col hx-gap-{gap}"}, children)
 # A row shares its width among its children (cards side by side); a cluster keeps each child
 # its own size and wraps (buttons, badges, a toolbar).
-export fn row(children, gap = 4) = el("div", {class: "row gap-{gap}"}, children)
-export fn cluster(children, gap = 2) = el("div", {class: "cluster gap-{gap}"}, children)
+export fn row(children, gap = 4) = el("div", {class: "row hx-gap-{gap}"}, children)
+export fn cluster(children, gap = 2) = el("div", {class: "cluster hx-gap-{gap}"}, children)
 # Children laid out in as many columns of at least `min` pixels as fit.
 # (`auto-fit`: a row with fewer children than fit stretches them across the width, rather
 # than leaving empty columns beside them.)
-export fn grid(children, min = 260, gap = 4) = el("div", {class: "grid gap-{gap}", style: {grid_template_columns: "repeat(auto-fit, minmax(min({min}px, 100%), 1fr))"}}, children)
+export fn grid(children, min = 260, gap = 4) = el("div", {class: "hx-grid hx-gap-{gap}", style: {grid_template_columns: "repeat(auto-fit, minmax(min({min}px, 100%), 1fr))"}}, children)
 export fn spacer() = el("div", {class: "spacer"}, [])
 export fn divider() = el("hr", {class: "divider"}, [])
 
@@ -155,10 +155,10 @@ fn glyph(g, size = "md") = if ICONS.get(g).is_missing() then el("span", {class: 
 # in (a capsule stays a capsule); released, it springs back.
 
 export fn button(caption, msg, variant = "default", value = missing, disabled = false, label = missing, icon = missing) =
-  el("button", {class: "btn {variant}", click: msg, value: value, aria: {label: label}, attrs: {type: "button", disabled: disabled}},
+  el("button", {class: "btn {variant_class(variant)}", click: msg, value: value, aria: {label: label}, attrs: {type: "button", disabled: disabled}},
     present([if icon.is_missing() then missing else glyph(icon, "sm"), text(caption)]))
 export fn icon_button(icon, label, msg, value = missing, variant = "ghost") =
-  el("button", {class: "btn {variant} icon", click: msg, value: value, aria: {label: label}, attrs: {type: "button", title: label}}, [glyph(icon)])
+  el("button", {class: "btn {variant_class(variant)} icon", click: msg, value: value, aria: {label: label}, attrs: {type: "button", title: label}}, [glyph(icon)])
 # The one primary action of a screen, floating at its corner.
 export fn fab(icon, label, msg, value = missing) =
   el("button", {class: "fab", click: msg, value: value, aria: {label: label}, attrs: {type: "button", title: label}}, [glyph(icon)])
@@ -273,7 +273,8 @@ export fn kbd(keys) = el("kbd", {class: "kbd"}, [text(keys)])
 # A form sends `{msg: submit, value: {field: text, …}}` on Enter or its submit button, and never
 # reloads the page. Fields are named by their ids.
 export fn form(submit, children) = el("form", {class: "form", submit: submit, attrs: {novalidate: true}}, children)
-export fn submit_button(caption, variant = "primary") = el("button", {class: "btn {variant}", attrs: {type: "submit"}}, [text(caption)])
+export fn submit_button(caption, variant = "primary") = el("button", {class: "btn {variant_class(variant)}", attrs: {type: "submit"}}, [text(caption)])
+fn variant_class(v) = if v == "outline" then "outlined" else v
 
 # Validators: each is a function from a value to missing (fine) or a message.
 export fn required(message) = (v) => if v.is_missing() or "{v}".trim() == "" then message else missing
@@ -300,7 +301,7 @@ export fn ring(label, value, max = 100.0, size = 44) = do {
   q = if max == 0 then 0.0 else value / max
   f = if is_finite(q) then clamp(q, 0.0, 1.0) else 0.0
   c = 2.0 * pi * 15.0
-  el("svg", {class: "ring", role: "img", aria: {label: "{label}: {round(f * 100.0)}%"}, style: {width: "{size}px", height: "{size}px"}, attrs: {viewBox: "0 0 36 36"}}, [
+  el("svg", {class: "progress-ring", role: "img", aria: {label: "{label}: {round(f * 100.0)}%"}, style: {width: "{size}px", height: "{size}px"}, attrs: {viewBox: "0 0 36 36"}}, [
     el("circle", {class: "ring-track", attrs: {cx: "18", cy: "18", r: "15"}}, []),
     el("circle", {class: "ring-fill", attrs: {cx: "18", cy: "18", r: "15", "stroke-dasharray": "{c:.2f}", "stroke-dashoffset": "{c * (1.0 - f):.2f}"}}, []),
     el("text", {class: "ring-text", attrs: {x: "18", y: "18", "text-anchor": "middle", "dominant-baseline": "central"}}, [text("{round(f * 100.0)}")]),
@@ -1559,7 +1560,16 @@ THEME = """
 }
 :root[data-theme="dark"] { color-scheme: dark; }
 * { box-sizing: border-box; }
-html, body { margin: 0; color: var(--fg); font: var(--type-body); letter-spacing: var(--track-body); }
+/* The root keeps the browser's own size (the person's setting), so a rem — the unit of the
+   utility classes' scale — is theirs; the body carries the type. */
+html { font-size: 100%; }
+html, body { margin: 0; color: var(--fg); }
+body { font: var(--type-body); letter-spacing: var(--track-body); }
+/* What Tailwind's reset does for the elements a utility-styled view uses, at zero specificity
+   so any class wins: lists without bullets or indents, buttons without the platform's chrome. */
+:where(ul, ol) { list-style: none; margin: 0; padding: 0; }
+:where(button) { font: inherit; color: inherit; background: none; border: 0 solid; padding: 0; }
+:where(img, video) { max-width: 100%; height: auto; }
 html { background: var(--bg); -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; font-feature-settings: "cv11", "ss01"; }
 body { min-height: 100vh; }
 /* The design's backdrop is one fixed layer behind the page: it never scrolls, repaints or
@@ -1624,9 +1634,9 @@ h2 { font: var(--type-headline); letter-spacing: var(--track-headline); color: v
 .row { display: flex; flex-wrap: wrap; align-items: stretch; }
 .row > * { flex: 1 1 280px; }
 .cluster { display: flex; flex-wrap: wrap; align-items: center; }
-.grid { display: grid; }
-.gap-1 { gap: var(--s-1); } .gap-2 { gap: var(--s-2); } .gap-3 { gap: var(--s-3); } .gap-4 { gap: var(--s-4); }
-.gap-5 { gap: var(--s-5); } .gap-6 { gap: var(--s-6); } .gap-7 { gap: var(--s-7); }
+.hx-grid { display: grid; }
+.hx-gap-1 { gap: var(--s-1); } .hx-gap-2 { gap: var(--s-2); } .hx-gap-3 { gap: var(--s-3); } .hx-gap-4 { gap: var(--s-4); }
+.hx-gap-5 { gap: var(--s-5); } .hx-gap-6 { gap: var(--s-6); } .hx-gap-7 { gap: var(--s-7); }
 .spacer { flex: 1; }
 .divider { border: 0; border-top: 1px solid var(--line); margin: var(--s-2) 0; width: 100%; }
 
@@ -1661,7 +1671,7 @@ h2 { font: var(--type-headline); letter-spacing: var(--track-headline); color: v
 .btn:active { transform: scale(.97); border-radius: var(--r-pressed); }
 .btn.primary { background: var(--accent); color: var(--accent-fg); box-shadow: 0 1px 2px var(--accent-glow), 0 6px 16px -8px var(--accent-glow); }
 .btn.tonal { background: var(--accent-soft); color: var(--accent-text); box-shadow: none; }
-.btn.outline { background: transparent; box-shadow: inset 0 0 0 1px var(--line-strong); }
+.btn.outlined { background: transparent; box-shadow: inset 0 0 0 1px var(--line-strong); }
 .btn.ghost { background: transparent; box-shadow: none; }
 .btn.danger { background: var(--danger); color: var(--surface); box-shadow: none; }
 .btn.icon { width: var(--ctl-h); padding: 0; color: var(--muted); }
@@ -1763,7 +1773,7 @@ select.input { appearance: none; padding-right: 32px; background-image: linear-g
 /* Feedback. */
 .progress { height: 8px; border-radius: 999px; background: var(--surface-3); overflow: hidden; }
 .progress-bar { display: block; height: 100%; border-radius: inherit; background: var(--accent); transform-origin: left; transition: transform var(--sp); }
-.ring { display: block; transform: rotate(-90deg); flex: none; }
+.progress-ring { display: block; transform: rotate(-90deg); flex: none; }
 .ring-track { fill: none; stroke: var(--surface-3); stroke-width: 3.5; }
 .ring-fill { fill: none; stroke: var(--accent); stroke-width: 3.5; stroke-linecap: round; transition: stroke-dashoffset var(--sp); }
 .ring-text { transform: rotate(90deg); transform-origin: 18px 18px; font: 700 10px var(--font); fill: var(--fg); }
@@ -2530,6 +2540,7 @@ CLIENT = """
     for (const d of pending.splice(0)) {
       if (d.client && d.client !== built) { location.reload(); return; }
       if (d.css != null) { const st = document.getElementById('hx-style'); if (st && st.textContent !== d.css) st.textContent = d.css; }
+      if (d.util != null) { const su = document.getElementById('hx-util'); if (su && su.textContent !== d.util) su.textContent = d.util; }
       if (d.effects != null) { if (d.effects === 'auto') delete document.documentElement.dataset.effects; else document.documentElement.dataset.effects = d.effects; }
       if (d.title != null && document.title !== d.title) document.title = d.title;
       // A gesture this frame answers lands where the frame puts it, from where it was let go.
@@ -3165,16 +3176,19 @@ fn design_of(spec, model, last) = do {
   } else if is_design(d) then d else raise("`design:` is a `ui.design(…)`, or a function of the model that returns one", "`design: ui.design({{seed: \"#0f766e\"}})`")
 }
 fn is_design(d) = type_of(d) == "Record" and ["light", "dark", "effects", "material"].filter((k) => d.get(k).is_missing()).count() == 0
-fn css_with(spec, d) = ":root {{ {motion_tokens()} }}{design_css(d)}{scope_css(d)}{THEME}{spec.get("style") ?? ""}"
+fn css_with(spec, d) = "@layer hx-components, hx-utilities; :root {{ {motion_tokens()} }}{design_css(d)}{scope_css(d)}@layer hx-components {{ {THEME} }}{spec.get("style") ?? ""}"
 fn css_of(spec, model) = css_with(spec, design_of(spec, model, missing))
 
 fn page(spec, rt, model) = do {
   title = html_escape("{spec.title}")
-  body = render((spec.view)(model))
+  tree = (spec.view)(model)
+  body = render(tree)
+  # The utilities this page uses: those already sent, and any its own tree adds.
+  util = utility_css(rt.known.keys().concat(view_classes(tree)))
   theme = theme_of(spec, model)
   effects = rt.design.effects
   fx = if effects == "auto" then "" else " data-effects=\"{effects}\""
-  "<!doctype html><html lang=\"en\" data-theme=\"{theme}\"{fx} data-client=\"{rt.client}\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{title}</title><style id=\"hx-style\">{rt.css}</style></head><body><main id=\"root\">{body}</main><script>{CLIENT}</script></body></html>"
+  "<!doctype html><html lang=\"en\" data-theme=\"{theme}\"{fx} data-client=\"{rt.client}\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{title}</title><style id=\"hx-style\">{rt.css}</style><style id=\"hx-util\">{util}</style></head><body><main id=\"root\">{body}</main><script>{CLIENT}</script></body></html>"
 }
 fn theme_of(spec, model) = if spec.get("theme").is_missing() then "light" else do {
   t = try (spec.theme)(model)
@@ -3247,15 +3261,29 @@ fn step(spec, model, ev) = do {
 
 # A frame is the patch operations that bring a client's page up to date, and the theme.
 # JSON, because an SSE `data:` line cannot carry raw newlines.
-fn frame(ops, theme, rt, restyled, acks = []) = do {
-  f = if restyled then {ops: ops, theme: theme, css: rt.css, effects: rt.design.effects} else {ops: ops, theme: theme}
+fn frame(ops, theme, rt, restyled, acks = [], util = missing) = do {
+  f0 = if restyled then {ops: ops, theme: theme, css: rt.css, effects: rt.design.effects} else {ops: ops, theme: theme}
+  f = if util.is_missing() then f0 else {...f0, util: util}
   (if acks.count() == 0 then f else {...f, acks: acks}).to_json()
+}
+
+# The utility classes a view uses (ADR 0060): those not seen before are added to what the page
+# has, and when there are any, the stylesheet for all of them rides on the frame. Classes are
+# only ever added, so a page never loses a rule a node that is leaving still uses.
+fn with_classes(rt, tree) = do {
+  fresh = view_classes(tree).filter((c) => rt.known.get(c).is_missing())
+  if fresh.count() == 0 then {rt: rt, util: missing} else do {
+    known = fresh.reduce(rt.known, (d, c) => d.insert(c, true))
+    css = utility_css(known.keys())
+    # New names that are not utilities change nothing, and nothing is sent.
+    {rt: {...rt, known: known, util: css}, util: if css == rt.util then missing else css}
+  }
 }
 
 # A subscriber's FIRST frame carries the whole page around the view too — the stylesheet, the
 # title, and which client built it — because after a hot reload all three may have changed
 # and the page was loaded by the program before. A client older than this runtime reloads.
-fn first_frame(ops, theme, rt) = {ops: ops, theme: theme, css: rt.css, effects: rt.design.effects, title: rt.title, client: rt.client}.to_json()
+fn first_frame(ops, theme, rt) = {ops: ops, theme: theme, css: rt.css, util: rt.util, effects: rt.design.effects, title: rt.title, client: rt.client}.to_json()
 
 # `tree` is the view every current subscriber is showing. A change sends them its diff — and
 # nothing at all when the diff is empty, as a timer whose `update` changed nothing leaves it; a
@@ -3282,9 +3310,11 @@ fn serve(l, spec, rt, model, tree, conns, streams, timers) = do {
   # A design that changed restyles every page: the new stylesheet rides on the frame.
   d_now = if changed and type_of(spec.get("design")) == "Function" then design_of(spec, ticked, st.rt.design) else st.rt.design
   restyled = changed and d_now != st.rt.design
-  rt2 = if restyled then {...st.rt, design: d_now, css: css_with(spec, d_now)} else st.rt
-  kept = if ops.count() == 0 and not restyled and st.acks.count() == 0 then streams else do {
-    f = frame(ops, theme, rt2, restyled, st.acks)
+  rt1 = if restyled then {...st.rt, design: d_now, css: css_with(spec, d_now)} else st.rt
+  cl = if changed then with_classes(rt1, next) else {rt: rt1, util: missing}
+  rt2 = cl.rt
+  kept = if ops.count() == 0 and not restyled and st.acks.count() == 0 and cl.util.is_missing() then streams else do {
+    f = frame(ops, theme, rt2, restyled, st.acks, cl.util)
     streams.filter((s) => s.send(f))
   }
   first = if st.streams.count() == 0 then [] else do {
@@ -3350,7 +3380,8 @@ export fn app(spec) = do {
   generation = dev_generation()
   reload = if generation.is_missing() then false else generation > 1
   d0 = design_of(spec, spec.init, missing)
-  rt = {...session(port), dev: not generation.is_missing(), design: d0, css: css_with(spec, d0), title: "{spec.title}", client: sha256(CLIENT)}
+  rt0 = {...session(port), dev: not generation.is_missing(), design: d0, css: css_with(spec, d0), title: "{spec.title}", client: sha256(CLIENT), known: {"": true}, util: ""}
+  rt = with_classes(rt0, (spec.view)(spec.init)).rt
   url = "http://127.0.0.1:{port}/?token={rt.token}"
   # Under `--watch` the supervisor reads this line and shows the link once, on the first start.
   logged = elog("{spec.title} on {url}")

@@ -318,6 +318,40 @@ fn write_html(n: &Node, out: &mut String) {
     }
 }
 
+/// `view_classes(tree)` — every class name the tree uses, once each, sorted (ADR 0060).
+pub fn view_classes(tree: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
+    fn walk(n: &Node, out: &mut std::collections::BTreeSet<String>) {
+        if let Node::El { attrs, kids, .. } = n {
+            for (k, v) in attrs {
+                if k == "class" {
+                    out.extend(v.split_whitespace().map(str::to_string));
+                }
+            }
+            for k in kids {
+                walk(k, out);
+            }
+        }
+    }
+    let node = parse(tree, line, col)?;
+    let mut set = std::collections::BTreeSet::new();
+    walk(&node, &mut set);
+    Ok(Value::array(set.into_iter().map(|c| s(&c)).collect()))
+}
+
+/// `utility_css(classes)` — the stylesheet for the utilities among `classes` (ADR 0060).
+pub fn utility_css(classes: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
+    let Value::Array(a) = classes else {
+        return Err(HelixError::new(format!("`utility_css` takes an array of class names, not {}", crate::value::with_article(classes.type_name())), line, col));
+    };
+    let mut set = std::collections::BTreeSet::new();
+    for v in a.to_values().iter() {
+        if let Value::Str(c) = v {
+            set.extend(c.split_whitespace().map(str::to_string));
+        }
+    }
+    Ok(Value::Str(Rc::new(crate::style::css_for(&set))))
+}
+
 /// `view_html(tree)` — the tree as HTML.
 pub fn view_html(tree: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
     let node = parse(tree, line, col)?;

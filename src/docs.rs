@@ -1168,6 +1168,22 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         notes: "WHAT AN APP SENDS INSTEAD OF A PAGE (ADR 0055). A full-page morph of a 2,000-node view took 11.6 ms in Chromium — most of a frame — while a diff touches only what changed, so a running transition is patched rather than restarted. Operations, applied in order: `text` (a text node's new text), `attrs` (`set` pairs and `remove` names on one element), `replace` (a node rebuilt), `insert` / `remove` (a child at an index under `path`) and `move` (`from` → `to`). A `path` is child indices from the root. Children diff BY KEY when every child on both sides has a unique `key`, so a reordered list moves its nodes; otherwise by position. A node in an operation is in wire form: a string for text, `[tag, [[name, value], ...], [children]]` for an element. Keywords: ui, app, view, diff, patch, virtual dom, reconcile, keyed, update.",
     },
     DocEntry {
+        name: "view_classes",
+        sig: "view_classes(tree)",
+        doc: "Every class name a view tree uses, once each, sorted.",
+        example: "view_classes({tag: \"div\", props: {class: \"p-4 card\"}, children: [{tag: \"b\", props: {class: \"p-4 text-sm\"}, children: []}]})",
+        example_out: "[\"card\", \"p-4\", \"text-sm\"]",
+        notes: "WHAT THE STYLE ENGINE IS ASKED FOR (ADR 0060): an app's runtime collects the classes its view uses, and `utility_css` writes the CSS for those that are utilities. Read from each element's `class` prop, split on whitespace. Keywords: ui, view, class, css, tailwind, utility.",
+    },
+    DocEntry {
+        name: "utility_css",
+        sig: "utility_css(classes)",
+        doc: "The stylesheet for the utility classes among `classes` — Tailwind's names, Helix's tokens, no build step.",
+        example: "utility_css([\"p-4\"])",
+        example_out: "@layer hx-utilities { :root { --spacing: 0.25rem; --container-3xs: 16rem; --container-2xs: 18rem; --container-xs: 20rem; --container-sm: 24rem; --container-md: 28rem; --container-lg: 32rem; --container-xl: 36rem; --container-2xl: 42rem; --container-3xl: 48rem; --container-4xl: 56rem; --container-5xl: 64rem; --container-6xl: 72rem; --container-7xl: 80rem; } .p-4 { padding: calc(var(--spacing) * 4); } }",
+        notes: "TAILWIND'S VOCABULARY, GENERATED IN RUST (ADR 0060). Spacing, sizing, flex and grid, type, colour (Tailwind v4's palette exactly, with `/opacity`), borders and radii, shadows and rings, filters, transitions and transforms, and the variants `hover:`, `focus-visible:`, `group-hover:`, `dark:`, `md:` and the other breakpoints, `max-md:`, `@md:` (container), `data-[state=open]:`, `aria-selected:`, `motion-reduce:` — with `!` for important and a leading `-` for negative. Helix's design tokens join it by name: `bg-accent`, `text-muted`, `border-line`, `bg-card`, `rounded-card`, `rounded-control`, `p-card`, `shadow-1`, `text-title-2`, `ease-spring`. A plain `border` is `--line` coloured, not `currentColor`. An arbitrary value (`w-[320px]`, `grid-cols-[1fr_2fr]`) must pass a strict whitelist — no `url(`, quotes, semicolons or braces — or the class produces nothing, so a class from data can never escape its rule. Unknown names produce nothing, as in Tailwind. The output is wrapped in the `hx-utilities` cascade layer, after the components', and is the same for the same set in any order. Keywords: css, tailwind, utility, class, style, design, tokens, jit.",
+    },
+    DocEntry {
         name: "open_window",
         sig: "open_window(url, title?, width?, height?)",
         doc: "Show this app's own page in a native window; true if one opened, false where none can.",

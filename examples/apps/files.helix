@@ -485,7 +485,7 @@ fn inspector(m) = do {
         ].flat_map((f) => [ui.el("dt", {}, [ui.text(f[0])]), ui.el("dd", {}, [ui.text(f[1])])])),
       ui.cluster(present([
         if e.kind == "dir" then ui.button("Open", "open", variant: "primary", value: e.name, icon: "folder") else missing,
-        ui.el("button", {class: "btn outline", copy: join(here(m), [e.name]), click: "cmd", value: "cmd:copy", attrs: {type: "button"}}, [ui.icon("copy", "sm"), ui.text("Copy path")]),
+        ui.el("button", {class: "btn outlined", copy: join(here(m), [e.name]), click: "cmd", value: "cmd:copy", attrs: {type: "button"}}, [ui.icon("copy", "sm"), ui.text("Copy path")]),
         if m.write then ui.button("Rename", "cmd", variant: "ghost", value: "cmd:rename", icon: "pen") else missing,
         ]), gap: 2),
     ])
