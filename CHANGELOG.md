@@ -4,6 +4,153 @@
 
 ### Added
 
+- **Apps (ADR 0063: compete by being different).**
+  - **A windowed app opens no port.** `ui.app({window: true})` runs in a native window whose
+    page loads through a private `helix:` URL scheme, with events and frames going through the
+    web view's own message channel. Nothing listens on the network: no other process can reach
+    the app, and it needs no network permission. Before, it served on `127.0.0.1` behind a token.
+    `tests/ui/window.sh` checks a real window: no listening socket, a click reaches `update`,
+    and the frame reaches the page.
+  - **The black box: sessions that replay exactly.** `HELIX_RECORD=s.jsonl helix run app.helix`
+    records every event, what `update` and `view` read from the world while handling it (each
+    impure builtin's result or error: the clock, files, responses), and a hash of every screen.
+    `helix replay app.helix s.jsonl` plays it back without reading, writing or sending anything —
+    the tape answers — and says whether every screen came out identical, on any machine. Add
+    `--engines` to check all three. A bug report becomes a file that reproduces the bug.
+  - **`helix build app.helix --app`: a native app whose permissions come from its code.** It
+    produces the platform's own bundle (an AppDir with a `.desktop` file on Linux, a `.app`
+    with an entitlements file on macOS, an `.exe` on Windows) that always opens in its own
+    window. Its permissions are INFERRED from the code by the same analysis as `helix effects`,
+    printed with the code that needs each one, written to `permissions.json`, and enforced by
+    the capability sandbox. The examples need nothing (Orbit, the gallery) or exactly file
+    access (Files). A reach the analysis cannot follow is named at build time. A `[capabilities]`
+    block in `helix.toml` stays an upper bound: code that needs more fails the build.
+  - `has_feature("desktop")` answers; it was missing from the list.
+- **Rules written and proved in Helix, shipped as Rust (ADR 0065).**
+  - `helix emit rust rule.helix -o policy.rs` writes plain Rust from a rule: `std` only, no
+    `unsafe`, formatted, clippy-clean, one Rust function per Helix function. The public API is
+    declared in `## rust:` lines in Rust's own syntax. Generated call sequences are run through
+    the Helix rule and written as Rust `#[test]`s, so the Rust is checked against the Helix it
+    came from; `--check` makes CI fail when the checked-in file differs.
+  - `import std.model`: `model.explore(init, inputs, step, check)` visits every state a rule
+    can reach over a finite set of inputs, checks a property on every step, and returns a
+    shortest failing sequence when one breaks.
+  - State that survives a restart: `Save<T>` in a signature makes the emitter write a versioned,
+    checksummed text format for a struct. `load` refuses anything `save` did not write, and
+    the emitted tests prove every cut and every changed byte is refused.
+  - Rules also get top-level integer and boolean constants, enum variants with no value
+    (`{Accepted: true}`), `Default` for a no-argument `new`, and their `##` docs as `///`.
+  - `examples/rules/lockout.helix` is the PIN lockout mobile-os's auth service needs. A
+    restart can't reset the count or shorten the wait, a damaged save gives the longest wait,
+    and a guess is never accepted during a wait. All of this is checked on 951 reachable
+    states; three planted bugs were each caught in one or two steps.
+  - `examples/rules/updates.helix` decides when the phone downloads, installs and restarts
+    into an update. On every reachable step it never restarts during a call, with the screen
+    on, while media plays, off charge, outside 01:00–05:00, or before 30 minutes idle, and it
+    always restarts when every condition allows. Rules can take input records with public
+    fields (`&Phone`), with per-field test domains.
+  - `examples/rules/freezer.helix` is mobile-os's app freezer, with its Rust API. Its eight
+    safety properties hold on all 80 reachable states (7,040 steps), and three planted bugs
+    were each caught with a 1- to 3-step counterexample.
+- **Helix on mobile-os (ADR 0064).**
+  - A built app's Linux bundle carries a Flatpak manifest whose sandbox is generated from the
+    code: Orbit and the gallery get no network and no files; Files gets the home folder. The
+    `.desktop` entry is marked for phone mode.
+  - `ui.tokens(design, "gtk" | "css" | "json", mode)` exports a design's colours, sizes and
+    springs, with how many contrast pairs were checked. `examples/tools/design_tokens.helix`
+    writes them from the command line and fails if any pair is below WCAG — a shell can
+    generate its palette in CI. GTK's own CSS parser accepts the `gtk` output.
+
+- **Made for AI agents to get right (from a study of five agents building apps).**
+
+  Five fresh agents built a todo app, a dashboard, a signup wizard, a memory game and a CLI tool
+  using only the binary, `AGENTS.md` and the examples, and logged every mistake. All five
+  finished, and four had a first full draft that checked. Their friction was finding things,
+  and failures that made no noise. Changes:
+
+  - **Finding things:**
+    - `helix doc ui` lists every app component with its parameters, read from the library
+      itself, and `helix doc ui.text_input` gives one in full with the markup to write.
+    - `describe` and `search` find components too.
+    - `helix describe events` lists every event and prop, the key-chord names and the motion
+      presets.
+    - `helix search` uses every word, and when nothing has them all it shows the closest
+      matches instead of silently dropping words.
+    - `helix check --lint` no longer buries the user's notes under a hundred about the built-in
+      library.
+    - `helix eval` honours `import`.
+    - `helix test --help` explains test files.
+  - **Errors that were silent, or gave the wrong advice:**
+    - A mistyped prop (`clik="save"`) or a React spelling (`onDoubleClick`, `onChange`,
+      `htmlFor`, `tabIndex`) is an error that names the Helix one. `onChange` explains that
+      Helix's `input` is every keystroke.
+    - An event Helix doesn't have (`blur`, `onMouseEnter`, `onKeyUp`) says so, and what to use
+      instead.
+    - `x == missing` is refused, with `.is_missing()` and `??` named; the run-time error for a
+      `missing` condition explains the comparison.
+    - `&&` and `||` say "Helix writes `and`/`or`".
+    - A raw string ending in a quote is explained.
+    - `assert_eq("1", 1)` shows `"1" != 1`.
+    - A misspelled component gets "did you mean", and an unknown `ui.` name gets "did you mean"
+      or `helix doc ui`.
+    - A relative file path that is missing suggests `source_path(…)`.
+    - `--lint` names classes that look like utilities but produce no CSS.
+    - A failing replay names the event that caused it.
+  - **Behaviour fixes:**
+    - Markup kept two spaces between holes (`{a} {b}`).
+    - A click's `value={7}` reached `update` as the text `"7"` in a browser but as `7` in a
+      replay; it is now `7` in both.
+    - Doc examples in a file with `fn main` ran `main`.
+    - An uncalled `fn test_…()` in a test file was skipped silently; each now runs as a test
+      of its own.
+  - **Things agents expected and Helix lacked:**
+    - array spread `[head, ...rest]`;
+    - descending DataFrame sort `df.sort(-@price)` (both backends);
+    - a record field inside a query (`where(@region == m.region)`, `sort(m.sort_col)`);
+    - a one-shot timer `ui.after(ms, msg)`;
+    - 3D utilities (`rotate-y-180`, `perspective-*`, `backface-hidden`, `transform-3d`);
+    - an app's own `<main>` root no longer nests inside the runtime's.
+
+    `AGENTS.md` has a new "Building an app" section with a complete small app.
+  - **More checks and help:**
+    - `helix check --lint` flags HTML that cannot nest: a list or a block inside a
+      `<button>`, a non-`<li>` child of a list, a block inside a `<p>`, interactive content
+      inside a link or button.
+    - A `fn main` tool's `--help` puts each `## --name: …` doc line beside that option, and
+      shows a `missing` default as "(optional)".
+    - ADR 0062 records the study and the rule it set: make the guess work, else refuse it with
+      the fix, else note it.
+  - **Second round** (three new agents: a quiz, an expense tracker, a notes app):
+    - `ui.Segmented`, `ui.RadioGroup` and `ui.Chips` take plain strings (`options={["a", "b"]}`)
+      as well as `(value, label)` pairs. Plain strings used to render as letters.
+    - Several sort keys: `sort_by(p => (p.team, -p.score))`. `sort`, `min` and `max` now order
+      tuples as `<` always has, so `xs.enumerate().sort()` works (ADR 0025 addendum). A list
+      key is refused with the tuple spelling.
+    - `{price:.2f}` inside markup text formats the value, as it does in a string.
+    - A failing replay points at the line in your `update`, not into the library.
+    - An unknown `variant` on a component is an error that lists the variants.
+    - `helix doc len` prints the entry; `helix doc ui.table` suggests `ui.data_table`.
+    - A not-exported import names every missing name, not only the first.
+    - A keyword used as a name (`fn f(then)`) says it is reserved.
+    - `helix check --lint` also reads class names in lists and in `if` branches.
+    - `helix test` labels a test file's top level "(top level)", apart from its `test_…`
+      functions, and a doc example whose expected output swallowed the prose below it says
+      to end the output with a bare `##` line.
+    - `helix describe test` (and `helix search doctest`) explains test files, `fn test_…` and
+      doc examples. `ui.app`, `ui.replay`, `ui.check` and `ui.icon` are documented.
+    - `AGENTS.md`: `/` always gives a Float, and only `export`ed names can be imported.
+
+- **Orbit (`examples/apps/orbit.helix`)**, an app written only in markup and utility classes:
+  - a focus timer with a live ring;
+  - a board whose cards drag between columns (or move with Alt + arrows);
+  - habits that bounce when ticked;
+  - a weekly chart;
+  - a ⌘K command palette;
+  - toasts with Undo;
+  - accent, material and dark mode that recompute the whole design live.
+
+  Its scripted session replays identically on all three engines.
+
 - **Markup: write views as elements (ADR 0061).**
   - **What you write.** `<li class="row" click="open" value={f.id}>{f.name}</li>` is the
     record `ui.el` builds, read by the parser, so the checker and the three engines see only
@@ -20,6 +167,27 @@
     `onClick` are refused with the Helix spelling.
   - **Comparisons are unchanged.** `a <b` still compares, because markup starts only where a
     value cannot have just ended.
+- **Shorter markup:**
+  - `class:done={it.done}` adds a class while a condition holds;
+  - `{if busy then <Spinner />}` needs no `else` inside markup;
+  - `{items.map(<li>{it}</li>)}` loops without a lambda;
+  - a component may be defined below its first use.
+- **More of Tailwind.** About 50 more of the classes people copy from Tailwind examples now
+  work, for instance:
+  - `decoration-2`, `underline-offset-4`, gradient stop positions (`from-10%`);
+  - the v3 names `bg-gradient-to-*`, plus `bg-conic`, `bg-clip-text` and `drop-shadow-*`;
+  - `scroll-mt-*`, `skew-*`, `max-w-screen-*`, logical corners, table display values and
+    blend modes;
+  - the variants `not-*`, `has-*`, `group-data-[…]`, bare `data-[open]`, `inert`, `rtl`/`ltr`,
+    `supports-[…]`, `forced-colors`, `file:`, `marker:`, and `before:`/`after:`.
+
+  `before:`/`after:` accept only empty content (`content-['']`), so a class can never put text
+  on the page. Bracketed variants accept only a state, a tag, or one `data-`/`aria-`
+  attribute, and the tests try to break out of them.
+- **A busy port no longer stops an app.** If 8080 (or the `--port` asked for) is taken,
+  `ui.app` uses the next free port and says so. Under `--watch` each reload finds the same
+  port, and if the port has been taken in the meantime, the supervisor prints the app's new
+  link.
 - **Views are easier to build without markup too.**
   - A child may be a string, a number, a list or `missing`.
   - `class` takes a list, as `clsx` does.
@@ -177,6 +345,12 @@
   program that never asks for a window never touches the windowing system.
 
 ### Fixed
+
+- **Typing quickly into a field no longer loses characters.** A frame answering an older
+  keystroke could arrive after newer typing had been sent and answered, and replace it ("rose"
+  became "r"). Each edit now carries a `seq`, and a field accepts a value from the app only
+  once a frame has acknowledged its latest edit. A browser test holds the page's animation
+  frames to make the race certain.
 
 - **A window that cannot open now falls back to the browser.** `open_window` answered `true`
   as soon as `DISPLAY` or `WAYLAND_DISPLAY` was set, and the app ended when the window failed.

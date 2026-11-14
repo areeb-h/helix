@@ -1,0 +1,19 @@
+exit: 0
+--- stdout ---
+[1, 2, 3, 4] [2, 3] [2, 3, 2, 3]
+1 [2, 3]
+["x", "z", "y", "w", "v"]
+["x", "z", "w", "y", "v"]
+["v", "w", "x", "y", "z"]
+1 2
+assertion failed: "1" != 1
+<p>2 2</p>
+<button data-click="go" data-value="3" data-value-type="number">x</button>
+<button data-click="go" data-value="true" data-value-type="bool">x</button>
+["a", "b", "c"]
+(2, 20)
+sort keys must be all numbers, all strings, all DNA, all Bytes, or all tuples of those
+true
+<p>3.14</p>
+a button's `variant` is default, primary, tonal, outline, ghost or danger — not "primry"
+--- stderr ---

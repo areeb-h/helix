@@ -62,7 +62,11 @@ pub(crate) fn net_method(
     // Capability gate (ADR 0021): the socket-touching verbs (accept/poll/respond/sse/send)
     // are `Net` authority — defense-in-depth behind `listen` (itself gated). `request` reads
     // the already-parsed request record (no socket I/O) and is ungated (`Pure`).
-    crate::capability::gate_method(name, args, line, col)?;
+    // A window's handles reach nothing but the app's own page (ADR 0063): showing your own
+    // window needs no network authority, so they are not behind the `net` gate.
+    if !matches!(&**h, crate::serve::NetHandle::Local(_) | crate::serve::NetHandle::LocalConn(_)) {
+        crate::capability::gate_method(name, args, line, col)?;
+    }
     match name {
         "accept" => {
             if !args.is_empty() {

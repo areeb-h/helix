@@ -305,7 +305,63 @@ pub static SYNTAX: &[SyntaxDoc] = &[
                 a COMPONENT, any function: `<TodoItem label=\"x\" done />` calls `todo_item(label: \"x\", done: \
                 true)`, children are its `children`, and `<ui.Button caption=\"Save\" msg=\"save\" />` calls \
                 `ui.button`. `onClick` is refused: a view sends messages (`click=\"save\"`). \
+                `class:done={it.done}` adds one class while the condition holds; inside markup an `if` \
+                may leave out `else` (`{if busy then <Spinner />}` renders nothing when false); and \
+                `{items.map(<li>{it}</li>)}` loops without a lambda. \
                 Keywords: jsx, tsx, html, markup, element, tag, template, component, props, children, react, view.",
+    },
+    SyntaxDoc {
+        name: "events",
+        form: "<button click=\"save\" value={item.id}>",
+        doc: "Every prop a view can carry: the events it sends to `update`, keys, motion, gestures and focus.",
+        example: "print(view_html(<button click=\"save\" value={7}>Save</button>))",
+        example_out: "<button data-click=\"save\" data-value=\"7\" data-value-type=\"number\">Save</button>",
+        notes: "EVENTS (each names the message; `update` gets `{msg, value}`): `click` (with `value={…}` as \
+                its payload), `dblclick`, `contextmenu` (value `{value, x, y}`), `input` (every keystroke; \
+                value is the text, a number for `type=\"number\"`/`\"range\"`, a Bool for a checkbox), `change` (a \
+                committed field: checkbox, select, radio), `submit` (a `<form>`; value is a record of its \
+                named fields), `dismiss` (a press outside the node, or Escape: how to close a menu, cancel an \
+                edit, close a dialog), `scroll` (value is the offset in px). KEYS: `keydown=\"key\" \
+                shortcuts=\"Enter Escape Space ArrowUp ArrowDown Ctrl+K Alt+ArrowLeft /\"` sends the chord typed as \
+                `value`; a chord is modifiers (`Ctrl` — Command on a Mac counts —, `Alt`, `Shift` only for \
+                keys that print nothing) then the key: a letter in upper case (`S`, `Ctrl+K`), a printed \
+                character as itself (`/`, `?`), `Space`, `Enter`, `Escape`, `Tab`, `Backspace`, `Delete`, \
+                `ArrowUp`…, `Home`, `End`, `F2`. The nearest node with `keydown` listing the chord gets it; in \
+                a text field only Ctrl/Alt chords, Escape, Enter and the vertical arrows do; inside \
+                `role=\"tree\"`, `\"menu\"`, `\"tablist\"` or `\"radiogroup\"` the arrows, Home, End and Enter belong to \
+                the widget. There are NO focus, blur, hover, key-up or mouse-move events: use `dismiss`, \
+                `hover:` utilities and `ui.tooltip`. FOCUS: `autofocus` focuses a node when it appears \
+                (change its `key` to focus it again). MOTION: `enter=` and `exit=` play a preset when a node \
+                arrives or leaves — `fade`, `rise`, `pop`, `grow`, `sheet`, `push`, and the emphasis \
+                presets `bounce`, `wiggle`, `pulse`; `layout` animates a node to its new place; `share=\"name\"` \
+                morphs a node into the next one with the same name. A re-keyed node (`key=\"n{count}\"`) \
+                replays its `enter`. GESTURES: `drag=\"msg\"` (`drag_axis`, `drag_commit`), `reorder=\"msg\"` on a \
+                list of keyed children (`reorder_group` to trade between lists), `drop=\"msg\"`, `resize=\"msg\"`, \
+                `handle`. TIMERS: `subscriptions: (m) => [ui.every(1000, \"tick\")]` sends `{msg: \"tick\", value: \
+                <seconds since 1970>}` every second while the model asks for it (the first \
+                one period after it first asks; clicks and keys carry no time, so keep the last tick's); `ui.after(800, \"flip-back\")` \
+                is sent ONCE, 800 ms after the model first lists it (stop listing it and ask again to rerun \
+                it). A `value` reaches `update` as the type \
+                the view gave it — `value={7}` is 7, `value={true}` is true, text is text — in a browser as \
+                in `ui.replay`. \
+                Keywords: event, events, onclick, on click, handler, listener, dblclick, double click, keydown, \
+                key, keyboard, shortcut, shortcuts, hotkey, chord, blur, focus, hover, mouse, escape, submit, \
+                change, input, animation, animate, transition, enter, exit, timer, interval, timeout, delay.",
+    },
+    SyntaxDoc {
+        name: "test",
+        form: "fn test_parses() = assert_eq(parse(\"a=1\").a, 1)",
+        doc: "Tests: `*_test.helix` files and `## >>>` doc examples, run by `helix test` (add `--engines` to check all three).",
+        example: "assert_eq(1 + 1, 2)\nprint(\"ok\")",
+        example_out: "ok",
+        notes: "A TEST FILE is any `*_test.helix`: its top level runs, `assert`, `assert_eq`, `assert_close` \
+                and `assert_error` check things, and a file that asserts nothing fails. Each `fn test_…()` it \
+                defines and does not call runs too, as a test of its own. To test an app's functions, mark them \
+                `export fn` and `import app.{name, other}` in the test file. A DOC EXAMPLE is a `## >>>` line \
+                above a function; the `##` lines after it, up to an empty `##` line, are what it must \
+                print (so put a bare `##` line before more prose). A file with `fn main` is fine: its main does \
+                not run for its doc examples. `helix test --json` gives one document of results. \
+                Keywords: test, tests, unit test, testing, assert, doctest, doc test, doc example, pytest, spec, check.",
     },
     SyntaxDoc {
         name: "main",

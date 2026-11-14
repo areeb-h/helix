@@ -886,12 +886,14 @@ pub(crate) fn array_method(
                     (Value::Bytes(x), Value::Bytes(y)) => x.cmp(y),
                     _ => std::cmp::Ordering::Equal,
                 }))
+            } else if all_list_keys(items) {
+                Ok(pick(&list_key_cmp))
             } else {
                 // `sort`'s domain wording, with this method's name — one concept, one
                 // message (the old text named numbers only and pointed at the first
                 // offending element, which is now often a legal type in the wrong mix).
                 Err(HelixError::new(
-                    format!("`{name}` needs an array of all numbers, all strings, all DNA, or all Bytes"),
+                    format!("`{name}` needs an array of all numbers, all strings, all DNA, all Bytes, or all tuples of those"),
                     line,
                     col,
                 ))
@@ -977,6 +979,9 @@ pub(crate) fn array_method(
                     (Value::Bytes(x), Value::Bytes(y)) => x.cmp(y),
                     _ => std::cmp::Ordering::Equal,
                 });
+            } else if all_list_keys(items) {
+                // Tuples, part by part — what `<` already does with them.
+                sorted.sort_by(list_key_cmp);
             } else if items.iter().any(|v| matches!(v, Value::Missing)) {
                 // Name the actual blocker: every present value may well be
                 // sortable — it's the `missing` that has no order (ADR 0001
@@ -989,10 +994,11 @@ pub(crate) fn array_method(
                 .hint("drop them explicitly first: `xs.drop_missing().sort()`."));
             } else {
                 return Err(HelixError::new(
-                    "`sort` needs an array of all numbers, all strings, all DNA, or all Bytes",
+                    "`sort` needs an array of all numbers, all strings, all DNA, all Bytes, or all tuples of those",
                     line,
                     col,
-                ));
+                )
+                .hint(SEVERAL_KEYS_HINT));
             }
             Ok(Value::array(sorted))
         }
@@ -1561,6 +1567,9 @@ pub(crate) fn array_method(
                     (Value::Bytes(x), Value::Bytes(y)) => x.cmp(y),
                     _ => std::cmp::Ordering::Equal,
                 });
+            } else if all_list_keys(items) {
+                // Several keys: `xs.sort_by(p => (p.group, -p.score))`. Stable, like the rest.
+                idx.sort_by(|&a, &b| list_key_cmp(&items[a as usize], &items[b as usize]));
             } else if items.iter().any(|v| matches!(v, Value::Missing)) {
                 // `sort`'s wording and hint verbatim — one concept, one message.
                 return Err(HelixError::new(
@@ -1570,11 +1579,14 @@ pub(crate) fn array_method(
                 )
                 .hint("drop them explicitly first: `xs.drop_missing().sort()`."));
             } else {
+                // Said as what the person wrote — `sort_by` is this underneath, and a message
+                // naming `argsort` named something they never called.
                 return Err(HelixError::new(
-                    "`argsort` needs an array of all numbers, all strings, all DNA, or all Bytes",
+                    "sort keys must be all numbers, all strings, all DNA, all Bytes, or all tuples of those",
                     line,
                     col,
-                ));
+                )
+                .hint(SEVERAL_KEYS_HINT));
             }
             Ok(Value::int_array(idx))
         }
@@ -1826,3 +1838,108 @@ pub(crate) fn value_histogram(items: &[Value]) -> Vec<(Value, i64)> {
     counts
 }
 
+/// What a sort refusal suggests: an agent sorting by two things writes a list key first.
+const SEVERAL_KEYS_HINT: &str = "to sort by several keys return a TUPLE, compared part by part: \
+     `xs.sort_by(p => (p.team, -p.score))`. A Bool key is refused; write `if p.pinned then 0 else 1`.";
+
+/// TUPLE KEYS: tuples compared part by part, exactly as `<` compares them (ADR 0025's
+/// "tuple claim") — `xs.sort_by(p => (p.group, -p.score))` sorts by group, then by score
+/// descending within each. One shape check and one comparator, used by `sort`, `argsort`
+/// (so `sort_by`), `min` and `max`, so the four cannot disagree about what is orderable.
+///
+/// A part is a number, a String, DNA, Bytes, or another tuple. Arrays are not keys: `<`
+/// does not order them, and `sort` must not order what `<` refuses. The SAME POSITION must
+/// hold the same kind in every item, which is what makes `list_key_cmp` a total order:
+/// Rust's sort may panic on a comparator that is not one (ADR 0024). `missing` and Bool
+/// are refused inside a key, as they are outside one.
+#[derive(PartialEq)]
+enum KeyShape {
+    Num,
+    Str,
+    Dna,
+    Bytes,
+    List(Vec<KeyShape>),
+}
+
+fn list_parts(v: &Value) -> Option<Vec<Value>> {
+    match v {
+        Value::Tuple(t) => Some(t.as_ref().clone()),
+        _ => None,
+    }
+}
+
+/// Fold `v` into `shape`; false when it holds a different kind at some position.
+fn fits_shape(shape: &mut Option<KeyShape>, v: &Value) -> bool {
+    let leaf = if v.as_f64().is_some() {
+        Some(KeyShape::Num)
+    } else {
+        match v {
+            Value::Str(_) => Some(KeyShape::Str),
+            Value::Dna(_) => Some(KeyShape::Dna),
+            Value::Bytes(_) => Some(KeyShape::Bytes),
+            Value::Tuple(_) => None,
+            _ => return false,
+        }
+    };
+    match (leaf, shape) {
+        (Some(l), slot @ None) => {
+            *slot = Some(l);
+            true
+        }
+        (Some(l), Some(have)) => *have == l,
+        (None, slot) => {
+            let parts = list_parts(v).unwrap_or_default();
+            if slot.is_none() {
+                *slot = Some(KeyShape::List(Vec::new()));
+            }
+            let Some(KeyShape::List(cols)) = slot else { return false };
+            for (i, p) in parts.iter().enumerate() {
+                if i == cols.len() {
+                    let mut fresh = None;
+                    match (fits_shape(&mut fresh, p), fresh) {
+                        (true, Some(f)) => cols.push(f),
+                        _ => return false,
+                    }
+                } else {
+                    let mut have = Some(std::mem::replace(&mut cols[i], KeyShape::Num));
+                    let ok = fits_shape(&mut have, p);
+                    match (ok, have) {
+                        (true, Some(h)) => cols[i] = h,
+                        _ => return false,
+                    }
+                }
+            }
+            true
+        }
+    }
+}
+
+/// True when every item is a tuple key and they agree position by position.
+pub(crate) fn all_list_keys(items: &[Value]) -> bool {
+    if items.is_empty() || !items.iter().all(|v| matches!(v, Value::Tuple(_))) {
+        return false;
+    }
+    let mut shape = None;
+    items.iter().all(|v| fits_shape(&mut shape, v))
+}
+
+/// Lexicographic order on tuple keys that passed `all_list_keys`; a shorter prefix first.
+pub(crate) fn list_key_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering::Equal;
+    match (a, b) {
+        (Value::Str(x), Value::Str(y)) => x.cmp(y),
+        (Value::Dna(x), Value::Dna(y)) => x.cmp(y),
+        (Value::Bytes(x), Value::Bytes(y)) => x.cmp(y),
+        _ if a.as_f64().is_some() && b.as_f64().is_some() => numeric_cmp(a, b),
+        _ => {
+            let (x, y) = (list_parts(a).unwrap_or_default(), list_parts(b).unwrap_or_default());
+            for (p, q) in x.iter().zip(y.iter()) {
+                let o = list_key_cmp(p, q);
+                if o != Equal {
+                    return o;
+                }
+            }
+            x.len().cmp(&y.len())
+        }
+    }
+}

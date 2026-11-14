@@ -1,0 +1,18 @@
+import std.ui
+
+## A design's tokens for another program: a GTK theme (mobile-os's shell), a stylesheet, or
+## JSON. The colours are computed from one seed and their contrast is proved; the run fails
+## if any text/background pair is below WCAG, so a CI job can use it as a check (ADR 0064).
+##
+##     helix run examples/tools/design_tokens.helix --seed "#6d5dfc" --format gtk > colours.css
+##
+## --seed: the accent colour, "#rrggbb"
+## --format: gtk, css or json
+## --mode: dark or light
+## --shape: sharp, soft or round (the corner radii)
+fn main(seed: String = "#6d5dfc", format: String = "gtk", mode: String = "dark", shape: String = "soft") = do {
+  d = ui.design({seed: seed, shape: shape})
+  failing = ui.contrast_report(d).filter((p) => p.mode == mode and not p.ok)
+  shown = print(ui.tokens(d, format, mode))
+  if failing.count() == 0 then () else raise("{failing.count()} text/background pairs are below WCAG", "pick another seed; the report is `ui.contrast_report(d)`.")
+}

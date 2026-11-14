@@ -1,0 +1,38 @@
+3 6 true
+every reachable step holds
+["up", "up", "up"]
+a shortest sequence that breaks it (3 steps):
+  "up"
+  "up"
+  "up"
+  -> reached 3
+true
+true
+true
+light true 0
+true
+["a7", "a1", "b3"]
+[(1, "a"), (1, "z"), (2, "b")]
+(1, "a")
+[1, 2, 0]
+[1, 2, 3, 4]
+true
+true
+<button aria-label="Close" disabled="">x</button>
+<p>3.50</p>
+<p>x y</p>
+<li class="row done">t</li>
+<div></div>
+<ul><li>p</li><li>q</li></ul>
+<li class="done">x</li>
+<p class="a b"></p>
+true
+["p-4", "rounded-xl", "text-muted"]
+true
+true
+true
+true
+["Open recent", "Reopen", "Copy path"]
+true
+true
+false

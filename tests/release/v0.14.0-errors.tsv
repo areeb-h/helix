@@ -1,0 +1,26 @@
+# The v0.14.0 release notes' ERROR claims: the cells whose answer is a refusal. One per line:
+#
+#   <substring the diagnostic must contain>	<program>
+#
+# Tab-separated, `#` comments ignored. Each program must exit NON-ZERO and its stderr must
+# contain the substring. Each program is ONE line.
+
+# --- "`x == missing` is refused, with `.is_missing()` and `??` named".
+x.is_missing()	print(1 == missing)
+# --- "`&&` and `||` say "Helix writes `and`/`or`"".
+Helix writes `and`	print(true && false)
+# --- "`className` and `onClick` are refused with the Helix spelling."
+the attribute is `class`	print(view_html(<div className="a"></div>))
+`click="save"`	print(view_html(<button onClick="go">x</button>))
+# --- "A mistyped prop (`clik="save"`) … is an error that names the Helix one."
+did you mean `click`	print(view_html(<button clik="go">x</button>))
+# --- "`onChange` explains that Helix's `input` is every keystroke."
+every keystroke	print(view_html(<input onChange="typed" />))
+# --- "An event Helix doesn't have (`blur`, `onMouseEnter`, `onKeyUp`) says so, and what to use instead."
+Helix sends no hover events	print(view_html(<div onMouseEnter="h">x</div>))
+# --- "A keyword used as a name (`fn f(then)`) says it is reserved."
+is a reserved word	fn f(then) = 1
+# --- "A list key is refused with the tuple spelling."
+return a TUPLE	print([3, 1].sort_by((x) => [x, 1]))
+# --- "`assert_eq("1", 1)` shows `"1" != 1`."
+"1" != 1	assert_eq("1", 1)

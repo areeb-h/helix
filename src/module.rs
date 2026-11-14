@@ -410,6 +410,24 @@ pub fn load_diag(entry: &Path) -> Result<Loaded, Diag> {
     assemble(loader)
 }
 
+/// Load a program from source that is not in a file (`helix eval`), as if it were `name` in
+/// the current directory: its imports resolve as that file's would, `import std.ui` included.
+pub fn load_source(code: &str, name: &str) -> Result<Loaded, Diag> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let entry = normalize(&cwd.join(name));
+    let mut roots = vec![cwd.clone()];
+    roots.extend(search_roots());
+    roots.push(PathBuf::from(EMBED_ROOT));
+    let mut loader = Loader {
+        roots,
+        project_root: cwd,
+        store: Store::Overlay(entry.clone(), code.to_string()),
+        ..Loader::default()
+    };
+    loader.load_file(&entry, name.to_string(), true)?;
+    assemble(loader)
+}
+
 /// Load a program whose modules come from a built program's archive, not the filesystem.
 ///
 /// The virtual project root is `""`, so every join the resolver performs reproduces the
@@ -511,6 +529,10 @@ enum Store {
     /// `/`-separated. The build already resolved every import against the real root list
     /// and kept the winner, so this map needs no root list of its own.
     Archive(HashMap<PathBuf, String>),
+    /// The filesystem, with one file that exists only in memory: the code `helix eval` was
+    /// given, as if it were a file in the current directory, so its imports resolve as that
+    /// file's would.
+    Overlay(PathBuf, String),
 }
 
 /// Resolve `.` and `..` lexically. An archive has no symlinks and no working directory,
@@ -549,6 +571,8 @@ pub const EMBED_ROOT: &str = "<helix>";
 pub const EMBEDDED: &[(&str, &str)] = &[
     // The app runtime and component library (ADR 0055): `import std.ui`.
     ("std/ui.helix", include_str!("../std/ui.helix")),
+    // Exhaustive checking of rules (ADR 0065): `import std.model`.
+    ("std/model.helix", include_str!("../std/model.helix")),
 ];
 
 /// The embedded source at `p`, when `p` is under [`EMBED_ROOT`].
@@ -562,26 +586,29 @@ fn embedded(p: &Path) -> Option<&'static str> {
 impl Store {
     fn is_file(&self, p: &Path) -> bool {
         match self {
-            Store::Fs if p.starts_with(EMBED_ROOT) => embedded(p).is_some(),
-            Store::Fs => p.is_file(),
+            Store::Overlay(at, _) if normalize(p) == *at => true,
+            Store::Fs | Store::Overlay(..) if p.starts_with(EMBED_ROOT) => embedded(p).is_some(),
+            Store::Fs | Store::Overlay(..) => p.is_file(),
             Store::Archive(m) => m.contains_key(&normalize(p)),
         }
     }
 
     fn canonicalize(&self, p: &Path) -> std::io::Result<PathBuf> {
         match self {
-            Store::Fs if p.starts_with(EMBED_ROOT) => Ok(normalize(p)),
-            Store::Fs => p.canonicalize(),
+            Store::Overlay(at, _) if normalize(p) == *at => Ok(at.clone()),
+            Store::Fs | Store::Overlay(..) if p.starts_with(EMBED_ROOT) => Ok(normalize(p)),
+            Store::Fs | Store::Overlay(..) => p.canonicalize(),
             Store::Archive(_) => Ok(normalize(p)),
         }
     }
 
     fn read_to_string(&self, p: &Path) -> std::io::Result<String> {
         match self {
-            Store::Fs if p.starts_with(EMBED_ROOT) => embedded(p).map(str::to_string).ok_or_else(|| {
+            Store::Overlay(at, src) if normalize(p) == *at => Ok(src.clone()),
+            Store::Fs | Store::Overlay(..) if p.starts_with(EMBED_ROOT) => embedded(p).map(str::to_string).ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "not in Helix's built-in standard library")
             }),
-            Store::Fs => std::fs::read_to_string(p),
+            Store::Fs | Store::Overlay(..) => std::fs::read_to_string(p),
             Store::Archive(m) => m.get(&normalize(p)).cloned().ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "not in this program's archive")
             }),
@@ -803,9 +830,21 @@ impl Loader {
                                 // shipped and `clamp` simply needs no import. The
                                 // diagnostic was true and still produced a false
                                 // negative, so it now says where the name really lives.
+                                // Every name that is not exported, at once: fixing nine of them
+                                // one run at a time is eight runs too many.
+                                let missing_all: Vec<&String> = names
+                                    .iter()
+                                    .filter(|m| !self.modules[dep_idx].exports.contains(*m) && !crate::registry::is_builtin_name(m))
+                                    .collect();
                                 let hint = if crate::registry::is_builtin_name(n) {
                                     format!(
                                         "`{n}` is a builtin — it is already available everywhere, with no import."
+                                    )
+                                } else if missing_all.len() > 1 {
+                                    format!(
+                                        "none of {} is exported: write `export fn` for each in that module (a test file importing \
+                                         an app's functions needs them exported).",
+                                        missing_all.iter().map(|m| format!("`{m}`")).collect::<Vec<_>>().join(", ")
                                     )
                                 } else {
                                     format!(
@@ -1448,8 +1487,15 @@ fn check_exported(
         };
         // Same near-miss, reached the other way: `core.clamp` for a name that is a
         // builtin and therefore needs no module at all.
+        let names: Vec<&str> = exports.iter().map(|s| s.as_str()).collect();
+        let near = crate::error::suggest(member, &names);
         let hint = if crate::registry::is_builtin_name(member) {
             format!("`{member}` is a builtin — call it directly as `{member}(…)`, with no module prefix.")
+        } else if let Some(n) = near {
+            format!("did you mean `{alias}.{n}`?")
+        // The library compiled into Helix is not something to edit: say where its names are.
+        } else if names.contains(&"app") && names.contains(&"el") {
+            format!("`helix doc ui` lists everything `{alias}` has, with parameters; `helix search <words>` finds one by what it does.")
         } else {
             format!(
                 "only `export`ed names are reachable as `{alias}.{member}`; mark it `export` in that module, or check the spelling."

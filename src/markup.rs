@@ -134,13 +134,27 @@ impl Scan<'_> {
             };
             return Err(self.err(format!("expected {what}, found {found}")));
         }
+        let mut brackets = 0usize;
         while let Some(c) = self.peek(0) {
-            if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '.') {
-                out.push(c);
-                self.bump();
-            } else {
+            // After `class:` comes a class name, which may be any utility: `class:bg-accent/10`,
+            // `class:w-[42%]`, `class:data-[state=open]:block`. It ends at a space, `=`, `>` or `/>`
+            // (a `=` inside brackets is part of it).
+            let in_class = out.starts_with("class:");
+            let ok = c.is_ascii_alphanumeric()
+                || matches!(c, '_' | '-' | ':' | '.')
+                || (in_class && (matches!(c, '[' | ']' | '(' | ')' | '%' | '#' | ',' | '!' | '*' | '@' | '&' | '+')
+                    || (c == '/' && self.peek(1) != Some('>'))
+                    || (c == '=' && brackets > 0)));
+            if !ok {
                 break;
             }
+            match c {
+                '[' => brackets += 1,
+                ']' => brackets = brackets.saturating_sub(1),
+                _ => {}
+            }
+            out.push(c);
+            self.bump();
         }
         Ok(out)
     }
@@ -415,7 +429,9 @@ fn flush(text: &mut String, out: &mut Vec<MNode>) {
     }
     let raw = std::mem::take(text);
     let lines: Vec<&str> = raw.split('\n').collect();
-    let last_full = lines.iter().rposition(|l| !l.trim().is_empty());
+    // As Babel counts it: the last line with anything on it, or the first line when none has —
+    // so the single space in `{a} {b}` stays one space.
+    let last_full = Some(lines.iter().rposition(|l| !l.trim().is_empty()).unwrap_or(0));
     let mut s = String::new();
     for (i, line) in lines.iter().enumerate() {
         let mut t: &str = line.trim_end_matches('\r');
@@ -526,6 +542,27 @@ mod tests {
         assert!(e.message.contains("needs a function `nowhere`"), "{}", e.message);
         let e = parse_err("x = <p>a < b</p>\n");
         assert!(e.message.contains("starts a tag"), "{}", e.message);
+    }
+
+    #[test]
+    fn the_mistakes_agents_make_name_their_fix() {
+        let hint = |src: &str| {
+            let e = parse_err(src);
+            format!("{} | {}", e.message, e.hint.unwrap_or_default())
+        };
+        assert!(hint("x = <p onDoubleClick=\"go\" />\n").contains("`dblclick=\"save\"`"));
+        assert!(hint("x = <input onChange=\"t\" />\n").contains("`input=\"…\"`"));
+        assert!(hint("x = <p blur=\"x\" />\n").contains("Helix has no `blur` event"));
+        assert!(hint("x = <p onBlur=\"x\" />\n").contains("dismiss"));
+        assert!(hint("x = <button clik=\"save\" />\n").contains("did you mean `click`?"));
+        assert!(hint("x = <label htmlFor=\"a\" />\n").contains("the attribute is `for`"));
+        assert!(hint("x = <div tabIndex=\"0\" />\n").contains("the attribute is `tabindex`"));
+        assert!(hint("fn field(label) = label\nx = <Feild label=\"a\" />\n").contains("did you mean `<Field>`"));
+        assert!(hint("x = true && false\n").contains("Helix writes `and`"));
+        assert!(hint("x = 1\ny = x == missing\n").contains("never true or false"));
+        // Real HTML and SVG attributes pass, whatever their case.
+        assert!(crate::lexer::lex("x = <svg viewBox=\"0 0 1 1\"><circle cx=\"1\" stroke-width=\"2\" /></svg>\n").and_then(crate::parser::parse).is_ok());
+        assert!(crate::lexer::lex("x = <button title=\"t\" rel=\"r\" size=\"3\" role=\"r\" />\n").and_then(crate::parser::parse).is_ok());
     }
 
     #[test]

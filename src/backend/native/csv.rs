@@ -373,6 +373,9 @@ pub fn read_csv(path: &str, line: usize, col: usize) -> Result<crate::backend::D
             None => e,
         }
     };
+    if !std::path::Path::new(path).exists() {
+        return Err(crate::error::missing_file(path, "CSV ", line, col));
+    }
     let bytes =
         std::fs::read(path).map_err(|e| err(format!("could not open CSV `{path}`: {e}")))?;
     // Strip a UTF-8 BOM so the first header name doesn't carry it invisibly.

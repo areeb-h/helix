@@ -213,9 +213,24 @@ pub fn call(name: &str, args: Vec<Expr>, line: usize, col: usize) -> Stmt {
 pub fn help(sig: &MainSig<'_>, src: &str, tool: &str) -> String {
     let mut out = String::new();
     let doc = doc_above_main(src);
-    if !doc.is_empty() {
-        out.push_str(&doc);
-        out.push('\n');
+    // A doc line `--name: what it does` (or `name: …`) for a parameter describes that
+    // option: it goes in the options table, beside its type, not in the prose above.
+    let mut described: Vec<(String, String)> = Vec::new();
+    let mut prose: Vec<&str> = Vec::new();
+    for line in doc.lines() {
+        let t = line.trim();
+        let key = t.trim_start_matches("--");
+        match key.split_once(':') {
+            Some((n, what)) if sig.params.iter().any(|(p, _)| p == n.trim()) && !n.contains(' ') => {
+                described.push((n.trim().to_string(), what.trim().to_string()));
+            }
+            _ => prose.push(line),
+        }
+    }
+    let prose = prose.join("\n");
+    if !prose.trim().is_empty() {
+        out.push_str(prose.trim_end());
+        out.push_str("\n\n");
     }
     // Required parameters are always a prefix — the parser refuses a non-default after a
     // default — so usage can be written left to right without sorting anything.
@@ -246,10 +261,13 @@ pub fn help(sig: &MainSig<'_>, src: &str, tool: &str) -> String {
         };
         let d = sig.defaults.get(idx).and_then(|d| d.as_ref());
         let tail = match d {
+            // A default of `missing` means "optional, none given" — say that, not the keyword.
+            Some(Expr::Missing) => "  (optional)".to_string(),
             Some(e) => format!("  (default: {})", literal_text(e)),
             None => "  (required)".to_string(),
         };
-        out.push_str(&format!("  --{name:<14} {tyname}{tail}\n"));
+        let what = described.iter().find(|(n, _)| n == name).map(|(_, w)| format!("  {w}")).unwrap_or_default();
+        out.push_str(&format!("  --{name:<14} {tyname}{tail}{what}\n"));
     }
     out
 }

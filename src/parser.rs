@@ -78,14 +78,15 @@ fn parse_expression(
     sigs: &HashMap<String, FnSig>,
     imports: &std::collections::HashSet<String>,
 ) -> Result<(Expr, Vec<DoBinding>), HelixError> {
-    parse_expression_at(src, (1, 1), depth, sigs, imports)
+    parse_expression_at(src, (1, 1, false), depth, sigs, imports)
 }
 
 /// [`parse_expression`] for source that starts at `at` (line, column) of the file: a hole in
-/// markup, whose positions are then the ones the person sees.
+/// markup, whose positions are then the ones the person sees. The third field says whether it
+/// is markup's (see [`Parser::markup`]).
 fn parse_expression_at(
     src: &str,
-    at: (usize, usize),
+    at: (usize, usize, bool),
     depth: usize,
     sigs: &HashMap<String, FnSig>,
     imports: &std::collections::HashSet<String>,
@@ -103,6 +104,7 @@ fn parse_expression_at(
         pending: Vec::new(),
         temps: 0,
         pinned_keys_at: None,
+        markup: at.2,
     };
     p.skip_newlines();
     let e = p.expr()?;
@@ -937,6 +939,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Stmt>, HelixError> {
         pending: Vec::new(),
         temps: 0,
         pinned_keys_at: None,
+        markup: false,
     };
     // EVERY SIGNATURE BEFORE THE FIRST CALL IS PARSED — a function may be called above
     // its definition, and its defaults and parameter names must be known there too.
@@ -1007,12 +1010,102 @@ const MARKUP_PROPS: [&str; 31] = [
     "drag_commit", "reorder", "resize", "handle", "reorder_group", "drop", "style", "transition",
 ];
 
+/// HTML's own attribute names (lower case), so a name that is one of them is never mistaken
+/// for a typo of one of Helix's props, and a React spelling of one (`tabIndex`) is named.
+const HTML_ATTRS: &[&str] = &[
+    "accept", "accesskey", "action", "align", "allow", "alt", "async", "autocapitalize", "autocomplete", "autofocus", "autoplay",
+    "capture", "charset", "checked", "cite", "cols", "colspan", "content", "contenteditable", "controls", "coords", "crossorigin",
+    "datetime", "decoding", "default", "defer", "dir", "dirname", "disabled", "download", "draggable", "enctype", "enterkeyhint",
+    "fetchpriority", "for", "form", "formaction", "headers", "height", "hidden", "high", "href", "hreflang", "inert", "inputmode",
+    "ismap", "itemprop", "kind", "label", "lang", "list", "loading", "loop", "low", "max", "maxlength", "media", "method", "min",
+    "minlength", "multiple", "muted", "name", "nonce", "novalidate", "open", "optimum", "part", "pattern", "ping", "placeholder",
+    "playsinline", "popover", "popovertarget", "popovertargetaction", "poster", "preload", "readonly", "referrerpolicy", "rel",
+    "required", "reversed", "rows", "rowspan", "sandbox", "scope", "selected", "shape", "size", "sizes", "slot", "span",
+    "spellcheck", "src", "srcdoc", "srclang", "srcset", "start", "step", "tabindex", "target", "title", "translate", "type",
+    "usemap", "width", "wrap", "xmlns",
+];
+
+/// Events a browser has that a view might name, and Helix does not send (so an attribute of
+/// that name would never fire).
+const DOM_EVENTS: &[&str] = &[
+    "blur", "focus", "focusin", "focusout", "doubleclick", "mouseover", "mouseout", "mouseenter", "mouseleave", "mousedown",
+    "mouseup", "mousemove", "hover", "keyup", "keypress", "pointerdown", "pointerup", "pointermove", "pointerenter",
+    "pointerleave", "touchstart", "touchend", "touchmove", "wheel", "dragstart", "dragend", "dragover", "dragenter",
+    "dragleave", "load", "unload", "animationend", "transitionend", "select", "paste", "cut", "beforeinput",
+];
+
+/// What to write instead of `on<event>` (or a bare event name Helix does not have).
+fn event_hint(ev: &str) -> String {
+    let send = |prop: &str, what: &str| format!("a view sends a message instead: `{prop}=\"save\"` posts {{msg: \"save\"}} to `update` {what}.");
+    match ev {
+        "click" => send("click", "on a click (with `value={…}` as its payload)"),
+        "doubleclick" | "dblclick" => send("dblclick", "on a double click"),
+        "contextmenu" => send("contextmenu", "on a right click, with where it was"),
+        "change" => "for a text field, React's `onChange` is Helix's `input=\"…\"` (every keystroke, with the text as `value`); \
+             `change=\"…\"` is sent when a field is committed (a checkbox, a select)."
+            .to_string(),
+        "input" => send("input", "on every keystroke, with the text as `value`"),
+        "submit" => send("submit", "when the form is submitted, with its named fields as `value`"),
+        "scroll" => send("scroll", "as the node scrolls"),
+        "keydown" | "keyup" | "keypress" => "keys are `keydown=\"key\" shortcuts=\"Enter Escape Ctrl+K ArrowUp\"`: the chords listed are sent \
+             as `value` (\"Ctrl+K\", \"Space\", \"ArrowDown\"); there is no key-up event."
+            .to_string(),
+        "blur" | "focusout" | "focus" | "focusin" => "Helix sends no focus events. To close or cancel something when the person clicks away or \
+             presses Escape, use `dismiss=\"msg\"`; to put focus somewhere, use `autofocus` on the element (re-key it to move focus again)."
+            .to_string(),
+        "mouseover" | "mouseout" | "mouseenter" | "mouseleave" | "hover" | "mousemove" | "pointerenter" | "pointerleave" | "pointermove" => {
+            "Helix sends no hover events: a hover look is a utility (`hover:bg-hover`, `group-hover:opacity-100`), and a tooltip is `ui.tooltip`.".to_string()
+        }
+        "mousedown" | "mouseup" | "pointerdown" | "pointerup" | "touchstart" | "touchend" | "touchmove" | "dragstart" | "dragend"
+        | "dragover" | "dragenter" | "dragleave" | "drag" | "drop" => {
+            "gestures are props: `drag=\"moved\"` (sent when let go, with `drag: {dx, dy, vx, vy}`), `reorder=\"msg\"` on a list, `drop=\"msg\"` on a target."
+                .to_string()
+        }
+        _ => "Helix's events are `click`, `dblclick`, `contextmenu`, `input`, `change`, `submit`, `dismiss`, `scroll` and \
+              `keydown` (with `shortcuts`), plus the gestures `drag`, `reorder`, `resize` and `drop`: `helix describe events`."
+            .to_string(),
+    }
+}
+
 /// Elements whose `value` attribute is HTML's, not a click's payload.
 const MARKUP_VALUE_TAGS: [&str; 5] = ["input", "option", "progress", "meter", "data"];
 
 /// `TodoItem` → `todo_item`: a component tag is written as React writes it, and names the
 /// Helix function as Helix writes it.
-fn snake(name: &str) -> String {
+/// Whether a hole's source has a `:` outside every bracket and string — a format spec
+/// (`pct:.1f`), since a record's or a call's colons are inside brackets.
+fn top_level_colon(src: &str) -> bool {
+    let (mut depth, mut quote) = (0i32, None::<char>);
+    let mut prev = ' ';
+    for c in src.chars() {
+        match quote {
+            Some(q) => {
+                if c == q && prev != '\\' {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '"' | '\'' => quote = Some(c),
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                ':' if depth == 0 => return true,
+                _ => {}
+            },
+        }
+        prev = c;
+    }
+    false
+}
+
+/// `todo_item` → `TodoItem`: how a function is written as a tag.
+fn pascal_case(name: &str) -> String {
+    name.split('_').map(|w| {
+        let mut c = w.chars();
+        c.next().map(|f| f.to_ascii_uppercase().to_string() + c.as_str()).unwrap_or_default()
+    }).collect()
+}
+
+pub(crate) fn snake_case(name: &str) -> String {
     let mut out = String::new();
     for (i, c) in name.chars().enumerate() {
         if c.is_ascii_uppercase() {
@@ -1069,6 +1162,10 @@ struct Parser {
     /// the one escape the defining position lacked. Anywhere else an `@` key is refused
     /// at parse time, so it can only ever reach a frame verb or a runtime refusal.
     pinned_keys_at: Option<usize>,
+    /// Whether this parser reads a hole inside markup (ADR 0061), where `if c then <X />` with no
+    /// `else` is `missing` — nothing rendered — as `{c && <X />}` is in JSX. Anywhere else an
+    /// `if` still needs its `else`.
+    markup: bool,
 }
 
 impl Parser {
@@ -1541,11 +1638,22 @@ impl Parser {
             }
             other => {
                 let (l, c) = self.pos();
-                Err(HelixError::new(
-                    format!("expected a name {}, found {}", ctx, other.describe()),
-                    l,
-                    c,
-                ))
+                let e = HelixError::new(format!("expected a name {}, found {}", ctx, other.describe()), l, c);
+                // A keyword where a name goes: say it is one, and which they are.
+                let kw = matches!(
+                    other,
+                    Tok::Mut | Tok::Fn | Tok::Import | Tok::And | Tok::Or | Tok::Not | Tok::If | Tok::Then | Tok::Else
+                        | Tok::Let | Tok::In | Tok::Missing | Tok::Try | Tok::Match | Tok::Do | Tok::True | Tok::False
+                );
+                Err(if kw {
+                    e.hint(format!(
+                        "{} is a reserved word, so it cannot be a name — pick another (`then_at`, `when`). The reserved \
+                         words are: and, do, else, false, fn, if, import, in, let, match, missing, mut, not, or, then, true, try.",
+                        other.describe()
+                    ))
+                } else {
+                    e
+                })
             }
         }
     }
@@ -2242,6 +2350,25 @@ impl Parser {
             self.advance();
             self.deepen()?;
             let right = self.comparison()?;
+            // `x == missing` is never true or false: under ADR 0001 a comparison with an
+            // unknown is unknown, so it is `missing`, and the `if` (or `where`) that reads it
+            // fails far from here, or selects nothing. Said at the comparison instead. Only one
+            // side being the literal counts: `missing == missing` is how the rule is shown.
+            if matches!(left, Expr::Missing) != matches!(right, Expr::Missing) {
+                let other = "x";
+                let neg = op == BinOp::Ne;
+                self.depth = saved;
+                return Err(HelixError::new(
+                    format!("`{} missing` is never true or false — it is `missing`", if neg { "!=" } else { "==" }),
+                    l,
+                    c,
+                )
+                .hint(format!(
+                    "test for it with `{}{other}.is_missing()` (in a query, `{}@col.is_missing()`), or give a default first: `({other} ?? \"\") == \"pro\"`.",
+                    if neg { "not " } else { "" },
+                    if neg { "not " } else { "" },
+                )));
+            }
             left = Expr::Binary {
                 op,
                 left: Box::new(left),
@@ -3484,6 +3611,12 @@ impl Parser {
                 ("children".into(), Expr::Array(vec![])),
                 ("text".into(), Expr::Str(t.clone())),
             ])),
+            // `{pct:.1f}` among the children formats, as it does in a string: such a hole is the
+            // interpolated string `"{pct:.1f}"`, so the spec means exactly what it means there.
+            MNode::Hole(src) if top_level_colon(&src.text) => {
+                let as_string = crate::markup::Src { text: format!("'''{{{}}}'''", src.text), line: src.line, col: src.col.saturating_sub(4).max(1) };
+                self.markup_src(&as_string)
+            }
             MNode::Hole(src) => self.markup_src(src),
             MNode::Fragment { children, .. } => Ok(Expr::Array(self.markup_children(children)?)),
             MNode::Element { tag, attrs, children, line, col } => {
@@ -3502,7 +3635,7 @@ impl Parser {
 
     /// A hole's expression, parsed where it was written.
     fn markup_src(&mut self, s: &crate::markup::Src) -> Result<Expr, HelixError> {
-        let (e, binds) = parse_expression_at(&s.text, (s.line, s.col), self.depth, &self.fn_sigs, &self.imports)?;
+        let (e, binds) = parse_expression_at(&s.text, (s.line, s.col, true), self.depth, &self.fn_sigs, &self.imports)?;
         self.do_bindings.extend(binds);
         Ok(e)
     }
@@ -3530,6 +3663,9 @@ impl Parser {
         let mut aria: Vec<(String, Expr)> = Vec::new();
         let mut raw: Vec<(String, Expr)> = Vec::new();
         let mut seen: Vec<&str> = Vec::new();
+        // `class:on={cond}`: the class `on` while `cond` holds, added to `class`.
+        let mut toggles: Vec<Expr> = Vec::new();
+        let mut class_at: Option<usize> = None;
         for a in attrs {
             if let MValue::Spread(_) = a.value {
                 let e = self.markup_value(a)?;
@@ -3549,16 +3685,54 @@ impl Parser {
                     .hint("write `class=\"…\"`: Helix markup is HTML's names, so `class` and `for`."));
             }
             if lower.len() > 2 && lower.starts_with("on") && lower[2..].chars().all(|c| c.is_ascii_alphabetic()) && lower != "open" {
-                let ev = &lower[2..];
                 return Err(HelixError::new(format!("`{name}` would be a script handler, which a view cannot carry"), a.line, a.col)
-                    .hint(format!("a view sends a message instead: `{ev}=\"save\"` posts {{msg: \"save\"}} to `update`.")));
+                    .hint(event_hint(&lower[2..])));
+            }
+            // An event name written without `on` that Helix does not have would be a dead
+            // attribute: `blur="save"` checks, renders, and never fires.
+            if !MARKUP_PROPS.contains(&lower.as_str()) && DOM_EVENTS.contains(&lower.as_str()) {
+                return Err(HelixError::new(format!("Helix has no `{lower}` event"), a.line, a.col).hint(event_hint(&lower)));
+            }
+            if let Some(class) = name.strip_prefix("class:") {
+                if class.is_empty() {
+                    return Err(HelixError::new("`class:` needs a class name: `class:active={on}`", a.line, a.col));
+                }
+                let cond = self.markup_value(a)?;
+                toggles.push(Expr::If {
+                    cond: Box::new(cond),
+                    then_branch: Box::new(Expr::Str(class.to_string())),
+                    else_branch: Box::new(Expr::Missing),
+                    line: a.line,
+                    col: a.col,
+                });
+                continue;
             }
             let value = self.markup_value(a)?;
+            if name == "class" {
+                class_at = Some(parts.len());
+            }
             if let Some(rest) = name.strip_prefix("aria-") {
                 aria.push((rest.replace('-', "_"), value));
                 continue;
             }
             let prop = name.replace('-', "_");
+            // A typo of one of Helix's own props would quietly become an HTML attribute, and a
+            // `clik="save"` button would do nothing at all. A name one edit from a prop, that is
+            // not HTML's own, is refused with the prop it nearly is; a React spelling of an HTML
+            // attribute (`tabIndex`, `htmlFor`) is given HTML's.
+            if !MARKUP_PROPS.contains(&prop.as_str())
+                && !lower.starts_with("data-")
+                && !HTML_ATTRS.contains(&lower.as_str())
+                && let Some(p) = crate::error::suggest(&prop, &MARKUP_PROPS)
+            {
+                return Err(HelixError::new(format!("`{name}` is not an attribute; did you mean `{}`?", p.replace('_', "-")), a.line, a.col)
+                    .hint("Helix's props are `class`, `click`, `input`, `change`, `submit`, `key`, `value` and the gesture and motion names; anything else becomes an HTML attribute as written."));
+            }
+            let html = if name == "htmlFor" { Some("for") } else { HTML_ATTRS.iter().copied().find(|h| *h == lower) };
+            if let Some(h) = html.filter(|_| name.chars().any(|c| c.is_ascii_uppercase())) {
+                return Err(HelixError::new(format!("the attribute is `{h}`"), a.line, a.col)
+                    .hint(format!("markup uses HTML's names, all lower case: `{h}=…`, not React's `{name}`.")));
+            }
             // On a form control, `value` is the HTML value (what an input shows); anywhere
             // else it is what a click sends, as in `ui.el`.
             if prop == "value" && MARKUP_VALUE_TAGS.contains(&tag) {
@@ -3567,6 +3741,22 @@ impl Parser {
                 parts.push(RecordPart::Field(prop, value));
             } else {
                 raw.push((name.to_string(), value));
+            }
+        }
+        if !toggles.is_empty() {
+            match class_at {
+                Some(i) => {
+                    if let RecordPart::Field(_, base) = &mut parts[i] {
+                        let b = std::mem::replace(base, Expr::Missing);
+                        *base = Expr::Array(std::iter::once(b).chain(toggles).collect());
+                    }
+                }
+                // With a spread, the spread's own `class` would be replaced without a word.
+                None if spread => {
+                    return Err(HelixError::new(format!("`class:…` on `<{tag}>` with a spread needs a `class` attribute too"), line, col)
+                        .hint("write the base classes as `class=\"…\"` (or `class={props.class}`) so the toggles have something to add to."));
+                }
+                None => parts.push(RecordPart::Field("class".into(), Expr::Array(toggles))),
             }
         }
         if !aria.is_empty() {
@@ -3633,6 +3823,10 @@ impl Parser {
                 return Err(HelixError::new(format!("`<{tag}>` is a function, so it takes named arguments, not a spread"), a.line, a.col)
                     .hint("pass the record as one argument (`props={p}`), or spread it onto an element."));
             }
+            if a.name.starts_with("class:") {
+                return Err(HelixError::new(format!("`{}` belongs on an element; `<{tag}>` is a function", a.name), a.line, a.col)
+                    .hint("pass the condition as an argument, or put `class:…` on the element the function returns."));
+            }
             let name = a.name.replace('-', "_");
             if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
                 return Err(HelixError::new(format!("`{}` is not a parameter name", a.name), a.line, a.col)
@@ -3655,7 +3849,7 @@ impl Parser {
         match parts.as_slice() {
             [module, f] => Ok(Expr::Method {
                 recv: Box::new(Expr::Ident { name: (*module).to_string(), line, col }),
-                name: snake(f),
+                name: snake_case(f),
                 args: vec![],
                 named,
                 ufcs: None,
@@ -3663,12 +3857,19 @@ impl Parser {
                 col,
             }),
             [f] => {
-                let name = if self.fn_sigs.contains_key(*f) { (*f).to_string() } else { snake(f) };
+                let name = if self.fn_sigs.contains_key(*f) { (*f).to_string() } else { snake_case(f) };
                 if !self.fn_sigs.contains_key(&name) && !crate::registry::is_builtin_name(&name) {
-                    return Err(HelixError::new(format!("`<{tag}>` needs a function `{name}`, defined above it"), line, col).hint(
-                        "a capitalised tag is a component: a function, defined before its first use, whose \
-                         parameters are the tag's attributes (and `children`).",
-                    ));
+                    let known: Vec<&str> = self.fn_sigs.keys().map(|k| k.as_str()).collect();
+                    let hint = match crate::error::suggest(&name, &known) {
+                        Some(n) => format!("did you mean `<{}>`, the function `{n}`?", pascal_case(&n)),
+                        None if crate::uidocs::find(&name).is_some() => {
+                            format!("`{name}` is in the app library: write `<ui.{tag}>` (with `import std.ui`).")
+                        }
+                        None => "a capitalised tag is a component: a function whose parameters are the tag's \
+                                 attributes (and `children`). A library's is written with its name: `<ui.Badge />`."
+                            .to_string(),
+                    };
+                    return Err(HelixError::new(format!("`<{tag}>` needs a function `{name}`"), line, col).hint(hint));
                 }
                 let args = self.resolve_call_args(&name, vec![], named, line, col)?;
                 Ok(Expr::Call { name, args, line, col })
@@ -3823,8 +4024,19 @@ impl Parser {
                     }
                 })?;
                 let then_branch = self.expr()?;
+                if self.markup && !matches!(self.peek(), Tok::Else) {
+                    return Ok(Expr::If {
+                        cond: Box::new(cond),
+                        then_branch: Box::new(then_branch),
+                        else_branch: Box::new(Expr::Missing),
+                        line: l,
+                        col: c,
+                    });
+                }
                 self.eat(&Tok::Else, "after the `then` branch").map_err(|e| {
-                    e.hint("`if` is an expression, so it always needs an `else` branch that yields a value.")
+                    e.hint("`if` is an expression, so it needs an `else` that yields a value. For a guard, \
+                            `if n < 1 then raise(\"n must be positive\") else missing` (or `assert(n >= 1, \"…\")`); \
+                            inside markup's `{…}` the `else` may be left out, and renders nothing.")
                 })?;
                 let else_branch = self.expr()?;
                 Ok(Expr::If {
@@ -3895,10 +4107,20 @@ impl Parser {
                 }
             }
             Tok::LBracket => {
+                let (bl, bc) = self.pos();
                 self.advance();
                 let mut elems = Vec::new();
+                // `[head, ...rest, last]`: a spread puts a list's items in place. It is the
+                // same `...` records and destructuring already use, and desugars to `concat`,
+                // so no engine sees it. `spreads[i]` says whether `elems[i]` was one.
+                let mut spreads: Vec<bool> = Vec::new();
                 if !matches!(self.peek(), Tok::RBracket) {
                     loop {
+                        let spread = matches!(self.peek(), Tok::DotDotDot);
+                        if spread {
+                            self.advance();
+                        }
+                        spreads.push(spread);
                         elems.push(self.expr()?);
                         if matches!(self.peek(), Tok::Comma) {
                             self.advance();
@@ -3929,7 +4151,40 @@ impl Parser {
                     ));
                 }
                 self.eat(&Tok::RBracket, "to close the array")?;
-                Ok(Expr::Array(elems))
+                if !spreads.contains(&true) {
+                    return Ok(Expr::Array(elems));
+                }
+                // Runs of plain items become arrays; spreads stay as they are; then `concat`.
+                let mut parts: Vec<Expr> = Vec::new();
+                let mut run: Vec<Expr> = Vec::new();
+                for (e, sp) in elems.into_iter().zip(spreads) {
+                    if sp {
+                        if !run.is_empty() {
+                            parts.push(Expr::Array(std::mem::take(&mut run)));
+                        }
+                        parts.push(e);
+                    } else {
+                        run.push(e);
+                    }
+                }
+                if !run.is_empty() {
+                    parts.push(Expr::Array(run));
+                }
+                // A lone spread `[...xs]` is a copy: `[].concat(xs)`, still checked as a list.
+                let mut it = parts.into_iter();
+                let first = it.next().unwrap_or(Expr::Array(vec![]));
+                let start = if matches!(first, Expr::Array(_)) { first } else {
+                    Expr::Method { recv: Box::new(Expr::Array(vec![])), name: "concat".into(), args: vec![first], named: vec![], ufcs: None, line: bl, col: bc }
+                };
+                Ok(it.fold(start, |acc, p| Expr::Method {
+                    recv: Box::new(acc),
+                    name: "concat".into(),
+                    args: vec![p],
+                    named: vec![],
+                    ufcs: None,
+                    line: bl,
+                    col: bc,
+                }))
             }
             Tok::LBrace => {
                 // record literal: `{ name: expr, age: expr }`, or a record UPDATE that

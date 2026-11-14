@@ -1,0 +1,71 @@
+# The freezer's safety properties, checked on EVERY reachable step (std.model, ADR 0065).
+#
+# The world is small — two apps, a few clock readings including ones that go backwards — and
+# every input is tried in every state the rules can reach from a new policy. The rules are the
+# same functions `helix emit rust` turns into the shell's `Policy`.
+import std.model
+import freezer.{new, update, next_deadline, not_frozen, thaw}
+
+AFTER = 10
+APPS = ["a", "b"]
+TIMES = [0, 5, 10, 25]
+OPENS = [[], ["a"], ["b"], ["a", "b"], ["b", "a"], ["a", "a"]]
+VISIBLES = [missing, "a", "b"]
+
+INPUTS = OPENS.flat_map((o) => VISIBLES.flat_map((v) => TIMES.map((t) => {call: "update", now: t, open: o, visible: v}))).concat(APPS.flat_map((id) => TIMES.flat_map((t) => [{call: "not_frozen", id: id, now: t}, {call: "thaw", id: id, now: t}])))
+
+fn step(s, i) = match i.call {
+  "update" => do {
+    r = update(s, i.now, i.open, i.visible)
+    {state: r[0], out: r[1]}
+  },
+  "not_frozen" => {state: not_frozen(s, i.id, i.now), out: []},
+  _ => do {
+    r = thaw(s, i.id, i.now)
+    {state: r[0], out: r[1]}
+  },
+}
+
+fn frozen(s, id) = (s.apps.get(id) ?? {frozen: false}).frozen
+fn hidden_since(s, id) = (s.apps.get(id) ?? {hidden_since: missing}).hidden_since
+fn has(out, action) = out.any((a) => a.to_json() == action.to_json())
+fn first_problem(ps) = do {
+  bad = ps.filter((p) => p != "")
+  if bad.count() == 0 then "" else bad[0]
+}
+
+# Each property, as a sentence that is "" when it holds.
+fn check(before, i, after, out) = if i.call == "update" then on_update(before, i, after, out) else if i.call == "thaw" then on_thaw(before, i, after, out) else on_not_frozen(i, after)
+
+fn on_update(before, i, after, out) = do {
+  vis = i.visible ?? ""
+  open = i.open.unique().sort()
+  freezes = out.filter((a) => a.keys()[0] == "Freeze").map((a) => a.Freeze)
+  first_problem([
+    if after.apps.keys() == open then "" else "it keeps {after.apps.keys()}, but the open apps are {open}",
+    if vis == "" or not frozen(after, vis) then "" else "the app on screen ({vis}) is frozen",
+    if freezes.any((x) => x == vis) then "it froze the app on screen ({vis})" else "",
+    first_problem(freezes.map((x) => do {
+      since = hidden_since(after, x) ?? i.now
+      if i.now - since >= AFTER then "" else "it froze {x} after {i.now - since} ms hidden, before the {AFTER} ms wait"
+    })),
+    first_problem(freezes.map((x) => if has(out, {Background: x}) or not hidden_since(before, x).is_missing() then "" else "it froze {x} without lowering its share first")),
+    first_problem(before.apps.keys().map((x) => if frozen(before, x) and (x == vis or not open.contains(x)) and not has(out, {Thaw: x}) then "{x} was frozen and is now {if x == vis then "on screen" else "closed"}, but it was not thawed" else "")),
+    first_problem(after.apps.keys().map((x) => if frozen(after, x) and hidden_since(after, x).is_missing() then "{x} is frozen with no time it was hidden" else "")),
+    do {
+      d = next_deadline(before)
+      if freezes.count() == 0 or d.is_missing() then "" else if i.now >= d then "" else "it froze an app at {i.now}, before the deadline {d} it had promised"
+    },
+  ])
+}
+
+fn on_thaw(before, i, after, out) = first_problem([
+  if out == frozen(before, i.id) then "" else "thaw said {out}, but {i.id} was {if frozen(before, i.id) then "" else "not "}frozen",
+  if frozen(after, i.id) then "{i.id} is still frozen after thaw" else "",
+])
+
+fn on_not_frozen(i, after) = if frozen(after, i.id) then "{i.id} is frozen after not_frozen" else ""
+
+RESULT = model.explore(new(AFTER), INPUTS, step, check)
+print("{RESULT.states} states, {RESULT.transitions} steps checked")
+assert(RESULT.failure.is_missing(), model.explain(RESULT.failure))

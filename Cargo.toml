@@ -235,7 +235,7 @@ parquet = { version = "59", default-features = false, features = [
 # module hides behind a flag that drags the arrow stack in; zstd is already in
 # every build's tree via other deps).
 zstd = { version = "0.13", optional = true }
-rusqlite = { version = "0.40.2", features = ["bundled"], optional = true }
+rusqlite = { version = "0.41.1", features = ["bundled"], optional = true }
 
 [features]
 # HTTP data-fetching and the fast allocator are on by default; build with

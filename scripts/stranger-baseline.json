@@ -1,8 +1,8 @@
 {
  "_comment": "Oracle-4 (help-quality) ratchet for scripts/stranger.py. See the module docstring: this is a backlog, not a target. It may only go DOWN. Regenerate with --bless.",
- "help_failures": 265,
+ "help_failures": 264,
  "corpus_size": 1438,
- "blessed_against_sha256": "dde21932636dca1bc62a1b58666bfddc5d5711b91272d91f721667d5e7847031",
+ "blessed_against_sha256": "76bc54bd84c930b247a9f1001759d4bb6a7cd9c04b6894a757a89d9c883f61e8",
  "programs": [
   "bytes/bad-name/bad-utf8",
   "bytes/bad-name/bom",
@@ -267,7 +267,6 @@
   "pair/r-toupper/jl-broadcast",
   "path/dir/read_csv",
   "path/dir/read_text",
-  "path/empty-str/read_csv",
   "path/missing/read_csv"
  ]
 }

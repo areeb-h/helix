@@ -1,0 +1,8 @@
+# ui.tokens (ADR 0064): a design's tokens for another program, the same on every engine.
+import std.ui
+d = ui.design({seed: "#2f7d5b", shape: "round"})
+print(ui.tokens(d, "gtk", "dark"))
+j = ui.tokens(d, "json", "light").parse_json()
+print(j.contrast, j.sizes.get("r-card"), j.springs.count(), j.colours.get("accent"))
+print(ui.tokens(d, "css").split("\n").filter((l) => l.contains("spring-spatial:")))
+print((try ui.tokens(d, "yaml")).error)

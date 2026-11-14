@@ -84,6 +84,10 @@ export fn stat(name, value) = el("div", {class: "stat"}, [el("span", {class: "st
 # its colour from what it sits in. `icon(name)` is decorative (hidden from screen readers);
 # give `label` when the icon alone carries meaning. `icon_names()` lists them.
 
+# Whether this run records its session, replays one, or neither (`"off"`): the black box, ADR
+# 0063 D2, described with `step` below.
+TAPE = session_tape("mode") ?? "off"
+
 ICONS = {
   home: ["M4 10.5 12 4l8 6.5V19a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z"],
   search: ["M10.5 4a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13z", "M20 20l-4.6-4.6"],
@@ -138,6 +142,9 @@ ICONS = {
 }
 
 export fn icon_names() = ICONS.keys()
+# One of the library's icons by name (`ui.icon_names()` lists them: home, search, plus, close,
+# check, star, heart, trash, pen, doc, folder, clock, bell, settings, user, sun, moon, …). `size`
+# is xs, sm, md or lg; give `label` when the icon alone carries meaning.
 export fn icon(name, size = "md", label = missing) = do {
   paths = ICONS.get(name) ?? raise("`{name}` is not one of std.ui's icons", "`ui.icon_names()` lists them.")
   el("svg", {class: "ic {size}", role: if label.is_missing() then missing else "img", aria: {hidden: if label.is_missing() then true else missing, label: label},
@@ -229,7 +236,12 @@ export fn slider(msg, lo, hi, value, label = missing, step = 1) = do {
 
 # One choice of several, as radio buttons: arrow keys move and choose, Tab enters and leaves.
 # `options` is `[[value, caption], …]`.
-export fn radio_group(id, label, value, options, msg) = el("fieldset", {class: "radios", attrs: {id: id}}, [el("legend", {class: "field-label"}, [text(label)])].concat(options.map((o) =>
+# An option of a list component: `[value, caption]`, or a plain value that is its own caption
+# (`["Week", "Month"]`). A string used to be indexed as if it were a pair, and rendered as its
+# letters with no error.
+fn opt(o) = if type_of(o) == "Array" or type_of(o) == "Tuple" then [o[0], o[1]] else [o, "{o}"]
+
+export fn radio_group(id, label, value, options0, msg) = el("fieldset", {class: "radios", attrs: {id: id}}, [el("legend", {class: "field-label"}, [text(label)])].concat(options0.map(opt).map((o) =>
   el("label", {class: "check"}, [
     el("input", {change: msg, attrs: {type: "radio", name: id, value: "{o[0]}", checked: o[0] == value}}, []),
     el("span", {class: "box round", aria: {hidden: true}}, []),
@@ -239,7 +251,8 @@ export fn radio_group(id, label, value, options, msg) = el("fieldset", {class: "
 # A segmented control: one of a few choices, side by side, the chosen one raised. A radio
 # group: arrow keys, Home and End move and choose; only the chosen one is in the Tab order.
 # The selection glides between options (`share`). Clicking sends `{msg, value: <value>}`.
-export fn segmented(id, label, value, options, msg, size = "md") = el("div", {id: id, class: "segmented {size}", role: "radiogroup", aria: {label: label}}, options.map((o) => do {
+# One of a few choices, as a row of buttons. `options` are `[value, caption]` pairs or plain values.
+export fn segmented(id, label, value, options, msg, size = "md") = el("div", {id: id, class: "segmented {size}", role: "radiogroup", aria: {label: label}}, options.map(opt).map((o) => do {
   on = o[0] == value
   el("button", {class: if on then "seg on" else "seg", role: "radio", click: msg, value: "{o[0]}", aria: {checked: on}, attrs: {type: "button", tabindex: if on then "0" else "-1"}}, present([
     if on then el("span", {class: "seg-thumb", share: "{id}-thumb", aria: {hidden: true}}, []) else missing,
@@ -247,8 +260,8 @@ export fn segmented(id, label, value, options, msg, size = "md") = el("div", {id
   ]))
 }))
 
-# Filter chips: one of a few, each a toggle button. `options` is `[[value, caption], …]`.
-export fn chips(id, label, value, options, msg) = el("div", {id: id, class: "chips", role: "group", aria: {label: label}}, options.map((o) => do {
+# Filter chips: one of a few, each a toggle button. `options` are `[value, caption]` pairs or plain values.
+export fn chips(id, label, value, options, msg) = el("div", {id: id, class: "chips", role: "group", aria: {label: label}}, options.map(opt).map((o) => do {
   on = o[0] == value
   el("button", {class: if on then "chip on" else "chip", click: msg, value: "{o[0]}", aria: {pressed: on}, attrs: {type: "button"}}, present([if on then icon("check", "xs") else missing, text(o[1])]))
 }))
@@ -274,13 +287,17 @@ export fn kbd(keys) = el("kbd", {class: "kbd"}, [text(keys)])
 # reloads the page. Fields are named by their ids.
 export fn form(submit, children) = el("form", {class: "form", submit: submit, attrs: {novalidate: true}}, children)
 export fn submit_button(caption, variant = "primary") = el("button", {class: "btn {variant_class(variant)}", attrs: {type: "submit"}}, [text(caption)])
-fn variant_class(v) = if v == "outline" then "outlined" else v
+fn variant_class(v) = if not ["default", "primary", "tonal", "outline", "ghost", "danger"].contains(v) then raise("a button's `variant` is default, primary, tonal, outline, ghost or danger — not \"{v}\"", "e.g. `variant: \"danger\"`.") else if v == "outline" then "outlined" else v
 
 # Validators: each is a function from a value to missing (fine) or a message.
 export fn required(message) = (v) => if v.is_missing() or "{v}".trim() == "" then message else missing
 export fn min_length(n, message) = (v) => if "{v}".trim().count() < n then message else missing
 export fn max_length(n, message) = (v) => if "{v}".count() > n then message else missing
 export fn pattern(regex, message) = (v) => if "{v}".re_match(regex) then missing else message
+# The first message from `rules` that `value` fails, or `missing` when it passes them all:
+# `ui.check(m.email, [ui.required("Enter an email."), ui.pattern("""^[^@]+@[^@]+$""", "That is not an email.")])`.
+# Give the result to a field's `error`. The rules are `required`, `min_length`, `max_length`,
+# `pattern`, or any function from a value to `missing` or a message.
 export fn check(value, rules) = rules.reduce(missing, (err, rule) => if err.is_missing() then rule(value) else err)
 
 # --- Feedback. ---------------------------------------------------------------------------
@@ -826,12 +843,17 @@ fn fmt_cell(v) = match type_of(v) {
 # while the model asks for it — a stopwatch that is stopped has none, and nothing polls.
 export fn every(ms, msg) = if not ((type_of(ms) == "Int" or type_of(ms) == "Float") and is_finite(ms) and ms > 0) then raise("a timer's period is a positive number of milliseconds, not {ms}", "`ui.every(1000, \"tick\")`") else if type_of(msg) != "String" then raise("a timer's message is a string, not {type_of(msg)}", "`ui.every(1000, \"tick\")`") else {every: ms, msg: msg}
 
+# A one-shot: `msg` is sent once, `ms` after the model first asks for it — a card that turns
+# back after a moment, a toast that leaves. While the model keeps listing it nothing more is
+# sent; stop listing it and ask again, and it runs again.
+export fn after(ms, msg) = {...every(ms, msg), once: true}
+
 # No timer is faster than this, so a period of 0 cannot spin the loop.
 FASTEST_MS = 10
 fn timer_ok(x) = type_of(x) == "Record" and (type_of(x.get("every")) == "Int" or type_of(x.get("every")) == "Float") and is_finite(x.every) and type_of(x.get("msg")) == "String"
 fn subs_of(spec, model) = if spec.get("subscriptions").is_missing() then [] else do {
   s = try (spec.subscriptions)(model)
-  if s.ok and type_of(s.value) == "Array" then s.value.filter(timer_ok).map((x) => {every: max(x.every, FASTEST_MS), msg: x.msg}) else do {
+  if s.ok and type_of(s.value) == "Array" then s.value.filter(timer_ok).map((x) => {every: max(x.every, FASTEST_MS), msg: x.msg, once: x.get("once") ?? false}) else do {
     logged = elog(if s.ok then "subscriptions returned {type_of(s.value)}, not a list of `ui.every(…)`; no timers until the model changes" else "subscriptions failed: {s.error}; no timers until the model changes")
     []
   }
@@ -841,21 +863,24 @@ fn subs_of(spec, model) = if spec.get("subscriptions").is_missing() then [] else
 # wanted keeps its next due time (so re-rendering does not reset it); a new one is due one
 # period from `t`; one the model no longer lists is dropped.
 fn schedule(timers, subs, t) = subs.map((s) => do {
-  old = timers.filter((x) => x.msg == s.msg and x.every == s.every)
-  if old.count() == 0 then {every: s.every, msg: s.msg, due: t + s.every / 1000.0} else old[0]
+  old = timers.filter((x) => x.msg == s.msg and x.every == s.every and x.once == s.once)
+  if old.count() == 0 then {every: s.every, msg: s.msg, once: s.once, fired: false, due: t + s.every / 1000.0} else old[0]
 })
 
 # The next due time after a timer fires. A timer that fell behind — the machine slept, or an
 # `update` took longer than the period — fires ONCE and is rescheduled from now: catching up
 # on every missed tick would replay a burst of stale events into `update`.
-fn advance(x, t) = do {
+fn advance(x, t) = if x.once then {...x, fired: true} else do {
   next = x.due + x.every / 1000.0
   {...x, due: if next <= t then t + x.every / 1000.0 else next}
 }
 
 # How long the loop may sleep: until the next timer, at most a second (so a closed client is
 # still noticed), never negative.
-fn sleep_ms(timers, t) = if timers.count() == 0 then 1000 else clamp(round((timers.map((x) => x.due).min() - t) * 1000.0), 0, 1000)
+fn sleep_ms(timers0, t) = do {
+  timers = timers0.filter((x) => not x.fired)
+  if timers.count() == 0 then 1000 else clamp(round((timers.map((x) => x.due).min() - t) * 1000.0), 0, 1000)
+}
 
 # --- Motion. -----------------------------------------------------------------------------
 
@@ -1512,6 +1537,39 @@ export fn contrast_report(d) = ["light", "dark"].flat_map((mode) => PAIRS.map((p
 }))
 
 fn decls(tokens, prefix) = tokens.keys().map((k) => "--{prefix}{k}: {tokens.get(k)};").join(" ")
+
+# A design's tokens for another program to use (ADR 0064): a GTK theme, a web page, a native
+# app. `format` is "gtk" (GTK CSS `@define-color hx_accent …;` for the colours), "css" (custom
+# properties for every token and spring) or "json" (colours, sizes, springs and the contrast
+# report). One mode at a time, "dark" or "light". The colours are the ones whose contrast the
+# design proves; the export says how many pairs were checked and whether every one passed.
+export fn tokens(d, format = "json", mode = "dark") = do {
+  t = if mode == "light" then d.light else d.dark
+  keys = t.keys()
+  is_colour = (v) => type_of(v) == "String" and (v.starts_with("#") or v.starts_with("rgb"))
+  colours = keys.filter((k) => is_colour(t.get(k)))
+  sizes = keys.filter((k) => not is_colour(t.get(k)) and "{t.get(k)}".ends_with("px") and not "{t.get(k)}".contains(" "))
+  checked = contrast_report(d).filter((p) => p.mode == mode)
+  failing = checked.filter((p) => not p.ok)
+  springs = SPRINGS.keys().map((name) => do {
+    k = SPRINGS.get(name)
+    c = spring_ratio_curve(k[0], k[1])
+    {name: name, stiffness: k[0], ratio: k[1], ms: c.ms, easing: c.easing}
+  })
+  proof = "{checked.count()} text/background pairs checked in {mode}, {failing.count()} below WCAG"
+  match format {
+    "gtk" => (["/* Generated by Helix (ui.tokens, ADR 0064). {proof}. */"].concat(colours.map((k) => "@define-color hx_{k.replace("-", "_")} {t.get(k)};"))).join("\n"),
+    "css" => (["/* Generated by Helix (ui.tokens, ADR 0064). {proof}. */", ":root {{"].concat(keys.map((k) => "  --hx-{k}: {t.get(k)};")).concat(springs.map((s) => "  --hx-spring-{s.name}: {s.ms}ms {s.easing};")).concat(["}}"])).join("\n"),
+    "json" => {
+      mode: mode,
+      colours: colours.map((k) => (k, t.get(k))).to_dict(),
+      sizes: sizes.map((k) => (k, t.get(k))).to_dict(),
+      springs: springs.map((s) => {name: s.name, stiffness: s.stiffness, ratio: s.ratio, ms: s.ms}),
+      contrast: {checked: checked.count(), failing: failing.map((p) => "{p.fg} on {p.bg}: {p.ratio} < {p.needs}")},
+    }.to_json(),
+    _ => raise("`ui.tokens` formats are gtk, css and json, not \"{format}\""),
+  }
+}
 
 # The stylesheet a design sets on the page: both modes' tokens.
 fn design_css(d) = ":root {{ {decls(d.light, "")} }} :root[data-theme=\"dark\"] {{ {decls(d.dark, "")} }}"
@@ -2173,7 +2231,14 @@ CLIENT = """
   // sent, with nothing from the field still on its way, is the app's answer — a search cleared
   // by Escape — and the field shows it. (Before, the attribute then matched the app's tree, so
   // the value was never sent again and the field stayed wrong.)
-  const answered = (n, v) => v !== n.value && v !== n.__sent && !busy(n.dataset.input || n.dataset.change);
+  //
+  // Which value is the app's answer is decided by acknowledgement, not by timing: each edit
+  // carries a `seq`, and the server lists it in `acks` on the first frame computed after it.
+  // Until a frame has acknowledged a field's latest edit, any value it carries is the answer to
+  // an older keystroke — "r" arriving after "rose" was typed and sent — and the field keeps
+  // what the person typed. (Timing alone could not tell: frames wait for the next animation
+  // frame, and the newer request can finish in that wait.)
+  const answered = (n, v) => v !== n.value && v !== n.__sent && !busy(n.dataset.input || n.dataset.change) && (n.__seq == null || fieldAcked >= n.__seq);
   function setAttr(n, k, v) {
     n.setAttribute(k, v);
     if (k === 'value' && (n.tagName === 'INPUT' || n.tagName === 'SELECT') && owned(n) && answered(n, v)) { n.value = v; return; }
@@ -2535,6 +2600,10 @@ CLIENT = """
   // is back within a fraction of a second, and the browser's own retry waits seconds.
   let version = 0, delay = 100, scheduled = false;
   const pending = [];
+  // The newest field edit a frame has acknowledged; edits are numbered in the order they are
+  // sent, and the app takes them in that order, so one number covers every field. Another
+  // tab's edits are named for that tab and do not count.
+  let fieldAcked = 0;
   function drain() {
     scheduled = false;
     for (const d of pending.splice(0)) {
@@ -2545,6 +2614,7 @@ CLIENT = """
       if (d.title != null && document.title !== d.title) document.title = d.title;
       // A gesture this frame answers lands where the frame puts it, from where it was let go.
       const due = d.acks ? settling.filter((s) => d.acks.includes(s.seq)) : [];
+      if (d.acks) for (const a of d.acks) { const m = a.startsWith('f' + TAB + ':') && /:(\d+)$/.exec(a); if (m) fieldAcked = Math.max(fieldAcked, Number(m[1])); }
       const seen = due.map(boxes);
       apply(d.ops);
       due.forEach((s, i) => settle(s, seen[i]));
@@ -2554,17 +2624,23 @@ CLIENT = """
     }
   }
   const built = document.documentElement.dataset.client;
+  // In the app's own native window (ADR 0063) there is no server to talk to: frames arrive as
+  // calls to `__hx_frame` and events leave through the web view's message channel. The page
+  // was told which by the runtime that served it, not by sniffing the browser.
+  const LOCAL = document.documentElement.dataset.transport === 'window' && !!window.ipc;
+  // Frames are applied on the next animation frame, all that arrived since the last one
+  // together: a burst of frames (a slider dragged, a list filling) is one layout and one
+  // paint per display refresh, never several per refresh.
+  function receive(text) {
+    pending.push(JSON.parse(text));
+    if (document.hidden) drain();
+    else if (!scheduled) { scheduled = true; requestAnimationFrame(drain); }
+  }
   function connect() {
+    if (LOCAL) { window.__hx_frame = receive; window.ipc.postMessage(JSON.stringify({ path: '/events' })); return; }
     const es = new EventSource('/events');
     es.onopen = () => { delay = 100; };
-    // Frames are applied on the next animation frame, all that arrived since the last one
-    // together: a burst of frames (a slider dragged, a list filling) is one layout and one
-    // paint per display refresh, never several per refresh.
-    es.onmessage = (e) => {
-      pending.push(JSON.parse(e.data));
-      if (document.hidden) drain();
-      else if (!scheduled) { scheduled = true; requestAnimationFrame(drain); }
-    };
+    es.onmessage = (e) => receive(e.data);
     es.onerror = () => { es.close(); setTimeout(connect, delay); delay = Math.min(delay * 2, 2000); };
   }
   connect();
@@ -2574,9 +2650,11 @@ CLIENT = """
   // never dropped. Only the last: typing that follows a submit must reach `update` after it,
   // and merging into an earlier waiting event would move it ahead.
   const queue = [];
-  let inflight = null;
+  let inflight = null, fieldSeq = 0;
   const busy = (msg) => !!msg && ((inflight && inflight.msg === msg) || queue.some((q) => q.ev.msg === msg));
   function flush() {
+    // The window's channel is in order and never busy: everything waiting goes now.
+    if (LOCAL) { while (queue.length) window.ipc.postMessage(JSON.stringify({ path: '/event', body: JSON.stringify(queue.shift().ev) })); return; }
     if (inflight || queue.length === 0) return;
     const ev = queue.shift().ev;
     inflight = ev;
@@ -2596,15 +2674,22 @@ CLIENT = """
   // Which modifier keys a click carried — "ctrl", "shift", "ctrl+shift" or "" — for the
   // selection gestures of a desktop list. Command on a Mac counts as Ctrl.
   const mods = (e) => [(e.ctrlKey || e.metaKey) && 'ctrl', e.altKey && 'alt', e.shiftKey && 'shift'].filter(Boolean).join('+');
+  // A node's `value`, as the type the view gave it: text, or a number or Bool marked as one.
+  const valueAt = (t) => {
+    const v = t.dataset.value;
+    if (v == null) return null;
+    const k = t.dataset.valueType;
+    return k === 'number' && v.trim() !== '' && Number.isFinite(Number(v)) ? Number(v) : k === 'bool' ? v === 'true' : v;
+  };
   document.addEventListener('click', (e) => {
     const cp = e.target.closest('[data-copy]');
     if (cp && navigator.clipboard) navigator.clipboard.writeText(cp.dataset.copy).catch(() => {});
     const t = e.target.closest('[data-click]');
-    if (t && !t.disabled) post({ msg: t.dataset.click, value: t.dataset.value ?? null, mods: mods(e) }, false);
+    if (t && !t.disabled) post({ msg: t.dataset.click, value: valueAt(t), mods: mods(e) }, false);
   });
   document.addEventListener('dblclick', (e) => {
     const t = e.target.closest('[data-dblclick]');
-    if (t) { e.preventDefault(); post({ msg: t.dataset.dblclick, value: t.dataset.value ?? null, mods: mods(e) }, false); }
+    if (t) { e.preventDefault(); post({ msg: t.dataset.dblclick, value: valueAt(t), mods: mods(e) }, false); }
   });
   // A right click (or the menu key) where the view asked for one: the node's value and where
   // the pointer is, so the app can put its menu there.
@@ -2614,15 +2699,15 @@ CLIENT = """
     e.preventDefault();
     let x = e.clientX, y = e.clientY;
     if (!x && !y) { const r = t.getBoundingClientRect(); x = r.left + 24; y = r.bottom; }
-    post({ msg: t.dataset.contextmenu, value: { value: t.dataset.value ?? null, x: Math.round(x), y: Math.round(y) }, mods: mods(e) }, false);
+    post({ msg: t.dataset.contextmenu, value: { value: valueAt(t), x: Math.round(x), y: Math.round(y) }, mods: mods(e) }, false);
   });
   document.addEventListener('input', (e) => {
     const t = e.target.closest('[data-input]');
-    if (t) { t.__sent = String(t.value); post({ msg: t.dataset.input, value: valueOf(t) }, true); }
+    if (t) { t.__sent = String(t.value); t.__seq = ++fieldSeq; post({ msg: t.dataset.input, value: valueOf(t), seq: 'f' + TAB + ':' + t.__seq }, true); }
   });
   document.addEventListener('change', (e) => {
     const t = e.target.closest('[data-change]');
-    if (t) { t.__sent = String(t.value); post({ msg: t.dataset.change, value: valueOf(t) }, false); }
+    if (t) { t.__sent = String(t.value); t.__seq = ++fieldSeq; post({ msg: t.dataset.change, value: valueOf(t), seq: 'f' + TAB + ':' + t.__seq }, false); }
   });
   document.addEventListener('submit', (e) => {
     const f = e.target.closest('[data-submit]');
@@ -2898,7 +2983,7 @@ CLIENT = """
     let ev = null;
     if (!cancel && G.kind === 'reorder') {
       // Let go over a drop target: the target's message, its value, and which row it was given.
-      if (G.drop) ev = { msg: G.drop.dataset.drop, value: G.drop.dataset.value ?? null, dropped: el.dataset.key };
+      if (G.drop) ev = { msg: G.drop.dataset.drop, value: valueAt(G.drop), dropped: el.dataset.key };
       // Into another container of the group: the move names both lists (each container's `value`).
       else if (G.over && G.over !== G.box) ev = { msg: G.box.dataset.reorder, value: { key: el.dataset.key, from: G.from, to: G.to, from_list: G.box.dataset.value ?? null, to_list: G.over.dataset.value ?? null } };
       else if (G.to !== G.from) ev = { msg: G.box.dataset.reorder, value: { key: el.dataset.key, from: G.from, to: G.to } };
@@ -2909,7 +2994,7 @@ CLIENT = """
       const s = SIGN[G.dir];
       const far = s ? reach[0] * s[0] + reach[1] * s[1] : Math.hypot(reach[0], reach[1]);
       const commit = Number(el.dataset.dragCommit || 0);
-      if (!commit || far >= commit) ev = { msg: el.dataset.drag, value: el.dataset.value ?? null, drag: { dx: Math.round(G.d[0]), dy: Math.round(G.d[1]), vx: Math.round(v[0]), vy: Math.round(v[1]) } };
+      if (!commit || far >= commit) ev = { msg: el.dataset.drag, value: valueAt(el), drag: { dx: Math.round(G.d[0]), dy: Math.round(G.d[1]), vx: Math.round(v[0]), vy: Math.round(v[1]) } };
     }
     const held = G.seen ? [...new Set([...G.seen.values()].flatMap((t) => t.items))] : G.items;
     const s = { els: held, dragged: el, v, host: G.kind === 'drag' ? el.parentElement : null };
@@ -3187,8 +3272,11 @@ fn page(spec, rt, model) = do {
   util = utility_css(rt.known.keys().concat(view_classes(tree)))
   theme = theme_of(spec, model)
   effects = rt.design.effects
-  fx = if effects == "auto" then "" else " data-effects=\"{effects}\""
-  "<!doctype html><html lang=\"en\" data-theme=\"{theme}\"{fx} data-client=\"{rt.client}\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{title}</title><style id=\"hx-style\">{rt.css}</style><style id=\"hx-util\">{util}</style></head><body><main id=\"root\">{body}</main><script>{CLIENT}</script></body></html>"
+  fx0 = if effects == "auto" then "" else " data-effects=\"{effects}\""
+  fx = if (rt.get("transport") ?? "") == "window" then "{fx0} data-transport=\"window\"" else fx0
+  # The page's main landmark — unless the app's view is one itself, when two would nest.
+  shell = if type_of(tree) == "Record" and (tree.get("tag") ?? "") == "main" then "div" else "main"
+  "<!doctype html><html lang=\"en\" data-theme=\"{theme}\"{fx} data-client=\"{rt.client}\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{title}</title><style id=\"hx-style\">{rt.css}</style><style id=\"hx-util\">{util}</style></head><body><{shell} id=\"root\">{body}</{shell}><script>{CLIENT}</script></body></html>"
 }
 fn theme_of(spec, model) = if spec.get("theme").is_missing() then "light" else do {
   t = try (spec.theme)(model)
@@ -3208,7 +3296,10 @@ fn handle(spec, st, c) = do {
 # the request must carry the cookie — or, on the one link the app printed, the token itself.
 fn guard(spec, st, c, req) = do {
   rt = st.rt
-  if not local_host(rt, req) then refuse(st, c, 421, "this app answers only on 127.0.0.1") else if req.method != "GET" and not same_origin(req) then refuse(st, c, 403, "this app takes changes only from its own page") else if same_token(rt, cookie_token(rt, req)) then (if rt.dev and req.path.starts_with("/__dev/") then dev_route(spec, st, c, req) else route(spec, st, c, req)) else if req.method == "GET" and same_token(rt, query_token(req.query)) then do {
+  # A request from the app's own window (ADR 0063) came through no socket: `transport` is set
+  # only by the window's link, never parsed from anything a peer sent, and a windowed app has
+  # no port open at all. The session below defends a port; there is none to defend.
+  if (req.get("transport") ?? "") == "window" then route(spec, st, c, req) else if not local_host(rt, req) then refuse(st, c, 421, "this app answers only on 127.0.0.1") else if req.method != "GET" and not same_origin(req) then refuse(st, c, 403, "this app takes changes only from its own page") else if same_token(rt, cookie_token(rt, req)) then (if rt.dev and req.path.starts_with("/__dev/") then dev_route(spec, st, c, req) else route(spec, st, c, req)) else if req.method == "GET" and same_token(rt, query_token(req.query)) then do {
     sent = c.respond({status: 303, headers: {"Set-Cookie": set_cookie(rt), "Location": "/", "Cache-Control": "no-store"}})
     {...st, keep: st.keep.concat([c])}
   } else refuse(st, c, 403, "open the link this app printed when it started; it carries the session")
@@ -3252,11 +3343,63 @@ fn ack_of(ev) = do {
 # One event through `update`. An update that raises is logged and the model kept: one bad
 # event must not take the app down with it.
 fn step(spec, model, ev) = do {
+  # With a recording running, what `update` reads is taped with the event (the black box).
+  taping = TAPE == "record"
+  began = if taping then session_tape("begin") else ()
   next = try (spec.update)(model, ev)
+  taped = if taping then session_tape("event", {event: ev, error: if next.ok then missing else "{next.error}"}) else ()
   if next.ok then next.value else do {
     logged = elog("update failed on {ev.to_json()}: {next.error}")
     model
   }
+}
+
+# --- The black box (ADR 0063 D2). ------------------------------------------------------------
+#
+# `HELIX_RECORD=session.jsonl helix run app.helix` records the session: every event that reaches
+# `update`, what `update` and `view` read from the world while handling it (the clock, a file,
+# a response — taped at the builtin they called), and a hash of every screen drawn.
+# `helix replay app.helix session.jsonl` plays it back: no event is sent and nothing is read —
+# the tape answers instead — so the session reproduces exactly, on any machine and engine, and
+# the replay says whether every screen came out the same.
+
+# One screen as a hash, the way it is recorded and compared.
+fn screen_hash(tree) = sha256(render(tree))
+
+# Play a recorded session through this app's `update` and `view`, and report.
+fn replay_session(spec) = do {
+  entries = session_tape("entries")
+  starts = entries.filter((e) => e.kind == "start")
+  first = if starts.count() == 0 then missing else starts[0]
+  recorded_init = if first.is_missing() then missing else first.get("init")
+  init = recorded_init ?? spec.init
+  out = range(0, entries.count()).reduce({model: init, events: 0, screens: 0, same: 0, diverged: missing, errors: 0, reproduced: 0}, (st, i) => do {
+    e = entries[i]
+    match e.kind {
+      "event" => do {
+        played = session_tape("play", i)
+        r = try (spec.update)(st.model, e.event)
+        clean = session_tape("done")
+        n = st.events + 1
+        was = e.get("error")
+        logged = if r.ok then false else elog("event #{n} {e.event.to_json()}: update raised: {r.error}")
+        {...st, model: if r.ok then r.value else st.model, events: n, errors: st.errors + (if r.ok then 0 else 1), reproduced: st.reproduced + (if not r.ok and not was.is_missing() then 1 else 0), diverged: if st.diverged.is_missing() and (r.ok != was.is_missing() or not clean) then "event #{n} {e.event.to_json()}" else st.diverged}
+      },
+      "view" => do {
+        played = session_tape("play", i)
+        t = try (spec.view)(st.model)
+        clean = session_tape("done")
+        h = if t.ok then screen_hash(t.value) else "view failed: {t.error}"
+        same = h == e.screen and clean
+        k = st.screens + 1
+        {...st, screens: k, same: st.same + (if same then 1 else 0), diverged: if st.diverged.is_missing() and not same then "screen #{k} (after event #{st.events})" else st.diverged}
+      },
+      _ => st,
+    }
+  })
+  errors = if out.errors == 0 then "" else ", update raised {out.errors} time{if out.errors == 1 then "" else "s"} ({out.reproduced} as recorded)"
+  print("replayed {out.events} event{if out.events == 1 then "" else "s"}: {out.same} of {out.screens} screens identical{errors}")
+  if out.diverged.is_missing() then out else raise("the replay differs from the recording, first at {out.diverged}", "the app's code changed since the session was recorded, or it reads something the tape does not hold: a method on a handle (`db.query`), or a value computed at the top level from a file.")
 }
 
 # A frame is the patch operations that bring a client's page up to date, and the theme.
@@ -3294,13 +3437,15 @@ fn serve(l, spec, rt, model, tree, conns, streams, timers) = do {
   live = if fresh.is_missing() then conns else conns.concat([fresh])
   st = live.reduce({model: model, rt: rt, keep: [], streams: [], changed: false, acks: []}, (s, c) => handle(spec, s, c))
   t = clock_monotonic()
-  due = timers.filter((x) => x.due <= t)
+  due = timers.filter((x) => x.due <= t and not x.fired)
   ticked = due.reduce(st.model, (m, x) => step(spec, m, {msg: x.msg, value: now()}))
   changed_now = st.changed or due.count() > 0
   # A view that raises must not end the app either. The events of this round are undone — the
   # model goes back to what the screen shows — and the error is logged; the screen stays
   # consistent with the model, and the next event starts from there.
+  began = if changed_now and TAPE == "record" then session_tape("begin") else ()
   drawn = if changed_now then try (spec.view)(ticked) else {ok: true, value: tree}
+  taped = if changed_now and TAPE == "record" then session_tape("view", if drawn.ok then screen_hash(drawn.value) else "view failed: {drawn.error}") else ()
   logged_view = if drawn.ok then false else elog("view failed: {drawn.error}; the events that led to it were undone")
   ticked = if drawn.ok then ticked else model
   changed = changed_now and drawn.ok
@@ -3374,31 +3519,82 @@ fn adopt(spec, kept) = if kept.is_missing() then spec.init else do {
   }
 }
 
-export fn app(spec) = do {
-  port = if spec.get("port").is_missing() then 8080 else spec.port
-  l = listen(port)
+# Run an app: `spec` is a record — `title`, `init` (the first model), `update: (model, event) =>
+# model`, `view: (model) => tree`, and optionally `theme: (m) => "dark" | "light"`, `design:` (a
+# `ui.design(…)`, or a function of the model returning one), `subscriptions: (m) => [ui.every(ms,
+# msg), ui.after(ms, msg)]`, `style:` (extra CSS), `port` (8080; the next free one if taken),
+# `open: true` (open the browser), `window: true` (a native window where the build has one). It
+# prints its link and serves until stopped. Test it with `ui.replay(spec, events)`.
+export fn app(spec) = if TAPE == "replay" then replay_session(spec) else do {
+  recording = if TAPE == "record" then session_tape("start", {app: "{spec.title}", init: spec.init}) else false
   generation = dev_generation()
-  reload = if generation.is_missing() then false else generation > 1
+  win = spec.get("window")
+  # An app made by `helix build --app` always has its own window (ADR 0063 D4).
+  windowed = built_app() or (if win.is_missing() then false else if type_of(win) == "Bool" then win else true)
+  size = if type_of(win) == "Record" then win else {}
+  # In its own window the app opens NO PORT (ADR 0063): the window's web view is the only
+  # thing that can reach it, so nothing else on the machine can. Under `--watch` a reload is a
+  # new process, and its window would close and reopen on every save, so a watched app is
+  # served to the browser instead.
+  local = if windowed and generation.is_missing() then app_window("{spec.title}", size.get("width") ?? 1100, size.get("height") ?? 760) else missing
+  # A built app was granted what its window needs and nothing more: it has no network
+  # permission to serve a browser with, so with no display it says so and stops.
+  if local.is_missing() and built_app() then raise("{spec.title} needs a display to open its window", "a built app runs in its own window; run it in a desktop session.") else if local.is_missing() then serve_tcp(spec, windowed, generation) else do {
+    logged = elog("{spec.title} is open in its own window (no port)")
+    rt = runtime(spec, 0, generation)
+    serve(local, spec, {...rt, transport: "window"}, spec.init, (spec.view)(spec.init), [], [], schedule([], subs_of(spec, spec.init), clock_monotonic()))
+  }
+}
+
+# What every page of this run shares: the session, the design and its stylesheet, the client.
+fn runtime(spec, port, generation) = do {
   d0 = design_of(spec, spec.init, missing)
   rt0 = {...session(port), dev: not generation.is_missing(), design: d0, css: css_with(spec, d0), title: "{spec.title}", client: sha256(CLIENT), known: {"": true}, util: ""}
-  rt = with_classes(rt0, (spec.view)(spec.init)).rt
+  with_classes(rt0, (spec.view)(spec.init)).rt
+}
+
+# Served on 127.0.0.1 to a browser, behind the session (see "The session").
+fn serve_tcp(spec, windowed, generation) = do {
+  wanted = if spec.get("port").is_missing() then 8080 else spec.port
+  bound = listen_from(wanted, wanted, 20)
+  l = bound.l
+  port = bound.port
+  moved = if port == wanted or (generation ?? 1) > 1 then false else elog("port {wanted} is in use, so {spec.title} is on port {port}")
+  reload = if generation.is_missing() then false else generation > 1
+  rt = runtime(spec, port, generation)
   url = "http://127.0.0.1:{port}/?token={rt.token}"
   # Under `--watch` the supervisor reads this line and shows the link once, on the first start.
   logged = elog("{spec.title} on {url}")
-  # `window: true` (or `{width, height}`) shows the app in a native window (ADR 0055 Phase 4)
-  # where this build and machine can; otherwise it opens in the browser, as `open: true` does.
-  # Under `--watch` a reload is a new process, so a window would close and reopen on every
-  # save: a watched app opens in the browser, once.
-  win = spec.get("window")
-  windowed = if win.is_missing() then false else if type_of(win) == "Bool" then win else true
-  size = if type_of(win) == "Record" then win else {}
-  in_window = if windowed and generation.is_missing() then open_window(url, "{spec.title}", size.get("width") ?? 1100, size.get("height") ?? 760) else false
+  # A window that could not open (no `desktop` build, no display) leaves the browser: `window:
+  # true` opens it there, as `open: true` does. Under `--watch` it opens once, not per reload.
   wants_open = if spec.get("open").is_missing() then false else spec.open
-  opened = if in_window or reload then false else if windowed or wants_open then open_url(url) else false
+  opened = if reload then false else if windowed or wants_open then open_url(url) else false
   serve(l, spec, rt, spec.init, (spec.view)(spec.init), [], [], schedule([], subs_of(spec, spec.init), clock_monotonic()))
+}
+
+# The first free port from `port`: another dev server on 8080 should not stop an app starting.
+# A reload under `--watch` searches the same way, so it lands where the first start did.
+fn listen_from(first, port, tries) = do {
+  r = try listen(port)
+  if r.ok then {l: r.value, port: port} else if tries > 1 and "{r.error}".contains("in use") then listen_from(first, port + 1, tries - 1) else
+    if port == first then raise("{r.error}", "the port may already be in use — try another with `--port`, or stop the process holding it.") else
+    raise("ports {first} to {port} are all in use", "pass a free one with `--port`, or stop what holds them.")
 }
 
 # Replay a list of events through `update` and return every screen as HTML — the property a
 # model–update–view app buys: its UI is a pure function of its event log, testable without a
 # browser, and the same on every engine.
-export fn replay(spec, events) = events.scan(spec.init, (m, e) => (spec.update)(m, e)).map((m) => render((spec.view)(m)))
+# Every screen of an app, as HTML: `update` applied to each event in turn, and the view of the
+# model AFTER each one (one screen per event; `init` alone is not a screen). Timers do not run in
+# a replay: send their messages as events (`{msg: "tick", value: 100.0}`).
+export fn replay(spec, events) = range(0, events.count()).scan(spec.init, (m, i) => do {
+  # Which scripted event failed, and what it was: a replay of fifty events that says only
+  # "index 3 is out of bounds" leaves the reader to bisect the script.
+  # Said first, on stderr; then `update` runs again WITHOUT `try`, so the error is the original
+  # one, at the line in the app that raised it (re-raising it from here pointed into this file).
+  r = try (spec.update)(m, events[i])
+  if r.ok then r.value else do {
+    logged = elog("ui.replay: event #{i + 1} of {events.count()} failed in `update`: {events[i]}")
+    (spec.update)(m, events[i])
+  }
+}).map((m) => render((spec.view)(m)))

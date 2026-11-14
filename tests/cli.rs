@@ -4809,6 +4809,40 @@ fn the_design_lab_replays_identically_on_every_engine() {
 }
 
 #[test]
+fn orbit_written_in_markup_replays_identically_on_every_engine() {
+    // examples/apps/orbit.helix is markup and utility classes only (ADR 0060, 0061): a timer, a
+    // board, habits and the palette, replayed on a fixed day.
+    let mut seen: Vec<String> = Vec::new();
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run(&["run", "examples/apps/orbit.helix", "--replay"], env, "");
+        assert_eq!(code, Some(0), "{env:?} stderr: {err}");
+        seen.push(out);
+    }
+    assert!(seen.windows(2).all(|w| w[0] == w[1]), "engines disagree on the replayed UI");
+    let s: Vec<&str> = seen[0].lines().collect();
+    assert_eq!(s.len(), 14, "one screen per event");
+    let has = |i: usize, what: &str| assert!(s[i].contains(what), "screen {i} lacks {what}");
+    // A sprint runs, and the tick past its minute ends it with a toast.
+    has(0, "aria-label=\"Pause (S)\"");
+    has(2, "Sprint complete — 1 min of focus. Take a breath.");
+    has(2, ">1 today</span>");
+    has(3, "data-value=\"read\" aria-pressed=\"true\"");
+    // A card dragged to Done lands there, and says so.
+    let col = |i: usize, id: &str| s[i].split(&format!("data-value=\"{id}\"")).nth(1).unwrap_or("").split("</section>").next().unwrap_or("").matches("role=\"listitem\"").count();
+    assert_eq!((col(4, "doing"), col(4, "done")), (1, 2), "a card moved to Done");
+    has(4, "Done: Markup for every component");
+    // A new task heads the To do column; a card's sheet moves it.
+    assert_eq!(col(6, "todo"), 4);
+    has(6, "Water the plants");
+    has(7, "class=\"sheet-title\" id=\"task-title\">Sketch the onboarding flow");
+    assert_eq!((col(8, "todo"), col(8, "doing")), (3, 2), "the sheet moved the card");
+    // The palette finds the accent and applies it; then the dark theme.
+    has(10, "role=\"dialog\"");
+    has(12, "accent Rose,");
+    has(13, "aria-label=\"Light appearance (D)\"");
+}
+
+#[test]
 fn the_component_gallery_replays_identically_on_every_engine() {
     let mut seen: Vec<String> = Vec::new();
     for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
@@ -5029,6 +5063,243 @@ fn dev_generation_is_missing_in_an_ordinary_run() {
     assert_eq!(out, "missing\n");
 }
 
+/// THE BLACK BOX (ADR 0063 D2): a recorded app session replays exactly. The app's `update`
+/// reads the clock and a file; the session is recorded over real HTTP, then the file is
+/// changed and deleted — and the replay still reproduces every screen and the error, on all
+/// three engines, because the tape answers what the app read. Changing the app's code makes
+/// the replay fail, naming where it first went another way.
+#[test]
+fn a_recorded_session_replays_exactly() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    const PORT: u16 = 18478;
+    let dir = std::env::temp_dir().join(format!("helix_blackbox_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let app = dir.join("app.helix");
+    let source = format!(
+        "import std.ui\n\
+         fn update(m, e) = match e.msg {{\n\
+           \"stamp\" => {{...m, at: \"{{now()}}\", note: read_text(source_path(\"note.txt\"))}},\n\
+           \"inc\" => {{...m, n: m.n + 1}},\n\
+           \"boom\" => raise(\"the boom button\"),\n\
+           _ => m,\n\
+         }}\n\
+         fn view(m) = <div><p>{{m.n}}</p><p>{{m.note ?? \"-\"}}</p><p>{{m.at ?? \"-\"}}</p></div>\n\
+         ui.app({{title: \"BB\", init: {{n: 0, at: missing, note: missing}}, update: update, view: view, port: {PORT}}})\n"
+    );
+    std::fs::write(&app, &source).unwrap();
+    std::fs::write(dir.join("note.txt"), "first note\n").unwrap();
+    let session = dir.join("session.jsonl");
+
+    struct Running(std::process::Child);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut run = Running(
+        Command::new(env!("CARGO_BIN_EXE_helix"))
+            .args(["run", app.to_str().unwrap()])
+            .env("HELIX_RECORD", &session)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut lines = BufReader::new(run.0.stderr.take().unwrap()).lines();
+    let banner = lines.next().unwrap().unwrap();
+    let token = banner.split("token=").nth(1).unwrap().trim().to_string();
+    let cookie = format!("Cookie: helix_app_{PORT}={token}\r\n");
+    let post = |body: &str| {
+        let mut s = TcpStream::connect(("127.0.0.1", PORT)).expect("the app has stopped");
+        s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        s.write_all(
+            format!("POST /event HTTP/1.0\r\nHost: 127.0.0.1:{PORT}\r\n{cookie}Content-Length: {}\r\n\r\n{body}", body.len())
+                .as_bytes(),
+        )
+        .unwrap();
+        let mut out = String::new();
+        let _ = s.read_to_string(&mut out);
+        std::thread::sleep(Duration::from_millis(150));
+    };
+    for m in ["inc", "stamp", "inc", "boom", "inc"] {
+        post(&format!(r#"{{"msg":"{m}"}}"#));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    drop(run);
+    let tape = std::fs::read_to_string(&session).unwrap();
+    assert!(tape.contains(r#""fn":"read_text""#) && tape.contains(r#""fn":"now""#), "the reads are on the tape:\n{tape}");
+
+    // The world changes: the file the app read is rewritten, then gone. The replay reads nothing.
+    std::fs::write(dir.join("note.txt"), "changed\n").unwrap();
+    std::fs::remove_file(dir.join("note.txt")).unwrap();
+    let (out, err, code) = run_cmd(&["replay", app.to_str().unwrap(), session.to_str().unwrap(), "--engines"]);
+    assert_eq!(code, Some(0), "out:\n{out}\nerr:\n{err}");
+    assert!(out.contains("replayed 5 events: 5 of 5 screens identical, update raised 1 time (1 as recorded)"), "{out}");
+    assert!(out.contains("(3 engines agree)"), "{out}");
+    assert!(err.contains(r#"event #4 {"msg":"boom"}: update raised: the boom button"#), "{err}");
+
+    // The app's code changed: the replay fails and says where it first went another way.
+    std::fs::write(&app, source.replace("<p>{m.n}</p>", "<p>Count {m.n}</p>")).unwrap();
+    let (out, err, code) = run_cmd(&["replay", app.to_str().unwrap(), session.to_str().unwrap()]);
+    assert_eq!(code, Some(1), "out:\n{out}\nerr:\n{err}");
+    assert!(err.contains("the replay differs from the recording, first at screen #1"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `helix <args>` with no stdin and no extra environment.
+fn run_cmd(args: &[&str]) -> (String, String, Option<i32>) {
+    run(args, &[], "")
+}
+
+/// `helix emit rust` (ADR 0065): the freezer rule becomes Rust that compiles on its own (`std`
+/// only), passes its generated replay tests — call sequences run through the Helix rule when it
+/// was emitted — and is the same every time it is emitted, so CI can `--check` it.
+#[test]
+fn emit_rust_makes_a_rule_that_compiles_and_agrees_with_helix() {
+    let dir = std::env::temp_dir().join(format!("helix_emit_rust_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let rule = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/rules/freezer.helix");
+    let out = dir.join("freezer_policy.rs");
+    let (_, err, code) = run(&["emit", "rust", rule, "-o", out.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    let rust = std::fs::read_to_string(&out).unwrap();
+    for want in [
+        "pub fn update(&mut self, now_ms: u64, open: &[String], visible: Option<&str>) -> Vec<Action>",
+        "pub fn next_deadline(&self) -> Option<u64>",
+        "pub fn thaw(&mut self, id: &str, now_ms: u64) -> bool",
+        "helix effects: no authority",
+        "fn trace_000()",
+    ] {
+        assert!(rust.contains(want), "missing `{want}`");
+    }
+    assert!(!rust.contains("unsafe"), "no unsafe in emitted code");
+    // The same every time: CI regenerates and compares.
+    let (_, err, code) = run(&["emit", "rust", rule, "-o", out.to_str().unwrap(), "--check"], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    std::fs::write(&out, rust.replace("frozen: due", "frozen: !due")).unwrap();
+    let (_, err, code) = run(&["emit", "rust", rule, "-o", out.to_str().unwrap(), "--check"], &[], "");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("is not what"), "{err}");
+    std::fs::write(&out, &rust).unwrap();
+    // It compiles with nothing but rustc, and its replay tests pass.
+    if Command::new("rustc").arg("--version").output().is_ok_and(|o| o.status.success()) {
+        let bin = dir.join("replays");
+        let c = Command::new("rustc")
+            .args(["--edition", "2024", "--test", "-D", "warnings", out.to_str().unwrap(), "-o", bin.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(c.status.success(), "rustc:\n{}", String::from_utf8_lossy(&c.stderr));
+        let t = Command::new(&bin).output().unwrap();
+        let report = String::from_utf8_lossy(&t.stdout);
+        assert!(t.status.success() && report.contains("48 passed"), "{report}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The PIN lockout (ADR 0065): a rule with a SAVE FORMAT. The emitted save text round-trips and
+/// every damaged copy — each byte changed, each cut — reads as nothing, which the rule turns into
+/// the longest wait. Compiled with rustc alone; its replays and save-format test pass.
+#[test]
+fn emit_rust_lockout_has_a_damage_proof_save_format() {
+    let dir = std::env::temp_dir().join(format!("helix_emit_lockout_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let rule = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/rules/lockout.helix");
+    let out = dir.join("lockout_policy.rs");
+    let (_, err, code) = run(&["emit", "rust", rule, "-o", out.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    let rust = std::fs::read_to_string(&out).unwrap();
+    for want in [
+        "pub fn restore(saved: Option<&str>, now_ms: u64) -> Self",
+        "pub fn save(&self, now_ms: u64) -> String",
+        "pub fn guess(&mut self, now_ms: u64, correct: bool) -> Guess",
+        "const WIPE_AT: i64 = 10;",
+        "impl Default for Lockout",
+        "fn saved_round_trips_and_damage_is_refused()",
+        "/// Whether the service may check a PIN now.",
+    ] {
+        assert!(rust.contains(want), "missing `{want}`");
+    }
+    assert!(!rust.contains("use std::collections::BTreeMap"), "no unused import");
+    if Command::new("rustc").arg("--version").output().is_ok_and(|o| o.status.success()) {
+        let bin = dir.join("replays");
+        let c = Command::new("rustc")
+            .args(["--edition", "2024", "--test", "-D", "warnings", out.to_str().unwrap(), "-o", bin.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(c.status.success(), "rustc:\n{}", String::from_utf8_lossy(&c.stderr));
+        let t = Command::new(&bin).output().unwrap();
+        let report = String::from_utf8_lossy(&t.stdout);
+        assert!(t.status.success() && report.contains("49 passed"), "{report}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The update policy (ADR 0065): input records with public fields (`&Phone`), per-field test
+/// domains, and an associated function (`Policy::may_restart`). Compiled with rustc alone; its
+/// replays pass.
+#[test]
+fn emit_rust_update_policy_takes_input_records() {
+    let dir = std::env::temp_dir().join(format!("helix_emit_updates_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let rule = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/rules/updates.helix");
+    let out = dir.join("updates_policy.rs");
+    let (_, err, code) = run(&["emit", "rust", rule, "-o", out.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    let rust = std::fs::read_to_string(&out).unwrap();
+    for want in [
+        "pub fn decide(&mut self, now_ms: u64, phone: &Phone, update: &Update) -> Step",
+        "pub fn may_restart(phone: &Phone) -> bool",
+        "pub struct Phone {",
+        "    pub in_call: bool,",
+        "const ASK_AFTER: i64 = 259200000;",
+    ] {
+        assert!(rust.contains(want), "missing `{want}`");
+    }
+    if Command::new("rustc").arg("--version").output().is_ok_and(|o| o.status.success()) {
+        let bin = dir.join("replays");
+        let c = Command::new("rustc")
+            .args(["--edition", "2024", "--test", "-D", "warnings", out.to_str().unwrap(), "-o", bin.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(c.status.success(), "rustc:\n{}", String::from_utf8_lossy(&c.stderr));
+        let t = Command::new(&bin).output().unwrap();
+        let report = String::from_utf8_lossy(&t.stdout);
+        assert!(t.status.success() && report.contains("48 passed"), "{report}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What `helix emit rust` refuses, each with the line and what to do.
+#[test]
+fn emit_rust_refuses_what_it_cannot_emit_exactly() {
+    let dir = std::env::temp_dir().join(format!("helix_emit_refuse_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let cases = [
+        ("fn f(x) = x + 1\n", "has no `## rust: fn f(…)` signature"),
+        ("## rust: fn f(x: Option<i64>) -> i64\nfn f(x) = x + 1\n", "arithmetic"),
+        ("## rust: fn f(x: Option<i64>) -> bool\nfn f(x) = x == 3\n", "may be missing"),
+        ("## rust: fn f(p: String) -> String\nfn f(p) = read_text(p)\n", "must not reach files"),
+        ("## rust: fn g(x: i64) -> i64\nfn f(x) = x\n", "must sit directly above `fn g(…)`"),
+    ];
+    for (i, (src, want)) in cases.iter().enumerate() {
+        let f = dir.join(format!("r{i}.helix"));
+        std::fs::write(&f, src).unwrap();
+        let (_, err, code) = run(&["emit", "rust", f.to_str().unwrap(), "--no-tests"], &[], "");
+        assert_eq!(code, Some(1), "{src}");
+        assert!(err.contains(want), "{src}\n{err}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// One bad request or one failing view must not end an app. A body that is not an event
 /// record used to raise out of `parse_json` and stop the server for everyone using it; a view
 /// that raised did the same. Now the bad body is a 400, and the event that broke the view is
@@ -5134,6 +5405,36 @@ fn open_window_shows_only_the_apps_own_page() {
 /// view uses, a frame whose view uses new ones carries the stylesheet for all seen so far, and
 /// a frame with no new classes carries none. A class from data that tries to break out of its
 /// rule produces nothing.
+#[test]
+fn an_app_whose_port_is_taken_starts_on_the_next_free_one() {
+    use std::io::{BufRead, BufReader};
+    // Another server already holds the port (a dev server on 8080, say).
+    let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = held.local_addr().unwrap().port();
+    struct Running(std::process::Child);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut run = Running(
+        Command::new(env!("CARGO_BIN_EXE_helix"))
+            .args(["run", "examples/apps/stopwatch.helix", "--port", &port.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut err = BufReader::new(run.0.stderr.take().unwrap());
+    let (mut notice, mut link) = (String::new(), String::new());
+    err.read_line(&mut notice).unwrap();
+    err.read_line(&mut link).unwrap();
+    assert_eq!(notice.trim(), format!("port {port} is in use, so Stopwatch is on port {}", port + 1), "{notice}{link}");
+    assert!(link.contains(&format!("http://127.0.0.1:{}/?token=", port + 1)), "{link}");
+    drop(held);
+}
+
 #[test]
 fn an_apps_utility_classes_are_generated_as_its_view_uses_them() {
     use std::io::{BufRead, BufReader, Read, Write};
@@ -5504,11 +5805,16 @@ fn helix_test_fails_a_file_that_asserts_nothing() {
         "fn test_reverse() = assert([1, 2].reverse() == [2, 1], \"reversed\")\n",
     )
     .unwrap();
+    // `fn test_…()` that nothing calls now RUNS, each as a test of its own (the agent study:
+    // pytest's and Go's habit, skipped in silence, was the commonest testing mistake).
+    let (out, err, code) = run(&["test", dir.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "stderr: {err}\nout: {out}");
+    assert!(out.contains("habit_test.helix › test_reverse"), "out:\n{out}");
+    // A file that truly asserts nothing still fails.
+    std::fs::write(dir.join("habit_test.helix"), "x = [1, 2].reverse()\n").unwrap();
     let (out, err, code) = run(&["test", dir.to_str().unwrap()], &[], "");
     assert_eq!(code, Some(1), "stderr: {err}\nout: {out}");
     assert!(out.contains("without asserting anything"), "out:\n{out}");
-    // The diagnostic names the actual mistake rather than a generic one.
-    assert!(out.contains("nothing calls them"), "out:\n{out}");
 
     // Calling it passes, and so does asserting at the top level.
     std::fs::write(
@@ -6484,7 +6790,11 @@ fn no_new_panicking_calls_on_user_reachable_paths() {
         // them, never calling back into the interpreter. `close` was rewritten to take one
         // guard instead of two for exactly this reason — not because two was a bug, but
         // because each extra borrow is somewhere a later edit can nest one.
-        ("src/serve.rs", 22),
+        // 22 -> 25 (ADR 0063, the window's connections): `request.borrow()` in `request`,
+        // `request.borrow_mut()` in `poll_request` and `reply.borrow_mut()` in `respond`. Each
+        // is a one-expression borrow of a cell only that arm touches, released before any
+        // other call — the reply closure runs AFTER `take()` has ended the borrow.
+        ("src/serve.rs", 25),
         ("src/cookiejar.rs", 7),
         ("src/autodiff.rs", 13),
         ("src/regexes.rs", 2),
@@ -7480,7 +7790,8 @@ fn helix_doc_reverse_looks_up_methods_and_builtins() {
 
     let (out, _, code) = run(&["doc", "sqrt"], &[], "");
     assert_eq!(code, Some(0));
-    assert!(out.contains("`sqrt` is a free function"), "{out}");
+    // The entry itself, not a pointer to it: what it is, what it does, an example.
+    assert!(out.contains("`sqrt(x)` — free function") && out.contains("e.g."), "{out}");
 
     let (out, _, code) = run(&["doc", "max"], &[], "");
     assert_eq!(code, Some(0));
@@ -7616,11 +7927,10 @@ df = dataframe({g: ["a", "b", "c", "d"], v: [1.0, missing, 3.0, missing], w: [10
 print(df.where(@v.is_missing()).column("g"))
 print(df.where(not @v.is_missing()).count())
 print(df.drop_missing().column("g"))
-print(df.where(@v == missing).count())
 r = try df.drop_missing(@v)
 print(r.ok)
 "#;
-    let want = "[\"b\", \"d\"]\n2\n[\"a\"]\n0\nfalse\n";
+    let want = "[\"b\", \"d\"]\n2\n[\"a\"]\nfalse\n";
     for (name, env) in ENGINES {
         let (out, err, code) = run_source(src, env, &format!("missing_query_{name}"));
         assert_eq!(code, Some(0), "{name}: {err}");
@@ -18245,4 +18555,56 @@ print(b0({where: @age > V and @id < V and @age < 90}).s)\n";
         assert_eq!(code, Some(0), "{label}: {err}");
         assert_eq!(out, want, "{label}");
     }
+}
+
+/// The second agent study's hints, each where the agent hit the mistake (ADR 0062).
+#[test]
+fn agent_study_round_two_hints() {
+    let dir = std::env::temp_dir().join("helix_agent_round_two");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Prose under a doc example was read as more expected output: the failure says how to
+    // end the output.
+    let lib = dir.join("lib.helix");
+    std::fs::write(
+        &lib,
+        "## >>> double(2)\n## 4\n## Works for negatives too.\nexport fn double(x) = x * 2\n",
+    )
+    .unwrap();
+    let (out, _, code) = run(&["test", dir.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(1), "out:\n{out}");
+    assert!(out.contains("put a line that is just `##` after its output"), "out:\n{out}");
+    std::fs::write(
+        &lib,
+        "## >>> double(2)\n## 4\n##\n## Works for negatives too.\nexport fn double(x) = x * 2\n",
+    )
+    .unwrap();
+    let (out, _, code) = run(&["test", dir.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "out:\n{out}");
+    std::fs::remove_file(&lib).unwrap();
+
+    // A String method that computes a value is not a query form; the error names the
+    // row-by-row route.
+    let q = dir.join("q.helix");
+    std::fs::write(
+        &q,
+        "df = dataframe({date: [\"2026-01-02\"]})\nprint(df.with({month: @date.take(7)}))\n",
+    )
+    .unwrap();
+    let (_, err, code) = run(&["run", q.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(1), "stderr:\n{err}");
+    assert!(err.contains("`@date.take(…)` isn't supported") && err.contains("df.records().map("), "stderr:\n{err}");
+
+    // A keyword as a name says it is reserved.
+    std::fs::write(&q, "fn f(then) = 1\n").unwrap();
+    let (out, err, _) = run(&["check", q.to_str().unwrap()], &[], "");
+    assert!(format!("{out}{err}").contains("`then` is a reserved word"), "out:\n{out}\nerr:\n{err}");
+
+    // How tests are written is answered by the binary.
+    let (out, _, code) = run(&["describe", "test"], &[], "");
+    assert_eq!(code, Some(0));
+    assert!(out.contains("fn test_") && out.contains(">>>"), "out:\n{out}");
+    let (out, _, _) = run(&["search", "doctest"], &[], "");
+    assert!(out.contains("[syntax]"), "out:\n{out}");
 }

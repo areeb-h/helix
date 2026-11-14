@@ -98,6 +98,12 @@ pub enum NetHandle {
         status: i64,
         reader: RefCell<Option<std::io::BufReader<Box<dyn std::io::Read>>>>,
     },
+    /// A listener fed by the app's own native window instead of a socket (ADR 0063,
+    /// `src/localnet.rs`), and one connection from it. The loop in `std/ui.helix` drives them
+    /// with the same verbs as TCP; no port is opened.
+    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    Local(Rc<crate::localnet::Link>),
+    LocalConn(crate::localnet::Conn),
     /// A cookie jar (ADR 0031 §4): explicit, program-held state that a request threads
     /// through to store what a response sets and send what a later request should carry.
     /// Behind the `Net` value so it reuses that dispatch; interior-mutable because a
@@ -332,7 +338,7 @@ fn spawn_shards(total: usize, line: usize, col: usize) -> Result<(), HelixError>
                         }
                     }
                     Rerun::Source(code, name) => {
-                        crate::run_source(&code, &name);
+                        let _ = crate::run_source(&code, &name);
                     }
                     Rerun::Archive(modules, entry) => {
                         if let Err(e) = crate::run_archive_capture(modules, entry) {
@@ -520,7 +526,12 @@ pub fn stream_close(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<V
             // handler does when it also closes on the way out of an error path.
             Ok(Value::Missing)
         }
-        NetHandle::Listener(_) => Err(HelixError::new(
+        NetHandle::LocalConn(c) => {
+            c.open.set(false);
+            c.streaming.set(false);
+            Ok(Value::Missing)
+        }
+        NetHandle::Listener(_) | NetHandle::Local(_) => Err(HelixError::new(
             "`close` works on a connection or an `http_stream`, not on a listener",
             line,
             col,
@@ -619,6 +630,7 @@ fn push_and_flush(stream: &mut TcpStream, pending: &mut Vec<u8>, bytes: &[u8]) -
 pub fn request(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, HelixError> {
     match &**handle {
         NetHandle::Conn { request, .. } => Ok(request.clone()),
+        NetHandle::LocalConn(c) => Ok(c.request.borrow().clone()),
         _ => Err(HelixError::new(
             "`request` works on a connection from `accept()`, not a listener",
             line,
@@ -851,6 +863,27 @@ fn parse_request(
 /// - a **string** is sent as `text/plain`;
 /// - any other value is serialized as JSON.
 pub fn respond(handle: &Rc<NetHandle>, value: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
+    // A window's page load is answered through its URL scheme; its script's messages expect no
+    // answer. Either way the connection is done.
+    if let NetHandle::LocalConn(c) = &**handle {
+        let (status, headers, body) = build_response(value, line, col)?;
+        // The borrow ends with `take()`: the reply runs with no borrow held.
+        let reply = c.reply.borrow_mut().take();
+        if let Some(reply) = reply {
+            let content_type = headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+                .map(|(_, v)| v.to_string())
+                .unwrap_or_else(|| "text/plain; charset=utf-8".into());
+            reply(crate::localnet::Reply {
+                status: u16::try_from(status).unwrap_or(500),
+                content_type,
+                body: body.into_owned().into_bytes(),
+            });
+        }
+        c.open.set(false);
+        return Ok(Value::Unit);
+    }
     let (cell, event, open) = match &**handle {
         NetHandle::Conn { stream, event, open, .. } => (stream, event, open),
         _ => {
@@ -1018,6 +1051,20 @@ fn parse_request_buf(buf: &[u8], peer: &Value) -> BufParse {
 /// the program drives `poll_request`/`respond` across many connections in one loop, so a single
 /// thread serves many keep-alive clients interleaved (no per-connection blocking).
 pub fn accept_poll(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, HelixError> {
+    if let NetHandle::Local(link) = &**handle {
+        return Ok(match link.next() {
+            Some(crate::localnet::Incoming::Request { method, path, query, body, reply }) => {
+                Value::Net(Rc::new(NetHandle::LocalConn(crate::localnet::Conn {
+                    link: link.clone(),
+                    request: RefCell::new(crate::localnet::request_record(&method, &path, &query, &body)),
+                    reply: RefCell::new(reply),
+                    streaming: Cell::new(false),
+                    open: Cell::new(true),
+                })))
+            }
+            None => Value::Missing,
+        });
+    }
     let listener = match &**handle {
         NetHandle::Listener(l) => l,
         _ => {
@@ -1056,6 +1103,10 @@ pub fn accept_poll(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Va
 /// else `missing`. `missing` means either "not ready yet" (still open — check `is_open`) or
 /// "closed" (`is_open` is now false). A malformed/oversized request closes the connection.
 pub fn poll_request(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, HelixError> {
+    // A window's connection carries exactly one request, already whole.
+    if let NetHandle::LocalConn(c) = &**handle {
+        return Ok(std::mem::replace(&mut *c.request.borrow_mut(), Value::Missing));
+    }
     let (stream, inbuf, open, peer) = match &**handle {
         NetHandle::Conn { stream, inbuf, open, peer, .. } => (stream, inbuf, open, peer),
         _ => {
@@ -1137,6 +1188,7 @@ pub fn poll_request(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<V
 pub fn is_open(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, HelixError> {
     match &**handle {
         NetHandle::Conn { open, .. } => Ok(Value::Bool(open.get())),
+        NetHandle::LocalConn(c) => Ok(Value::Bool(c.open.get())),
         _ => Err(HelixError::new("`is_open` works on a connection", line, col)),
     }
 }
@@ -1154,6 +1206,11 @@ pub fn wait(
     line: usize,
     col: usize,
 ) -> Result<Value, HelixError> {
+    if let NetHandle::Local(link) = &**handle {
+        let _ = conns;
+        link.wait(timeout_ms);
+        return Ok(Value::Unit);
+    }
     if !matches!(&**handle, NetHandle::Listener(_)) {
         return Err(HelixError::new("`wait` works on a listener from `listen(port)`", line, col));
     }
@@ -1365,6 +1422,11 @@ fn merge_headers(
 /// `conn.sse()` — begin a Server-Sent-Events response: status `200`, `text/event-stream`,
 /// no `Content-Length`, the socket kept open. Drive it with `conn.send(value)` per event.
 pub fn sse(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, HelixError> {
+    // A window's subscription: frames go to its page by `send`, no stream to open.
+    if let NetHandle::LocalConn(c) = &**handle {
+        c.streaming.set(true);
+        return Ok(Value::Unit);
+    }
     let (cell, pending, mode) = match &**handle {
         NetHandle::Conn { stream, pending, stream_mode, .. } => (stream, pending, stream_mode),
         _ => {
@@ -1492,6 +1554,23 @@ fn push_chunk(stream: &mut TcpStream, pending: &mut Vec<u8>, body: &str, chunked
 /// was sent or buffered), `false` the client is gone or too far behind to keep up (so the
 /// producer loop drops it). A string/`Dna` is sent verbatim; any other value as JSON.
 pub fn send(handle: &Rc<NetHandle>, value: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
+    if let NetHandle::LocalConn(c) = &**handle {
+        if !c.streaming.get() {
+            return Err(HelixError::new("`send` needs `sse()` first on this connection", line, col));
+        }
+        let text = match value {
+            Value::Str(s) => s.to_string(),
+            other => match crate::writers::to_json(std::slice::from_ref(other), line, col)? {
+                Value::Str(s) => (*s).clone(),
+                v => v.to_string(),
+            },
+        };
+        let alive = c.link.push(&text);
+        if !alive {
+            c.open.set(false);
+        }
+        return Ok(Value::Bool(alive));
+    }
     let (cell, pending, mode) = match &**handle {
         NetHandle::Conn { stream, pending, stream_mode, .. } => (stream, pending, stream_mode),
         _ => {

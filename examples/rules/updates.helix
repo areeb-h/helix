@@ -1,0 +1,54 @@
+## When the phone may download an update, install it, and restart into it (mobile-os ADR 0002).
+## These are the rules only: the update service watches the phone and does what they say.
+##
+## - A download waits for an unmetered network and enough charge.
+## - Installing writes the other system slot, in the background; it waits out calls and low
+##   battery.
+## - A restart happens only at night, charging, with the screen off, no call, nothing playing,
+##   and nobody using the phone for half an hour. An update that has waited three days asks
+##   instead, while the screen is on and no call is in progress. It never restarts on its own
+##   outside that window.
+## - The hour is the local hour of day, which the service passes in; the rules read no clock.
+##
+## rust: pub enum Step { Wait, Download, Install, Restart, AskToRestart }
+## rust: pub struct Phone { pub hour: i64, pub charging: bool, pub battery: i64, pub screen_on: bool, pub in_call: bool, pub media_playing: bool, pub idle_ms: i64, pub metered: bool }
+## rust: pub struct Update { pub available: bool, pub downloaded: bool, pub installed: bool }
+## rust: pub struct Policy { installed_since: Option<i64> }
+## rust: impl Policy
+## rust-domain: Phone.hour = 0, 1, 2, 4, 5, 12, 23
+## rust-domain: Phone.battery = 10, 30, 49, 50, 90
+## rust-domain: Phone.idle_ms = 0, 600000, 1799999, 1800000, 7200000
+## rust-domain: Int = 0, 3600000, 259199999, 259200000, 300000000
+
+## The night window: from 01:00 until 05:00.
+export NIGHT_FROM = 1
+export NIGHT_UNTIL = 5
+## Nobody has touched the phone for this long (30 minutes).
+export IDLE_FOR = 1800000
+## An installed update asks to restart after waiting this long (72 hours).
+export ASK_AFTER = 259200000
+
+## No update waiting yet.
+## rust: pub fn new() -> Self
+export fn new() = {installed_since: missing}
+
+## What to do now, given the phone and the update.
+## rust: pub fn decide(&mut self, now_ms: u64, phone: &Phone, update: &Update) -> Step
+export fn decide(self, now_ms, phone, update) = do {
+  next = if update.installed then {installed_since: self.installed_since ?? now_ms} else {installed_since: missing}
+  step = if update.installed then after_install(next, now_ms, phone) else if update.downloaded then (if may_install(phone) then {Install: true} else {Wait: true}) else if update.available then (if may_download(phone) then {Download: true} else {Wait: true}) else {Wait: true}
+  (next, step)
+}
+
+## rust: fn may_download(phone: Phone) -> bool
+fn may_download(phone) = not phone.metered and (phone.charging or phone.battery >= 30)
+
+## rust: fn may_install(phone: Phone) -> bool
+fn may_install(phone) = not phone.in_call and (phone.charging or phone.battery >= 50)
+
+## Whether the phone may restart into an installed update now.
+## rust: pub fn may_restart(phone: &Phone) -> bool
+export fn may_restart(phone) = phone.hour >= NIGHT_FROM and phone.hour < NIGHT_UNTIL and phone.charging and phone.battery >= 50 and not phone.screen_on and not phone.in_call and not phone.media_playing and phone.idle_ms >= IDLE_FOR
+
+## rust: fn after_install(state: Policy, now: i64, phone: Phone) -> Step
+fn after_install(state, now, phone) = if may_restart(phone) then {Restart: true} else if phone.screen_on and not phone.in_call and now - (state.installed_since ?? now) >= ASK_AFTER then {AskToRestart: true} else {Wait: true}

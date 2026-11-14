@@ -51,9 +51,16 @@ fn arg_as_column_name(
         // resolves to exactly this, so refusing the literal spelling of the thing bindings
         // produce would be a rule with no reason behind it.
         Expr::Str(s) => Ok(s.clone()),
+        // A field of a bound record holding the name: `df.sort(m.sort_col)` in an app's view.
+        Expr::Field { .. } => match crate::backend::field_value(e, resolve_var) {
+            Some(Value::Str(s)) => Ok((*s).clone()),
+            Some(other) => Err(HelixError::new(format!("a column name must be a String, and this is a {}", other.type_name()), line, col)),
+            None => Err(HelixError::new("expected a column name", line, col)
+                .hint("a column is `@name`, a String (`\"price\"`), or a binding or field holding one (`m.sort_col`).")),
+        },
         _ => Err(
             HelixError::new("expected a column name", line, col)
-                .hint("write a column with the `@` sigil, e.g. `df.select(@name, @age)`."),
+                .hint("a column is `@name`, a String (`\"price\"`), or a binding or field holding one (`m.sort_col`); descending is `-@price`."),
         ),
     }
 }
@@ -348,9 +355,30 @@ pub(crate) fn df_column_verb(
             Ok(Value::dataframe(lf.select(&names, line, col)?))
         }
         "sort" => {
-            let names = column_name_args(args, resolve_var, line, col)?;
+            // Descending, the two ways people write it: `-@price` and `"-price"` (also through
+            // a binding, `k = "-price"`). A real column whose name starts with `-` keeps it.
+            let existing = lf.column_names(line, col)?;
+            let mut names = Vec::with_capacity(args.len());
+            let mut desc = Vec::with_capacity(args.len());
+            for a in args {
+                let (inner, neg) = match a {
+                    Expr::Unary { op: crate::ast::UnOp::Neg, expr, .. } => (&**expr, true),
+                    other => (other, false),
+                };
+                let n = arg_as_column_name(inner, resolve_var, line, col)?;
+                match n.strip_prefix('-') {
+                    Some(rest) if !neg && !existing.contains(&n) => {
+                        names.push(rest.to_string());
+                        desc.push(true);
+                    }
+                    _ => {
+                        names.push(n);
+                        desc.push(neg);
+                    }
+                }
+            }
             crate::backend::validate_columns_exist(lf, &names, line, col)?;
-            Ok(Value::dataframe(lf.sort(&names, line, col)?))
+            Ok(Value::dataframe(lf.sort(&names, &desc, line, col)?))
         }
         "group" => {
             let names = column_name_args(args, resolve_var, line, col)?;

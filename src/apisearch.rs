@@ -41,7 +41,7 @@ use crate::{docs, envdocs, registry, syntaxdocs};
 pub struct Hit {
     /// `builtin`, `syntax`, or the receiver type for a method.
     pub owner: &'static str,
-    pub name: &'static str,
+    pub name: String,
     pub sig: String,
     pub doc: String,
     pub effect: &'static str,
@@ -122,6 +122,14 @@ static SYNONYMS: &[(&str, &[&str])] = &[
     ("shuffle", &["sample"]),
     ("histogram", &["frequencies"]),
     ("timestamp", &["epoch", "time"]),
+    // Words the agent study searched with and found nothing (2026-11).
+    ("lines", &["split"]),
+    ("descending", &["sort"]),
+    ("timeout", &["after"]),
+    ("delay", &["after"]),
+    ("interval", &["every"]),
+    ("onclick", &["click"]),
+    ("hotkey", &["shortcut"]),
 ];
 
 /// The catalog's words for `term`, or nothing if it is already one of them.
@@ -215,7 +223,7 @@ pub fn search(query: &str) -> Vec<Hit> {
         if let Some((score, matched)) = score(&terms, &q, b.path, sig, doc, notes) {
             hits.push(Hit {
                 owner: "builtin",
-                name: b.path,
+                name: b.path.to_string(),
                 sig: if sig.is_empty() { format!("{}(…)", b.path) } else { sig.to_string() },
                 doc: doc.to_string(),
                 effect: crate::capability::effect_of(b.path).label(),
@@ -232,7 +240,7 @@ pub fn search(query: &str) -> Vec<Hit> {
             if let Some((score, matched)) = score(&terms, &q, m, sig, doc, notes) {
                 hits.push(Hit {
                     owner: ty,
-                    name: m,
+                    name: m.to_string(),
                     sig: if sig.is_empty() { format!("{m}(…)") } else { sig.to_string() },
                     doc: doc.to_string(),
                     effect: crate::capability::method_effect_of(m).label(),
@@ -250,7 +258,7 @@ pub fn search(query: &str) -> Vec<Hit> {
         if let Some((score, matched)) = score(&terms, &q, s.name, s.form, s.doc, s.notes) {
             hits.push(Hit {
                 owner: "syntax",
-                name: s.name,
+                name: s.name.to_string(),
                 sig: s.form.to_string(),
                 doc: s.doc.to_string(),
                 effect: "pure",
@@ -272,7 +280,7 @@ pub fn search(query: &str) -> Vec<Hit> {
         if let Some((score, matched)) = score(&terms, &q, e.name, &what, e.doc, e.notes) {
             hits.push(Hit {
                 owner: "env",
-                name: e.name,
+                name: e.name.to_string(),
                 sig: e.name.to_string(),
                 doc: e.doc.to_string(),
                 effect: "pure",
@@ -282,14 +290,53 @@ pub fn search(query: &str) -> Vec<Hit> {
         }
     }
 
+    // The app library's components (`ui.button`, `ui.bar_chart`, …), read from its source:
+    // an agent asks for "bar chart" or "text input" before it knows a component's name.
+    for f in crate::uidocs::functions() {
+        let sig = f.signature();
+        let words = f.name.replace('_', " ");
+        if let Some((score, matched)) = score(&terms, &q, &f.name, &format!("{sig} {words} {}", f.tag()), &f.doc, "ui component std.ui app") {
+            hits.push(Hit { owner: "ui", name: f.name.clone(), sig, doc: crate::uidocs::first_sentence(&f.doc).to_string(), effect: "pure", matched, score });
+        }
+    }
+
     // Best first; ties by owner then name so the order is stable between runs — an
     // unstable listing makes a diff of two searches unreadable.
-    hits.sort_by(|a, b| b.score.cmp(&a.score).then(a.owner.cmp(b.owner)).then(a.name.cmp(b.name)));
+    hits.sort_by(|a, b| b.score.cmp(&a.score).then(a.owner.cmp(b.owner)).then(a.name.cmp(&b.name)));
     hits
 }
 
 /// The human listing.
 pub fn render(query: &str, hits: &[Hit]) -> String {
+    // Nothing has every word: say so, then show what has the most of them, rather than an
+    // empty answer to a question that had a near one ("script directory" → `source_path`).
+    if hits.is_empty() && query.split_whitespace().count() > 1 {
+        let mut near: Vec<Hit> = Vec::new();
+        for w in query.split_whitespace() {
+            for h in search(w) {
+                if !near.iter().any(|n| n.owner == h.owner && n.name == h.name) {
+                    near.push(h);
+                }
+            }
+        }
+        // Rank by how many of the words each one has, then by its own score.
+        let words: Vec<String> = query.to_lowercase().split_whitespace().map(str::to_string).collect();
+        let count = |h: &Hit| {
+            let hay = format!("{} {} {}", h.name, h.sig, h.doc).to_lowercase();
+            words.iter().filter(|w| matches_term(&hay, w)).count()
+        };
+        near.sort_by(|a, b| count(b).cmp(&count(a)).then(b.score.cmp(&a.score)).then(a.name.cmp(&b.name)));
+        near.truncate(8);
+        if !near.is_empty() {
+            let mut s = format!(
+                "no match for `{query}`: no single entry has every word. Every word has to match in \
+                 names, signatures, docs, notes and the language forms;\nthese have the most of them:\n\n"
+            );
+            s.push_str(&rows(&near));
+            s.push_str("\nFull entry: `helix describe <name>`. One type's methods: `helix doc <Type>`.\n");
+            return s;
+        }
+    }
     if hits.is_empty() {
         return format!(
             "no match for `{query}`\n\n\
@@ -304,17 +351,26 @@ pub fn render(query: &str, hits: &[Hit]) -> String {
         s.push_str(&format!("(also searched `{catalog}`, which is what the catalog calls `{typed}`)\n"));
     }
     s.push('\n');
+    s.push_str(&rows(hits));
+    s.push_str("\nFull entry: `helix describe <name>`. One type's methods: `helix doc <Type>`.\n");
+    s
+}
+
+/// The listing's rows.
+fn rows(hits: &[Hit]) -> String {
+    let mut s = String::new();
     for h in hits {
         // The receiver is part of how you CALL it, so it leads: `Array.frequencies()` is
         // usable as printed, where a bare `frequencies()` is not. A language form has no
         // receiver and is shown as written.
         let call = match h.owner {
-            "builtin" | "syntax" | "env" => h.sig.clone(),
+            "builtin" | "syntax" | "env" | "ui" => h.sig.clone(),
             ty => format!("{ty}.{}", h.sig),
         };
         let tag = match h.owner {
             "syntax" => "  [syntax]".to_string(),
             "env" => "  [environment]".to_string(),
+            "ui" => "  [ui]".to_string(),
             _ if h.effect == "pure" => String::new(),
             _ => format!("  [{}]", h.effect),
         };
@@ -328,7 +384,6 @@ pub fn render(query: &str, hits: &[Hit]) -> String {
             s.push_str(&format!("      (matched in the {})\n", h.matched));
         }
     }
-    s.push_str("\nFull entry: `helix describe <name>`. One type's methods: `helix doc <Type>`.\n");
     s
 }
 
@@ -383,7 +438,8 @@ mod tests {
     /// The instance that named the class: excellent docs, and the one word a reader types.
     #[test]
     fn regex_is_findable_by_the_word_people_use() {
-        let names: Vec<&str> = search("regex").iter().map(|h| h.name).collect();
+        let hits = search("regex");
+        let names: Vec<&str> = hits.iter().map(|h| h.name.as_str()).collect();
         assert!(names.contains(&"re_match"), "`regex` must find the family: {names:?}");
         // The docs say "regular expression" throughout, which is correct and was not enough.
         assert!(!search("regular expression").is_empty());

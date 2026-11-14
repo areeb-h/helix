@@ -1579,6 +1579,27 @@ Pause the program for ms milliseconds (wall clock; fractional ms honoured).
 
 ## ui
 
+### `app_window(title, width?, height?)`
+
+Open a native window and return a listener fed by it — no port — or missing where none can open.
+
+**Note:** ADR 0063: how `ui.app({…, window: true})` runs in a window. The page loads through a private URL scheme and the page's events and frames travel through the web view's own message channel, so the app OPENS NO PORT: no other process on the machine has anything to connect to, and the program needs no `net` authority to show its own window. The listener answers the same verbs as `listen`'s (`accept_poll`, `wait`, and on a connection `poll_request`, `respond`, `sse`, `send`), and each request carries `transport: "window"`, a field a socket's request never has. Only the runtime's own messages are accepted from the page. Answers missing in a build without `--features desktop` or on a machine with no display. Keywords: window, desktop, native, ipc, no port, in-process, app.
+
+```
+>>> app_window("My app", 1100, 760)
+```
+
+### `built_app()`
+
+Whether this program is an app made by `helix build --app`.
+
+**Note:** ADR 0063 D4. `ui.app` asks: a built app always opens in its own window and never falls back to serving a browser, because its permissions were inferred for a window — it has no network grant to serve with. Keywords: app, bundle, build, desktop, packaged.
+
+```
+>>> built_app()
+false
+```
+
 ### `dev_generation()`
 
 Under `helix run --watch`, which start of the program this is (1 for the first); otherwise missing.
@@ -1598,6 +1619,16 @@ Show this app's own page in a native window; true if one opened, false where non
 
 ```
 >>> open_window("http://127.0.0.1:8080/", "My app", 1100, 760)
+```
+
+### `session_tape(op, value?)`
+
+The black box's controls, used by `std.ui` to record and replay an app session.
+
+**Note:** ADR 0063 D2. Apps do not call this; `ui.app` does. `HELIX_RECORD=s.jsonl helix run app.helix` records every event, what `update` and `view` read from the world (the result of every impure builtin they called, or the error it raised), and a hash of each screen. `helix replay app.helix s.jsonl` plays it back: impure builtins do NOT run — the tape answers — so a replay touches no file, network or clock, and reports whether every screen came out identical. Operations: mode, start, begin, event, view, entries, play, done. Keywords: record, replay, session, black box, bug report, reproduce, time travel, deterministic.
+
+```
+>>> session_tape("mode")
 ```
 
 ### `utility_css(classes)`
@@ -1762,6 +1793,33 @@ Hot reload: which start of the app this is — 1, then one more per reload.
 - **Unset:** 1
 
 **Note:** Set by `helix run --watch` and read by `dev_generation()`. An app opens the browser on generation 1 only, and serves the routes the supervisor hands its model and session over on only when this is set. It carries no secret: the session token never goes through the environment, which other processes of the same user can read. Keywords: hot reload, reload count, watch.
+
+### `HELIX_DOC_EXAMPLE`
+
+Running a doc example: a file's `fn main` is not called.
+
+- **Values:** `1`, set by `helix test` for each `## >>>` example it runs
+- **Unset:** unset
+
+**Note:** A doc example runs as the file plus the example's lines, so a file with `fn main` used to run its main as well — and a main with a required parameter failed every example in the file. `helix test` sets this for the examples it runs; nothing else needs to. Keywords: doctest, doc example, main, test.
+
+### `HELIX_RECORD`
+
+Record an app session to this file (JSON Lines), to replay with `helix replay`.
+
+- **Values:** a file path
+- **Unset:** unset
+
+**Note:** ADR 0063's black box. Each event that reaches `update` is written as it happens, with what `update` and `view` read from the world while handling it (the clock, files, responses — each impure builtin's result or error) and a hash of every screen. The file is the bug report: `helix replay app.helix session.jsonl` reproduces it exactly, on any machine and engine. A program cannot choose this path; only the person running it can. Keywords: record, session, black box, bug report, reproduce.
+
+### `HELIX_REPLAY`
+
+Replay this recorded session instead of serving the app.
+
+- **Values:** a session file, set by `helix replay`
+- **Unset:** unset
+
+**Note:** Set by `helix replay app.helix session.jsonl`; nothing else needs to. `ui.app` plays the session through the app's `update` and `view` with the tape answering every impure builtin, prints how many screens came out identical, and fails if any differ. Keywords: replay, session, reproduce.
 
 ### `HELIX_THREADS`
 
@@ -2096,12 +2154,39 @@ Write a view as markup: elements, attributes, text and `{expr}` holes, turned in
 
 `<li class="row" click="open" value={f.id}>{f.name}</li>`
 
-**Note:** MARKUP (ADR 0061) is the record `ui.el` builds: `<div class="card">…</div>` is `{tag: "div", props: {class: "card"}, children: […]}`, so nothing after the parser knows it exists. A `<` followed by a letter or `>` starts markup unless a value just ended (`a <b` still compares). Attributes: the runtime's props by name (`class`, `click`, `value`, `key`, `enter`, `drag-axis`…), `aria-label` into `aria`, anything else (`href`, `type`, `data-row`) into `attrs`; a bare one is `true`; `"…"` interpolates; `{expr}` is any expression; `{...rec}` spreads props. `class` takes a list (`class={["row", if on then "on" else missing]}`). A child `{…}` may be a node, text, a number, a list (flattened), or `missing`/a Bool (nothing). `<>…</>` is a list. A capitalised tag is a COMPONENT, any function: `<TodoItem label="x" done />` calls `todo_item(label: "x", done: true)`, children are its `children`, and `<ui.Button caption="Save" msg="save" />` calls `ui.button`. `onClick` is refused: a view sends messages (`click="save"`). Keywords: jsx, tsx, html, markup, element, tag, template, component, props, children, react, view.
+**Note:** MARKUP (ADR 0061) is the record `ui.el` builds: `<div class="card">…</div>` is `{tag: "div", props: {class: "card"}, children: […]}`, so nothing after the parser knows it exists. A `<` followed by a letter or `>` starts markup unless a value just ended (`a <b` still compares). Attributes: the runtime's props by name (`class`, `click`, `value`, `key`, `enter`, `drag-axis`…), `aria-label` into `aria`, anything else (`href`, `type`, `data-row`) into `attrs`; a bare one is `true`; `"…"` interpolates; `{expr}` is any expression; `{...rec}` spreads props. `class` takes a list (`class={["row", if on then "on" else missing]}`). A child `{…}` may be a node, text, a number, a list (flattened), or `missing`/a Bool (nothing). `<>…</>` is a list. A capitalised tag is a COMPONENT, any function: `<TodoItem label="x" done />` calls `todo_item(label: "x", done: true)`, children are its `children`, and `<ui.Button caption="Save" msg="save" />` calls `ui.button`. `onClick` is refused: a view sends messages (`click="save"`). `class:done={it.done}` adds one class while the condition holds; inside markup an `if` may leave out `else` (`{if busy then <Spinner />}` renders nothing when false); and `{items.map(<li>{it}</li>)}` loops without a lambda. Keywords: jsx, tsx, html, markup, element, tag, template, component, props, children, react, view.
 
 ```
 >>> name = "Ada"
 >>> print(view_html(<p class="note">Hi, <b>{name}</b></p>))
 <p class="note">Hi, <b>Ada</b></p>
+```
+
+### `events`
+
+Every prop a view can carry: the events it sends to `update`, keys, motion, gestures and focus.
+
+`<button click="save" value={item.id}>`
+
+**Note:** EVENTS (each names the message; `update` gets `{msg, value}`): `click` (with `value={…}` as its payload), `dblclick`, `contextmenu` (value `{value, x, y}`), `input` (every keystroke; value is the text, a number for `type="number"`/`"range"`, a Bool for a checkbox), `change` (a committed field: checkbox, select, radio), `submit` (a `<form>`; value is a record of its named fields), `dismiss` (a press outside the node, or Escape: how to close a menu, cancel an edit, close a dialog), `scroll` (value is the offset in px). KEYS: `keydown="key" shortcuts="Enter Escape Space ArrowUp ArrowDown Ctrl+K Alt+ArrowLeft /"` sends the chord typed as `value`; a chord is modifiers (`Ctrl` — Command on a Mac counts —, `Alt`, `Shift` only for keys that print nothing) then the key: a letter in upper case (`S`, `Ctrl+K`), a printed character as itself (`/`, `?`), `Space`, `Enter`, `Escape`, `Tab`, `Backspace`, `Delete`, `ArrowUp`…, `Home`, `End`, `F2`. The nearest node with `keydown` listing the chord gets it; in a text field only Ctrl/Alt chords, Escape, Enter and the vertical arrows do; inside `role="tree"`, `"menu"`, `"tablist"` or `"radiogroup"` the arrows, Home, End and Enter belong to the widget. There are NO focus, blur, hover, key-up or mouse-move events: use `dismiss`, `hover:` utilities and `ui.tooltip`. FOCUS: `autofocus` focuses a node when it appears (change its `key` to focus it again). MOTION: `enter=` and `exit=` play a preset when a node arrives or leaves — `fade`, `rise`, `pop`, `grow`, `sheet`, `push`, and the emphasis presets `bounce`, `wiggle`, `pulse`; `layout` animates a node to its new place; `share="name"` morphs a node into the next one with the same name. A re-keyed node (`key="n{count}"`) replays its `enter`. GESTURES: `drag="msg"` (`drag_axis`, `drag_commit`), `reorder="msg"` on a list of keyed children (`reorder_group` to trade between lists), `drop="msg"`, `resize="msg"`, `handle`. TIMERS: `subscriptions: (m) => [ui.every(1000, "tick")]` sends `{msg: "tick", value: <seconds since 1970>}` every second while the model asks for it (the first one period after it first asks; clicks and keys carry no time, so keep the last tick's); `ui.after(800, "flip-back")` is sent ONCE, 800 ms after the model first lists it (stop listing it and ask again to rerun it). A `value` reaches `update` as the type the view gave it — `value={7}` is 7, `value={true}` is true, text is text — in a browser as in `ui.replay`. Keywords: event, events, onclick, on click, handler, listener, dblclick, double click, keydown, key, keyboard, shortcut, shortcuts, hotkey, chord, blur, focus, hover, mouse, escape, submit, change, input, animation, animate, transition, enter, exit, timer, interval, timeout, delay.
+
+```
+>>> print(view_html(<button click="save" value={7}>Save</button>))
+<button data-click="save" data-value="7" data-value-type="number">Save</button>
+```
+
+### `test`
+
+Tests: `*_test.helix` files and `## >>>` doc examples, run by `helix test` (add `--engines` to check all three).
+
+`fn test_parses() = assert_eq(parse("a=1").a, 1)`
+
+**Note:** A TEST FILE is any `*_test.helix`: its top level runs, `assert`, `assert_eq`, `assert_close` and `assert_error` check things, and a file that asserts nothing fails. Each `fn test_…()` it defines and does not call runs too, as a test of its own. To test an app's functions, mark them `export fn` and `import app.{name, other}` in the test file. A DOC EXAMPLE is a `## >>>` line above a function; the `##` lines after it, up to an empty `##` line, are what it must print (so put a bare `##` line before more prose). A file with `fn main` is fine: its main does not run for its doc examples. `helix test --json` gives one document of results. Keywords: test, tests, unit test, testing, assert, doctest, doc test, doc example, pytest, spec, check.
+
+```
+>>> assert_eq(1 + 1, 2)
+>>> print("ok")
+ok
 ```
 
 ### `main`
@@ -2459,7 +2544,7 @@ Transform every element with the function, keeping order and length.
 
 ### `max()`
 
-The largest element of all numbers, all strings, all DNA, or all Bytes.
+The largest element of all numbers, all strings, all DNA, all Bytes, or all tuples of those.
 
 **Note:** An array containing missing reduces to missing, where sort refuses instead.
 
@@ -2649,6 +2734,8 @@ Ascending sort of an all-number, all-string, or all-DNA array.
 ### `sort_by(key)`
 
 Ascending stable sort by key(element).
+
+**Note:** SEVERAL KEYS: return a TUPLE, compared part by part as `<` compares tuples — `people.sort_by(p => (p.team, -p.score))` sorts by team, then by score descending within a team. Each position must hold the same kind in every item (numbers, Strings, DNA or Bytes); a Bool or `missing` in a key is refused, so write `if p.pinned then 0 else 1`. An Array is not a key (`<` does not order Arrays). Descending is a minus on a number; `sort` and `min`/`max` order tuples the same way. Keywords: multiple keys, multi-key, secondary sort, tie-break, then by, compound key, descending.
 
 ```
 >>> ["bb", "a", "ccc"].sort_by(s => s.length())
@@ -3932,13 +4019,13 @@ At most len rows starting at row offset.
 
 ### `sort(@col, ...)`
 
-Rows sorted ascending by the named column(s).
+Rows sorted by the named column(s), ascending; `-@col` (or `"-col"`) sorts that column descending.
 
-**Note:** Missing rows sort FIRST here — unlike Array sort, which refuses missing. A BINDING IN SCOPE WINS OVER A COLUMN OF THE SAME NAME (ADR 0028), and its String value names the column: `k = "price"` then `df.sort(k)` uses `price`. That is also how a column is named at RUN TIME, which this position had no way to express before. Write `@k` for the column literally called `k`; a String literal works too (`df.sort("price")`). Until 0.8.1 a bare name here was taken literally, so a library's own parameter names were reserved words in data it had never seen — `fn top(frame, key) = frame.select(key)` returned the frame's `key` column and ignored the argument, with no error. Keywords: column name, binding, shadow, runtime, dynamic, scope, ADR 0028.
+**Note:** DESCENDING is a minus: `df.sort(-@price)`, `df.sort("-price")`, or a binding holding `"-price"` (a column whose name really starts with `-` keeps it). A descending key is the ascending order reversed, so `missing` comes LAST there; ties keep their input order either way. A field of a record names a column as a binding does: `df.sort(m.sort_col)`. Missing rows sort FIRST in ascending order — unlike Array sort, which refuses missing. A BINDING IN SCOPE WINS OVER A COLUMN OF THE SAME NAME (ADR 0028), and its String value names the column: `k = "price"` then `df.sort(k)` uses `price`. That is also how a column is named at RUN TIME, which this position had no way to express before. Write `@k` for the column literally called `k`; a String literal works too (`df.sort("price")`). Until 0.8.1 a bare name here was taken literally, so a library's own parameter names were reserved words in data it had never seen — `fn top(frame, key) = frame.select(key)` returned the frame's `key` column and ignored the argument, with no error. Keywords: column name, binding, shadow, runtime, dynamic, scope, ADR 0028.
 
 ```
->>> dataframe({a: [2, 1], b: [3.0, 4.5]}).sort(@a).column("a")
-[1, 2]
+>>> dataframe({a: [2, 1, 3], b: [3.0, 4.5, 1.0]}).sort(-@a).column("a")
+[3, 2, 1]
 ```
 
 ### `tail(n)`

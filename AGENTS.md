@@ -45,6 +45,77 @@ actually make, **eleven named the exact fix** (`to_json(x)` answers "``to_json``
 method: `x.to_json()`"; a C-style body answers ``fn f(x) = x + 1``). Reading the error
 is usually faster than reading anything else, this file included.
 
+## Building an app (`import std.ui`)
+
+Ask the binary, not the examples: `helix doc ui` lists every component with its parameters,
+`helix doc ui.text_input` gives one in full (with the markup to write), `helix describe events`
+lists every event and prop, `helix describe markup` the markup rules. `helix search bar chart`
+finds components by what they do.
+
+```helix
+import std.ui
+
+fn update(m, e) = match e.msg {
+  "add" => {...m, items: m.items.concat([m.draft]), draft: ""},
+  "draft" => {...m, draft: e.value ?? ""},
+  "remove" => {...m, items: m.items.filter((x) => x != e.value)},
+  _ => m,
+}
+
+fn view(m) = <div class="mx-auto max-w-md space-y-4 p-6">
+  <form submit="add" class="flex gap-2">
+    <input input="draft" value={m.draft} aria-label="New item" class="flex-1 rounded-control bg-surface-2 px-3 py-2" />
+    <ui.Button caption="Add" msg="add" variant="primary" />
+  </form>
+  {if m.items.count() == 0 then <p class="text-muted">Nothing yet.</p>}
+  <ul>{m.items.map(<li key={it} class="flex justify-between">{it}<button click="remove" value={it} aria-label="Remove {it}">×</button></li>)}</ul>
+</div>
+
+SESSION = [{msg: "draft", value: "milk"}, {msg: "add", value: missing}]
+spec = {title: "List", init: {items: [], draft: ""}, update: update, view: view}
+fn main(replay: Bool = false, port: Int = 8080) = if replay then ui.replay(spec, SESSION).map((h) => print(h)) else ui.app({...spec, port: port})
+```
+
+- **The loop:** `helix check app.helix` → `helix run app.helix --replay` on all three engines
+  (outputs identical) → `helix run --watch app.helix --open` to look at it. A replay prints one
+  screen per event, the state AFTER it; an error names the event that caused it.
+- **Markup:** a lowercase tag is an element; a capitalised one calls a function by its parameter
+  names (`<TodoItem done />` calls `todo_item(done: true)`; children are `children`); a library's
+  is `<ui.TextInput …/>`. Attributes are HTML's lower-case names (`class`, `for`, `tabindex`),
+  `aria-*`, and Helix's props. `class:done={c}` adds a class when `c`; `{if c then <X />}` needs
+  no `else`; `{xs.map(<li>{it}</li>)}` loops. Mistyped props (`clik`), React names (`onClick`,
+  `className`, `htmlFor`) and events Helix does not have (`blur`, `onMouseEnter`) are errors that
+  name the fix.
+- **Events** carry a message, not a handler: `click="save" value={item.id}` sends `{msg: "save",
+  value: item.id}` to `update`, with the value's own type (a number stays a number). `input` is
+  every keystroke (React's `onChange`); `submit` sends the form's named fields; `dismiss` is a
+  press outside or Escape; keys are `keydown="key" shortcuts="Enter Escape Ctrl+K"`. Timers:
+  `subscriptions: (m) => [ui.every(1000, "tick")]`, and `ui.after(800, "flip-back")` once.
+- **Styling** is Tailwind's class names (v4), generated as the view renders, plus the design's
+  tokens: `bg-accent`, `text-muted`, `bg-card`, `ring-line`, `rounded-card`, `p-card`,
+  `shadow-1`. Dark mode is `theme: (m) => if m.dark then "dark" else "light"` and the tokens
+  follow it. An unknown class renders nothing, silently — `helix check --lint` names the ones
+  that look like utilities but are not.
+- **Bug reports reproduce exactly:** `HELIX_RECORD=s.jsonl helix run app.helix` records a
+  session (events, plus what `update`/`view` read: clock, files, responses);
+  `helix replay app.helix s.jsonl --engines` replays it with nothing read from the world and says
+  whether every screen is identical. `window: true` runs in a native window with no port open.
+- **Shipping:** `helix build app.helix --app` (from a `--features desktop` helix) makes the
+  platform's app bundle; its permissions are inferred from the code, printed, and enforced.
+- **Footguns:** a comparison with a `missing` field is `missing`, not `false` — give it a
+  default first, `(m.plan ?? "") == "pro"`. The runtime supplies the page's `<main>`; it steps
+  aside if your view's root is one. A busy port moves to the next free one, and says so.
+
+## Rules shipped as Rust (`helix emit rust`)
+
+A rule is pure functions over records, maps, lists, options, integers, strings and booleans.
+Declare its Rust shapes in `## rust:` lines (Rust syntax: `pub struct`, `pub enum`, `impl Name`,
+and a `## rust: pub fn …` signature directly above each `fn`), then `helix emit rust rule.helix
+-o policy.rs`. `&mut self` means the Helix function takes the state first and returns
+`(new_state, output)`; an enum variant is written `{Freeze: id}`; `missing` is `None`. Prove
+properties with `import std.model` (`model.explore(init, inputs, step, check)`), and see
+`examples/rules/freezer.helix` and ADR 0065.
+
 ## The correctness model
 
 One program, one answer, on three engines: the tree-walker (`HELIX_NOVM=1`), the
@@ -70,13 +141,17 @@ cmp a.out b.out && cmp a.out c.out
   `helix check` refuses that), a Windows path, or any text with braces or backslashes.
 - Strings have no `+`: use interpolation `"{a}{b}"` or `parts.join("")`. Both are linear.
 - `{ }` in a string is interpolation; a literal brace is `{{`.
+- **`/` always gives a Float**: `7 / 2` is `3.5` and `10 / 2` is `5.0`, so a score printed as
+  `"{right / total}"` shows `0.5`. `//` is integer division (`7 // 2` is `3`) and `%` the
+  remainder; `round(x, 1)` or `"{x:.1f}"` formats a Float.
 - `try` binds tighter than operators: `try (a + b)`, never `try a + b`.
 - One binding per line; `do { }` separates statements by newline, never `;`.
 - `fn` is item-level only — inside `do { }` bind a lambda: `f = (x) => …`.
 - A function value in a record field is called parenthesized: `(rec.f)(x)`.
 - Imports are `import lib.stats` (for `lib/stats.helix`), `import lib.stats as st`, or
   `import lib.stats.{mean, sd}` to bring names in unqualified. Not `use`, not
-  `from … import …`. **`import std.ui`** is built in (bound as `ui`): the app library —
+  `from … import …`. **Only `export fn` / `export` names can be imported**: mark what a
+  test file or another module needs (`export fn total(xs) = …`). **`import std.ui`** is built in (bound as `ui`): the app library —
   `helix describe app` for the whole surface, `examples/apps/gallery.helix` for every component.
 - **`mut` is top-level only, and this is a design question, not a spelling one.** A
   function body evolves state by *rebinding* — `do { n = 0` / `n = n + 1` / `n }`, each
@@ -98,9 +173,10 @@ cmp a.out b.out && cmp a.out c.out
 
 ## Footguns — wrong answers, not errors
 
-1. **Filtering on `missing` finds nothing, silently.** `where(@v == missing)` returns
-   0 rows because `missing == missing` is `missing`. The keep-non-missing idiom is
-   `where(@v == @v)`; `drop_missing` (on Array and DataFrame) is the explicit form.
+1. **`missing` never equals anything, itself included** (`missing == missing` is `missing`).
+   Comparing against the literal, `x == missing`, is refused with the fix: `x.is_missing()`,
+   `where(@v.is_missing())`, or `drop_missing` (on Array and DataFrame). A *field* that may be
+   missing still compares as missing, so give it a default first: `(m.plan ?? "") == "pro"`.
 2. **i64 arithmetic wraps silently** — `9223372036854775807 + 1` is min-i64, exit 0.
    Deliberate; see `docs/integer-semantics.md`.
 3. **`sum()` and its `reduce` spelling diverge at the i64 edge**: `sum()` widens to

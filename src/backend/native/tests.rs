@@ -101,9 +101,14 @@ mod against_the_oracle {
         );
         let keys = vec!["region".to_string(), "samples".to_string()];
         assert_frames_equal(
-            &n.sort(&keys, 0, 0).unwrap(),
-            &p.sort(&keys, 0, 0).unwrap(),
+            &n.sort(&keys, &[], 0, 0).unwrap(),
+            &p.sort(&keys, &[], 0, 0).unwrap(),
             "sort region, samples (stable, missing placement)",
+        );
+        assert_frames_equal(
+            &n.sort(&keys, &[true, false], 0, 0).unwrap(),
+            &p.sort(&keys, &[true, false], 0, 0).unwrap(),
+            "sort region descending, then samples (stable, missing last)",
         );
         assert_frames_equal(&n.head(2), &p.head(2), "head 2");
     }

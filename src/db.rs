@@ -189,7 +189,7 @@ pub fn sqlite_query(args: &[Value], line: usize, col: usize) -> Result<Df, Helix
         }
     };
 
-    let names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let names: Vec<String> = stmt.column_names().map(|s| s.to_string()).collect();
     let mut cols: Vec<Col> = names.iter().map(|_| Col::Null(0)).collect();
 
     let mut rows = stmt

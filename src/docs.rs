@@ -1192,6 +1192,30 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         notes: "ADR 0055 PHASE 4: the platform's web view (WebView2, WKWebView, WebKitGTK) in a native window, instead of a browser tab. `std.ui` calls it for `ui.app({…, window: true})`. ONLY the app's own `http://127.0.0.1:<port>` origin: any other URL is refused, navigation away from it is refused inside the window, and pages cannot open more windows — a frame around what the app serves, not a browser. Closing the window ends the program. Answers false in a build without `--features desktop` or on a machine with no display, so the caller can open the browser instead (`open_url`). Keywords: window, desktop, native, gui, app, webview.",
     },
     DocEntry {
+        name: "app_window",
+        sig: "app_window(title, width?, height?)",
+        doc: "Open a native window and return a listener fed by it — no port — or missing where none can open.",
+        example: "app_window(\"My app\", 1100, 760)",
+        example_out: "",
+        notes: "ADR 0063: how `ui.app({…, window: true})` runs in a window. The page loads through a private URL scheme and the page's events and frames travel through the web view's own message channel, so the app OPENS NO PORT: no other process on the machine has anything to connect to, and the program needs no `net` authority to show its own window. The listener answers the same verbs as `listen`'s (`accept_poll`, `wait`, and on a connection `poll_request`, `respond`, `sse`, `send`), and each request carries `transport: \"window\"`, a field a socket's request never has. Only the runtime's own messages are accepted from the page. Answers missing in a build without `--features desktop` or on a machine with no display. Keywords: window, desktop, native, ipc, no port, in-process, app.",
+    },
+    DocEntry {
+        name: "built_app",
+        sig: "built_app()",
+        doc: "Whether this program is an app made by `helix build --app`.",
+        example: "built_app()",
+        example_out: "false",
+        notes: "ADR 0063 D4. `ui.app` asks: a built app always opens in its own window and never falls back to serving a browser, because its permissions were inferred for a window — it has no network grant to serve with. Keywords: app, bundle, build, desktop, packaged.",
+    },
+    DocEntry {
+        name: "session_tape",
+        sig: "session_tape(op, value?)",
+        doc: "The black box's controls, used by `std.ui` to record and replay an app session.",
+        example: "session_tape(\"mode\")",
+        example_out: "",
+        notes: "ADR 0063 D2. Apps do not call this; `ui.app` does. `HELIX_RECORD=s.jsonl helix run app.helix` records every event, what `update` and `view` read from the world (the result of every impure builtin they called, or the error it raised), and a hash of each screen. `helix replay app.helix s.jsonl` plays it back: impure builtins do NOT run — the tape answers — so a replay touches no file, network or clock, and reports whether every screen came out identical. Operations: mode, start, begin, event, view, entries, play, done. Keywords: record, replay, session, black box, bug report, reproduce, time travel, deterministic.",
+    },
+    DocEntry {
         name: "dev_generation",
         sig: "dev_generation()",
         doc: "Under `helix run --watch`, which start of the program this is (1 for the first); otherwise missing.",
@@ -1816,7 +1840,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
         DocEntry {
             name: "max",
             sig: "max()",
-            doc: "The largest element of all numbers, all strings, all DNA, or all Bytes.",
+            doc: "The largest element of all numbers, all strings, all DNA, all Bytes, or all tuples of those.",
             example: "[3, 9, 5].max()",
             example_out: "9",
             notes: "An array containing missing reduces to missing, where sort refuses instead.",
@@ -2039,7 +2063,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
             doc: "Ascending stable sort by key(element).",
             example: "[\"bb\", \"a\", \"ccc\"].sort_by(s => s.length())",
             example_out: "[\"a\", \"bb\", \"ccc\"]",
-            notes: "",
+            notes: "SEVERAL KEYS: return a TUPLE, compared part by part as `<` compares tuples — `people.sort_by(p => (p.team, -p.score))` sorts by team, then by score descending within a team. Each position must hold the same kind in every item (numbers, Strings, DNA or Bytes); a Bool or `missing` in a key is refused, so write `if p.pinned then 0 else 1`. An Array is not a key (`<` does not order Arrays). Descending is a minus on a number; `sort` and `min`/`max` order tuples the same way. Keywords: multiple keys, multi-key, secondary sort, tie-break, then by, compound key, descending.",
         },
     ),
     (
@@ -3172,10 +3196,10 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
         DocEntry {
             name: "sort",
             sig: "sort(@col, ...)",
-            doc: "Rows sorted ascending by the named column(s).",
-            example: "dataframe({a: [2, 1], b: [3.0, 4.5]}).sort(@a).column(\"a\")",
-            example_out: "[1, 2]",
-            notes: "Missing rows sort FIRST here — unlike Array sort, which refuses missing. A BINDING IN SCOPE WINS OVER A COLUMN OF THE SAME NAME (ADR 0028), and its String value names the column: `k = \"price\"` then `df.sort(k)` uses `price`. That is also how a column is named at RUN TIME, which this position had no way to express before. Write `@k` for the column literally called `k`; a String literal works too (`df.sort(\"price\")`). Until 0.8.1 a bare name here was taken literally, so a library's own parameter names were reserved words in data it had never seen — `fn top(frame, key) = frame.select(key)` returned the frame's `key` column and ignored the argument, with no error. Keywords: column name, binding, shadow, runtime, dynamic, scope, ADR 0028.",
+            doc: "Rows sorted by the named column(s), ascending; `-@col` (or `\"-col\"`) sorts that column descending.",
+            example: "dataframe({a: [2, 1, 3], b: [3.0, 4.5, 1.0]}).sort(-@a).column(\"a\")",
+            example_out: "[3, 2, 1]",
+            notes: "DESCENDING is a minus: `df.sort(-@price)`, `df.sort(\"-price\")`, or a binding holding `\"-price\"` (a column whose name really starts with `-` keeps it). A descending key is the ascending order reversed, so `missing` comes LAST there; ties keep their input order either way. A field of a record names a column as a binding does: `df.sort(m.sort_col)`. Missing rows sort FIRST in ascending order — unlike Array sort, which refuses missing. A BINDING IN SCOPE WINS OVER A COLUMN OF THE SAME NAME (ADR 0028), and its String value names the column: `k = \"price\"` then `df.sort(k)` uses `price`. That is also how a column is named at RUN TIME, which this position had no way to express before. Write `@k` for the column literally called `k`; a String literal works too (`df.sort(\"price\")`). Until 0.8.1 a bare name here was taken literally, so a library's own parameter names were reserved words in data it had never seen — `fn top(frame, key) = frame.select(key)` returned the frame's `key` column and ignored the argument, with no error. Keywords: column name, binding, shadow, runtime, dynamic, scope, ADR 0028.",
         },
     ),
     (

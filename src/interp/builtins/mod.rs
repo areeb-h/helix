@@ -22,6 +22,17 @@ impl super::Interp {
         line: usize,
         col: usize,
     ) -> Result<Value, HelixError> {
+        // The black box (ADR 0063 D2, `src/tape.rs`): while an app records, an impure builtin's
+        // result goes on the tape; while it replays, the tape answers and the builtin does not
+        // run at all — so a replay reads, writes and sends nothing, and needs no authority.
+        if crate::tape::wants(name) {
+            if let Some(r) = crate::tape::replayed(name, line, col) {
+                return r;
+            }
+            let out = self.call_builtin_arm(name, args, line, col);
+            crate::tape::record(name, &out);
+            return out;
+        }
         let out = self.call_builtin_arm(name, args, line, col)?;
         // The folding sandbox pays for what a builtin PRODUCES as well as what it is
         // handed (ADR 0050): `to_array(range(0, n))` costs `n`, so no attempt holds more
@@ -151,6 +162,9 @@ impl super::Interp {
             "view_html" | "view_diff" | "view_classes" | "utility_css" => return a_view(name, args, line, col),
             "dev_generation" => return crate::devwatch::dev_generation(&args, line, col),
             "open_window" => return crate::desktop::open_window(&args, line, col),
+            "app_window" => return crate::desktop::app_window(&args, line, col),
+            "session_tape" => return crate::tape::session_tape(&args, line, col),
+            "built_app" => return crate::desktop::built_app(&args, line, col),
             "url_encode" => return encoding::a_url_encode(args, line, col),
             "url_decode" => return encoding::a_url_decode(name, args, line, col),
             "url_decode_lenient" => return encoding::a_url_decode_lenient(name, args, line, col),
@@ -695,8 +709,15 @@ fn http_timeout_ms(req: &Value, line: usize, col: usize) -> Result<Option<u64>, 
 /// clean error rather than an allocator abort. Shared by `read_text` and `read_json`.
 fn read_text_file(path: &str, line: usize, col: usize) -> Result<String, HelixError> {
     let meta = std::fs::metadata(path).map_err(|e| {
-        HelixError::new(format!("could not read `{path}`: {e}"), line, col)
-            .hint("check the path exists and is readable.")
+        let hint = if e.kind() == std::io::ErrorKind::NotFound && std::path::Path::new(path).is_relative() {
+            format!(
+                "a relative path is read from the directory `helix` was started in, not the program's. \
+                 For a file beside the program, write `source_path(\"{path}\")`."
+            )
+        } else {
+            "check the path exists and is readable.".to_string()
+        };
+        HelixError::new(format!("could not read `{path}`: {e}"), line, col).hint(hint)
     })?;
     if meta.len() as usize > crate::interp::MAX_STRING_LEN {
         return Err(HelixError::new(

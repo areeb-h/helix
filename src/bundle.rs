@@ -69,6 +69,25 @@ pub struct Embedded {
     pub entry: usize,
     /// The authority ceiling the program declared when it was built, if any.
     pub capabilities: Option<crate::pkg::Capabilities>,
+    /// Set when it was built with `helix build --app` (ADR 0063): a windowed app whose
+    /// ceiling was inferred from its code.
+    pub app: Option<AppInfo>,
+}
+
+/// What `helix build --app` records about the app beside its ceiling.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppInfo {
+    pub name: String,
+}
+
+/// The ceiling block of an app: the inferred ceiling and the app's identity. A plain build
+/// writes a bare `Capabilities`, and both shapes are read back.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AppCeiling {
+    capabilities: crate::pkg::Capabilities,
+    app: AppInfo,
 }
 
 fn read_u32(b: &[u8], at: usize) -> Option<usize> {
@@ -89,12 +108,18 @@ fn parse_v3(b: &[u8]) -> Option<Embedded> {
     // A zero-length block means the program declared nothing, which is different from
     // declaring an empty ceiling: the first leaves the artifact unconfined (today's
     // behaviour), the second would deny everything.
-    let capabilities = if caps_len == 0 {
-        None
+    let (capabilities, app) = if caps_len == 0 {
+        (None, None)
     } else {
         let raw = b.get(at..at.checked_add(caps_len)?)?;
         at += caps_len;
-        serde_json::from_slice(raw).ok()?
+        match serde_json::from_slice::<crate::pkg::Capabilities>(raw) {
+            Ok(c) => (Some(c), None),
+            Err(_) => {
+                let w: AppCeiling = serde_json::from_slice(raw).ok()?;
+                (Some(w.capabilities), Some(w.app))
+            }
+        }
     };
     let mut modules = Vec::with_capacity(n);
     for _ in 0..n {
@@ -110,7 +135,7 @@ fn parse_v3(b: &[u8]) -> Option<Embedded> {
     if entry >= modules.len() {
         return None;
     }
-    Some(Embedded { modules, entry, capabilities })
+    Some(Embedded { modules, entry, capabilities, app })
 }
 
 /// If the running executable carries an embedded program (it was produced by
@@ -174,6 +199,7 @@ pub fn embedded() -> Option<Embedded> {
         modules: vec![(String::from_utf8(name).ok()?, String::from_utf8(src).ok()?)],
         entry: 0,
         capabilities: None,
+        app: None,
     })
 }
 
@@ -236,6 +262,47 @@ pub fn build(
     out: Option<&Path>,
     runtime: Option<&Path>,
 ) -> Result<Built, HelixError> {
+    build_with(entry, out, runtime, None).map(|(b, _)| b)
+}
+
+/// `helix build --app`: the same artifact, with its ceiling INFERRED from the code and the
+/// app's identity recorded, then laid out as the platform's app bundle under `out_dir`.
+pub fn build_app(
+    entry: &Path,
+    out_dir: &Path,
+    runtime: Option<&Path>,
+    display: &str,
+) -> Result<(Built, crate::appbuild::Inferred, Vec<PathBuf>), HelixError> {
+    let tmp = out_dir.join(format!(".{}.helix-build", crate::appbuild::slug(display)));
+    std::fs::create_dir_all(out_dir).map_err(|e| HelixError::new(format!("cannot create `{}`: {e}", out_dir.display()), 0, 0))?;
+    let (built, inferred) = build_with(entry, Some(&tmp), runtime, Some(display))?;
+    let Some(inferred) = inferred else { return Err(HelixError::new("internal: an app build inferred no ceiling", 0, 0)) };
+    let exe = std::fs::read(&tmp).map_err(|e| HelixError::new(format!("cannot read `{}`: {e}", tmp.display()), 0, 0))?;
+    let _ = std::fs::remove_file(&tmp);
+    let version = "1.0.0".to_string();
+    let mut written = Vec::new();
+    for e in crate::appbuild::layout(crate::appbuild::host_os(), display, exe, &inferred, &version) {
+        let path = out_dir.join(&e.path);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|err| HelixError::new(format!("cannot create `{}`: {err}", dir.display()), 0, 0))?;
+        }
+        std::fs::write(&path, &e.bytes).map_err(|err| HelixError::new(format!("cannot write `{}`: {err}", path.display()), 0, 0))?;
+        #[cfg(unix)]
+        if e.executable {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+        }
+        written.push(path);
+    }
+    Ok((built, inferred, written))
+}
+
+fn build_with(
+    entry: &Path,
+    out: Option<&Path>,
+    runtime: Option<&Path>,
+    app: Option<&str>,
+) -> Result<(Built, Option<crate::appbuild::Inferred>), HelixError> {
     let mkerr = |m: String| HelixError::new(m, 0, 0);
 
     // Load the import graph. A single file comes back un-mangled; more than one is
@@ -330,10 +397,38 @@ pub fn build(
     // The ceiling comes from `module::load` above, which installed whatever the project's
     // manifest declared — so the artifact enforces exactly what `helix run` enforced, and
     // the declaration cannot drift from the thing it is supposed to govern.
-    let caps = crate::capability::declared_ceiling();
-    let caps_json = match &caps {
-        Some(c) => serde_json::to_vec(c).unwrap_or_default(),
-        None => Vec::new(),
+    let declared = crate::capability::declared_ceiling();
+    // AN APP'S CEILING IS WHAT ITS CODE REACHES (ADR 0063 D3). A project that also declared a
+    // ceiling keeps it as an upper bound: code that reaches past it fails the build, here,
+    // rather than the app failing in a user's hands.
+    let inferred = app.map(|_| crate::appbuild::infer(&loaded.stmts, &loaded.spans));
+    if let Some(inf) = &inferred {
+        if let Some((_, path)) = inf.refused.first() {
+            return Err(mkerr(format!("this app reads environment variables (`{}`), which a built app is never granted", path.join(" -> ")))
+                .hint("pass what it needs as `fn main` arguments, or read a settings file."));
+        }
+        if let Some(d) = &declared {
+            let over = [
+                (inf.caps.fs_read() && !d.fs_read(), "read files", "fs"),
+                (inf.caps.fs_write() && !d.fs_write(), "write files", "fs"),
+                (inf.caps.net_on() && !d.net_on(), "use the network", "net"),
+                (inf.caps.process_on() && !d.process_on(), "run programs", "process"),
+                (inf.caps.db_write() && !d.db_write(), "write to databases", "db"),
+            ];
+            if let Some((_, what, key)) = over.iter().find(|(o, _, _)| *o) {
+                return Err(mkerr(format!("the app's code needs to {what}, which helix.toml's [capabilities] does not allow"))
+                    .hint(format!("allow it with `{key} = …` under [capabilities], or remove the code that needs it (`helix effects` shows where).")));
+            }
+        }
+    }
+    let caps = match &inferred {
+        Some(inf) => Some(inf.caps.clone()),
+        None => declared,
+    };
+    let caps_json = match (&caps, app) {
+        (Some(c), Some(name)) => serde_json::to_vec(&AppCeiling { capabilities: c.clone(), app: AppInfo { name: name.to_string() } }).unwrap_or_default(),
+        (Some(c), None) => serde_json::to_vec(c).unwrap_or_default(),
+        (None, _) => Vec::new(),
     };
     let mut payload = Vec::new();
     payload.extend_from_slice(&(archive.len() as u32).to_le_bytes());
@@ -367,13 +462,16 @@ pub fn build(
             let _ = std::fs::set_permissions(&out_path, perm);
         }
     }
-    Ok(Built {
-        debug_runtime: runtime.is_none() && cfg!(debug_assertions),
-        capabilities: caps,
-        features: features_used(&loaded.stmts),
-        bytes: image.len() as u64,
-        modules: archive.len(),
-        runtime: runtime.map(|p| p.display().to_string()),
-        path: out_path,
-    })
+    Ok((
+        Built {
+            debug_runtime: runtime.is_none() && cfg!(debug_assertions),
+            capabilities: caps,
+            features: features_used(&loaded.stmts),
+            bytes: image.len() as u64,
+            modules: archive.len(),
+            runtime: runtime.map(|p| p.display().to_string()),
+            path: out_path,
+        },
+        inferred,
+    ))
 }

@@ -88,3 +88,20 @@ print(view_diff(v1, v2))
 
 # The utilities a markup view uses are found as for any view.
 print(view_classes(<div class="p-4 md:grid-cols-3"><span class="text-muted" /></div>))
+
+# `class:name={cond}` adds one class while `cond` holds, to `class` or on its own; the name may
+# be any utility, brackets and slashes included.
+lit = true
+dim = false
+print(view_html(<li class="row" class:on={lit} class:bg-accent/10={lit} class:data-[state=open]:block={lit} class:off={dim} />))
+print(view_html(<li class:only={lit} />))
+
+# Inside markup, an `if` may leave out `else`: false renders nothing, as `{c && <X />}` does.
+print(view_html(<p>{if lit then <b>shown</b>}{if dim then <b>hidden</b>}</p>))
+
+# A loop needs no lambda: `it` is the element.
+print(view_html(<ol>{["x", "y"].map(<li class:first={it == "x"}>{it}</li>)}</ol>))
+
+# A component may be defined below the markup that uses it.
+print(view_html(<Below n={3} />))
+fn below(n) = <i>{n}</i>

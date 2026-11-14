@@ -393,6 +393,27 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Bool)
         }
+        // Whether this is a `helix build --app` executable (ADR 0063 D4).
+        "built_app" => {
+            if !args.is_empty() {
+                return Err(arity_err(name, 0, 0, args.len(), line, col));
+            }
+            Ok(Type::Bool)
+        }
+        // The black box (ADR 0063): an operation name and maybe one value; answers vary by op.
+        "session_tape" => {
+            if args.is_empty() || args.len() > 2 {
+                return Err(arity_err(name, 1, 2, args.len(), line, col));
+            }
+            Ok(Type::Unknown)
+        }
+        // A native window fed to the app's loop (ADR 0063): a listener, or `missing`.
+        "app_window" => {
+            if args.is_empty() || args.len() > 3 {
+                return Err(arity_err(name, 1, 3, args.len(), line, col));
+            }
+            Ok(Type::Unknown)
+        }
         // Hot reload (`helix run --watch`): which start this is, or `missing` — so `Unknown`.
         "dev_generation" => {
             if !args.is_empty() {
