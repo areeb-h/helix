@@ -78,7 +78,19 @@ fn parse_expression(
     sigs: &HashMap<String, FnSig>,
     imports: &std::collections::HashSet<String>,
 ) -> Result<(Expr, Vec<DoBinding>), HelixError> {
-    let tokens = crate::lexer::lex(src)?;
+    parse_expression_at(src, (1, 1), depth, sigs, imports)
+}
+
+/// [`parse_expression`] for source that starts at `at` (line, column) of the file: a hole in
+/// markup, whose positions are then the ones the person sees.
+fn parse_expression_at(
+    src: &str,
+    at: (usize, usize),
+    depth: usize,
+    sigs: &HashMap<String, FnSig>,
+    imports: &std::collections::HashSet<String>,
+) -> Result<(Expr, Vec<DoBinding>), HelixError> {
+    let tokens = crate::lexer::lex_at(src, at.0, at.1)?;
     let mut p = Parser {
         toks: tokens,
         pos: 0,
@@ -987,6 +999,34 @@ fn reject_do_binding_over_mut_global(
 /// also protects the type checker / compiler / tree-walker, which recurse over
 /// the same shape. Deep enough nested input would otherwise overflow the stack
 /// at parse time rather than producing a clean error.
+/// The props markup's attribute names map to directly; any other attribute is an HTML
+/// attribute (`attrs`), and `aria-*` is `aria`. A `-` in a name is `_` (`drag-axis`).
+const MARKUP_PROPS: [&str; 31] = [
+    "class", "id", "role", "key", "click", "value", "input", "change", "submit", "dismiss", "scroll", "enter", "exit",
+    "layout", "share", "dblclick", "contextmenu", "keydown", "shortcuts", "reveal", "copy", "drag", "drag_axis",
+    "drag_commit", "reorder", "resize", "handle", "reorder_group", "drop", "style", "transition",
+];
+
+/// Elements whose `value` attribute is HTML's, not a click's payload.
+const MARKUP_VALUE_TAGS: [&str; 5] = ["input", "option", "progress", "meter", "data"];
+
+/// `TodoItem` → `todo_item`: a component tag is written as React writes it, and names the
+/// Helix function as Helix writes it.
+fn snake(name: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_ascii_uppercase() {
+            if i > 0 && !out.ends_with('_') {
+                out.push('_');
+            }
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 const MAX_PARSE_DEPTH: usize = 1000;
 
 struct Parser {
@@ -3418,6 +3458,226 @@ impl Parser {
         }
     }
 
+    // --- Markup (ADR 0061). ----------------------------------------------------------------
+    //
+    // `<li class="row" click="open" value={f.id}>{f.name}</li>` is the record `ui.el` builds,
+    // `{tag: "li", props: {class: "row", click: "open", value: f.id}, children: [f.name]}`, and
+    // `<ui.Button caption="Save" msg="save"/>` is the call `ui.button(caption: "Save", msg:
+    // "save")`. Everything is decided here, so the checker and the engines see only records,
+    // arrays and calls. A child that is a string, a number, a list, `missing` or a Bool is
+    // made a node (or nothing) by the renderer, which is what lets `{items.map(row)}` and
+    // `{if busy then <Spinner/> else missing}` sit among the children.
+
+    fn markup(&mut self, n: &crate::markup::MNode) -> Result<Expr, HelixError> {
+        self.deepen()?;
+        let r = self.markup_node(n);
+        self.depth -= 1;
+        r
+    }
+
+    fn markup_node(&mut self, n: &crate::markup::MNode) -> Result<Expr, HelixError> {
+        use crate::markup::MNode;
+        match n {
+            MNode::Text(t) => Ok(Expr::Record(vec![
+                ("tag".into(), Expr::Str("#text".into())),
+                ("props".into(), Expr::Record(vec![])),
+                ("children".into(), Expr::Array(vec![])),
+                ("text".into(), Expr::Str(t.clone())),
+            ])),
+            MNode::Hole(src) => self.markup_src(src),
+            MNode::Fragment { children, .. } => Ok(Expr::Array(self.markup_children(children)?)),
+            MNode::Element { tag, attrs, children, line, col } => {
+                if tag.contains('.') || tag.starts_with(|c: char| c.is_ascii_uppercase()) {
+                    self.markup_component(tag, attrs, children, *line, *col)
+                } else {
+                    self.markup_element(tag, attrs, children, *line, *col)
+                }
+            }
+        }
+    }
+
+    fn markup_children(&mut self, kids: &[crate::markup::MNode]) -> Result<Vec<Expr>, HelixError> {
+        kids.iter().map(|k| self.markup(k)).collect()
+    }
+
+    /// A hole's expression, parsed where it was written.
+    fn markup_src(&mut self, s: &crate::markup::Src) -> Result<Expr, HelixError> {
+        let (e, binds) = parse_expression_at(&s.text, (s.line, s.col), self.depth, &self.fn_sigs, &self.imports)?;
+        self.do_bindings.extend(binds);
+        Ok(e)
+    }
+
+    fn markup_value(&mut self, a: &crate::markup::MAttr) -> Result<Expr, HelixError> {
+        use crate::markup::MValue;
+        match &a.value {
+            MValue::Flag => Ok(Expr::Bool(true)),
+            MValue::Str(s) | MValue::Expr(s) | MValue::Spread(s) => self.markup_src(s),
+        }
+    }
+
+    fn markup_element(
+        &mut self,
+        tag: &str,
+        attrs: &[crate::markup::MAttr],
+        children: &[crate::markup::MNode],
+        line: usize,
+        col: usize,
+    ) -> Result<Expr, HelixError> {
+        use crate::ast::RecordPart;
+        use crate::markup::MValue;
+        let mut parts: Vec<RecordPart> = Vec::new();
+        let mut spread = false;
+        let mut aria: Vec<(String, Expr)> = Vec::new();
+        let mut raw: Vec<(String, Expr)> = Vec::new();
+        let mut seen: Vec<&str> = Vec::new();
+        for a in attrs {
+            if let MValue::Spread(_) = a.value {
+                let e = self.markup_value(a)?;
+                parts.push(RecordPart::Spread(e));
+                spread = true;
+                continue;
+            }
+            let name = a.name.as_str();
+            if seen.contains(&name) {
+                return Err(HelixError::new(format!("`{name}` is given twice on `<{tag}>`"), a.line, a.col)
+                    .hint("give each attribute once; the second would silently win."));
+            }
+            seen.push(name);
+            let lower = name.to_ascii_lowercase();
+            if name == "className" || name == "class_name" {
+                return Err(HelixError::new("the attribute is `class`", a.line, a.col)
+                    .hint("write `class=\"…\"`: Helix markup is HTML's names, so `class` and `for`."));
+            }
+            if lower.len() > 2 && lower.starts_with("on") && lower[2..].chars().all(|c| c.is_ascii_alphabetic()) && lower != "open" {
+                let ev = &lower[2..];
+                return Err(HelixError::new(format!("`{name}` would be a script handler, which a view cannot carry"), a.line, a.col)
+                    .hint(format!("a view sends a message instead: `{ev}=\"save\"` posts {{msg: \"save\"}} to `update`.")));
+            }
+            let value = self.markup_value(a)?;
+            if let Some(rest) = name.strip_prefix("aria-") {
+                aria.push((rest.replace('-', "_"), value));
+                continue;
+            }
+            let prop = name.replace('-', "_");
+            // On a form control, `value` is the HTML value (what an input shows); anywhere
+            // else it is what a click sends, as in `ui.el`.
+            if prop == "value" && MARKUP_VALUE_TAGS.contains(&tag) {
+                raw.push(("value".into(), value));
+            } else if MARKUP_PROPS.contains(&prop.as_str()) {
+                parts.push(RecordPart::Field(prop, value));
+            } else {
+                raw.push((name.to_string(), value));
+            }
+        }
+        if !aria.is_empty() {
+            parts.push(RecordPart::Field("aria".into(), Expr::Record(aria)));
+        }
+        if !raw.is_empty() {
+            let named = raw.iter().all(|(k, _)| {
+                k.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            });
+            let attrs = if named {
+                Expr::Record(raw)
+            } else {
+                Expr::Method {
+                    recv: Box::new(Expr::Array(raw.into_iter().map(|(k, v)| Expr::Tuple(vec![Expr::Str(k), v])).collect())),
+                    name: "to_dict".into(),
+                    args: vec![],
+                    named: vec![],
+                    ufcs: None,
+                    line,
+                    col,
+                }
+            };
+            parts.push(RecordPart::Field("attrs".into(), attrs));
+        }
+        let props = if spread {
+            if !matches!(parts.first(), Some(RecordPart::Spread(_))) {
+                parts.insert(0, RecordPart::Spread(Expr::Record(vec![])));
+            }
+            Expr::RecordUpdate { parts, line, col }
+        } else {
+            Expr::Record(
+                parts
+                    .into_iter()
+                    .map(|p| match p {
+                        RecordPart::Field(k, v) => (k, v),
+                        RecordPart::Spread(v) => (String::new(), v),
+                    })
+                    .collect(),
+            )
+        };
+        let kids = self.markup_children(children)?;
+        Ok(Expr::Record(vec![
+            ("tag".into(), Expr::Str(tag.to_string())),
+            ("props".into(), props),
+            ("children".into(), Expr::Array(kids)),
+        ]))
+    }
+
+    /// `<Card title="Plan" />` calls `card(title: "Plan")` (or `Card`, if that is the name
+    /// defined); `<ui.Button …/>` calls `ui.button(…)`. Attributes are named arguments, and
+    /// children are the argument `children`.
+    fn markup_component(
+        &mut self,
+        tag: &str,
+        attrs: &[crate::markup::MAttr],
+        children: &[crate::markup::MNode],
+        line: usize,
+        col: usize,
+    ) -> Result<Expr, HelixError> {
+        use crate::markup::MValue;
+        let mut named: Vec<(String, Expr)> = Vec::new();
+        for a in attrs {
+            if let MValue::Spread(_) = a.value {
+                return Err(HelixError::new(format!("`<{tag}>` is a function, so it takes named arguments, not a spread"), a.line, a.col)
+                    .hint("pass the record as one argument (`props={p}`), or spread it onto an element."));
+            }
+            let name = a.name.replace('-', "_");
+            if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                return Err(HelixError::new(format!("`{}` is not a parameter name", a.name), a.line, a.col)
+                    .hint(format!("an attribute of `<{tag}>` is one of its parameters, by name.")));
+            }
+            if named.iter().any(|(k, _)| *k == name) {
+                return Err(HelixError::new(format!("`{name}` is given twice on `<{tag}>`"), a.line, a.col));
+            }
+            let v = self.markup_value(a)?;
+            named.push((name, v));
+        }
+        if !children.is_empty() {
+            let kids = self.markup_children(children)?;
+            if named.iter().any(|(k, _)| k == "children") {
+                return Err(HelixError::new(format!("`<{tag}>` has children and a `children` attribute"), line, col));
+            }
+            named.push(("children".into(), Expr::Array(kids)));
+        }
+        let parts: Vec<&str> = tag.split('.').collect();
+        match parts.as_slice() {
+            [module, f] => Ok(Expr::Method {
+                recv: Box::new(Expr::Ident { name: (*module).to_string(), line, col }),
+                name: snake(f),
+                args: vec![],
+                named,
+                ufcs: None,
+                line,
+                col,
+            }),
+            [f] => {
+                let name = if self.fn_sigs.contains_key(*f) { (*f).to_string() } else { snake(f) };
+                if !self.fn_sigs.contains_key(&name) && !crate::registry::is_builtin_name(&name) {
+                    return Err(HelixError::new(format!("`<{tag}>` needs a function `{name}`, defined above it"), line, col).hint(
+                        "a capitalised tag is a component: a function, defined before its first use, whose \
+                         parameters are the tag's attributes (and `children`).",
+                    ));
+                }
+                let args = self.resolve_call_args(&name, vec![], named, line, col)?;
+                Ok(Expr::Call { name, args, line, col })
+            }
+            _ => Err(HelixError::new(format!("`<{tag}>` has more than one `.`"), line, col)
+                .hint("a component tag is a function, `<Card>`, or a module's function, `<ui.Card>`.")),
+        }
+    }
+
     fn primary(&mut self) -> Result<Expr, HelixError> {
         let (l, c) = self.pos();
         match self.peek().clone() {
@@ -3432,6 +3692,10 @@ impl Parser {
             Tok::Str(s) => {
                 self.advance();
                 Ok(Expr::Str(s))
+            }
+            Tok::Markup(node) => {
+                self.advance();
+                self.markup(&node)
             }
             Tok::InterpStr(segs) => {
                 self.advance();

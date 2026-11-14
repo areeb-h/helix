@@ -27,6 +27,9 @@ pub enum Tok {
     Str(String),
     /// A string containing one or more `{expr}` interpolations.
     InterpStr(Vec<StrSeg>),
+    /// An element written as markup, `<li class="row">{x}</li>` (ADR 0061), read whole by
+    /// [`crate::markup::scan`]. The parser turns it into view data.
+    Markup(std::rc::Rc<crate::markup::MNode>),
     Ident(String),
     True,
     False,
@@ -104,6 +107,7 @@ impl Tok {
             Tok::Float(_) | Tok::BigInt(..) => "a number".into(),
             Tok::Str(_) => "a string".into(),
             Tok::InterpStr(_) => "an interpolated string".into(),
+            Tok::Markup(_) => "markup".into(),
             Tok::Ident(n) => format!("`{}`", n),
             Tok::True => "`true`".into(),
             Tok::False => "`false`".into(),

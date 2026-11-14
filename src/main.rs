@@ -74,6 +74,7 @@ mod jitexplain;
 mod json;
 mod lattice;
 mod lexer;
+mod markup;
 mod ufcs;
 mod managed;
 mod module;

@@ -238,7 +238,11 @@ fn parse(v: &Value, line: usize, col: usize) -> Result<Node, HelixError> {
         ("drop", "data-drop"),
     ] {
         if let Some(v) = get(&props, prop) {
-            attrs.push((out.to_string(), text_of(&v, line, col)?));
+            let t = if prop == "class" { class_of(&v, line, col)? } else { text_of(&v, line, col)? };
+            if prop == "class" && t.is_empty() {
+                continue;
+            }
+            attrs.push((out.to_string(), t));
         }
     }
     // `aria` is a record of ARIA states and properties: `{label: "Close", expanded: false}` is
@@ -253,13 +257,18 @@ fn parse(v: &Value, line: usize, col: usize) -> Result<Node, HelixError> {
     }
     // `style` is a record of CSS properties (`border_radius` is `border-radius`), and
     // `transition` is appended to it — the same text the Helix renderer built.
-    let base = match get(&props, "style").as_ref().and_then(pairs) {
+    let style = get(&props, "style");
+    let base = match style.as_ref().and_then(pairs) {
         Some(st) => st
             .iter()
             .map(|(k, v)| Ok(format!("{}: {}", k.replace('_', "-"), text_of(v, line, col)?)))
             .collect::<Result<Vec<_>, HelixError>>()?
             .join("; "),
-        None => String::new(),
+        // Markup's `style="--fill: 40%"`: a string is the declarations as written.
+        None => match style {
+            Some(Value::Str(s)) => s.as_str().to_string(),
+            _ => String::new(),
+        },
     };
     let styled = match get(&props, "transition") {
         Some(t) => format!("{base}; transition: {}", text_of(&t, line, col)?),
@@ -280,11 +289,46 @@ fn parse(v: &Value, line: usize, col: usize) -> Result<Node, HelixError> {
         }
     }
     guard(tag.as_str(), &mut attrs, line, col)?;
-    let kids = match get(v, "children") {
-        Some(Value::Array(a)) => a.to_values().iter().map(|c| parse(c, line, col)).collect::<Result<Vec<_>, _>>()?,
-        _ => Vec::new(),
-    };
+    let mut kids = Vec::new();
+    if let Some(Value::Array(a)) = get(v, "children") {
+        children(&a.to_values(), &mut kids, line, col)?;
+    }
     Ok(Node::El { tag: tag.as_str().to_string(), key, attrs, kids })
+}
+
+/// A node's children, as markup writes them (ADR 0061): a string or a number is text, a list
+/// is its items in place (`{items.map(row)}`), and `missing` or a Bool is nothing, so
+/// `{if busy then <spinner/> else missing}` and `{done and <Badge/>}` leave no gap.
+fn children(vs: &[Value], out: &mut Vec<Node>, line: usize, col: usize) -> Result<(), HelixError> {
+    for c in vs {
+        match c {
+            Value::Missing | Value::Bool(_) => {}
+            Value::Str(s) => out.push(Node::Text(s.as_str().to_string())),
+            Value::Int(_) | Value::Float(_) => out.push(Node::Text(shown(c, line, col)?)),
+            Value::Array(a) => children(&a.to_values(), out, line, col)?,
+            other => out.push(parse(other, line, col)?),
+        }
+    }
+    Ok(())
+}
+
+/// A `class` value: a string as it is, or a list whose strings are joined (`class={["row",
+/// if on then "on" else missing]}`), skipping `missing`, Bools and empty strings.
+fn class_of(v: &Value, line: usize, col: usize) -> Result<String, HelixError> {
+    match v {
+        Value::Array(a) => {
+            let mut parts = Vec::new();
+            for x in a.to_values().iter() {
+                match x {
+                    Value::Missing | Value::Bool(_) => {}
+                    Value::Array(_) => parts.push(class_of(x, line, col)?),
+                    other => parts.push(text_of(other, line, col)?),
+                }
+            }
+            Ok(parts.into_iter().filter(|p| !p.trim().is_empty()).collect::<Vec<_>>().join(" "))
+        }
+        other => text_of(other, line, col),
+    }
 }
 
 fn escape(s: &str) -> std::borrow::Cow<'_, str> {

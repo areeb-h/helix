@@ -1,0 +1,25 @@
+exit: 0
+--- stdout ---
+true
+<button class="btn primary" data-click="save" data-value="7" aria-label="Save the draft">Save</button>
+<input checked="" data-row-id="r1" type="checkbox" value="on">
+<a href="https://example.org" target="_blank">out</a>
+<a href="about:blank#blocked">still inert</a>
+<div data-key="k1" data-enter="fade" data-layout="true" data-drag="moved" data-drag-axis="x"></div>
+<p class="note muted" style="--fill: 40%" title="3 items">x</p>
+<p style="border-radius: 4px">y</p>
+<p>Hello,<b>you</b> and me &amp; &lt;them&gt; → &amp;nope</p>
+<ul><li>one</li><li>two</li><li>6 and text</li></ul>
+2
+<dl><dt>k</dt><dd>v</dd></dl>
+<section class="card wide" id="s1" role="group">z</section>
+<section class="panel"><h3>Today</h3><li class="todo done">Write the ADR</li><li class="todo">Ship it</li></section>
+<span class="badge accent">new</span>
+<div class="col hx-gap-2"><p>a</p><p>b</p></div>
+<tr><td class="zero">-</td><td>5</td></tr>
+true
+[1]
+under
+[{from: 1, op: "move", path: [], to: 0}]
+["md:grid-cols-3", "p-4", "text-muted"]
+--- stderr ---
