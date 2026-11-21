@@ -587,7 +587,7 @@ pub fn hash_tree(dir: &Path) -> Result<String, HelixError> {
         hasher.update((bytes.len() as u64).to_le_bytes());
         hasher.update(&bytes);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(crate::value::bytes_to_hex(&hasher.finalize()))
 }
 
 fn collect_package_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), HelixError> {
@@ -698,7 +698,7 @@ fn install_into_cache(cache: &Path, sha256: &str, bytes: &[u8]) -> Result<PathBu
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
-    format!("{:x}", h.finalize())
+    crate::value::bytes_to_hex(&h.finalize())
 }
 
 /// Without networking (`--no-default-features`) a `url` dependency cannot be fetched —
