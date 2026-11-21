@@ -2547,7 +2547,10 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     // the JIT engages (as before ranges were lazy). The receiver is now the stack top.
                     densify_lazy_top(&mut stack);
                     enum Pick {
-                        I64(*const u8, Vec<i64>),
+                        /// An i64-ABI build. The flag says whether it is a MIXED build: codegen
+                        /// gives a mixed build of a raising kernel a trailing poison pointer
+                        /// (`raising = mixed && k.raises`), and the plain build never has one.
+                        I64(*const u8, Vec<i64>, bool),
                         F64(*const u8, Vec<f64>),
                         Mixed(*const u8, Vec<i64>),
                         /// A Floats-source TYPED kernel: `f64` in, and out by the root it
@@ -2575,7 +2578,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                         // or decline.
                                         map_index_caps(k, &cap_vals, src_range, false)
                                     };
-                                    caps.map(|c| Pick::I64(p, c))
+                                    caps.map(|c| Pick::I64(p, c, false))
                                 });
                                 // The fallbacks once the Int-proven marshal declines (some
                                 // capture is a runtime `Float`): the VALUE-SCALAR builds —
@@ -2599,14 +2602,14 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                         .zip(value_scalar_caps(&cap_vals));
                                     match (vs, mi, miv) {
                                         (Some((p, c)), _, _) => Pick::Mixed(p, c),
-                                        (None, Some((p, c)), _) => Pick::I64(p, c),
-                                        (None, None, Some((p, c))) => Pick::I64(p, c),
+                                        (None, Some((p, c)), _) => Pick::I64(p, c, true),
+                                        (None, None, Some((p, c))) => Pick::I64(p, c, true),
                                         (None, None, None) => match j
                                             .map_kernel_mixed_fcaps(kidx)
                                             .zip(float_scalar_caps(&cap_vals))
                                         {
                                             Some(((p, crate::jit::NumKind::Float), c)) => Pick::Mixed(p, c),
-                                            Some(((p, crate::jit::NumKind::Int), c)) => Pick::I64(p, c),
+                                            Some(((p, crate::jit::NumKind::Int), c)) => Pick::I64(p, c, true),
                                             None => Pick::No,
                                         },
                                     }
@@ -2676,7 +2679,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         // index another iteration writes. (Such bodies are already range-only,
                         // so this cannot trigger today — but the guard is local, and the
                         // alternative is a safety argument that lives in another function.)
-                        Pick::I64(ptr, caps) => {
+                        Pick::I64(ptr, caps, mixed) => {
                             let mut arr = stack.pop().unwrap();
                             let unindexed = program.map_kernels[kidx].index_bounds.is_empty();
                             // A RAISING kernel (rounder body, poison signature) must never
@@ -2686,6 +2689,11 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             // (some element left i64 range) falls through to the bytecode
                             // loop for the exact interpreter error.
                             let raises = program.map_kernels[kidx].raises;
+                            // Only a mixed build of a raising kernel has the poison slot. The
+                            // plain build of a kernel `body_raises` flags (it counts any ordering
+                            // comparison, untyped) is a 4-argument function: calling it through the
+                            // 5-argument poison type was undefined behaviour.
+                            let poison = mixed && raises;
                             let ran = if unindexed
                                 && !raises
                                 && let Value::Array(a) = &mut arr
@@ -2706,18 +2714,13 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             } else if let Value::Array(a) = &arr
                                 && let ArrayData::Ints(v) = &**a
                             {
-                                if raises {
-                                    // SAFETY: `raises` is set. For the Int-rooted MIXED builds that
-                                    // `Pick::I64` can carry (`map_kernel_mixed_int`, `_int_value`,
-                                    // the Int-root float-caps build) codegen adds the `*mut i64`
-                                    // poison param exactly when `k.raises`, so this names their
-                                    // real signature, and `caps` has one slot per capture.
-                                    // FIXME(soundness): `Pick::I64` can also carry the PLAIN build
-                                    // (`j.map_kernel`), which never has a poison param (`raising =
-                                    // mixed && k.raises`), although `body_raises` sets `raises` for
-                                    // it too (an `if` with an ordering comparison); that case calls
-                                    // a 4-param kernel through this 5-param type. `Pick::I64`
-                                    // should record which build it holds.
+                                if poison {
+                                    // SAFETY: `poison` means this is an Int-rooted MIXED build
+                                    // (`map_kernel_mixed_int`, `_int_value`, or the Int-root
+                                    // float-caps build) of a raising kernel, and codegen gives exactly
+                                    // those the trailing `*mut i64` poison param (`raising = mixed &&
+                                    // k.raises`), so this names their real signature. `caps` has one
+                                    // slot per capture and `v` borrows `arr`, alive across the call.
                                     match unsafe {
                                         crate::jit::run_map_kernel_int_poison(ptr, v, &caps)
                                     } {
@@ -2728,9 +2731,9 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                         None => false,
                                     }
                                 } else {
-                                    // SAFETY: `!raises`, so whichever i64-ABI build `Pick::I64`
-                                    // holds has no poison slot: `fn(*const i64, *mut i64, i64,
-                                    // *const i64)`. `caps` has one slot per capture and `v` borrows
+                                    // SAFETY: `!poison`: either the PLAIN build (never a poison
+                                    // slot) or a mixed build of a kernel that does not raise, so the
+                                    // function is `fn(*const i64, *mut i64, i64, *const i64)`. `caps` has one slot per capture and `v` borrows
                                     // the receiver `arr`, alive across the call.
                                     let out =
                                         unsafe { crate::jit::run_map_kernel(ptr, v, &caps) };

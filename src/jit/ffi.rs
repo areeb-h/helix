@@ -544,9 +544,6 @@ pub unsafe fn run_map_kernel_fsrc_inplace(ptr: *const u8, buf: &mut [f64], caps:
     unsafe { run_map_inplace::<f64, i64>(ptr, buf, caps) }
 }
 
-/// Run a native filter kernel over `src`, returning the kept elements in order. SAFETY:
-/// `ptr` is a finalized `extern "C" fn(*const i64,*mut i64,i64)->i64` (kept count) from
-/// [`define_array_kernel`].
 /// The RANGE-source twin of [`run_filter_kernel`], for the same reason as
 /// [`run_map_range_chunked`]: materializing a lazy range purely to be read once doubled peak
 /// memory. Each chunk's values are generated into a reused scratch and filtered straight into
@@ -856,6 +853,10 @@ pub unsafe fn run_filter_kernel_f64(
     Some(dst)
 }
 
+/// Run an i64 filter kernel over `src`, returning the kept elements. SAFETY: the VM guarantees
+/// `ptr` is a finalized `extern "C" fn(*const i64 src, *mut i64 dst, i64 len, *const i64 caps)
+/// -> i64` from `define_array_kernel` (it returns the kept count), and `caps` has one slot per
+/// capture the kernel reads.
 pub unsafe fn run_filter_kernel(ptr: *const u8, src: &[i64], caps: &[i64]) -> Vec<i64> {
     note_native_call();
     let mut dst = vec![0i64; src.len()];

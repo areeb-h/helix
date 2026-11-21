@@ -208,7 +208,6 @@ fn run_cli() -> ExitCode {
         eprintln!("error: {msg}");
         return ExitCode::FAILURE;
     }
-    configure_thread_pool();
     // Return freed memory to the OS after ONE millisecond (mimalloc `purge_delay = 1`)
     // instead of its default ~10 ms hold — or the immediate purge this used to be. Helix
     // processes are typically short-lived (CLI, serverless), so a 10 ms hold outlives most
@@ -261,13 +260,14 @@ fn run_cli() -> ExitCode {
     // out-of-range option; 15 is `mi_option_purge_delay` and 5 `mi_option_purge_decommits` in the
     // v3 enum the crate builds (no `v2` feature), and 1 and 0 are valid values for them. It stores
     // into mimalloc's global option table without atomics, so it must not race another thread's
-    // allocator reads. FIXME(soundness): `configure_thread_pool()` above already starts rayon's
-    // workers when `HELIX_THREADS` is set; this block should run before it, while the process is
-    // single-threaded.
+    // allocator reads: it runs before `configure_thread_pool()` below starts any worker, while
+    // the process has only this thread.
     unsafe {
         libmimalloc_sys::mi_option_set(15, 1);
         libmimalloc_sys::mi_option_set(5, 0);
     }
+    // Only now may other threads exist (HELIX_THREADS starts rayon's workers).
+    configure_thread_pool();
     // The bytecode VM — the default engine — recurses on the *heap* (frames in a
     // `Vec`), so it runs on the ordinary main-thread stack. Only the tree-walker
     // recurses on the native stack, and it is now reached just as a rare
