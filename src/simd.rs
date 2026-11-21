@@ -38,6 +38,8 @@ pub fn gc_counts(bytes: &[u8]) -> (i64, i64) {
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("avx2") {
+            // SAFETY: `gc_counts_avx2` requires only AVX2, and `is_x86_feature_detected!("avx2")`
+            // just confirmed this CPU has it.
             return unsafe { gc_counts_avx2(bytes) };
         }
     }
@@ -71,6 +73,11 @@ fn gc_counts_scalar(bytes: &[u8]) -> (i64, i64) {
 #[target_feature(enable = "avx2")]
 unsafe fn base_counts_avx2(bytes: &[u8]) -> (i64, i64, i64, i64) {
     use std::arch::x86_64::*;
+    // SAFETY: this fn is `#[target_feature(enable = "avx2")]`, and its only callers (`base_counts`
+    // and the test) call it after `is_x86_feature_detected!("avx2")`, so the AVX2 intrinsics and
+    // `hsum_epu8` run on a CPU that has them. Each `_mm256_loadu_si256` reads 32 bytes at
+    // `bytes.as_ptr().add(i)` only while `i + 32 <= n == bytes.len()`, so the offset and the read
+    // stay inside `bytes`; `loadu` has no alignment requirement. The tail uses checked indexing.
     unsafe {
         let (va, vc, vg, vt) = (
             _mm256_set1_epi8(b'A' as i8),
@@ -117,6 +124,9 @@ unsafe fn base_counts_avx2(bytes: &[u8]) -> (i64, i64, i64, i64) {
 #[target_feature(enable = "avx2")]
 unsafe fn gc_counts_avx2(bytes: &[u8]) -> (i64, i64) {
     use std::arch::x86_64::*;
+    // SAFETY: as in `base_counts_avx2`: AVX2 is enabled here and its callers (`gc_counts`, the
+    // test) check `is_x86_feature_detected!("avx2")` first; every 32-byte unaligned load is at `i`
+    // with `i + 32 <= bytes.len()`, so it stays inside `bytes`.
     unsafe {
         let (va, vc, vg, vt, vs, vw) = (
             _mm256_set1_epi8(b'A' as i8),
@@ -208,7 +218,9 @@ mod tests {
             assert_eq!(gc_counts(&v), gc, "gc_counts dispatch != scalar (len {len})");
             #[cfg(target_arch = "x86_64")]
             if is_x86_feature_detected!("avx2") {
+                // SAFETY: inside `is_x86_feature_detected!("avx2")`, so the AVX2 function may run.
                 assert_eq!(unsafe { base_counts_avx2(&v) }, bc, "base_counts AVX2 != scalar (len {len})");
+                // SAFETY: inside `is_x86_feature_detected!("avx2")`, so the AVX2 function may run.
                 assert_eq!(unsafe { gc_counts_avx2(&v) }, gc, "gc_counts AVX2 != scalar (len {len})");
             }
         }

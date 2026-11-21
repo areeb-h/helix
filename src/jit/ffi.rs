@@ -40,6 +40,11 @@ pub fn reset_native_call_count() {
 /// guarantees `ptr` is a finalized `extern "C" fn(i64×n)->i64` and `args.len()==n`.
 pub unsafe fn call_i64(ptr: *const u8, args: &[i64]) -> i64 {
     note_native_call();
+    // SAFETY: the caller guarantees `ptr` is a finalized `extern "C" fn` taking exactly
+    // `args.len()` `i64`s and returning `i64`, and the match on `args.len()` picks the transmute to
+    // exactly that arity, so each arm names the code's real signature. Unstated above: when `ptr`
+    // is a mixed specialization (`MixedFn`), its last slot is a poison pointer the code writes
+    // through; the VM passes the address of a live local `i8` there.
     unsafe {
         match args.len() {
             0 => std::mem::transmute::<*const u8, extern "C" fn() -> i64>(ptr)(),
@@ -72,6 +77,9 @@ pub unsafe fn call_i64(ptr: *const u8, args: &[i64]) -> i64 {
 /// `extern "C" fn(i64,i64,i64)->i64` produced by [`define_reduce_loop`].
 pub unsafe fn call_reduce(ptr: *const u8, start: i64, end: i64, init: i64) -> i64 {
     note_native_call();
+    // SAFETY: the caller guarantees `ptr` is a finalized `extern "C" fn(i64, i64, i64) -> i64` from
+    // `define_reduce_loop` (or a range-source fused kernel of the same ABI), so this transmute
+    // names its real signature; only integers are passed, no memory.
     unsafe {
         std::mem::transmute::<*const u8, extern "C" fn(i64, i64, i64) -> i64>(ptr)(start, end, init)
     }
@@ -83,6 +91,8 @@ pub unsafe fn call_reduce(ptr: *const u8, start: i64, end: i64, init: i64) -> i6
 /// SAFETY: the VM guarantees `ptr` is a finalized `float` [`define_reduce_loop`] kernel.
 pub unsafe fn call_reduce_f64(ptr: *const u8, start: i64, end: i64, init: f64) -> f64 {
     note_native_call();
+    // SAFETY: the caller guarantees `ptr` is a finalized `float` scalar reduce loop, built as
+    // `extern "C" fn(i64, i64, f64) -> f64` with no poison or caps param; only scalars are passed.
     unsafe {
         std::mem::transmute::<*const u8, extern "C" fn(i64, i64, f64) -> f64>(ptr)(start, end, init)
     }
@@ -98,6 +108,9 @@ pub unsafe fn call_reduce_f64(ptr: *const u8, start: i64, end: i64, init: f64) -
 /// kernel and `poison` points to a writable `i8`.
 pub unsafe fn call_reduce_f64_div(ptr: *const u8, start: i64, end: i64, init: f64, poison: *mut i8) -> f64 {
     note_native_call();
+    // SAFETY: the caller guarantees `ptr` is the raising `float` scalar reduce loop, built with the
+    // poison param as `extern "C" fn(i64, i64, f64, *mut i8) -> f64`, and that `poison` points to a
+    // writable `i8`, the only memory the kernel writes.
     unsafe {
         std::mem::transmute::<*const u8, extern "C" fn(i64, i64, f64, *mut i8) -> f64>(ptr)(
             start, end, init, poison,
@@ -114,6 +127,10 @@ pub unsafe fn call_reduce_f64_div(ptr: *const u8, start: i64, end: i64, init: f6
 /// pre-check) so the kernel's unchecked `f64` loads stay in-bounds.
 pub unsafe fn call_reduce_f64_caps(ptr: *const u8, start: i64, end: i64, init: f64, caps: *const i64) -> f64 {
     note_native_call();
+    // SAFETY: the caller guarantees `ptr` is a captured `float` scalar reduce loop, `extern "C"
+    // fn(i64, i64, f64, *const i64) -> f64`, that `caps` points to at least its capture count of
+    // slots, and that every array behind a base pointer in `caps` covers the whole counter range
+    // `[start, end)`, so the kernel's unchecked `f64` loads stay in bounds.
     unsafe {
         std::mem::transmute::<*const u8, extern "C" fn(i64, i64, f64, *const i64) -> f64>(ptr)(
             start, end, init, caps,
@@ -131,6 +148,10 @@ pub unsafe fn call_reduce_f64_caps(ptr: *const u8, start: i64, end: i64, init: f
 /// pre-check) so the kernel's unchecked element loads stay in-bounds.
 pub unsafe fn call_reduce_caps(ptr: *const u8, start: i64, end: i64, init: i64, caps: *const i64) -> i64 {
     note_native_call();
+    // SAFETY: the caller guarantees `ptr` is a captured integer scalar reduce loop, `extern "C"
+    // fn(i64, i64, i64, *const i64) -> i64`, that `caps` points to at least its capture count of
+    // `i64`s, and that every array slot covers `[start, end)`, so the kernel's unchecked loads stay
+    // in bounds.
     unsafe {
         std::mem::transmute::<*const u8, extern "C" fn(i64, i64, i64, *const i64) -> i64>(ptr)(
             start, end, init, caps,
@@ -147,6 +168,9 @@ pub unsafe fn call_reduce_caps(ptr: *const u8, start: i64, end: i64, init: i64, 
 /// count of writable `i64`s.
 pub unsafe fn call_tuple_reduce(ptr: *const u8, start: i64, end: i64, acc: *mut i64) {
     note_native_call();
+    // SAFETY: the caller guarantees `ptr` is a tuple reduce kernel, `extern "C" fn(i64, i64, *mut
+    // i64)`, and that `acc` points to at least its slot count of writable `i64`s, which is all the
+    // kernel reads and writes.
     unsafe {
         std::mem::transmute::<*const u8, extern "C" fn(i64, i64, *mut i64)>(ptr)(start, end, acc)
     }
@@ -198,6 +222,12 @@ pub unsafe fn run_nested_reduce_arrays(
     // A finalized native fn pointer is `Send + Sync` (an address), so it may be shared across
     // rayon workers; capture `f` (Copy), never the raw `*const u8`. `template` is a read-only
     // `&[i64]` (Sync) shared by reference; each worker copies it into its own stack buffer.
+    // SAFETY: the caller guarantees `ptr` is a finalized captured i64 reduce kernel, `extern "C"
+    // fn(i64, i64, i64, *const i64) -> i64`, so this transmute names its real signature. Each call
+    // below passes a stack buffer of `MAX_CAPTURES` slots whose first `template.len()` (the
+    // kernel's caps arity, `<= MAX_CAPTURES`, else `copy_from_slice` panics) are `template` with
+    // `i` at `scalar_pos`; the caller keeps the array bases alive and has proved every per-`i`
+    // bound fits `i64` and every counter range lies inside its arrays.
     let f: extern "C" fn(i64, i64, i64, *const i64) -> i64 = unsafe { std::mem::transmute(ptr) };
     // Spans in i128, clamped at 0 — the VM cap-check only bounds them from ABOVE, so a reverse
     // (empty) range `os > oe` reaches here; an i64 `oe - os` would OVERFLOW (a debug-profile
@@ -266,6 +296,12 @@ where
     // A finalized native fn pointer is `Send + Sync` (it's an address), so it may be
     // shared across rayon workers; the raw data pointers are re-derived per chunk INSIDE
     // the closure from the (Sync) slices, never captured across threads.
+    // SAFETY: the caller guarantees `ptr` is a finalized `extern "C" fn(*const S, *mut D, i64,
+    // *const C)` matching `S`/`D`/`C`, so this transmute names its real signature. Every call below
+    // passes equal-length `src` and `dst` regions with that length (`par_chunks`/`par_chunks_mut`
+    // with the same `CH` over two `n`-element slices, or both whole slices), so the kernel's `len`
+    // reads and writes stay inside both; `caps` is a live slice the kernel only reads, holding the
+    // capture layout the caller built for this kernel.
     let f: extern "C" fn(*const S, *mut D, i64, *const C) = unsafe { std::mem::transmute(ptr) };
     if n >= crate::interp::PAR_MATH_THRESHOLD {
         use rayon::prelude::*;
@@ -317,6 +353,11 @@ where
         return;
     }
     note_native_call();
+    // SAFETY: the caller guarantees `ptr` is a finalized `extern "C" fn(*const T, *mut T, i64,
+    // *const C)`. Each call below passes one `&mut` chunk as both source and destination with that
+    // chunk's length, so all accesses stay inside it; the map reads `src[i]` before writing
+    // `dst[i]` and touches no other index, so the aliasing is sound (see above). `caps` is a live
+    // slice the kernel only reads.
     let f: extern "C" fn(*const T, *mut T, i64, *const C) = unsafe { std::mem::transmute(ptr) };
     if n >= crate::interp::PAR_MATH_THRESHOLD {
         use rayon::prelude::*;
@@ -334,12 +375,18 @@ where
 /// The `i64` map kernel run in place over a uniquely-owned buffer. SAFETY: as
 /// [`run_map_kernel`], with the `fn(*const i64, *mut i64, i64, *const i64)` contract.
 pub unsafe fn run_map_kernel_inplace(ptr: *const u8, buf: &mut [i64], caps: &[i64]) {
+    // SAFETY: the caller's contract (as `run_map_kernel`) is that `ptr` is a finalized `fn(*const
+    // i64, *mut i64, i64, *const i64)` map kernel and `caps` its capture layout, which is
+    // `run_map_inplace`'s requirement with `T = C = i64`; `buf` is a unique `&mut`.
     unsafe { run_map_inplace::<i64, i64>(ptr, buf, caps) }
 }
 
 /// The `f64` map kernel run in place over a uniquely-owned buffer. SAFETY: as
 /// [`run_map_kernel_f64`], with the `fn(*const f64, *mut f64, i64, *const f64)` contract.
 pub unsafe fn run_map_kernel_f64_inplace(ptr: *const u8, buf: &mut [f64], caps: &[f64]) {
+    // SAFETY: the caller guarantees `ptr` is a finalized `fn(*const f64, *mut f64, i64, *const
+    // f64)` map kernel and `caps` its captures, which is `run_map_inplace`'s requirement with `T =
+    // C = f64`; `buf` is a unique `&mut`.
     unsafe { run_map_inplace::<f64, f64>(ptr, buf, caps) }
 }
 
@@ -375,6 +422,12 @@ where
         return dst;
     }
     note_native_call();
+    // SAFETY: the caller guarantees `ptr` is a finalized `extern "C" fn(*const i64, *mut D, i64,
+    // *const C)`, so this transmute names its real signature. Each call below passes a scratch
+    // holding exactly the chunk's `n` (or `d.len()`) generated values and a `dst` region with at
+    // least that many slots (`dst[base..]` has `len - base >= n`; a `par_chunks_mut` chunk is `d`
+    // itself); the scratch lives until after the call, and `caps` is a live slice the kernel only
+    // reads.
     let f: extern "C" fn(*const i64, *mut D, i64, *const C) = unsafe { std::mem::transmute(ptr) };
     const CH: usize = 1 << 14;
     let at = |j: usize| -> i64 { (start as i128 + step as i128 * j as i128) as i64 };
@@ -405,6 +458,9 @@ pub unsafe fn run_map_kernel_range(
     len: usize,
     caps: &[i64],
 ) -> Vec<i64> {
+    // SAFETY: the caller guarantees (as for `run_map_kernel`) that `ptr` is a finalized `fn(*const
+    // i64, *mut i64, i64, *const i64)` map kernel without a poison slot and `caps` its capture
+    // layout, which is `run_map_range_chunked`'s contract with `D = C = i64`.
     unsafe { run_map_range_chunked::<i64, i64>(ptr, start, step, len, caps) }
 }
 
@@ -416,6 +472,9 @@ pub unsafe fn run_map_kernel_mixed_range(
     len: usize,
     caps: &[i64],
 ) -> Vec<f64> {
+    // SAFETY: the caller guarantees `ptr` is a finalized mixed map kernel `fn(*const i64, *mut f64,
+    // i64, *const i64)` without a poison slot and `caps` its capture layout,
+    // `run_map_range_chunked`'s contract with `D = f64, C = i64`.
     unsafe { run_map_range_chunked::<f64, i64>(ptr, start, step, len, caps) }
 }
 
@@ -423,6 +482,9 @@ pub unsafe fn run_map_kernel_mixed_range(
 /// threshold — see [`run_map_chunked`]. SAFETY: `ptr` is a finalized
 /// `extern "C" fn(*const i64,*mut i64,i64,*const i64)` from [`define_array_kernel`].
 pub unsafe fn run_map_kernel(ptr: *const u8, src: &[i64], caps: &[i64]) -> Vec<i64> {
+    // SAFETY: the caller guarantees `ptr` is a finalized `fn(*const i64, *mut i64, i64, *const
+    // i64)` map kernel and `caps` its capture layout: `run_map_chunked`'s contract with `S = D = C
+    // = i64`.
     unsafe { run_map_chunked::<i64, i64, i64>(ptr, src, caps) }
 }
 
@@ -431,6 +493,9 @@ pub unsafe fn run_map_kernel(ptr: *const u8, src: &[i64], caps: &[i64]) -> Vec<i
 /// byte-identical to sequential (see [`run_map_chunked`]). SAFETY: as [`run_map_kernel`],
 /// with an `fn(*const f64, *mut f64, i64, *const f64)` contract.
 pub unsafe fn run_map_kernel_f64(ptr: *const u8, src: &[f64], caps: &[f64]) -> Vec<f64> {
+    // SAFETY: the caller guarantees `ptr` is a finalized `fn(*const f64, *mut f64, i64, *const
+    // f64)` map kernel and `caps` its captures: `run_map_chunked`'s contract with `S = D = C =
+    // f64`.
     unsafe { run_map_chunked::<f64, f64, f64>(ptr, src, caps) }
 }
 
@@ -442,6 +507,10 @@ pub unsafe fn run_map_kernel_f64(ptr: *const u8, src: &[f64], caps: &[f64]) -> V
 /// `fn(*const i64, *mut f64, i64, *const i64)` contract; the caller keeps the arrays
 /// behind any base pointers alive across the call.
 pub unsafe fn run_map_kernel_mixed(ptr: *const u8, src: &[i64], caps: &[i64]) -> Vec<f64> {
+    // SAFETY: the caller guarantees `ptr` is a finalized `fn(*const i64, *mut f64, i64, *const
+    // i64)` mixed kernel, `caps` its capture layout, and that the arrays behind any base pointers
+    // in `caps` stay alive (and were bounds-checked): `run_map_chunked`'s contract with `S = i64, D
+    // = f64, C = i64`.
     unsafe { run_map_chunked::<i64, f64, i64>(ptr, src, caps) }
 }
 
@@ -450,12 +519,18 @@ pub unsafe fn run_map_kernel_mixed(ptr: *const u8, src: &[i64], caps: &[i64]) ->
 /// bits for the value-scalar build). SAFETY: as [`run_map_kernel`], with an
 /// `fn(*const f64, *mut f64, i64, *const i64)` contract.
 pub unsafe fn run_map_kernel_fsrc_f64(ptr: *const u8, src: &[f64], caps: &[i64]) -> Vec<f64> {
+    // SAFETY: the caller guarantees `ptr` is a finalized `fn(*const f64, *mut f64, i64, *const
+    // i64)` Floats-source kernel and `caps` its capture layout: `run_map_chunked`'s contract with
+    // `S = D = f64, C = i64`.
     unsafe { run_map_chunked::<f64, f64, i64>(ptr, src, caps) }
 }
 
 /// SAFETY: as [`run_map_kernel_fsrc_f64`], with an `fn(*const f64, *mut i64, i64, *const i64)`
 /// contract (an Int root: `to_int`, `sign`, the rounders).
 pub unsafe fn run_map_kernel_fsrc_int(ptr: *const u8, src: &[f64], caps: &[i64]) -> Vec<i64> {
+    // SAFETY: the caller guarantees `ptr` is a finalized `fn(*const f64, *mut i64, i64, *const
+    // i64)` Floats-source Int-root kernel and `caps` its capture layout: `run_map_chunked`'s
+    // contract with `S = f64, D = C = i64`.
     unsafe { run_map_chunked::<f64, i64, i64>(ptr, src, caps) }
 }
 
@@ -463,6 +538,9 @@ pub unsafe fn run_map_kernel_fsrc_int(ptr: *const u8, src: &[f64], caps: &[i64])
 /// non-raising body only, exactly the cases [`run_map_kernel_f64_inplace`] covers. SAFETY: as
 /// that, with `i64` captures.
 pub unsafe fn run_map_kernel_fsrc_inplace(ptr: *const u8, buf: &mut [f64], caps: &[i64]) {
+    // SAFETY: the caller guarantees `ptr` is a finalized non-raising Float-root Floats-source
+    // kernel `fn(*const f64, *mut f64, i64, *const i64)` and `caps` its capture layout:
+    // `run_map_inplace`'s contract with `T = f64, C = i64`; `buf` is a unique `&mut`.
     unsafe { run_map_inplace::<f64, i64>(ptr, buf, caps) }
 }
 
@@ -492,6 +570,11 @@ pub unsafe fn run_filter_kernel_range(
     if len == 0 {
         return dst;
     }
+    // SAFETY: the caller guarantees `ptr` is a finalized filter kernel `extern "C" fn(*const i64,
+    // *mut i64, i64, *const i64) -> i64` (the kept count), so this transmute names its real
+    // signature. Each call below passes a scratch of exactly `n` generated values and
+    // `dst[kept_total..]`, which has `len - kept_total >= len - base >= n` slots because a chunk
+    // keeps at most its own `n` elements; `caps` is a live slice the kernel only reads.
     let f: extern "C" fn(*const i64, *mut i64, i64, *const i64) -> i64 =
         unsafe { std::mem::transmute(ptr) };
     const CH: usize = 1 << 14;
@@ -534,6 +617,11 @@ unsafe fn run_map_poison<S: Sync, D: Copy + Default + Send>(
     if n == 0 {
         return Some(dst);
     }
+    // SAFETY: the caller guarantees `ptr` is a finalized raising map kernel `extern "C" fn(*const
+    // S, *mut D, i64, *const i64, *mut i64)` matching `S`/`D`, so this transmute names its real
+    // signature. Each call below passes equal-length `src`/`dst` regions with that length (same
+    // `CH` chunking over two `n`-element slices, or both whole), `caps` the caller's capture layout
+    // (only read), and `&mut p`, a live local poison cell.
     let f: extern "C" fn(*const S, *mut D, i64, *const i64, *mut i64) =
         unsafe { std::mem::transmute(ptr) };
     // PARALLEL past the threshold, with a poison cell PER CHUNK reduced by `|`. Sound for
@@ -568,6 +656,9 @@ pub unsafe fn run_map_kernel_int_poison(
     src: &[i64],
     caps: &[i64],
 ) -> Option<Vec<i64>> {
+    // SAFETY: the caller guarantees `ptr` is a raising `fn(*const i64, *mut i64, i64, *const i64,
+    // *mut i64)` kernel and `caps` its capture layout: `run_map_poison`'s contract with `S = D =
+    // i64`.
     unsafe { run_map_poison::<i64, i64>(ptr, src, caps) }
 }
 
@@ -578,6 +669,9 @@ pub unsafe fn run_map_kernel_mixed_poison(
     src: &[i64],
     caps: &[i64],
 ) -> Option<Vec<f64>> {
+    // SAFETY: the caller guarantees `ptr` is a raising mixed kernel `fn(*const i64, *mut f64, i64,
+    // *const i64, *mut i64)` and `caps` its capture layout: `run_map_poison`'s contract with `S =
+    // i64, D = f64`.
     unsafe { run_map_poison::<i64, f64>(ptr, src, caps) }
 }
 
@@ -588,6 +682,9 @@ pub unsafe fn run_map_kernel_fsrc_f64_poison(
     src: &[f64],
     caps: &[i64],
 ) -> Option<Vec<f64>> {
+    // SAFETY: the caller guarantees `ptr` is a raising Floats-source kernel `fn(*const f64, *mut
+    // f64, i64, *const i64, *mut i64)` and `caps` its capture layout: `run_map_poison`'s contract
+    // with `S = D = f64`.
     unsafe { run_map_poison::<f64, f64>(ptr, src, caps) }
 }
 
@@ -597,6 +694,9 @@ pub unsafe fn run_map_kernel_fsrc_int_poison(
     src: &[f64],
     caps: &[i64],
 ) -> Option<Vec<i64>> {
+    // SAFETY: the caller guarantees `ptr` is a raising Floats-source Int-root kernel `fn(*const
+    // f64, *mut i64, i64, *const i64, *mut i64)` and `caps` its capture layout: `run_map_poison`'s
+    // contract with `S = f64, D = i64`.
     unsafe { run_map_poison::<f64, i64>(ptr, src, caps) }
 }
 
@@ -619,6 +719,11 @@ unsafe fn run_map_range_poison<D: Copy + Default + Send>(
     if len == 0 {
         return Some(dst);
     }
+    // SAFETY: the caller guarantees `ptr` is a finalized raising map kernel `extern "C" fn(*const
+    // i64, *mut D, i64, *const i64, *mut i64)`, so this transmute names its real signature. Each
+    // call below passes a scratch of exactly the chunk's `n` (or `d.len()`) values, a `dst` region
+    // with at least that many slots (`dst[base..]` has `len - base >= n`), `caps` (only read), and
+    // `&mut p`, a live local poison cell.
     let f: extern "C" fn(*const i64, *mut D, i64, *const i64, *mut i64) =
         unsafe { std::mem::transmute(ptr) };
     const CH: usize = 1 << 14;
@@ -665,6 +770,9 @@ pub unsafe fn run_map_kernel_range_int_poison(
     len: usize,
     caps: &[i64],
 ) -> Option<Vec<i64>> {
+    // SAFETY: the caller guarantees `ptr` is a raising i64-ABI kernel `fn(*const i64, *mut i64,
+    // i64, *const i64, *mut i64)` and `caps` its capture layout: `run_map_range_poison`'s contract
+    // with `D = i64`.
     unsafe { run_map_range_poison::<i64>(ptr, start, step, len, caps) }
 }
 
@@ -676,6 +784,9 @@ pub unsafe fn run_map_kernel_range_mixed_poison(
     len: usize,
     caps: &[i64],
 ) -> Option<Vec<f64>> {
+    // SAFETY: the caller guarantees `ptr` is a raising mixed kernel `fn(*const i64, *mut f64, i64,
+    // *const i64, *mut i64)` and `caps` its capture layout: `run_map_range_poison`'s contract with
+    // `D = f64`.
     unsafe { run_map_range_poison::<f64>(ptr, start, step, len, caps) }
 }
 
@@ -700,6 +811,10 @@ pub unsafe fn run_scan_kernel_range(
     if n == 0 {
         return dst;
     }
+    // SAFETY: the caller guarantees `ptr` is a finalized scan kernel from `define_scan_loop`,
+    // `extern "C" fn(i64, i64, i64, *mut i64, *const i64)`, so this transmute names its real
+    // signature. The call below passes `dst`, allocated here with exactly the `end - start` slots
+    // the kernel writes (one per counter; `n > 0` here), and `caps`, a live slice it only reads.
     let f: extern "C" fn(i64, i64, i64, *mut i64, *const i64) =
         unsafe { std::mem::transmute(ptr) };
     f(start, end, init, dst.as_mut_ptr(), caps.as_ptr());
@@ -727,6 +842,10 @@ pub unsafe fn run_filter_kernel_f64(
     if src.is_empty() {
         return Some(dst);
     }
+    // SAFETY: the caller guarantees `ptr` is a finalized f64 filter kernel `extern "C" fn(*const
+    // f64, *mut f64, i64, *const f64) -> i64`, so this transmute names its real signature. The call
+    // below passes `src` with its own length and `dst`, allocated here with `src.len()` slots, the
+    // most a filter can keep; `caps` is only read.
     let f: extern "C" fn(*const f64, *mut f64, i64, *const f64) -> i64 =
         unsafe { std::mem::transmute(ptr) };
     let kept = f(src.as_ptr(), dst.as_mut_ptr(), src.len() as i64, caps.as_ptr());
@@ -743,6 +862,11 @@ pub unsafe fn run_filter_kernel(ptr: *const u8, src: &[i64], caps: &[i64]) -> Ve
     if src.is_empty() {
         return dst;
     }
+    // SAFETY: the caller guarantees `ptr` is a finalized i64 filter kernel from
+    // `define_array_kernel`, `extern "C" fn(*const i64, *mut i64, i64, *const i64) -> i64` (the
+    // contract written on `run_filter_kernel_range`; this fn has no doc of its own), so this
+    // transmute names its real signature. The call below passes `src` with its own length and
+    // `dst`, allocated with `src.len()` slots, the most a filter can keep; `caps` is only read.
     let f: extern "C" fn(*const i64, *mut i64, i64, *const i64) -> i64 =
         unsafe { std::mem::transmute(ptr) };
     let kept = f(src.as_ptr(), dst.as_mut_ptr(), src.len() as i64, caps.as_ptr());
@@ -759,6 +883,10 @@ pub unsafe fn run_fused_collect(ptr: *const u8, src: &[i64]) -> Vec<i64> {
     if src.is_empty() {
         return dst;
     }
+    // SAFETY: the caller guarantees `ptr` is a fused `Collect` kernel, `extern "C" fn(*const i64,
+    // *mut i64, i64) -> i64`, so this transmute names its real signature. The call passes `src`
+    // with its own length and `dst`, allocated with `src.len()` slots, the most the pipeline can
+    // keep.
     let f: extern "C" fn(*const i64, *mut i64, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
     let kept = f(src.as_ptr(), dst.as_mut_ptr(), src.len() as i64);
     dst.truncate(kept as usize);
@@ -769,6 +897,9 @@ pub unsafe fn run_fused_collect(ptr: *const u8, src: &[i64]) -> Vec<i64> {
 /// [`run_fused_collect`].
 pub unsafe fn run_fused_reduce(ptr: *const u8, src: &[i64], init: i64) -> i64 {
     note_native_call();
+    // SAFETY: the caller guarantees `ptr` is a fused scalar `Reduce` kernel, `extern "C" fn(*const
+    // i64, i64, i64) -> i64`; the call passes `src` with its own length, which the kernel only
+    // reads.
     let f: extern "C" fn(*const i64, i64, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
     f(src.as_ptr(), src.len() as i64, init)
 }
@@ -780,6 +911,9 @@ pub unsafe fn run_fused_reduce(ptr: *const u8, src: &[i64], init: i64) -> i64 {
 /// init check.
 pub unsafe fn run_fused_reduce_f64(ptr: *const u8, src: &[f64], init: f64) -> f64 {
     note_native_call();
+    // SAFETY: the caller guarantees `ptr` is a `float`-flagged fused scalar reduce, `extern "C"
+    // fn(*const f64, i64, f64) -> f64`; the call passes `src` with its own length, which the kernel
+    // only reads.
     let f: extern "C" fn(*const f64, i64, f64) -> f64 = unsafe { std::mem::transmute(ptr) };
     f(src.as_ptr(), src.len() as i64, init)
 }
@@ -792,6 +926,9 @@ pub unsafe fn run_fused_reduce_f64(ptr: *const u8, src: &[f64], init: f64) -> f6
 /// writable `i64`s.
 pub unsafe fn run_fused_tuple_reduce(ptr: *const u8, src: &[i64], acc: *mut i64) {
     note_native_call();
+    // SAFETY: the caller guarantees `ptr` is a fused tuple reduce, `extern "C" fn(*const i64, i64,
+    // *mut i64)`, and that `acc` points to its slot count of writable `i64`s; the call passes `src`
+    // with its own length.
     let f: extern "C" fn(*const i64, i64, *mut i64) = unsafe { std::mem::transmute(ptr) };
     f(src.as_ptr(), src.len() as i64, acc)
 }
@@ -803,6 +940,9 @@ pub unsafe fn run_fused_tuple_reduce(ptr: *const u8, src: &[i64], acc: *mut i64)
 /// element pointer is `*const f64` and `ptr` is a `float`-flagged tuple kernel.
 pub unsafe fn run_fused_tuple_reduce_f64(ptr: *const u8, src: &[f64], acc: *mut i64) {
     note_native_call();
+    // SAFETY: the caller guarantees `ptr` is a `float`-flagged fused tuple reduce, `extern "C"
+    // fn(*const f64, i64, *mut i64)`, and that `acc` points to its slot count of writable 8-byte
+    // slots; the call passes `src` with its own length.
     let f: extern "C" fn(*const f64, i64, *mut i64) = unsafe { std::mem::transmute(ptr) };
     f(src.as_ptr(), src.len() as i64, acc)
 }
@@ -811,6 +951,8 @@ pub unsafe fn run_fused_tuple_reduce_f64(ptr: *const u8, src: &[f64], acc: *mut 
 /// [`run_fused_collect`].
 pub unsafe fn run_fused_count(ptr: *const u8, src: &[i64]) -> i64 {
     note_native_call();
+    // SAFETY: the caller guarantees `ptr` is a fused `Count` kernel, `extern "C" fn(*const i64,
+    // i64, i64) -> i64`; the call passes `src` with its own length.
     let f: extern "C" fn(*const i64, i64, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
     f(src.as_ptr(), src.len() as i64, 0)
 }
@@ -819,6 +961,9 @@ pub unsafe fn run_fused_count(ptr: *const u8, src: &[i64]) -> i64 {
 /// `extern "C" fn(f64×n)->f64` contract.
 pub unsafe fn call_f64(ptr: *const u8, args: &[f64]) -> f64 {
     note_native_call();
+    // SAFETY: the caller guarantees `ptr` is a finalized `extern "C" fn(f64 x n) -> f64` with `n ==
+    // args.len()`, and the match on `args.len()` picks the transmute to exactly that arity, so each
+    // arm names the code's real signature.
     unsafe {
         match args.len() {
             0 => std::mem::transmute::<*const u8, extern "C" fn() -> f64>(ptr)(),
@@ -934,6 +1079,9 @@ pub unsafe fn run_search_kernel(ptr: *const u8, src: &[i64], caps: &[i64], want:
     if src.is_empty() {
         return false;
     }
+    // SAFETY: the caller guarantees `ptr` is a finalized Int search kernel, `extern "C" fn(*const
+    // i64, i64, *const i64, i64) -> i64`; the call passes non-empty `src` with its own length and
+    // `caps`, which the kernel only reads.
     let f: extern "C" fn(*const i64, i64, *const i64, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
     f(src.as_ptr(), src.len() as i64, caps.as_ptr(), want as i64) < src.len() as i64
 }
@@ -955,6 +1103,9 @@ pub unsafe fn run_search_kernel_range(
     if len == 0 {
         return false;
     }
+    // SAFETY: as `run_search_kernel`: `ptr` is `extern "C" fn(*const i64, i64, *const i64, i64) ->
+    // i64`; each call below passes a scratch of exactly `n` generated values with that length, and
+    // `caps`, only read.
     let f: extern "C" fn(*const i64, i64, *const i64, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
     const CH: usize = 1 << 14;
     let at = |j: usize| -> i64 { (start as i128 + step as i128 * j as i128) as i64 };
@@ -981,6 +1132,9 @@ pub unsafe fn run_search_kernel_f64(ptr: *const u8, src: &[f64], caps: &[f64], w
     if src.is_empty() {
         return Some(false);
     }
+    // SAFETY: the caller guarantees `ptr` is a finalized Float search kernel, `extern "C" fn(*const
+    // f64, i64, *const f64, i64) -> i64`; the call passes non-empty `src` with its own length and
+    // `caps`, which the kernel only reads.
     let f: extern "C" fn(*const f64, i64, *const f64, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
     let r = f(src.as_ptr(), src.len() as i64, caps.as_ptr(), want as i64);
     if r < 0 { None } else { Some(r < src.len() as i64) }
@@ -993,6 +1147,9 @@ pub unsafe fn run_search_kernel_f64(ptr: *const u8, src: &[f64], caps: &[f64], w
 /// guaranteed by the VM's `Ints` source + `Float` init check.
 pub unsafe fn run_fused_reduce_f64_from_ints(ptr: *const u8, src: &[i64], init: f64) -> f64 {
     note_native_call();
+    // SAFETY: the caller guarantees `ptr` is the Int-source fused f64 fold, `extern "C" fn(*const
+    // i64, i64, f64) -> f64`; the call passes `src` with its own length, which the kernel only
+    // reads.
     let f: extern "C" fn(*const i64, i64, f64) -> f64 = unsafe { std::mem::transmute(ptr) };
     f(src.as_ptr(), src.len() as i64, init)
 }

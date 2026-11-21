@@ -257,6 +257,13 @@ fn run_cli() -> ExitCode {
     // unchanged. The cost is ~4 MB on small programs, which is not a trade, it is a rounding
     // error.
     #[cfg(feature = "mimalloc")]
+    // SAFETY: `mi_option_set` takes two plain integers and returns without writing for an
+    // out-of-range option; 15 is `mi_option_purge_delay` and 5 `mi_option_purge_decommits` in the
+    // v3 enum the crate builds (no `v2` feature), and 1 and 0 are valid values for them. It stores
+    // into mimalloc's global option table without atomics, so it must not race another thread's
+    // allocator reads. FIXME(soundness): `configure_thread_pool()` above already starts rayon's
+    // workers when `HELIX_THREADS` is set; this block should run before it, while the process is
+    // single-threaded.
     unsafe {
         libmimalloc_sys::mi_option_set(15, 1);
         libmimalloc_sys::mi_option_set(5, 0);
@@ -306,6 +313,10 @@ fn install_robustness_hooks() {
     // EPIPE and the stdlib panics. Restoring the default action terminates the process
     // cleanly via the signal instead — the normal behaviour of any Unix tool.
     #[cfg(unix)]
+    // SAFETY: `SIGPIPE` is a valid signal number and `SIG_DFL` is the default disposition, not a
+    // Rust handler, so no code of ours ever runs in signal context; this is the first thing
+    // `run_cli` does, before any thread exists, and the ignored return value only reports the
+    // previous disposition.
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }

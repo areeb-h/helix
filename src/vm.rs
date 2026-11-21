@@ -489,6 +489,14 @@ fn try_map_range(
             map_index_caps(k, cap_vals, Some(rng), false)
         };
         if let Some(c) = caps {
+            // SAFETY: `p` is `j.map_kernel(kidx)`, the finalized PLAIN i64 map kernel built from
+            // `k`: `fn(*const i64, *mut i64, i64, *const i64)` with no poison slot (codegen adds
+            // one only for a mixed root), which is what `run_map_kernel_range` calls. `c` has
+            // exactly one slot per `k.captures` entry (both marshals map `cap_vals`, which the
+            // caller split off by that count, or decline), and any array base in it was
+            // bounds-checked over this range by `map_index_caps`. `cap_vals` is borrowed, so the
+            // `Rc`s behind those bases outlive the call, and `j` borrows the `Jit` that owns the
+            // code.
             let out = unsafe { crate::jit::run_map_kernel_range(p, start, step, len, &c) };
             return Some(Value::int_array(out));
         }
@@ -503,11 +511,18 @@ fn try_map_range(
             // materializing path, whose poison wrapper declines again into the bytecode
             // loop — which re-runs and raises the exact interpreter error.
             if k.raises {
+                // SAFETY: `p` is the mixed (Float-root) build of kernel `kidx`, and codegen gives a
+                // mixed build the `*mut i64` poison param exactly when `k.raises`, so here it is
+                // `fn(*const i64, *mut f64, i64, *const i64, *mut i64)`, the poison range runner's
+                // signature. `c` is `int_scalar_caps(cap_vals)`: one `i64` per capture, scalars
+                // only (unindexed).
                 let out = unsafe {
                     crate::jit::run_map_kernel_range_mixed_poison(p, start, step, len, &c)
                 };
                 return out.map(Value::float_array);
             }
+            // SAFETY: as above with `k.raises` false: the mixed build has no poison slot, so it is
+            // `fn(*const i64, *mut f64, i64, *const i64)`; `c` holds one scalar per capture.
             let out = unsafe { crate::jit::run_map_kernel_mixed_range(p, start, step, len, &c) };
             return Some(Value::float_array(out));
         }
@@ -517,11 +532,18 @@ fn try_map_range(
             // An indexed body can now RAISE too (division since Stage 3x): same poison
             // routing as the unindexed arm.
             if k.raises {
+                // SAFETY: the mixed build of kernel `kidx` with `k.raises` set, so it takes the
+                // poison param, as above. `c` comes from `map_index_caps(.., Some(rng), true)`: one
+                // slot per capture, `f64`-array bases only for `Floats` arrays, and every
+                // `index_bounds` obligation discharged for this range's elements; `cap_vals`
+                // (borrowed) keeps those arrays alive.
                 let out = unsafe {
                     crate::jit::run_map_kernel_range_mixed_poison(p, start, step, len, &c)
                 };
                 return out.map(Value::float_array);
             }
+            // SAFETY: as above without `k.raises`: the 4-param mixed signature, with the same
+            // bounds-checked `f64`-array caps kept alive by the borrowed `cap_vals`.
             let out = unsafe { crate::jit::run_map_kernel_mixed_range(p, start, step, len, &c) };
             return Some(Value::float_array(out));
         }
@@ -534,10 +556,15 @@ fn try_map_range(
         && let Some(c) = value_scalar_caps(cap_vals)
     {
         if k.raises {
+            // SAFETY: `p` is the value-scalar mixed build ("mapmv"), the mixed ABI, built with the
+            // poison param because `k.raises` (re-derived and matched in codegen); `c` is
+            // `value_scalar_caps`: one f64-bit slot per capture, scalars only (unindexed).
             let out =
                 unsafe { crate::jit::run_map_kernel_range_mixed_poison(p, start, step, len, &c) };
             return out.map(Value::float_array);
         }
+        // SAFETY: as above, `k.raises` false, so the 4-param mixed ABI; one f64-bit scalar slot per
+        // capture.
         let out = unsafe { crate::jit::run_map_kernel_mixed_range(p, start, step, len, &c) };
         return Some(Value::float_array(out));
     }
@@ -549,10 +576,15 @@ fn try_map_range(
         && let Some(c) = int_scalar_caps(cap_vals)
     {
         if k.raises {
+            // SAFETY: `p` is the Int-rooted mixed build ("mapmi"), the i64 ABI plus the poison
+            // param because `k.raises` (mixed root), matching `run_map_kernel_range_int_poison`;
+            // `c` is `int_scalar_caps`: one `i64` per capture, scalars only.
             let out =
                 unsafe { crate::jit::run_map_kernel_range_int_poison(p, start, step, len, &c) };
             return out.map(Value::int_array);
         }
+        // SAFETY: as above, `k.raises` false: `fn(*const i64, *mut i64, i64, *const i64)`, the
+        // plain i64 range runner's signature; one scalar slot per capture.
         let out = unsafe { crate::jit::run_map_kernel_range(p, start, step, len, &c) };
         return Some(Value::int_array(out));
     }
@@ -562,10 +594,14 @@ fn try_map_range(
         && let Some(c) = value_scalar_caps(cap_vals)
     {
         if k.raises {
+            // SAFETY: `p` is the Int-rooted value-scalar build ("mapmiv"): the i64 ABI with the
+            // poison param since `k.raises`; `c` is one f64-bit scalar slot per capture.
             let out =
                 unsafe { crate::jit::run_map_kernel_range_int_poison(p, start, step, len, &c) };
             return out.map(Value::int_array);
         }
+        // SAFETY: as above, `k.raises` false: the 4-param i64 ABI; one f64-bit scalar slot per
+        // capture.
         let out = unsafe { crate::jit::run_map_kernel_range(p, start, step, len, &c) };
         return Some(Value::int_array(out));
     }
@@ -579,20 +615,27 @@ fn try_map_range(
         use crate::jit::NumKind;
         return match (root, k.raises) {
             (NumKind::Float, true) => {
+                // SAFETY: `p` is the Float-root float-caps build ("mapmF"), the mixed ABI with the
+                // poison param since `k.raises`; `c` is `float_scalar_caps`: one f64-bit slot per
+                // capture, scalars only (unindexed).
                 let out = unsafe {
                     crate::jit::run_map_kernel_range_mixed_poison(p, start, step, len, &c)
                 };
                 out.map(Value::float_array)
             }
+            // SAFETY: as above, `k.raises` false: the 4-param mixed ABI.
             (NumKind::Float, false) => Some(Value::float_array(unsafe {
                 crate::jit::run_map_kernel_mixed_range(p, start, step, len, &c)
             })),
             (NumKind::Int, true) => {
+                // SAFETY: `p` is the Int-root float-caps build ("mapmFi"), the i64 ABI with the
+                // poison param since `k.raises`; `c` holds one f64-bit scalar slot per capture.
                 let out = unsafe {
                     crate::jit::run_map_kernel_range_int_poison(p, start, step, len, &c)
                 };
                 out.map(Value::int_array)
             }
+            // SAFETY: as above, `k.raises` false: the 4-param i64 ABI.
             (NumKind::Int, false) => Some(Value::int_array(unsafe {
                 crate::jit::run_map_kernel_range(p, start, step, len, &c)
             })),
@@ -927,6 +970,10 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             .map(|v| if let Value::Int(n) = v { *n } else { 0 })
                             .collect();
                         stack.truncate(start);
+                        // SAFETY: `ptr` is `nf.i64_ptr`, this function's finalized `extern "C"
+                        // fn(i64 x arity) -> i64` specialization (from the `Jit` that `jit` borrows
+                        // for the whole run, so the code stays mapped), and `iargs` holds exactly
+                        // `nargs == nf.arity` values, checked above.
                         let r = unsafe { crate::jit::call_i64(ptr, &iargs) };
                         stack.push(Value::Int(r));
                         return Ok(());
@@ -934,6 +981,8 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     if all_float && let Some(ptr) = nf.f64_ptr {
                         let fargs: Vec<f64> = tail.iter().map(|v| v.as_f64().unwrap()).collect();
                         stack.truncate(start);
+                        // SAFETY: `ptr` is `nf.f64_ptr`, the `extern "C" fn(f64 x arity) -> f64`
+                        // specialization, and `fargs` holds exactly `nargs == nf.arity` values.
                         let r = unsafe { crate::jit::call_f64(ptr, &fargs) };
                         stack.push(Value::Float(r));
                         return Ok(());
@@ -968,6 +1017,11 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             .collect();
                         let mut poison: i8 = 0;
                         iargs.push(&raw mut poison as i64);
+                        // SAFETY: `m.ptr` is the mixed specialization: `arity` `i64` slots (each
+                        // argument's runtime type matched `float_mask` above, Floats passed as
+                        // bits) plus the trailing `*mut i8` poison slot (`MixedFn`), so `iargs` has
+                        // `arity + 1` entries; the last is the address of the local `poison`, live
+                        // and writable for the whole call.
                         let r = unsafe { crate::jit::call_i64(m.ptr, &iargs) };
                         if poison == 0 {
                             stack.truncate(start);
@@ -1009,6 +1063,11 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         });
                         if all_int_caps {
                             stack.truncate(start);
+                            // SAFETY: `ptr` is the capture-taking tail loop for this function,
+                            // compiled with its `arity` params followed by one `i64` per captured
+                            // global in `capture_loop`'s order; `iargs` holds the `nargs == arity`
+                            // Int arguments then one Int per slot in that same order (any non-Int
+                            // global set `all_int_caps` false and skipped the call).
                             let r = unsafe { crate::jit::call_i64(*ptr, &iargs) };
                             stack.push(Value::Int(r));
                             return Ok(());
@@ -1471,9 +1530,13 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             .iter()
                             .map(|v| if let Value::Int(n) = v { *n } else { 0 })
                             .collect();
+                        // SAFETY: as in `CallFn`: `ptr` is the `i64 x arity` specialization and
+                        // `iargs` has `nargs == nf.arity` values.
                         Some(Value::Int(unsafe { crate::jit::call_i64(ptr, &iargs) }))
                     } else if all_float && let Some(ptr) = nf.f64_ptr {
                         let fargs: Vec<f64> = tail.iter().map(|v| v.as_f64().unwrap()).collect();
+                        // SAFETY: as in `CallFn`: `ptr` is the `f64 x arity` specialization and
+                        // `fargs` has `nargs == nf.arity` values.
                         Some(Value::Float(unsafe { crate::jit::call_f64(ptr, &fargs) }))
                     } else if let Some(m) = nf.mixed
                         && tail.iter().enumerate().all(|(j, v)| {
@@ -1497,6 +1560,9 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         // call on bytecode and raises the interpreter's exact error.
                         let mut poison: i8 = 0;
                         iargs.push(&raw mut poison as i64);
+                        // SAFETY: as in `CallFn`: `m.ptr` is the mixed specialization, `iargs` its
+                        // `arity` bit-pattern slots (types matched to `float_mask` above) plus the
+                        // address of the live local `poison`.
                         let r = unsafe { crate::jit::call_i64(m.ptr, &iargs) };
                         if poison == 0 {
                             Some(if m.ret_float {
@@ -2172,6 +2238,12 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                 // from — not a second derivation that has to agree with it.
                                 if program.reduce_loops[*loop_idx as usize].raises {
                                     let mut poison: i8 = 0;
+                                    // SAFETY: `ptr` is `j.reduce_loop(loop_idx)`, built by
+                                    // `define_reduce_loop` from this same loop: a float scalar
+                                    // (`n_acc == 1`, `float`), no captures and `raises` set, which
+                                    // is exactly when it adds the poison param, so it is `fn(i64,
+                                    // i64, f64, *mut i8) -> f64`. `&mut poison` points to a live
+                                    // local `i8`.
                                     let r = unsafe {
                                         crate::jit::call_reduce_f64_div(ptr, s, e, init, &mut poison)
                                     };
@@ -2182,6 +2254,9 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                         true
                                     }
                                 } else {
+                                    // SAFETY: as above, but `raises` is unset, so
+                                    // `define_reduce_loop` built `fn(i64, i64, f64) -> f64` with no
+                                    // poison param.
                                     let r = unsafe { crate::jit::call_reduce_f64(ptr, s, e, init) };
                                     locals[slot] = Value::Float(r);
                                     true
@@ -2276,6 +2351,15 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                     }
                                 }
                                 if ok {
+                                    // SAFETY: a float scalar loop WITH captures:
+                                    // `define_reduce_loop` built `fn(i64, i64, f64, *const i64) ->
+                                    // f64` (a caps body never takes the poison param). `caps` has
+                                    // one slot per `rl.captures` entry (the loop above pushed one
+                                    // per capture or set `ok` false, and `cap_vals` was split off
+                                    // by that count), and every `index_bounds` obligation was just
+                                    // checked against `[s, e)`, so the kernel's unchecked `f64`
+                                    // loads stay in bounds. `_keepalive` and `cap_vals` hold the
+                                    // arrays' `Rc`s alive across the call.
                                     let r = unsafe {
                                         crate::jit::call_reduce_f64_caps(ptr, s, e, init, caps.as_ptr())
                                     };
@@ -2291,6 +2375,9 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     } else if n_acc == 1 {
                         if let Value::Int(init) = locals[slot] {
                             if n_caps == 0 {
+                                // SAFETY: an integer scalar loop without captures:
+                                // `define_reduce_loop` built `fn(i64, i64, i64) -> i64` (the poison
+                                // param is for float scalars only); no memory is passed.
                                 let r = unsafe { crate::jit::call_reduce(ptr, s, e, init) };
                                 locals[slot] = Value::Int(r);
                                 true
@@ -2369,6 +2456,12 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                     }
                                 }
                                 if ok {
+                                    // SAFETY: an integer scalar loop with captures: `fn(i64, i64,
+                                    // i64, *const i64) -> i64`. `caps` has one slot per
+                                    // `rl.captures` entry, every `Counter`/`Scalar` bound was
+                                    // checked above (and an `Affine` one declines), so the kernel's
+                                    // unchecked `i64` loads stay in bounds; `_keepalive` and
+                                    // `cap_vals` keep the arrays alive across the call.
                                     let r = unsafe {
                                         crate::jit::call_reduce_caps(ptr, s, e, init, caps.as_ptr())
                                     };
@@ -2393,6 +2486,10 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             if is_float { acc_to_slots_f64(&tmpl, n_acc) } else { acc_to_slots(&tmpl, n_acc) };
                         match slots {
                             Some(mut buf) => {
+                                // SAFETY: `n_acc > 1`, so `define_reduce_loop` built the tuple form
+                                // `fn(i64, i64, *mut i64)`, which reads and writes `n_acc` 8-byte
+                                // slots; `buf` comes from `acc_to_slots`/`acc_to_slots_f64`, which
+                                // return exactly `n_acc` slots or `None`.
                                 unsafe { crate::jit::call_tuple_reduce(ptr, s, e, buf.as_mut_ptr()) };
                                 locals[slot] =
                                     if is_float { rebuild_acc_f64(&tmpl, buf) } else { rebuild_acc(&tmpl, buf) };
@@ -2594,12 +2691,33 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                 && let Value::Array(a) = &mut arr
                                 && let Some(ArrayData::Ints(v)) = std::rc::Rc::get_mut(a)
                             {
+                                // SAFETY: `ptr` came with `Pick::I64`, an i64-ABI build of kernel
+                                // `kidx` (plain, Int-rooted mixed, or their value-scalar/float-caps
+                                // twins); `!raises` means none of them has a poison slot, so it is
+                                // `fn(*const i64, *mut i64, i64, *const i64)`. `caps` has one slot
+                                // per capture (marshalled from `cap_vals`, alive until this arm
+                                // ends) and, the body being unindexed, holds only scalars, so
+                                // nothing in it points into `v`. `Rc::get_mut` proved `v` is the
+                                // array's only handle; a map reads `src[i]` before writing
+                                // `dst[i]`, so the in-place aliasing is sound (see
+                                // `run_map_inplace`).
                                 unsafe { crate::jit::run_map_kernel_inplace(ptr, v, &caps) };
                                 true
                             } else if let Value::Array(a) = &arr
                                 && let ArrayData::Ints(v) = &**a
                             {
                                 if raises {
+                                    // SAFETY: `raises` is set. For the Int-rooted MIXED builds that
+                                    // `Pick::I64` can carry (`map_kernel_mixed_int`, `_int_value`,
+                                    // the Int-root float-caps build) codegen adds the `*mut i64`
+                                    // poison param exactly when `k.raises`, so this names their
+                                    // real signature, and `caps` has one slot per capture.
+                                    // FIXME(soundness): `Pick::I64` can also carry the PLAIN build
+                                    // (`j.map_kernel`), which never has a poison param (`raising =
+                                    // mixed && k.raises`), although `body_raises` sets `raises` for
+                                    // it too (an `if` with an ordering comparison); that case calls
+                                    // a 4-param kernel through this 5-param type. `Pick::I64`
+                                    // should record which build it holds.
                                     match unsafe {
                                         crate::jit::run_map_kernel_int_poison(ptr, v, &caps)
                                     } {
@@ -2610,6 +2728,10 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                         None => false,
                                     }
                                 } else {
+                                    // SAFETY: `!raises`, so whichever i64-ABI build `Pick::I64`
+                                    // holds has no poison slot: `fn(*const i64, *mut i64, i64,
+                                    // *const i64)`. `caps` has one slot per capture and `v` borrows
+                                    // the receiver `arr`, alive across the call.
                                     let out =
                                         unsafe { crate::jit::run_map_kernel(ptr, v, &caps) };
                                     arr = Value::int_array(out);
@@ -2630,11 +2752,19 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                 && let Value::Array(a) = &mut arr
                                 && let Some(ArrayData::Floats(v)) = std::rc::Rc::get_mut(a)
                             {
+                                // SAFETY: `ptr` is `j.map_kernel_f64(kidx)`, the plain f64 build
+                                // `fn(*const f64, *mut f64, i64, *const f64)` (no poison slot: not
+                                // a mixed root). `caps` holds `as_f64` of each capture, one per
+                                // capture, scalars only (the f64 build declines indexed bodies).
+                                // `Rc::get_mut` proved `v` unique, and the map shape makes in-place
+                                // sound.
                                 unsafe { crate::jit::run_map_kernel_f64_inplace(ptr, v, &caps) };
                                 true
                             } else if let Value::Array(a) = &arr
                                 && let ArrayData::Floats(v) = &**a
                             {
+                                // SAFETY: as above, over the shared buffer `v` (borrowed from
+                                // `arr`) into a fresh output.
                                 let out = unsafe { crate::jit::run_map_kernel_f64(ptr, v, &caps) };
                                 arr = Value::float_array(out);
                                 true
@@ -2656,6 +2786,13 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                 // A RAISING body takes the poison wrapper; its `None` (a
                                 // rounder left i64 range) falls through to the bytecode loop.
                                 if program.map_kernels[kidx].raises {
+                                    // SAFETY: `Pick::Mixed` carries a Float-root mixed build
+                                    // (plain, indexed, value-scalar or float-caps), each given the
+                                    // poison param exactly when `k.raises`, so with `raises` set it
+                                    // is `fn(*const i64, *mut f64, i64, *const i64, *mut i64)`.
+                                    // `caps` has one slot per capture; an indexed body's array
+                                    // bases were bounds-checked by `map_index_caps` and are kept
+                                    // alive by `cap_vals`, still in scope.
                                     match unsafe {
                                         crate::jit::run_map_kernel_mixed_poison(ptr, v, &caps)
                                     } {
@@ -2666,6 +2803,8 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                         None => stack.push(arr),
                                     }
                                 } else {
+                                    // SAFETY: as above with `raises` unset: the 4-param mixed ABI,
+                                    // same caps.
                                     let out =
                                         unsafe { crate::jit::run_map_kernel_mixed(ptr, v, &caps) };
                                     stack.push(Value::float_array(out));
@@ -2696,6 +2835,14 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                 && let Value::Array(a) = &mut arr
                                 && let Some(ArrayData::Floats(v)) = std::rc::Rc::get_mut(a)
                             {
+                                // SAFETY: `Pick::Fsrc` carries a Floats-source typed build
+                                // (unindexed), whose ABI is `fn(*const f64, *mut D, i64, *const
+                                // i64)` with `D` set by `root` and a poison param exactly when
+                                // `k.raises`. Here `root` is Float and `!raises`, so `D = f64` with
+                                // no poison: the in-place runner's `fn(*const f64, *mut f64, i64,
+                                // *const i64)`. `caps` holds one scalar slot per capture,
+                                // `Rc::get_mut` proved `v` unique, and the map shape makes in-place
+                                // sound.
                                 unsafe { crate::jit::run_map_kernel_fsrc_inplace(ptr, v, &caps) };
                                 true
                             } else if let Value::Array(a) = &arr
@@ -2703,11 +2850,17 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             {
                                 match (root, raises) {
                                     (NumKind::Float, false) => {
+                                        // SAFETY: Float root, no poison: `fn(*const f64, *mut f64,
+                                        // i64, *const i64)`; `v` borrows `arr` and `caps` has one
+                                        // scalar slot per capture.
                                         let out =
                                             unsafe { crate::jit::run_map_kernel_fsrc_f64(ptr, v, &caps) };
                                         arr = Value::float_array(out);
                                         true
                                     }
+                                    // SAFETY: Float root with `raises`: the poison param is
+                                    // present, so `fn(*const f64, *mut f64, i64, *const i64, *mut
+                                    // i64)`; same caps.
                                     (NumKind::Float, true) => match unsafe {
                                         crate::jit::run_map_kernel_fsrc_f64_poison(ptr, v, &caps)
                                     } {
@@ -2718,11 +2871,15 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                         None => false,
                                     },
                                     (NumKind::Int, false) => {
+                                        // SAFETY: Int root, no poison: `fn(*const f64, *mut i64, i64,
+                                        // *const i64)`; same caps.
                                         let out =
                                             unsafe { crate::jit::run_map_kernel_fsrc_int(ptr, v, &caps) };
                                         arr = Value::int_array(out);
                                         true
                                     }
+                                    // SAFETY: Int root with `raises`: `fn(*const f64, *mut i64,
+                                    // i64, *const i64, *mut i64)`; same caps.
                                     (NumKind::Int, true) => match unsafe {
                                         crate::jit::run_map_kernel_fsrc_int_poison(ptr, v, &caps)
                                     } {
@@ -2764,6 +2921,12 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     (Some(j), Some(Value::Array(a))) => match &**a {
                         crate::value::ArrayData::Range { start, step, len } => {
                             match (j.search_kernel(skidx), icaps.as_deref()) {
+                                // SAFETY: `p` is `j.search_kernel(skidx)`, `fn(*const i64, i64,
+                                // *const i64, i64) -> i64` (search builds never take a poison
+                                // param); `c` is `int_scalar_caps` of the `cap_vals` split off by
+                                // `search_kernels[skidx].captures.len()`, so one slot per capture.
+                                // The runner generates each chunk into its own scratch and passes
+                                // that chunk's length.
                                 (Some(p), Some(c)) => Some(Some(unsafe {
                                     crate::jit::run_search_kernel_range(p, *start, *step, *len, c, *want)
                                 })),
@@ -2772,6 +2935,8 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         }
                         crate::value::ArrayData::Ints(v) => match (j.search_kernel(skidx), icaps.as_deref()) {
                             (Some(p), Some(c)) => {
+                                // SAFETY: as above, over the `Ints` buffer `v`, borrowed from the
+                                // receiver still on the stack, with its own length.
                                 Some(Some(unsafe { crate::jit::run_search_kernel(p, v, c, *want) }))
                             }
                             _ => None,
@@ -2781,6 +2946,10 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             cap_vals.iter().map(|x| x.as_f64()).collect::<Option<Vec<f64>>>(),
                         ) {
                             (Some(p), Some(fc)) => {
+                                // SAFETY: `p` is `j.search_kernel_f64(skidx)`, `fn(*const f64, i64,
+                                // *const f64, i64) -> i64`; `fc` holds `as_f64` of each capture
+                                // (one per capture) and `v` is borrowed from the receiver on the
+                                // stack.
                                 Some(unsafe { crate::jit::run_search_kernel_f64(p, v, &fc, *want) })
                             }
                             _ => None,
@@ -2822,6 +2991,10 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     && let Some(p) = j.filter_kernel(fkidx)
                     && let Some(c) = fcaps.as_deref()
                 {
+                    // SAFETY: `p` is `j.filter_kernel(fkidx)`, `fn(*const i64, *mut i64, i64,
+                    // *const i64) -> i64` (filter builds never take a poison param); `c` is
+                    // `int_scalar_caps` of the `fcap_vals` split off by the kernel's capture count,
+                    // one slot per capture.
                     let out =
                         unsafe { crate::jit::run_filter_kernel_range(p, rs, rstep, rlen, c) };
                     stack.pop(); // the lazy range receiver
@@ -2847,6 +3020,9 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         if let Value::Array(a) = &arr
                             && let crate::value::ArrayData::Ints(v) = &**a
                         {
+                            // SAFETY: as above, over the `Ints` buffer `v` borrowed from `arr`;
+                            // `ptr` is only `Some` when `fcaps` was, so `c` is the real caps, never
+                            // the `&[]` default.
                             let out = unsafe { crate::jit::run_filter_kernel(ptr, v, c) };
                             stack.push(Value::int_array(out));
                             frames[fi].ip = *after as usize;
@@ -2874,6 +3050,9 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         if let Value::Array(a) = &arr
                             && let crate::value::ArrayData::Floats(v) = &**a
                         {
+                            // SAFETY: `fptr` is `j.filter_kernel_f64(fkidx)`, `fn(*const f64, *mut
+                            // f64, i64, *const f64) -> i64`; `fc` holds `as_f64` of each capture
+                            // (one per capture) and `v` is borrowed from `arr`.
                             match unsafe { crate::jit::run_filter_kernel_f64(fptr, v, &fc) } {
                                 Some(out) => {
                                     stack.push(Value::float_array(out));
@@ -2918,6 +3097,11 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         return None;
                     }
                     let caps = int_scalar_caps(&cap_vals)?;
+                    // SAFETY: `ptr` is `j.scan_loop(loop_idx)`, built by `define_scan_loop` as
+                    // `fn(i64, i64, i64, *mut i64, *const i64)`; the runner allocates exactly the
+                    // `end - start` slots it writes (the span was capped at 100M above), and `caps`
+                    // is `int_scalar_caps` of the `cap_vals` split off by `rl.captures.len()`, one
+                    // slot per capture.
                     Some(unsafe { crate::jit::run_scan_kernel_range(ptr, *s, *e, *init, &caps) })
                 })();
                 if let Some(out) = native {
@@ -2950,6 +3134,11 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             match &kern.sink {
                                 FusionSink::Reduce { bodies, float: false, .. } if bodies.len() == 1 => {
                                     match &ops[2] {
+                                        // SAFETY: `ptr` is `j.fused_kernel(kernel_idx)`; for a range
+                                        // source with a scalar non-float `Reduce` sink,
+                                        // `define_fused_kernel` builds `fn(i64 start, i64 end, i64
+                                        // init) -> i64`, the reduce-loop ABI `call_reduce` names. Only
+                                        // integers are passed.
                                         Value::Int(init) => Some(Value::Int(unsafe {
                                             crate::jit::call_reduce(ptr, *s, *e, *init)
                                         })),
@@ -2959,6 +3148,10 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                 // tuple/record accumulator: ops[2] is its N-Int value.
                                 FusionSink::Reduce { bodies, .. } => {
                                     acc_to_slots(&ops[2], bodies.len()).map(|mut buf| {
+                                        // SAFETY: a range source with a tuple `Reduce` sink:
+                                        // `define_fused_kernel` builds `fn(i64, i64, *mut i64)`,
+                                        // reading and writing `bodies.len()` 8-byte slots, and
+                                        // `acc_to_slots` returns exactly that many or `None`.
                                         unsafe {
                                             crate::jit::call_tuple_reduce(ptr, *s, *e, buf.as_mut_ptr())
                                         };
@@ -2966,6 +3159,8 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                     })
                                 }
                                 // count: the kernel ignores the third arg.
+                                // SAFETY: a range source with a `Count` sink: `fn(i64, i64, i64) ->
+                                // i64`, the third argument ignored. Only integers are passed.
                                 FusionSink::Count => Some(Value::Int(unsafe {
                                     crate::jit::call_reduce(ptr, *s, *e, 0)
                                 })),
@@ -2975,14 +3170,25 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             && let crate::value::ArrayData::Ints(v) = &**a
                         {
                             match &kern.sink {
+                                // SAFETY: an array source with a `Collect` sink:
+                                // `define_fused_kernel` builds `fn(*const i64 src, *mut i64 dst,
+                                // i64 len) -> i64`; the runner sizes `dst` to `v.len()`, the most a
+                                // pipeline can keep, and `v` is borrowed from the operand still on
+                                // the stack.
                                 FusionSink::Collect => Some(Value::int_array(unsafe {
                                     crate::jit::run_fused_collect(ptr, v)
                                 })),
+                                // SAFETY: an array source with a `Count` sink: `fn(*const i64, i64,
+                                // i64) -> i64`, given `v` (borrowed from the stack operand) and its
+                                // own length.
                                 FusionSink::Count => Some(Value::Int(unsafe {
                                     crate::jit::run_fused_count(ptr, v)
                                 })),
                                 FusionSink::Reduce { bodies, float: false, .. } if bodies.len() == 1 => {
                                     match &ops[1] {
+                                        // SAFETY: an array source with a scalar non-float `Reduce`
+                                        // sink: `fn(*const i64, i64, i64) -> i64`, given `v` and its
+                                        // own length.
                                         Value::Int(init) => Some(Value::Int(unsafe {
                                             crate::jit::run_fused_reduce(ptr, v, *init)
                                         })),
@@ -2996,6 +3202,9 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                 // Int-source twin reads i64 and promotes where the body does.
                                 FusionSink::Reduce { bodies, float: true, .. } if bodies.len() == 1 => {
                                     match (&ops[1], jit.and_then(|j| j.fused_kernel_int_src(*kernel_idx as usize))) {
+                                        // SAFETY: `p` is `j.fused_kernel_int_src(kernel_idx)`, the
+                                        // Int-source twin of a float scalar fold, `fn(*const i64, i64,
+                                        // f64) -> f64`; `v` is an `Ints` buffer with its own length.
                                         (Value::Float(init), Some(p)) => Some(Value::Float(unsafe {
                                             crate::jit::run_fused_reduce_f64_from_ints(p, v, *init)
                                         })),
@@ -3005,6 +3214,11 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                 // tuple/record accumulator: ops[1] is its N-Int value.
                                 FusionSink::Reduce { bodies, .. } => {
                                     acc_to_slots(&ops[1], bodies.len()).map(|mut buf| {
+                                        // SAFETY: an array source with a tuple `Reduce` sink:
+                                        // `fn(*const i64, i64, *mut i64)` over `bodies.len()` slots,
+                                        // which `acc_to_slots` returns exactly (a float-flagged sink
+                                        // has an all-`Float` literal init, which `acc_to_slots`
+                                        // declines, so this is the i64 build).
                                         unsafe {
                                             crate::jit::run_fused_tuple_reduce(ptr, v, buf.as_mut_ptr())
                                         };
@@ -3022,6 +3236,9 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             match &kern.sink {
                                 FusionSink::Reduce { bodies, float: true, .. } if bodies.len() == 1 => {
                                     match &ops[1] {
+                                        // SAFETY: a `Floats` source with a scalar float `Reduce` sink:
+                                        // `define_fused_kernel` built `fn(*const f64, i64, f64) ->
+                                        // f64`; `v` is borrowed with its own length.
                                         Value::Float(init) => Some(Value::Float(unsafe {
                                             crate::jit::run_fused_reduce_f64(ptr, v, *init)
                                         })),
@@ -3030,6 +3247,10 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                 }
                                 FusionSink::Reduce { bodies, float: true, .. } => {
                                     acc_to_slots_f64(&ops[1], bodies.len()).map(|mut buf| {
+                                        // SAFETY: a `Floats` source with a float tuple sink:
+                                        // `fn(*const f64, i64, *mut i64)` over `bodies.len()` `f64`
+                                        // slots (stored as bits), which `acc_to_slots_f64` returns
+                                        // exactly.
                                         unsafe {
                                             crate::jit::run_fused_tuple_reduce_f64(ptr, v, buf.as_mut_ptr())
                                         };
@@ -3187,6 +3408,15 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                 IndexBound::Affine { .. } => return None,
                             }
                         }
+                        // SAFETY: `ok_shape` (non-float, one body, exactly one `Scalar` cap plus
+                        // `ArrayI64` caps) means `define_reduce_loop` built the captured i64 scalar
+                        // kernel `fn(i64, i64, i64, *const i64) -> i64` with no poison param.
+                        // `template` has one slot per capture, `scalar_pos` is the `Scalar` cap's
+                        // index within it, and `keepalive` (plus the arrays still on the stack)
+                        // keeps every base pointer valid. The checks above prove every per-`i`
+                        // bound fits `i64`, the union of the inner ranges lies inside each
+                        // counter-indexed array, `[os, oe)` lies inside each scalar-indexed one,
+                        // and decline any `Affine` bound.
                         let results = unsafe {
                             crate::jit::run_nested_reduce_arrays(
                                 ptr, os, oe, is, ie, sc, ec, init, &template, scalar_pos,
