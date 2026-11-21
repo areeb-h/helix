@@ -5,8 +5,8 @@
 ### Fixed
 
 - **A sharded server's listening sockets leaked into the programs it ran.** `listen(port, n)`
-  with `n > 1` made its sockets without close-on-exec, so any program the app ran (`run`,
-  `exec`) inherited them and could accept the app's connections. They are close-on-exec now,
+  with `n > 1` made its sockets without close-on-exec, so any program the app ran with `run`
+  inherited them and could accept the app's connections. They are close-on-exec now,
   as a single listener's always were, and a test checks the flag in `/proc`.
 - **A JIT map called some compiled kernels with the wrong signature.** An integer `map` whose
   body has an ordering comparison (`xs.map(x => if x > 2 then x else 0)` over a shared Int
