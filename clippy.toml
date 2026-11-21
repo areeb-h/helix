@@ -1,0 +1,15 @@
+# Helix's three engines must agree bit for bit. The "algebraic" float operations (Rust 1.98)
+# let the compiler reorder and fuse arithmetic, so a result could differ between engines,
+# builds or machines. They are refused everywhere.
+disallowed-methods = [
+    { path = "f64::algebraic_add", reason = "breaks bit-identical results across Helix's engines" },
+    { path = "f64::algebraic_sub", reason = "breaks bit-identical results across Helix's engines" },
+    { path = "f64::algebraic_mul", reason = "breaks bit-identical results across Helix's engines" },
+    { path = "f64::algebraic_div", reason = "breaks bit-identical results across Helix's engines" },
+    { path = "f64::algebraic_rem", reason = "breaks bit-identical results across Helix's engines" },
+    { path = "f32::algebraic_add", reason = "breaks bit-identical results across Helix's engines" },
+    { path = "f32::algebraic_sub", reason = "breaks bit-identical results across Helix's engines" },
+    { path = "f32::algebraic_mul", reason = "breaks bit-identical results across Helix's engines" },
+    { path = "f32::algebraic_div", reason = "breaks bit-identical results across Helix's engines" },
+    { path = "f32::algebraic_rem", reason = "breaks bit-identical results across Helix's engines" },
+]

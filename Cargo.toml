@@ -36,6 +36,20 @@ strip = false        # keep symbols so a test panic gives a real backtrace
 [profile.dev.package."*"]
 opt-level = 3
 
+
+# Checked on every build (and by CI's clippy, which denies warnings).
+[lints.rust]
+# Inside an `unsafe fn`, each unsafe operation still needs its own `unsafe {}` block, so the
+# operations that need care are marked one by one (edition 2024 only warns).
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+# Every `unsafe {}` block says why it is sound, in a `// SAFETY:` comment above it.
+undocumented_unsafe_blocks = "deny"
+
+[lints.cargo]
+# A dependency nothing uses is attack surface and build time for nothing (Rust 1.100).
+unused_dependencies = "warn"
 [dependencies]
 cranelift-codegen = { version = "0.132.2", optional = true }
 cranelift-frontend = { version = "0.132.2", optional = true }
