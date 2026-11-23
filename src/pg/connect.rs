@@ -259,7 +259,7 @@ fn authenticate(s: &mut Stream, t: &Target) -> Result<(), String> {
                         let binding = binding_for(t.channel_binding, &names, s.peer_certificate())?;
                         bound = matches!(binding, scram::Binding::EndPoint(_));
                         let mechanism = binding.mechanism();
-                        let mut sc = scram::Scram::new(&t.password, binding);
+                        let mut sc = scram::Scram::new(&t.password, binding)?;
                         let first = sc.client_first();
                         let mut out = Vec::new();
                         put_cstr(&mut out, mechanism);

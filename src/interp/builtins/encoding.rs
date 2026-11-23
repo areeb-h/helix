@@ -20,7 +20,7 @@ pub(super) fn a_sha256(name: &str, args: Vec<Value>, line: usize, col: usize) ->
                 use sha2::{Digest, Sha256};
                 let mut hasher = Sha256::new();
                 hasher.update(s.as_bytes());
-                Ok(Value::Str(Rc::new(format!("{:x}", hasher.finalize()))))
+                Ok(Value::Str(Rc::new(crate::value::bytes_to_hex(&hasher.finalize()))))
             }
             other => Err(type_err("sha256", "a string", other, line, col)),
         }
@@ -46,7 +46,7 @@ pub(super) fn a_hmac_sha256(name: &str, args: Vec<Value>, line: usize, col: usiz
             other => return Err(type_err("hmac_sha256", "a string message", other, line, col)),
         };
         use hmac::{Hmac, Mac};
-        let mut mac = <Hmac<sha2::Sha256> as Mac>::new_from_slice(key.as_bytes())
+        let mut mac = <Hmac<sha2::Sha256> as hmac::KeyInit>::new_from_slice(key.as_bytes())
             .expect("HMAC accepts a key of any length");
         mac.update(msg.as_bytes());
         let tag = mac.finalize().into_bytes();
@@ -357,8 +357,10 @@ pub(super) fn a_hex_decode(name: &str, args: Vec<Value>, line: usize, col: usize
 #[inline]
 pub(super) fn a_aes_keygen(name: &str, args: Vec<Value>, line: usize, col: usize) -> Result<Value, HelixError> {
         arity(name, &args, 0, line, col)?;
-        use aes_gcm::{aead::OsRng, Aes256Gcm, KeyInit};
-        let key = Aes256Gcm::generate_key(&mut OsRng);
+        use aes_gcm::{aead::Generate, Aes256Gcm, Key};
+        // The operating system's random source (getrandom), as before; a failure is an error.
+        let key = Key::<Aes256Gcm>::try_generate()
+            .map_err(|e| HelixError::new(format!("`aes_keygen` could not get random bytes: {e}"), line, col))?;
         Ok(Value::Str(Rc::new(key.iter().map(|b| format!("{b:02x}")).collect())))
     
 }
@@ -379,11 +381,15 @@ pub(super) fn a_aes_encrypt(name: &str, args: Vec<Value>, line: usize, col: usiz
         };
         let key_bytes = aes_key_bytes(key_hex, line, col)?;
         use aes_gcm::{
-            aead::{Aead, AeadCore, OsRng},
-            Aes256Gcm, Key, KeyInit,
+            aead::{Aead, Generate, Nonce},
+            Aes256Gcm, KeyInit,
         };
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_bytes));
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng); // 96-bit, unique per call
+        // `aes_key_bytes` returned exactly 32 bytes, so this cannot fail.
+        let cipher = Aes256Gcm::new_from_slice(&key_bytes)
+            .map_err(|_| HelixError::new("an AES key must be 32 bytes", line, col))?;
+        // 96-bit, from the operating system's random source on every call.
+        let nonce = Nonce::<Aes256Gcm>::try_generate()
+            .map_err(|e| HelixError::new(format!("`aes_encrypt` could not get random bytes: {e}"), line, col))?;
         let ct = cipher
             .encrypt(&nonce, plaintext.as_bytes())
             .map_err(|_| HelixError::new("`aes_encrypt` failed", line, col))?;
@@ -417,9 +423,13 @@ pub(super) fn a_aes_decrypt(name: &str, args: Vec<Value>, line: usize, col: usiz
             return Err(HelixError::new("`aes_decrypt` ciphertext is too short", line, col));
         }
         let (nonce, ct) = blob.split_at(12);
-        use aes_gcm::{aead::Aead, Aes256Gcm, Key, KeyInit, Nonce};
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_bytes));
-        let pt = cipher.decrypt(Nonce::from_slice(nonce), ct).map_err(|_| {
+        use aes_gcm::{aead::{Aead, Nonce}, Aes256Gcm, KeyInit};
+        // `aes_key_bytes` returned exactly 32 bytes, so this cannot fail.
+        let cipher = Aes256Gcm::new_from_slice(&key_bytes)
+            .map_err(|_| HelixError::new("an AES key must be 32 bytes", line, col))?;
+        let nonce = Nonce::<Aes256Gcm>::try_from(nonce)
+            .map_err(|_| HelixError::new("`aes_decrypt` ciphertext is too short", line, col))?;
+        let pt = cipher.decrypt(&nonce, ct).map_err(|_| {
             HelixError::new(
                 "`aes_decrypt` failed — wrong key, or the ciphertext was tampered with",
                 line,
@@ -441,9 +451,9 @@ pub(super) fn a_aes_decrypt(name: &str, args: Vec<Value>, line: usize, col: usiz
 #[inline]
 pub(super) fn a_ed25519_keygen(name: &str, args: Vec<Value>, line: usize, col: usize) -> Result<Value, HelixError> {
         arity(name, &args, 0, line, col)?;
-        use aes_gcm::aead::{rand_core::RngCore, OsRng};
         let mut seed = [0u8; 32];
-        OsRng.fill_bytes(&mut seed);
+        getrandom::fill(&mut seed)
+            .map_err(|e| HelixError::new(format!("`ed25519_keygen` could not get random bytes: {e}"), line, col))?;
         let sk = ed25519_dalek::SigningKey::from_bytes(&seed);
         let pk = sk.verifying_key();
         let priv_hex: String = sk.to_bytes().iter().map(|b| format!("{b:02x}")).collect();

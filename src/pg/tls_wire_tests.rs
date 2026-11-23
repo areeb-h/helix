@@ -232,7 +232,7 @@ fn send(s: &mut Peer, tag: u8, body: &[u8]) {
 }
 
 fn hmac256(key: &[u8], data: &[u8]) -> Vec<u8> {
-    use hmac::Mac;
+    use hmac::{KeyInit, Mac};
     let mut m = hmac::Hmac::<sha2::Sha256>::new_from_slice(key).expect("key");
     m.update(data);
     m.finalize().into_bytes().to_vec()
