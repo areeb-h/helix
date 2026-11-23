@@ -106,7 +106,7 @@ noodles-core = { version = "0.21", optional = true }
 # cranelift-codegen and faer, so this adds a dependency EDGE, not a new crate.
 libm = "0.2"
 # Latest Polars — Arrow-columnar, lazy, multi-threaded execution engine.
-polars = { version = "0.54", features = [
+polars = { version = "0.55", features = [
     "lazy",
     "csv",
     "parquet",
@@ -157,13 +157,13 @@ toml_edit = "0.25"
 # the core binary stays self-contained (no libpython dependency unless enabled).
 # `abi3-py38` builds against the stable ABI (one build spans Python 3.8+);
 # `auto-initialize` lazily starts the interpreter on first use.
-pyo3 = { version = "0.28", features = ["auto-initialize", "abi3-py38"], optional = true }
+pyo3 = { version = "0.29", features = ["auto-initialize", "abi3-py38"], optional = true }
 # Zero-copy Rust-Polars <-> Python-Polars interchange (via Arrow). Matches our
 # polars 0.54 and pyo3 0.28; used to hand a Helix DataFrame to/from Python.
-pyo3-polars = { version = "0.27", optional = true }
+pyo3-polars = { version = "0.28", optional = true }
 # ndarray <-> NumPy bridge. numpy 0.28 unifies on pyo3 ^0.28 and ndarray <=0.17
 # (our 0.17); used to hand a Helix Tensor to/from Python's NumPy.
-numpy = { version = "0.28", optional = true }
+numpy = { version = "0.29", optional = true }
 
 # Verified HTTPS downloads for managed runtimes / packages / toolchains / self-update
 # (ADR 0010), behind the `managed` feature so the pure core stays dependency-free.

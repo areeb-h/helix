@@ -566,10 +566,12 @@ mod imp {
         col: usize,
     ) -> Result<Bound<'py, PyAny>, HelixError> {
         Ok(match v {
-            Value::Int(i) => i
-                .into_pyobject(py)
-                .map_err(|e| py_err(py, e.into(), line, col))?
-                .into_any(),
+            Value::Int(i) => {
+                // An i64 always converts: the error type is `Infallible`, so there is no
+                // error case to map.
+                let Ok(obj) = i.into_pyobject(py);
+                obj.into_any()
+            }
             Value::Float(x) => PyFloat::new(py, *x).into_any(),
             Value::Bool(b) => PyBool::new(py, *b).to_owned().into_any(),
             Value::Str(s) => PyString::new(py, s).into_any(),
