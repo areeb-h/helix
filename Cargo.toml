@@ -197,7 +197,7 @@ sha2 = "0.11"
 # are UTF-8, so raw-byte XOR / arbitrary-byte base64 need a native, audited path). Same
 # "delegate to audited Rust crates" stance as sha2. base64 is already in the tree.
 hmac = "0.13"
-base64 = "0.22"
+base64 = "0.23"
 # AES-256-GCM authenticated encryption (RustCrypto, constant-time). Exposed with a
 # misuse-resistant API only — internal random nonce (OsRng), AEAD (encrypt+authenticate)
 # always, so the common footguns (nonce reuse, unauthenticated modes) aren't reachable.
@@ -260,7 +260,7 @@ parquet = { version = "59", default-features = false, features = [
 # module hides behind a flag that drags the arrow stack in; zstd is already in
 # every build's tree via other deps).
 zstd = { version = "0.13", optional = true }
-rusqlite = { version = "0.41.1", features = ["bundled"], optional = true }
+rusqlite = { version = "0.43", features = ["bundled"], optional = true }
 
 [features]
 # HTTP data-fetching and the fast allocator are on by default; build with
