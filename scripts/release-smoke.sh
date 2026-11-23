@@ -32,8 +32,11 @@ ERRORS="$DIR/v$VER-errors.tsv"
 [ -f "$CLAIMS" ] || { echo "no claims program at $CLAIMS — write the release notes as a program first" >&2; exit 2; }
 [ -f "$EXPECT" ] || { echo "no expectations at $EXPECT" >&2; exit 2; }
 
-SCRATCH="${TMPDIR:-/tmp}/helix-smoke-$VER"
-rm -rf "$SCRATCH"; mkdir -p "$SCRATCH/bin"
+# A fresh private folder per run (mode 0700, unpredictable name): a fixed /tmp path could be
+# created or swapped by another user first, and `rm -rf` on it would follow their lead.
+SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/helix-smoke-$VER.XXXXXX") || { echo "could not make a scratch folder" >&2; exit 2; }
+trap 'rm -rf "$SCRATCH"' EXIT
+mkdir -p "$SCRATCH/bin"
 FAIL=0
 ok()  { printf 'ok   %s\n' "$*"; }
 bad() { printf 'FAIL %s\n' "$*"; FAIL=1; }
@@ -44,13 +47,22 @@ if [ -n "$LOCAL" ]; then
   echo "== using $H (skipping install / version / glibc-floor checks)"
 else
   echo "== 1. install v$VER through the PUBLIC installer (it verifies the checksum)"
+  # HELIX_VERSION pins the tag: without it the installer fetches `latest`, so smoking an
+  # older release (or a new one before it is marked latest) would test the wrong binary.
   # The env var goes on `sh`, NOT on `curl`: a prefix assignment applies to the
   # command it prefixes, and the installer runs in the shell on the RIGHT of the
   # pipe. Getting this wrong installs over the developer's own ~/.local/bin/helix
   # while the script then reports "installer produced no binary" — which is exactly
   # what it did the first time it was run.
-  curl -LsSf https://raw.githubusercontent.com/areeb-h/helix/main/install.sh \
-    | HELIX_INSTALL_DIR="$SCRATCH/bin" sh
+  # HELIX_NO_SOURCE and the empty working folder: if the release has no binary for this
+  # machine, the installer must fail, not build whatever tree it is run from and let that
+  # pass as the published artifact (run from a checkout, it did exactly that).
+  if ! (cd "$SCRATCH" && curl -LsSf https://raw.githubusercontent.com/areeb-h/helix/main/install.sh \
+    | HELIX_INSTALL_DIR="$SCRATCH/bin" HELIX_VERSION="v$VER" HELIX_NO_SOURCE=1 sh); then
+    # pipefail: a failed download or a failed install both land here.
+    bad "the installer failed for v$VER"
+    exit 1
+  fi
   H="$SCRATCH/bin/helix"
   [ -x "$H" ] || { bad "installer produced no binary at $H"; exit 1; }
 
