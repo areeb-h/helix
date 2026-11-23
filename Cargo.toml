@@ -147,12 +147,12 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 # (`helix.lock`). TOML is the hand-edited manifest convention (Cargo/pyproject); the
 # lockfile is machine-generated. Core: the package manager is part of the toolchain.
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "1"
 # Format- and comment-preserving TOML editing for `helix add` — mutating the
 # hand-edited manifest must not destroy the user's comments/layout (a plain
 # `toml` re-serialize would). This is the crate Cargo's own `cargo add` uses, and
 # `toml` 0.8 is already built on it, so the marginal cost is near-zero.
-toml_edit = "0.22"
+toml_edit = "0.25"
 # CPython interop (Helix -> Python), behind the off-by-default `python` feature so
 # the core binary stays self-contained (no libpython dependency unless enabled).
 # `abi3-py38` builds against the stable ABI (one build spans Python 3.8+);
@@ -168,7 +168,7 @@ numpy = { version = "0.28", optional = true }
 # Verified HTTPS downloads for managed runtimes / packages / toolchains / self-update
 # (ADR 0010), behind the `managed` feature so the pure core stays dependency-free.
 # rustls (not OpenSSL) keeps the binary self-contained; sha2 is the trust boundary.
-ureq = { version = "2", optional = true }
+ureq = { version = "3", optional = true }
 # Native app windows (`--features desktop`, ADR 0055 Phase 4): the platform's own web view in a
 # native window. Not default: it links WebKitGTK on Linux, which the static musl build cannot.
 wry = { version = "0.57", optional = true }
