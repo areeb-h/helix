@@ -592,6 +592,73 @@ fn http_server_shards_across_workers() {
     let _ = std::fs::remove_file(&src);
 }
 
+/// A sharded server's listening sockets are close-on-exec, as `TcpListener::bind`'s are.
+/// v0.14.0 made them with a bare `socket()`, so every program the app ran inherited them and
+/// could accept the app's connections.
+#[cfg(target_os = "linux")]
+#[test]
+fn sharded_listeners_are_not_inherited_by_child_programs() {
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let src = std::env::temp_dir().join("helix_serve_shard_cloexec.helix");
+    std::fs::write(&src, "fn srv(l) = do {\n  c = l.accept()\n  c.respond({ status: 200, text: \"x\" })\n  srv(l)\n}\nsrv(listen(18239, 2))\n").unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_helix"))
+        .arg(&src)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn the server");
+    // A whole request and its answer, so the server is idle in `accept` when it is inspected
+    // (a probe that hung up at once made `respond` fail and the program exit).
+    let mut up = false;
+    for _ in 0..60 {
+        if let Ok(mut s) = TcpStream::connect("127.0.0.1:18239") {
+            use std::io::{Read, Write};
+            s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            let mut resp = String::new();
+            up = s.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n").is_ok()
+                && s.read_to_string(&mut resp).is_ok()
+                && resp.contains("200");
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let pid = child.id();
+    let mut sockets = Vec::new();
+    for entry in std::fs::read_dir(format!("/proc/{pid}/fd")).unwrap().flatten() {
+        let fd = entry.file_name().to_string_lossy().to_string();
+        // 0-2 are the standard streams, inherited on purpose.
+        if fd.parse::<u32>().is_ok_and(|n| n <= 2) {
+            continue;
+        }
+        let is_socket = std::fs::read_link(entry.path()).is_ok_and(|t| t.to_string_lossy().starts_with("socket:"));
+        if !is_socket {
+            continue;
+        }
+        let info = std::fs::read_to_string(format!("/proc/{pid}/fdinfo/{fd}")).unwrap_or_default();
+        let flags = info.lines().find_map(|l| l.strip_prefix("flags:")).map(|f| u32::from_str_radix(f.trim(), 8).unwrap()).unwrap();
+        // Which socket it is, for the failure message: inode -> local address in /proc/net/tcp.
+        let target = std::fs::read_link(entry.path()).map(|t| t.to_string_lossy().to_string()).unwrap_or_default();
+        sockets.push((format!("{fd} ({target})"), flags));
+    }
+    let _ = child.kill();
+    let out = child.wait_with_output().expect("wait on the server");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_file(&src);
+    assert!(up, "sharded server never came up");
+    assert!(sockets.len() >= 2, "expected the two shard listeners, found {sockets:?}; server stderr:\n{stderr}");
+    const O_CLOEXEC: u32 = 0o2000000;
+    for (fd, flags) in &sockets {
+        assert!(
+            flags & O_CLOEXEC != 0,
+            "socket fd {fd} is inherited by child programs (flags {flags:o}); all sockets: {sockets:?}; /proc/net/tcp:\n{}",
+            std::fs::read_to_string("/proc/net/tcp").unwrap_or_default()
+        );
+    }
+}
+
 #[test]
 fn http_server_poll_serves_cooperatively() {
     use std::io::Read;

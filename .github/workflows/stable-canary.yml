@@ -1,0 +1,32 @@
+# The newest stable Rust, tried every week against main. CI and the releases build with the
+# version pinned in rust-toolchain.toml, so a new compiler can never turn a PR red overnight
+# (as Rust 1.100 did: it began rejecting an ignored `ExitCode`). This job finds such changes
+# first. When it fails, fix the code, or move the pin in rust-toolchain.toml in a PR of its own.
+name: stable-canary
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"   # Mondays, 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Ahead of rust-toolchain.toml: this job is about the newest stable, whatever is pinned.
+  RUSTUP_TOOLCHAIN: stable
+
+jobs:
+  canary:
+    name: newest stable Rust (clippy + tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the newest stable Rust
+        run: rustup toolchain install stable --profile minimal --component clippy && rustc --version
+      - name: clippy
+        run: cargo clippy --all-targets --features postgres -- -D warnings
+      - name: Test suite
+        run: cargo test --profile gate --features postgres

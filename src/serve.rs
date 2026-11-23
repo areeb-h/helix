@@ -273,48 +273,15 @@ fn bind_listener(port: u16, line: usize, col: usize) -> Result<TcpListener, Heli
 /// bind, so N worker sockets can share the port and the kernel distributes connections.
 #[cfg(target_os = "linux")]
 fn bind_reuseport(port: u16) -> std::io::Result<TcpListener> {
-    use std::os::unix::io::FromRawFd;
-    // SAFETY: a straight-line socket/setsockopt/bind/listen sequence on a fresh fd. The
-    // fd is wrapped in a `TcpListener` immediately, so every early return (a failed
-    // option/bind/listen) drops it and closes the fd — no leak.
-    unsafe {
-        let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let listener = TcpListener::from_raw_fd(fd);
-        let one: libc::c_int = 1;
-        let set_opt = |opt| {
-            libc::setsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                opt,
-                &one as *const libc::c_int as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            )
-        };
-        if set_opt(libc::SO_REUSEADDR) < 0 || set_opt(libc::SO_REUSEPORT) < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let addr = libc::sockaddr_in {
-            sin_family: libc::AF_INET as libc::sa_family_t,
-            sin_port: port.to_be(),
-            sin_addr: libc::in_addr { s_addr: libc::INADDR_LOOPBACK.to_be() },
-            sin_zero: [0; 8],
-        };
-        let bind = libc::bind(
-            fd,
-            &addr as *const libc::sockaddr_in as *const libc::sockaddr,
-            std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
-        );
-        if bind < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        if libc::listen(fd, 128) < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(listener)
-    }
+    use rustix::net::{AddressFamily, SocketFlags, SocketType, sockopt};
+    // Close-on-exec, as `TcpListener::bind` would: without it a program the app runs would
+    // inherit the listening socket and could accept the app's connections.
+    let fd = rustix::net::socket_with(AddressFamily::INET, SocketType::STREAM, SocketFlags::CLOEXEC, None)?;
+    sockopt::set_socket_reuseaddr(&fd, true)?;
+    sockopt::set_socket_reuseport(&fd, true)?;
+    rustix::net::bind(&fd, &std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, port))?;
+    rustix::net::listen(&fd, 128)?;
+    Ok(TcpListener::from(fd))
 }
 
 /// Spawn `total - 1` shard workers, each re-running the program on its own thread with
@@ -1216,32 +1183,33 @@ pub fn wait(
     }
     #[cfg(unix)]
     {
-        use std::os::fd::AsRawFd;
+        use rustix::event::{PollFd, PollFlags};
+        // The connections' sockets stay borrowed for the call, so the kernel is never asked
+        // about a descriptor that was closed and reused meanwhile.
+        let values: std::borrow::Cow<'_, [Value]> = if let Value::Array(arr) = conns { arr.to_values() } else { std::borrow::Cow::Borrowed(&[]) };
+        let streams: Vec<std::cell::Ref<'_, Option<TcpStream>>> = values
+            .iter()
+            .filter_map(|v| match v {
+                Value::Net(h) => match &**h {
+                    NetHandle::Conn { stream, .. } => Some(stream.borrow()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
         // One slot for the listener + one per connection: pre-size so the per-tick fill
         // doesn't reallocate (this runs every event-loop tick).
-        let cap = 1 + if let Value::Array(arr) = conns { arr.len() } else { 0 };
-        let mut fds: Vec<libc::pollfd> = Vec::with_capacity(cap);
-        let mut push_fd = |fd: std::os::fd::RawFd| {
-            fds.push(libc::pollfd { fd, events: libc::POLLIN, revents: 0 });
-        };
+        let mut fds: Vec<PollFd<'_>> = Vec::with_capacity(1 + streams.len());
         if let NetHandle::Listener(l) = &**handle {
-            push_fd(l.as_raw_fd());
+            fds.push(PollFd::new(l, PollFlags::IN));
         }
-        if let Value::Array(arr) = conns {
-            for v in arr.to_values().iter() {
-                if let Value::Net(h) = v
-                    && let NetHandle::Conn { stream, .. } = &**h
-                    && let Some(s) = stream.borrow().as_ref()
-                {
-                    push_fd(s.as_raw_fd());
-                }
-            }
+        for s in streams.iter().filter_map(|s| s.as_ref()) {
+            fds.push(PollFd::new(s, PollFlags::IN));
         }
-        let t = timeout_ms.clamp(0, i32::MAX as i64) as i32;
-        // SAFETY: `fds` is a valid, correctly-sized slice of `pollfd` for the call's duration.
-        unsafe {
-            libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, t);
-        }
+        let ms = timeout_ms.clamp(0, i32::MAX as i64);
+        let t = rustix::event::Timespec { tv_sec: ms / 1000, tv_nsec: ((ms % 1000) * 1_000_000) as rustix::event::Nsecs };
+        // An interrupted or failed wait just ends this tick early: the loop polls again.
+        let _ = rustix::event::poll(&mut fds, Some(&t));
     }
     #[cfg(not(unix))]
     {

@@ -273,13 +273,10 @@ impl RenderOpts {
 /// Terminal column count: the kernel's window size, else `$COLUMNS`, else 80.
 #[cfg(unix)]
 fn term_width() -> usize {
-    // SAFETY: TIOCGWINSZ writes a `winsize` we zero-initialize; failure is detected
-    // via the return code and the value left untouched.
-    unsafe {
-        let mut ws: libc::winsize = std::mem::zeroed();
-        if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_col > 0 {
-            return ws.ws_col as usize;
-        }
+    if let Ok(ws) = rustix::termios::tcgetwinsize(std::io::stdout())
+        && ws.ws_col > 0
+    {
+        return ws.ws_col as usize;
     }
     env_cols().unwrap_or(80)
 }

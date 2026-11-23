@@ -1,0 +1,8 @@
+# The one Rust version that builds Helix: CI, the release builds and local work all use it,
+# so a tag always builds the same way. A new stable release is tried every week by
+# .github/workflows/stable-canary.yml, and moving this pin is a reviewed change. The minimum
+# version that must still compile is `rust-version` in Cargo.toml (the MSRV job checks it).
+[toolchain]
+channel = "1.100.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"
