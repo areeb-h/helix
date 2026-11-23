@@ -275,7 +275,12 @@ mod tests {
             writer.try_finish().unwrap();
         }
 
-        let index = bam::fs::index("examples/data/alignments.bam").unwrap();
+        // noodles-bam returns whichever index the file's references allow; this small fixture
+        // gets a BAI, which is the file the readers look for.
+        let index = match bam::fs::index("examples/data/alignments.bam").unwrap() {
+            bam::Index::Bai(index) => index,
+            other => panic!("expected a BAI index for the fixture, got {other:?}"),
+        };
         let bai_out = std::fs::File::create("examples/data/alignments.bam.bai").unwrap();
         let mut bai_writer = bam::bai::io::Writer::new(bai_out);
         bai_writer.write_index(&index).unwrap();
