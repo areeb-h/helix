@@ -1759,6 +1759,24 @@ pub fn dict_as_record_fields(
 ///
 /// Shared by the client (`http_request`) and the server (`respond`) so neither can be
 /// hardened while the other is not — a program is usually both.
+/// `s` for an error message, with anything that isn't printable ASCII written as `\u{…}`.
+/// Rust's `escape_debug` would do, but what it escapes has changed between Rust releases, and a
+/// diagnostic must read the same whatever compiler built Helix.
+pub fn escape_for_message(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ' '..='~' => out.push(c),
+            _ => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+        }
+    }
+    out
+}
+
 pub fn validate_header(name: &str, value: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("a header name cannot be empty".to_string());
@@ -1768,9 +1786,9 @@ pub fn validate_header(name: &str, value: &str) -> Result<(), String> {
         !(c.is_ascii_alphanumeric() || "!#$%&'*+-.^_`|~".contains(*c))
     }) {
         let what = if bad == '\r' || bad == '\n' {
-            format!("a newline in the header name `{}`", name.escape_debug())
+            format!("a newline in the header name `{}`", escape_for_message(name))
         } else {
-            format!("the character `{}` in the header name `{}`", bad.escape_debug(), name.escape_debug())
+            format!("the character `{}` in the header name `{}`", escape_for_message(&bad.to_string()), escape_for_message(name))
         };
         return Err(format!(
             "{what} — a header name may only contain letters, digits and !#$%&'*+-.^_`|~"
@@ -1787,7 +1805,7 @@ pub fn validate_header(name: &str, value: &str) -> Result<(), String> {
         return Err(format!(
             "{what} in the value of header `{}` — this would inject additional headers \
              into the message. Strip or percent-encode the value before setting it.",
-            name.escape_debug()
+            escape_for_message(name)
         ));
     }
     Ok(())

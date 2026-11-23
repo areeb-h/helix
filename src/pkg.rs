@@ -587,7 +587,7 @@ pub fn hash_tree(dir: &Path) -> Result<String, HelixError> {
         hasher.update((bytes.len() as u64).to_le_bytes());
         hasher.update(&bytes);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(crate::value::bytes_to_hex(&hasher.finalize()))
 }
 
 fn collect_package_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), HelixError> {
@@ -698,7 +698,7 @@ fn install_into_cache(cache: &Path, sha256: &str, bytes: &[u8]) -> Result<PathBu
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
-    format!("{:x}", h.finalize())
+    crate::value::bytes_to_hex(&h.finalize())
 }
 
 /// Without networking (`--no-default-features`) a `url` dependency cannot be fetched —
@@ -811,11 +811,23 @@ fn extract_tarball(bytes: &[u8], dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
+// Tests point the cache at a folder of their own through this, per thread. Setting
+// `HELIX_CACHE` instead would need `std::env::set_var`, which is unsound while other threads
+// read the environment, and the test harness runs tests on many threads.
+#[cfg(all(test, feature = "http"))]
+thread_local! {
+    static TEST_CACHE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
 /// The content-addressed download cache root. `HELIX_CACHE` overrides it (tests, CI,
 /// reproducible sandboxes); otherwise XDG `$XDG_CACHE_HOME/helix/cache` (falling back to
 /// `$HOME/.cache/helix/cache`) on unix, and `%LOCALAPPDATA%\helix\cache` on Windows.
 #[cfg(feature = "http")]
 fn cache_root() -> Result<PathBuf, HelixError> {
+    #[cfg(test)]
+    if let Some(dir) = TEST_CACHE.with(|c| c.borrow().clone()) {
+        return Ok(dir);
+    }
     if let Some(dir) = std::env::var_os("HELIX_CACHE").filter(|d| !d.is_empty()) {
         return Ok(PathBuf::from(dir));
     }
@@ -1373,10 +1385,9 @@ mod tests {
         )
         .unwrap();
 
-        // SAFETY: this is the only test that reads HELIX_CACHE, so no cross-test race.
-        unsafe { std::env::set_var("HELIX_CACHE", &cache) };
+        TEST_CACHE.with(|c| *c.borrow_mut() = Some(cache.clone()));
         let (lock, dirs) = resolve(&app).unwrap();
-        unsafe { std::env::remove_var("HELIX_CACHE") };
+        TEST_CACHE.with(|c| *c.borrow_mut() = None);
 
         assert_eq!(lock.packages.len(), 1);
         assert_eq!(lock.packages[0].name, "dep");
@@ -1597,8 +1608,7 @@ mod tests {
         let base = std::env::temp_dir().join(format!("helix_pkgaddurl_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
-        // SAFETY: lone env writer in an ignored, serially-run test.
-        unsafe { std::env::set_var("HELIX_CACHE", base.join("cache")) };
+        TEST_CACHE.with(|c| *c.borrow_mut() = Some(base.join("cache")));
         std::fs::write(base.join("helix.toml"), "[package]\nname = \"app\"\n").unwrap();
 
         let url = "https://static.crates.io/crates/cfg-if/cfg-if-1.0.0.crate".to_string();
@@ -1607,7 +1617,7 @@ mod tests {
         assert_eq!(n, 1);
         let m = Manifest::load(&base).unwrap().unwrap();
         assert_eq!(m.dependencies["cfgif"].sha256.as_deref().unwrap().len(), 64);
-        unsafe { std::env::remove_var("HELIX_CACHE") };
+        TEST_CACHE.with(|c| *c.borrow_mut() = None);
         let _ = std::fs::remove_dir_all(&base);
     }
 

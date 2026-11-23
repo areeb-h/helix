@@ -36,12 +36,26 @@ strip = false        # keep symbols so a test panic gives a real backtrace
 [profile.dev.package."*"]
 opt-level = 3
 
+
+# Checked on every build (and by CI's clippy, which denies warnings).
+[lints.rust]
+# Inside an `unsafe fn`, each unsafe operation still needs its own `unsafe {}` block, so the
+# operations that need care are marked one by one (edition 2024 only warns).
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+# Every `unsafe {}` block says why it is sound, in a `// SAFETY:` comment above it.
+undocumented_unsafe_blocks = "deny"
+
+[lints.cargo]
+# A dependency nothing uses is attack surface and build time for nothing (Rust 1.100).
+unused_dependencies = "warn"
 [dependencies]
-cranelift-codegen = { version = "0.132.2", optional = true }
-cranelift-frontend = { version = "0.132.2", optional = true }
-cranelift-jit = { version = "0.132.2", optional = true }
-cranelift-module = { version = "0.132.2", optional = true }
-cranelift-native = { version = "0.132.2", optional = true }
+cranelift-codegen = { version = "0.136", optional = true }
+cranelift-frontend = { version = "0.136", optional = true }
+cranelift-jit = { version = "0.136", optional = true }
+cranelift-module = { version = "0.136", optional = true }
+cranelift-native = { version = "0.136", optional = true }
 ndarray = "0.17.2"
 # Exact arbitrary-precision rationals (reuses num-bigint, already in the tree via
 # polars) for the Rational value type - exact coefficients (PSLQ/lll), fractions.
@@ -72,27 +86,27 @@ needletail = { version = "0.7.3", optional = true }
 # BGZF; BCF is its binary form (same record model); GFF/BED add feature/interval
 # formats. Pure Rust, no system deps. The BCF version is pinned to the one that
 # depends on noodles-vcf 0.88 so a single copy of each noodles crate is resolved.
-noodles-vcf = { version = "0.88", optional = true }
-noodles-bcf = { version = "0.86", optional = true }
-noodles-gff = { version = "0.57", optional = true }
+noodles-vcf = { version = "0.96", optional = true }
+noodles-bcf = { version = "0.94", optional = true }
+noodles-gff = { version = "0.63", optional = true }
 # SAM/BAM sequence alignments (the most common post-FASTQ format). BAM is the
 # binary, BGZF-framed form of SAM; noodles yields the same alignment RecordBuf for
 # both, so read_sam/read_bam share one column-building core. Versions pinned to the
 # set that depends on the noodles-core/bgzf/csi already in the tree (single copy).
-noodles-sam = { version = "0.85", optional = true }
-noodles-bam = { version = "0.90", optional = true }
+noodles-sam = { version = "0.93", optional = true }
+noodles-bam = { version = "0.98", optional = true }
 # Genomic region/interval types (`Region` = "chr17:43k-44k") for indexed region
 # queries — read just the variants in a region from a bgzipped+tabix-indexed VCF
 # without scanning the whole file (the local-first capability). Pinned to the copy
 # already in the tree. The .tbi index reader lives in noodles-vcf.
-noodles-core = { version = "0.20", optional = true }
+noodles-core = { version = "0.21", optional = true }
 # musl's libm, ported to Rust — used ONLY for `erf`/`erfc` (src/stats.rs): the two
 # functions Rust's std does not provide, and which a rational approximation cannot
 # compute to double precision. Already compiled into this binary via
 # cranelift-codegen and faer, so this adds a dependency EDGE, not a new crate.
 libm = "0.2"
 # Latest Polars — Arrow-columnar, lazy, multi-threaded execution engine.
-polars = { version = "0.54", features = [
+polars = { version = "0.55", features = [
     "lazy",
     "csv",
     "parquet",
@@ -133,28 +147,28 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 # (`helix.lock`). TOML is the hand-edited manifest convention (Cargo/pyproject); the
 # lockfile is machine-generated. Core: the package manager is part of the toolchain.
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "1"
 # Format- and comment-preserving TOML editing for `helix add` — mutating the
 # hand-edited manifest must not destroy the user's comments/layout (a plain
 # `toml` re-serialize would). This is the crate Cargo's own `cargo add` uses, and
 # `toml` 0.8 is already built on it, so the marginal cost is near-zero.
-toml_edit = "0.22"
+toml_edit = "0.25"
 # CPython interop (Helix -> Python), behind the off-by-default `python` feature so
 # the core binary stays self-contained (no libpython dependency unless enabled).
 # `abi3-py38` builds against the stable ABI (one build spans Python 3.8+);
 # `auto-initialize` lazily starts the interpreter on first use.
-pyo3 = { version = "0.28", features = ["auto-initialize", "abi3-py38"], optional = true }
+pyo3 = { version = "0.29", features = ["auto-initialize", "abi3-py38"], optional = true }
 # Zero-copy Rust-Polars <-> Python-Polars interchange (via Arrow). Matches our
 # polars 0.54 and pyo3 0.28; used to hand a Helix DataFrame to/from Python.
-pyo3-polars = { version = "0.27", optional = true }
+pyo3-polars = { version = "0.28", optional = true }
 # ndarray <-> NumPy bridge. numpy 0.28 unifies on pyo3 ^0.28 and ndarray <=0.17
 # (our 0.17); used to hand a Helix Tensor to/from Python's NumPy.
-numpy = { version = "0.28", optional = true }
+numpy = { version = "0.29", optional = true }
 
 # Verified HTTPS downloads for managed runtimes / packages / toolchains / self-update
 # (ADR 0010), behind the `managed` feature so the pure core stays dependency-free.
 # rustls (not OpenSSL) keeps the binary self-contained; sha2 is the trust boundary.
-ureq = { version = "2", optional = true }
+ureq = { version = "3", optional = true }
 # Native app windows (`--features desktop`, ADR 0055 Phase 4): the platform's own web view in a
 # native window. Not default: it links WebKitGTK on Linux, which the static musl build cannot.
 wry = { version = "0.57", optional = true }
@@ -177,21 +191,24 @@ webpki-roots = { version = "1", optional = true }
 # Content hashing — core, because the package manager's lockfile pins every
 # dependency by sha256 (the integrity/reproducibility property), and the managed
 # downloader verifies hashes before extract (ADR 0010).
-sha2 = "0.10"
+sha2 = "0.11"
 # HMAC-SHA256 (RustCrypto, composes with sha2 0.10) and base64 — the byte-level
 # crypto/encoding primitives a pure-Helix crypto lib can't do correctly (Helix strings
 # are UTF-8, so raw-byte XOR / arbitrary-byte base64 need a native, audited path). Same
 # "delegate to audited Rust crates" stance as sha2. base64 is already in the tree.
-hmac = "0.12"
-base64 = "0.22"
+hmac = "0.13"
+base64 = "0.23"
 # AES-256-GCM authenticated encryption (RustCrypto, constant-time). Exposed with a
 # misuse-resistant API only — internal random nonce (OsRng), AEAD (encrypt+authenticate)
 # always, so the common footguns (nonce reuse, unauthenticated modes) aren't reachable.
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 # Ed25519 signatures (dalek) — the safe asymmetric primitive: deterministic, no nonce
 # footgun, no parameter choices. Verify with `verify_strict` (rejects malleable sigs).
 # Deliberately NOT RSA / raw-ECDSA (padding-oracle / nonce-reuse footguns).
-ed25519-dalek = "2"
+ed25519-dalek = "3"
+# The operating system's random source, for the Ed25519 seed and the SCRAM nonce (aes-gcm
+# draws its keys and nonces from the same crate). Already in the tree.
+getrandom = "0.4"
 # Pure-Rust gzip (miniz_oxide backend — no zlib system dep, keeps the binary
 # self-contained). Core, not optional: reading gzipped/BGZF bioinformatics files
 # (`.vcf.gz`) is a flagship capability, and the managed-runtime extraction reuses it.
@@ -220,11 +237,19 @@ libmimalloc-sys = { version = "0.1", default-features = false, features = ["exte
 # cleanly instead of panicking on a broken stdout pipe (usage is `#[cfg(unix)]`).
 # Already in the tree transitively, so this adds no new crate.
 libc = "0.2"
+# Safe wrappers for the few system calls `std` lacks: the shared-port listener and the
+# readiness wait in serve.rs, and the terminal width in render.rs. With them those files
+# need no `unsafe`. Already in the tree (through tempfile), so no new crate.
+rustix = { version = "1.1.6", features = ["std", "net", "event", "termios"] }
 bytes = { version = "1", optional = true }
 # Parquet for the native engine (ADR 0033 Stage 2) — the apache crate WITHOUT its
 # arrow half. The codec set exists for cross-engine truth: the polars engine
 # writes zstd by default, so a native build that cannot read zstd cannot read
 # files the sibling engine wrote.
+# Held at 59: parquet-rs 60 marks every float column with the new IEEE_754_TOTAL_ORDER column
+# order, and older readers refuse the whole file (Python polars 1.20: "Invalid thrift: bad
+# data"; the polars 0.54 engine: "ColumnOrder union has no variant set"). Files Helix writes
+# must open in the tools people already have. Revisit when parquet-rs can leave it out.
 parquet = { version = "59", default-features = false, features = [
     "snap",
     "zstd",
@@ -235,7 +260,7 @@ parquet = { version = "59", default-features = false, features = [
 # module hides behind a flag that drags the arrow stack in; zstd is already in
 # every build's tree via other deps).
 zstd = { version = "0.13", optional = true }
-rusqlite = { version = "0.41.1", features = ["bundled"], optional = true }
+rusqlite = { version = "0.43", features = ["bundled"], optional = true }
 
 [features]
 # HTTP data-fetching and the fast allocator are on by default; build with
@@ -309,6 +334,6 @@ regex = ["dep:regex"]
 # Used only by the ignored `generate_*_index_fixture` tests to build the
 # bgzipped + tabix-indexed genomics fixtures from their text sources (no external
 # bgzip/tabix needed). Pinned to the copies already in the tree (single version).
-noodles-bgzf = "0.47"
-noodles-csi = "0.56"
-noodles-tabix = "0.62"
+noodles-bgzf = "0.52"
+noodles-csi = "0.62"
+noodles-tabix = "0.68"

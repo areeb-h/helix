@@ -126,7 +126,7 @@ pub struct Jit {
     /// by the receiver array's element type.
     map_ptrs_f64: Vec<Option<*const u8>>,
     /// The **mixed** specialization (Int source, float body): `extern "C"
-    /// fn(*const i64, *mut f64, i64, *const i64)` — reads `i64`, writes `f64`, no captures.
+    /// fn(*const i64, *mut f64, i64, *const i64)` — reads `i64`, writes `f64`, captures as i64.
     /// Same index as `map_ptrs`; taken for an `Int` array when no plain `i64` kernel exists.
     map_ptrs_mixed: Vec<Option<*const u8>>,
     /// The Int-ROOTED mixed specialization (i64 source, i64 result, Float intermediates).
@@ -159,8 +159,8 @@ pub struct Jit {
     map_ptrs_mixed_fc_int: Vec<Option<*const u8>>,
     map_ptrs_fsrc_fc: Vec<Option<*const u8>>,
     map_ptrs_fsrc_fc_int: Vec<Option<*const u8>>,
-    /// Native `extern "C" fn(*const i64 src, *mut i64 dst, i64 len) -> i64` (kept count)
-    /// filter kernels, indexed by [`crate::bytecode::Op::TryJitFilter`]'s `kernel_idx`.
+    /// Native `extern "C" fn(*const i64 src, *mut i64 dst, i64 len, *const i64 caps) -> i64`
+    /// (kept count) filter kernels, indexed by [`crate::bytecode::Op::TryJitFilter`]'s `kernel_idx`.
     filter_ptrs: Vec<Option<*const u8>>,
     /// The f64 (`Floats`-source) filter kernels — same index as `filter_ptrs`. The
     /// predicate POISONS (returns -1) when an ordering comparison meets a NaN, because

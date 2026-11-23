@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::types::{F64, I8, I64};
-use cranelift_codegen::ir::{AbiParam, Block, InstBuilder, MemFlags, Type, Value as ClValue};
+use cranelift_codegen::ir::{AbiParam, Block, InstBuilder, MemFlagsData, Type, Value as ClValue};
 use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
@@ -159,7 +159,7 @@ pub fn build(
                 let ret = gen_value(&mut builder, f.body, &mut vars, &fn_ids, &mut module, kind);
                 builder.ins().return_(&[ret]);
             }
-            builder.finalize();
+            builder.finalize(module.target_config());
 
             module.define_function(fn_ids[f.name], &mut ctx).ok()?;
             module.clear_context(&mut ctx);
@@ -249,7 +249,7 @@ pub fn build(
                 builder.seal_block(exit);
                 let rv = builder.use_var(ret);
                 builder.ins().return_(&[rv]);
-                builder.finalize();
+                builder.finalize(module.target_config());
 
                 module.define_function(id, &mut ctx).ok()?;
                 module.clear_context(&mut ctx);
@@ -342,7 +342,7 @@ pub fn build(
                 let var = builder.declare_var(k.cl_type());
                 let val = match k {
                     NumKind::Int => raw,
-                    NumKind::Float => builder.ins().bitcast(F64, MemFlags::new(), raw),
+                    NumKind::Float => builder.ins().bitcast(F64, MemFlagsData::new(), raw),
                 };
                 builder.def_var(var, val);
                 vars.insert(pname.as_str(), var);
@@ -389,7 +389,7 @@ pub fn build(
             builder.switch_to_block(poison_blk);
             builder.seal_block(poison_blk);
             let one8 = builder.ins().iconst(I8, 1);
-            builder.ins().store(MemFlags::trusted(), one8, poison_ptr, 0);
+            builder.ins().store(MemFlagsData::trusted(), one8, poison_ptr, 0);
             let z64 = builder.ins().iconst(I64, 0);
             builder.ins().return_(&[z64]);
             builder.switch_to_block(exit);
@@ -397,10 +397,10 @@ pub fn build(
             let rv = builder.use_var(ret);
             let out = match ret_kind {
                 NumKind::Int => rv,
-                NumKind::Float => builder.ins().bitcast(I64, MemFlags::new(), rv),
+                NumKind::Float => builder.ins().bitcast(I64, MemFlagsData::new(), rv),
             };
             builder.ins().return_(&[out]);
-            builder.finalize();
+            builder.finalize(module.target_config());
 
             module.define_function(id, &mut ctx).ok()?;
             module.clear_context(&mut ctx);
@@ -1143,7 +1143,7 @@ fn define_scan_loop<'a>(
     // the build gate proved identical to what the VM pushes.
     let mut vars: HashMap<&'a str, Variable> = HashMap::new();
     for (i, cap) in rl.captures.iter().enumerate() {
-        let v = b.ins().load(I64, MemFlags::trusted(), caps_ptr, (i * 8) as i32);
+        let v = b.ins().load(I64, MemFlagsData::trusted(), caps_ptr, (i * 8) as i32);
         let cv = b.declare_var(I64);
         b.def_var(cv, v);
         vars.insert(cap.name.as_str(), cv);
@@ -1167,14 +1167,14 @@ fn define_scan_loop<'a>(
     let r = gen_value(&mut b, &rl.bodies[0], &mut vars, fn_ids, module, NumKind::Int);
     b.def_var(acc, r);
     let jv = b.use_var(j);
-    let off = b.ins().imul_imm(jv, 8);
+    let off = b.ins().imul_imm_s(jv, 8);
     let dp = b.use_var(dst_var);
     let addr = b.ins().iadd(dp, off);
-    b.ins().store(MemFlags::trusted(), r, addr, 0);
-    let nj = b.ins().iadd_imm(jv, 1);
+    b.ins().store(MemFlagsData::trusted(), r, addr, 0);
+    let nj = b.ins().iadd_imm_s(jv, 1);
     b.def_var(j, nj);
     let xv2 = b.use_var(x);
-    let nx = b.ins().iadd_imm(xv2, 1);
+    let nx = b.ins().iadd_imm_s(xv2, 1);
     b.def_var(x, nx);
     b.ins().jump(header, &[]);
     b.seal_block(header);
@@ -1183,7 +1183,7 @@ fn define_scan_loop<'a>(
     b.seal_block(exit_blk);
     b.ins().return_(&[]);
 
-    b.finalize();
+    b.finalize(module.target_config());
     module.define_function(fid, ctx).ok()?;
     module.clear_context(ctx);
     Some(())
@@ -1294,7 +1294,7 @@ fn define_reduce_loop(
         b.def_var(acc_vars[0], third);
     } else {
         for (k, &v) in acc_vars.iter().enumerate() {
-            let loaded = b.ins().load(slot_ty, MemFlags::trusted(), third, (k * 8) as i32);
+            let loaded = b.ins().load(slot_ty, MemFlagsData::trusted(), third, (k * 8) as i32);
             b.def_var(v, loaded);
         }
     }
@@ -1312,7 +1312,7 @@ fn define_reduce_loop(
             .enumerate()
             .map(|(j, cap)| {
                 let ty = if cap.kind == CaptureKind::ScalarValue { F64 } else { I64 };
-                let v = b.ins().load(ty, MemFlags::trusted(), caps_ptr, (j * 8) as i32);
+                let v = b.ins().load(ty, MemFlagsData::trusted(), caps_ptr, (j * 8) as i32);
                 let var = b.declare_var(ty);
                 b.def_var(var, v);
                 var
@@ -1422,7 +1422,7 @@ fn define_reduce_loop(
         }
         b.ins().return_(&[total]);
 
-        b.finalize();
+        b.finalize(module.target_config());
         module.define_function(fid, ctx).ok()?;
         module.clear_context(ctx);
         return Some(());
@@ -1545,7 +1545,7 @@ fn define_reduce_loop(
     // and falls back to the exact-erroring bytecode loop.
     if let (Some(pv), Some(pp)) = (poison_var, poison_ptr) {
         let pval = b.use_var(pv);
-        b.ins().store(MemFlags::trusted(), pval, pp, 0);
+        b.ins().store(MemFlagsData::trusted(), pval, pp, 0);
     }
     if scalar {
         let result = b.use_var(acc_vars[0]);
@@ -1553,12 +1553,12 @@ fn define_reduce_loop(
     } else {
         for (k, &v) in acc_vars.iter().enumerate() {
             let val = b.use_var(v);
-            b.ins().store(MemFlags::trusted(), val, third, (k * 8) as i32);
+            b.ins().store(MemFlagsData::trusted(), val, third, (k * 8) as i32);
         }
         b.ins().return_(&[]);
     }
 
-    b.finalize();
+    b.finalize(module.target_config());
     module.define_function(fid, ctx).ok()?;
     module.clear_context(ctx);
     Some(())
@@ -1690,7 +1690,7 @@ fn define_array_kernel<'a>(
                     CK::Scalar | CK::ScalarValue => elem_ty,
                     CK::ArrayI64 | CK::ArrayF64 => I64,
                 };
-                let v = b.ins().load(ty, MemFlags::trusted(), cp, (j * 8) as i32);
+                let v = b.ins().load(ty, MemFlagsData::trusted(), cp, (j * 8) as i32);
                 let cvar = b.declare_var(ty);
                 b.def_var(cvar, v);
                 cvar
@@ -1716,10 +1716,10 @@ fn define_array_kernel<'a>(
     b.seal_block(body_blk);
     // elem = src[i]
     let iv2 = b.use_var(i_var);
-    let ioff = b.ins().imul_imm(iv2, 8);
+    let ioff = b.ins().imul_imm_s(iv2, 8);
     let srcp = b.use_var(src_var);
     let saddr = b.ins().iadd(srcp, ioff);
-    let elem = b.ins().load(elem_ty, MemFlags::trusted(), saddr, 0);
+    let elem = b.ins().load(elem_ty, MemFlagsData::trusted(), saddr, 0);
     let elem_var = b.declare_var(elem_ty);
     b.def_var(elem_var, elem);
 
@@ -1734,10 +1734,10 @@ fn define_array_kernel<'a>(
     if is_filter {
         // dst[w] = elem; w += (pred ? 1 : 0)
         let wv = b.use_var(w_var);
-        let woff = b.ins().imul_imm(wv, 8);
+        let woff = b.ins().imul_imm_s(wv, 8);
         let dstp = b.use_var(dst_var);
         let daddr = b.ins().iadd(dstp, woff);
-        b.ins().store(MemFlags::trusted(), elem, daddr, 0);
+        b.ins().store(MemFlagsData::trusted(), elem, daddr, 0);
         // `elem_kind` selects the comparison family (icmp for the i64 pass, fcmp for the
         // f64 one); the poison variable is only ever written by Float ordering
         // comparisons, so the i64 pass leaves it dead exactly as before.
@@ -1764,7 +1764,7 @@ fn define_array_kernel<'a>(
         let iv_hit = b.use_var(i_var);
         let ret = if matches!(elem_kind, NumKind::Float) {
             let pv = b.use_var(poison_var);
-            let bad = b.ins().icmp_imm(IntCC::NotEqual, pv, 0);
+            let bad = b.ins().icmp_imm_s(IntCC::NotEqual, pv, 0);
             let neg1 = b.ins().iconst(I64, -1);
             b.ins().select(bad, neg1, iv_hit)
         } else {
@@ -1817,14 +1817,14 @@ fn define_array_kernel<'a>(
             gen_value(&mut b, &k.body, &mut vars, fn_ids, module, elem_kind)
         };
         let iv3 = b.use_var(i_var);
-        let doff = b.ins().imul_imm(iv3, 8);
+        let doff = b.ins().imul_imm_s(iv3, 8);
         let dstp = b.use_var(dst_var);
         let daddr = b.ins().iadd(dstp, doff);
-        b.ins().store(MemFlags::trusted(), r, daddr, 0);
+        b.ins().store(MemFlagsData::trusted(), r, daddr, 0);
     }
 
     let iv4 = b.use_var(i_var);
-    let ni = b.ins().iadd_imm(iv4, 1);
+    let ni = b.ins().iadd_imm_s(iv4, 1);
     b.def_var(i_var, ni);
     b.ins().jump(header, &[]);
     b.seal_block(header);
@@ -1835,7 +1835,7 @@ fn define_array_kernel<'a>(
     // at exit, so the loop itself carries the flag in a register.
     if let Some(pp) = poison_ptr {
         let pv = b.use_var(poison_var);
-        b.ins().store(MemFlags::trusted(), pv, pp, 0);
+        b.ins().store(MemFlagsData::trusted(), pv, pp, 0);
     }
     if is_search {
         // Exhausted without a hit: `len` — or -1 when the f64 predicate met a NaN, so the
@@ -1843,7 +1843,7 @@ fn define_array_kernel<'a>(
         let lv = b.use_var(len_var);
         let ret = if matches!(elem_kind, NumKind::Float) {
             let pv = b.use_var(poison_var);
-            let bad = b.ins().icmp_imm(IntCC::NotEqual, pv, 0);
+            let bad = b.ins().icmp_imm_s(IntCC::NotEqual, pv, 0);
             let neg1 = b.ins().iconst(I64, -1);
             b.ins().select(bad, neg1, lv)
         } else {
@@ -1858,7 +1858,7 @@ fn define_array_kernel<'a>(
         // never writes the poison variable, so its return is the plain count as before.
         let ret = if !mixed && matches!(elem_kind, NumKind::Float) {
             let pv = b.use_var(poison_var);
-            let bad = b.ins().icmp_imm(IntCC::NotEqual, pv, 0);
+            let bad = b.ins().icmp_imm_s(IntCC::NotEqual, pv, 0);
             let neg1 = b.ins().iconst(I64, -1);
             b.ins().select(bad, neg1, wv)
         } else {
@@ -1869,7 +1869,7 @@ fn define_array_kernel<'a>(
         b.ins().return_(&[]);
     }
 
-    b.finalize();
+    b.finalize(module.target_config());
     module.define_function(fid, ctx).ok()?;
     module.clear_context(ctx);
     Some(())
@@ -1977,7 +1977,7 @@ fn define_fused_kernel<'a>(
     // (`sink_var` was harmlessly set to the pointer above and stays unused.)
     if tuple_reduce {
         for (k2, &v) in acc_vars.iter().enumerate() {
-            let loaded = b.ins().load(slot_ty, MemFlags::trusted(), p2, (k2 * 8) as i32);
+            let loaded = b.ins().load(slot_ty, MemFlagsData::trusted(), p2, (k2 * 8) as i32);
             b.def_var(v, loaded);
         }
     }
@@ -2002,13 +2002,13 @@ fn define_fused_kernel<'a>(
         b.use_var(idx_var) // the counter value itself
     } else {
         let i = b.use_var(idx_var);
-        let off = b.ins().imul_imm(i, 8);
+        let off = b.ins().imul_imm_s(i, 8);
         let base = b.use_var(src_var);
         let addr = b.ins().iadd(base, off);
         // The element is `f64` for any float reduce (scalar or tuple — `Floats` source), else
         // `i64` (8 bytes either way). `elem_ty` (not `acc_ty`) so an f64 *tuple*, whose scalar
         // `acc_ty` is the unused `I64`, still loads an `f64` element.
-        b.ins().load(elem_ty, MemFlags::trusted(), addr, 0)
+        b.ins().load(elem_ty, MemFlagsData::trusted(), addr, 0)
     };
     let cur_var = b.declare_var(elem_ty);
     b.def_var(cur_var, elem);
@@ -2039,12 +2039,12 @@ fn define_fused_kernel<'a>(
     match &k.sink {
         FusionSink::Collect => {
             let w = b.use_var(sink_var);
-            let off = b.ins().imul_imm(w, 8);
+            let off = b.ins().imul_imm_s(w, 8);
             let base = b.use_var(dst_var);
             let addr = b.ins().iadd(base, off);
             let cur = b.use_var(cur_var);
-            b.ins().store(MemFlags::trusted(), cur, addr, 0);
-            let nw = b.ins().iadd_imm(w, 1);
+            b.ins().store(MemFlagsData::trusted(), cur, addr, 0);
+            let nw = b.ins().iadd_imm_s(w, 1);
             b.def_var(sink_var, nw);
         }
         FusionSink::Reduce { pa, pb, bodies, .. } => {
@@ -2120,7 +2120,7 @@ fn define_fused_kernel<'a>(
         FusionSink::Count => {
             // A surviving element bumps the counter; nothing is stored.
             let w = b.use_var(sink_var);
-            let nw = b.ins().iadd_imm(w, 1);
+            let nw = b.ins().iadd_imm_s(w, 1);
             b.def_var(sink_var, nw);
         }
     }
@@ -2131,7 +2131,7 @@ fn define_fused_kernel<'a>(
     b.switch_to_block(cont);
     b.seal_block(cont);
     let i = b.use_var(idx_var);
-    let ni = b.ins().iadd_imm(i, 1);
+    let ni = b.ins().iadd_imm_s(i, 1);
     b.def_var(idx_var, ni);
     b.ins().jump(header, &[]);
     b.seal_block(header);
@@ -2142,7 +2142,7 @@ fn define_fused_kernel<'a>(
         // Write the folded slots back through `acc_ptr`; no scalar return.
         for (k2, &v) in acc_vars.iter().enumerate() {
             let val = b.use_var(v);
-            b.ins().store(MemFlags::trusted(), val, p2, (k2 * 8) as i32);
+            b.ins().store(MemFlagsData::trusted(), val, p2, (k2 * 8) as i32);
         }
         b.ins().return_(&[]);
     } else {
@@ -2150,7 +2150,7 @@ fn define_fused_kernel<'a>(
         b.ins().return_(&[result]);
     }
 
-    b.finalize();
+    b.finalize(module.target_config());
     module.define_function(fid, ctx).ok()?;
     module.clear_context(ctx);
     Some(())
@@ -2329,8 +2329,8 @@ fn gen_value_env<'a>(
                         // `div_euclid`: step the quotient AWAY from zero when the
                         // remainder is negative — down for a positive divisor, up for a
                         // negative one. The old `q - 1` was the `rv > 0` half only.
-                        let qm1 = b.ins().iadd_imm(q, -1);
-                        let qp1 = b.ins().iadd_imm(q, 1);
+                        let qm1 = b.ins().iadd_imm_s(q, -1);
+                        let qp1 = b.ins().iadd_imm_s(q, 1);
                         let r_pos = b.ins().icmp(IntCC::SignedGreaterThan, rv, zero);
                         let adj = b.ins().select(r_pos, qm1, qp1);
                         let is_neg = b.ins().icmp(IntCC::SignedLessThan, rem, zero);
@@ -2342,7 +2342,7 @@ fn gen_value_env<'a>(
                     // A constant in range keeps the immediate form (no count register,
                     // no guard); anything else is guarded and shifted by the register.
                     BinOp::Shl => match **right {
-                        Expr::Int(n) if (0..=63).contains(&n) => b.ins().ishl_imm(lv, n),
+                        Expr::Int(n) if (0..=63).contains(&n) => b.ins().ishl_imm_u(lv, n),
                         _ => {
                             shift_guard(b, rv, tl.poison_blk);
                             b.ins().ishl(lv, rv)
@@ -2350,7 +2350,7 @@ fn gen_value_env<'a>(
                     },
                     // `>>` on i64 is arithmetic (sign-extending) in Rust -> `sshr`.
                     BinOp::Shr => match **right {
-                        Expr::Int(n) if (0..=63).contains(&n) => b.ins().sshr_imm(lv, n),
+                        Expr::Int(n) if (0..=63).contains(&n) => b.ins().sshr_imm_u(lv, n),
                         _ => {
                             shift_guard(b, rv, tl.poison_blk);
                             b.ins().sshr(lv, rv)
@@ -2396,7 +2396,7 @@ fn gen_value_env<'a>(
                     let _ = k;
                     argv.push(match ak {
                         NumKind::Int => v,
-                        NumKind::Float => b.ins().bitcast(I64, MemFlags::new(), v),
+                        NumKind::Float => b.ins().bitcast(I64, MemFlagsData::new(), v),
                     });
                 }
                 argv.push(tl.poison_ptr);
@@ -2405,14 +2405,14 @@ fn gen_value_env<'a>(
                 // The callee shares our poison flag: if it NaN-bailed, bail HERE too —
                 // otherwise this body could keep looping on a garbage 0 result where
                 // the bytecode re-run would have raised immediately.
-                let p = b.ins().load(I8, MemFlags::trusted(), tl.poison_ptr, 0);
+                let p = b.ins().load(I8, MemFlagsData::trusted(), tl.poison_ptr, 0);
                 let cont = b.create_block();
                 b.ins().brif(p, tl.poison_blk, &[], cont, &[]);
                 b.switch_to_block(cont);
                 b.seal_block(cont);
                 let v = match sig.ret {
                     NumKind::Int => raw,
-                    NumKind::Float => b.ins().bitcast(F64, MemFlags::new(), raw),
+                    NumKind::Float => b.ins().bitcast(F64, MemFlagsData::new(), raw),
                 };
                 return (v, sig.ret);
             }
@@ -2734,12 +2734,12 @@ fn gen_value<'a>(
                     // Constant shift in 0..=63 (guaranteed by `value_eligible`); the
                     // immediate form avoids computing a throwaway count value.
                     let n = if let Expr::Int(n) = **right { n } else { unreachable!() };
-                    b.ins().ishl_imm(l, n)
+                    b.ins().ishl_imm_u(l, n)
                 }
                 (NumKind::Int, BinOp::Shr) => {
                     // `>>` on i64 is arithmetic (sign-extending) in Rust → `sshr`.
                     let n = if let Expr::Int(n) = **right { n } else { unreachable!() };
-                    b.ins().sshr_imm(l, n)
+                    b.ins().sshr_imm_u(l, n)
                 }
                 (NumKind::Int, BinOp::FloorDiv) => {
                     // `a.div_euclid(d)` for a positive constant `d`: `q = a / d`, then
@@ -2749,7 +2749,7 @@ fn gen_value<'a>(
                     let rem = b.ins().srem(l, r);
                     let zero = b.ins().iconst(I64, 0);
                     let is_neg = b.ins().icmp(IntCC::SignedLessThan, rem, zero);
-                    let qm1 = b.ins().iadd_imm(q, -1);
+                    let qm1 = b.ins().iadd_imm_s(q, -1);
                     b.ins().select(is_neg, qm1, q)
                 }
                 (NumKind::Float, BinOp::Add) => b.ins().fadd(l, r),
@@ -2849,9 +2849,9 @@ fn gen_value<'a>(
             };
             let base = b.use_var(vars[name]);
             let idx = gen_value(b, index, vars, fn_ids, module, NumKind::Int);
-            let off = b.ins().imul_imm(idx, 8);
+            let off = b.ins().imul_imm_s(idx, 8);
             let addr = b.ins().iadd(base, off);
-            b.ins().load(I64, MemFlags::trusted(), addr, 0)
+            b.ins().load(I64, MemFlagsData::trusted(), addr, 0)
         }
         _ => unreachable!("ineligible node reached codegen"),
     }
@@ -2941,12 +2941,12 @@ fn gen_arm_cond<'a>(
 ) -> ClValue {
     use crate::ast::Pattern;
     let pat = match pattern {
-        Pattern::Int(n) => Some(b.ins().icmp_imm(IntCC::Equal, sv, *n)),
+        Pattern::Int(n) => Some(b.ins().icmp_imm_s(IntCC::Equal, sv, *n)),
         Pattern::Or(alts) => {
             let mut acc: Option<ClValue> = None;
             for p in alts {
                 if let Pattern::Int(n) = p {
-                    let eq = b.ins().icmp_imm(IntCC::Equal, sv, *n);
+                    let eq = b.ins().icmp_imm_s(IntCC::Equal, sv, *n);
                     acc = Some(match acc {
                         Some(a) => b.ins().bor(a, eq),
                         None => eq,
@@ -3068,9 +3068,9 @@ fn gen_value_typed<'a>(
             let base = b.use_var(cx.vars[name]);
             let (idx, ik) = gen_value_typed(b, index, cx);
             debug_assert!(matches!(ik, NumKind::Int), "non-i64 index reached cx.mixed codegen");
-            let off = b.ins().imul_imm(idx, 8);
+            let off = b.ins().imul_imm_s(idx, 8);
             let addr = b.ins().iadd(base, off);
-            (b.ins().load(F64, MemFlags::trusted(), addr, 0), NumKind::Float)
+            (b.ins().load(F64, MemFlagsData::trusted(), addr, 0), NumKind::Float)
         }
         Expr::Binary { op, left, right, .. } => {
             let (lv, lk) = gen_value_typed(b, left, cx);
@@ -3097,7 +3097,7 @@ fn gen_value_typed<'a>(
                         let rem = b.ins().srem(lv, rv);
                         let zero = b.ins().iconst(I64, 0);
                         let is_neg = b.ins().icmp(IntCC::SignedLessThan, rem, zero);
-                        let qm1 = b.ins().iadd_imm(q, -1);
+                        let qm1 = b.ins().iadd_imm_s(q, -1);
                         b.ins().select(is_neg, qm1, q)
                     }
                     BinOp::BitAnd => b.ins().band(lv, rv),
@@ -3105,11 +3105,11 @@ fn gen_value_typed<'a>(
                     BinOp::BitXor => b.ins().bxor(lv, rv),
                     BinOp::Shl => {
                         let n = if let Expr::Int(n) = **right { n } else { unreachable!() };
-                        b.ins().ishl_imm(lv, n)
+                        b.ins().ishl_imm_u(lv, n)
                     }
                     BinOp::Shr => {
                         let n = if let Expr::Int(n) = **right { n } else { unreachable!() };
-                        b.ins().sshr_imm(lv, n)
+                        b.ins().sshr_imm_u(lv, n)
                     }
                     _ => unreachable!("ineligible operator reached cx.mixed codegen"),
                 };
@@ -3199,26 +3199,26 @@ fn gen_value_typed<'a>(
             let cell = cx.mixed.poison_cell;
             let cell_ptr = b.ins().stack_addr(I64, cell, 0);
             let zero8 = b.ins().iconst(I8, 0);
-            b.ins().store(MemFlags::new(), zero8, cell_ptr, 0);
+            b.ins().store(MemFlagsData::new(), zero8, cell_ptr, 0);
             let mut vals: Vec<ClValue> = Vec::with_capacity(args.len() + 1);
             for ((v, ak), &want) in argv.iter().zip(params) {
                 debug_assert!(*ak == want, "mixed-call arg kind drifted from the callee sig");
                 vals.push(match ak {
                     NumKind::Int => *v,
-                    NumKind::Float => b.ins().bitcast(I64, MemFlags::new(), *v),
+                    NumKind::Float => b.ins().bitcast(I64, MemFlagsData::new(), *v),
                 });
             }
             vals.push(cell_ptr);
             let call = b.ins().call(fref, &vals);
             let raw = b.inst_results(call)[0];
-            let flag = b.ins().load(I8, MemFlags::new(), cell_ptr, 0);
+            let flag = b.ins().load(I8, MemFlagsData::new(), cell_ptr, 0);
             let flag64 = b.ins().uextend(I64, flag);
             let pv = b.use_var(cx.poison);
             let npv = b.ins().bor(pv, flag64);
             b.def_var(cx.poison, npv);
             let v = match ret {
                 NumKind::Int => raw,
-                NumKind::Float => b.ins().bitcast(F64, MemFlags::new(), raw),
+                NumKind::Float => b.ins().bitcast(F64, MemFlagsData::new(), raw),
             };
             (v, *ret)
         }
@@ -3292,7 +3292,7 @@ fn gen_value_typed<'a>(
                 let ge_min = b.ins().fcmp(FloatCC::GreaterThanOrEqual, rounded, min_c);
                 let lt_lim = b.ins().fcmp(FloatCC::LessThan, rounded, lim_c);
                 let in_range = b.ins().band(ge_min, lt_lim);
-                let bad_i8 = b.ins().bxor_imm(in_range, 1);
+                let bad_i8 = b.ins().bxor_imm_u(in_range, 1);
                 let bad = b.ins().uextend(I64, bad_i8);
                 let pv = b.use_var(cx.poison);
                 let npv = b.ins().bor(pv, bad);
@@ -3654,19 +3654,19 @@ fn gen_f64_typed<'a>(
             // see, so slot-relative accesses could be folded away as "loads what was stored".
             let cell_ptr = b.ins().stack_addr(I64, mx.poison_cell, 0);
             let zero8 = b.ins().iconst(I8, 0);
-            b.ins().store(MemFlags::new(), zero8, cell_ptr, 0);
+            b.ins().store(MemFlagsData::new(), zero8, cell_ptr, 0);
             let mut vals: Vec<ClValue> = Vec::with_capacity(args.len() + 1);
             for ((v, ak), &want) in argv.iter().zip(params) {
                 debug_assert!(*ak == want, "cx.mixed-call arg kind drifted from the callee sig");
                 vals.push(match ak {
                     NumKind::Int => *v,
-                    NumKind::Float => b.ins().bitcast(I64, MemFlags::new(), *v),
+                    NumKind::Float => b.ins().bitcast(I64, MemFlagsData::new(), *v),
                 });
             }
             vals.push(cell_ptr);
             let call = b.ins().call(fref, &vals);
             let raw = b.inst_results(call)[0];
-            let flag = b.ins().load(I8, MemFlags::new(), cell_ptr, 0);
+            let flag = b.ins().load(I8, MemFlagsData::new(), cell_ptr, 0);
             if let Some(p) = cx.poison {
                 let pv = b.use_var(p);
                 let npv = b.ins().bor(pv, flag);
@@ -3674,7 +3674,7 @@ fn gen_f64_typed<'a>(
             }
             let v = match ret {
                 NumKind::Int => raw,
-                NumKind::Float => b.ins().bitcast(F64, MemFlags::new(), raw),
+                NumKind::Float => b.ins().bitcast(F64, MemFlagsData::new(), raw),
             };
             (v, *ret)
         }
@@ -3704,9 +3704,9 @@ fn gen_f64_typed<'a>(
             };
             let base = b.use_var(cx.arrays[name]);
             let (idx, _) = gen_f64_typed(b, index, cx);
-            let off = b.ins().imul_imm(idx, 8);
+            let off = b.ins().imul_imm_s(idx, 8);
             let addr = b.ins().iadd(base, off);
-            (b.ins().load(F64, MemFlags::trusted(), addr, 0), NumKind::Float)
+            (b.ins().load(F64, MemFlagsData::trusted(), addr, 0), NumKind::Float)
         }
         Expr::Binary { op, left, right, .. } => {
             let (lv, lk) = gen_f64_typed(b, left, cx);

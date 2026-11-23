@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+### Fixed
+
+- **A sharded server's listening sockets leaked into the programs it ran.** `listen(port, n)`
+  with `n > 1` made its sockets without close-on-exec, so any program the app ran with `run`
+  inherited them and could accept the app's connections. They are close-on-exec now,
+  as a single listener's always were, and a test checks the flag in `/proc`.
+- **A JIT map called some compiled kernels with the wrong signature.** An integer `map` whose
+  body has an ordering comparison (`xs.map(x => if x > 2 then x else 0)` over a shared Int
+  array) could call a 4-argument kernel through a 5-argument type. Results were right on
+  x86-64, but it was undefined behaviour. The VM now records which build it holds.
+- **Memory-allocator options could race with worker threads.** With `HELIX_THREADS` set, the
+  thread pool started before mimalloc's options were written; they are written first now.
+- **Two package tests changed environment variables while other test threads read them**,
+  which is unsound; they use a per-thread override instead.
+- **`helix emit rust` and some error messages depended on the Rust that built Helix.** String
+  literals and header names were escaped by Rust's own `Debug`, whose output changed in Rust
+  1.98 and 1.100, so `emit rust --check` could fail between two builds of the same Helix.
+  Helix escapes them itself now (printable ASCII as is, everything else `\u{…}`); the
+  example rules emit byte-identical files.
+
+### Changed
+
+- **One pinned Rust version.** `rust-toolchain.toml` pins Rust 1.100.0 for local builds, CI and
+  the release builds, so a tag always builds with the same compiler. A weekly job
+  (`stable-canary.yml`) tries the newest stable, and the MSRV job still checks 1.96.
+- **Less `unsafe`, and every block justified.** The server's socket setup and readiness wait
+  and the terminal-width query use safe `rustix` calls instead of raw `libc`. Each remaining
+  `unsafe` block (the JIT boundary, SIMD, start-up) has a `SAFETY:` comment, which clippy now
+  requires.
+- **Build guards.** Clippy refuses the "algebraic" float operations, which would let results
+  differ between engines. Cargo warns about unused dependencies. New crate versions are taken
+  only after a week (`.cargo/config.toml`); an urgent fix can still be taken deliberately with
+  `CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow`.
+
 ## v0.14.0 — 2026-11-21
 
 ### Added

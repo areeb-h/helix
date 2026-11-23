@@ -56,9 +56,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      - name: Install Rust (the version in rust-toolchain.toml)
+        shell: bash
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: helix-ci
@@ -83,7 +83,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust (the version in rust-toolchain.toml)
+        shell: bash
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: helix-ci
@@ -120,9 +122,9 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      - name: Install Rust (the version in rust-toolchain.toml)
+        shell: bash
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: helix-desktop
@@ -162,7 +164,9 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust (the version in rust-toolchain.toml)
+        shell: bash
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: helix-ci
@@ -219,6 +223,8 @@ jobs:
         run: |
           V=$(grep -m1 '^rust-version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
           echo "version=$V" >> "$GITHUB_OUTPUT"
+          # Ahead of rust-toolchain.toml's pin: this job checks the MINIMUM version.
+          echo "RUSTUP_TOOLCHAIN=$V" >> "$GITHUB_ENV"
           echo "MSRV declared as $V"
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -243,7 +249,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust (the version in rust-toolchain.toml)
+        shell: bash
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: helix-audit
@@ -266,7 +274,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust (the version in rust-toolchain.toml)
+        shell: bash
+        run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: helix-features

@@ -28,7 +28,7 @@
 //! pulling a crate for eleven lines.
 
 use base64::Engine as _;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha224, Sha256, Sha384, Sha512};
 
 type HmacSha256 = Hmac<Sha256>;
@@ -112,14 +112,14 @@ pub struct Scram {
 }
 
 impl Scram {
-    pub fn new(password: &str, binding: Binding) -> Scram {
-        Scram {
+    pub fn new(password: &str, binding: Binding) -> Result<Scram, String> {
+        Ok(Scram {
             password: password.to_string(),
-            client_nonce: nonce(),
+            client_nonce: nonce()?,
             binding,
             client_first_bare: String::new(),
             server_signature: Vec::new(),
-        }
+        })
     }
 
     /// `n,,n=,r=<nonce>` — the user name is EMPTY on purpose. PostgreSQL takes the user
@@ -212,13 +212,12 @@ impl Scram {
 /// A fresh client nonce: 18 random bytes as base64, which is printable and comfortably
 /// above the RFC's minimum.
 ///
-/// `OsRng` is the same source `aes-gcm` uses for its AEAD nonces here, so this adds no
-/// dependency and no second opinion about where randomness comes from.
-fn nonce() -> String {
-    use aes_gcm::aead::{rand_core::RngCore, OsRng};
+/// The operating system's random source through `getrandom`, the same source `aes-gcm` draws
+/// its AEAD nonces from here. If it fails there is no safe fallback, so the connection fails.
+fn nonce() -> Result<String, String> {
     let mut raw = [0u8; 18];
-    OsRng.fill_bytes(&mut raw);
-    b64().encode(raw)
+    getrandom::fill(&mut raw).map_err(|e| format!("could not get random bytes for the SCRAM nonce: {e}"))?;
+    Ok(b64().encode(raw))
 }
 
 /// One DER element: its tag, its contents, and what follows it. `None` for anything that is
@@ -324,7 +323,7 @@ mod tests {
 
     /// An exchange with the nonce and the user name a test vector fixes.
     fn fixed(password: &str, user: &str, nonce: &str, binding: Binding) -> (Scram, String) {
-        let mut s = Scram::new(password, binding);
+        let mut s = Scram::new(password, binding).expect("random source");
         s.client_nonce = nonce.to_string();
         let first = s.client_first();
         // The vectors name a user; this client never does (see `client_first`).

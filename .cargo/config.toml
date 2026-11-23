@@ -8,3 +8,10 @@
 # musl's slow default malloc, so the static build stays glibc-fast.
 [target.x86_64-unknown-linux-musl]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# Dependency cooldown (Rust 1.100): Cargo picks only crate versions published at least a week
+# ago, so a compromised release is usually caught and yanked before it can reach this tree.
+# Versions already in Cargo.lock are unaffected. For an urgent security fix that is newer,
+# run the update with CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow and say why in the PR.
+[registry]
+global-min-publish-age = "7 days"

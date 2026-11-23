@@ -33,16 +33,23 @@ mod imp {
         // adversarial mirror can't OOM the process by streaming forever *before* the
         // hash check runs. The cap is generous (verified artifacts are pinned anyway).
         const MAX_DOWNLOAD_BYTES: u64 = 1 << 30; // 1 GiB
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(std::time::Duration::from_secs(30))
-            .timeout_read(std::time::Duration::from_secs(300))
-            .build();
+        // A 4xx/5xx is an error (a download needs the bytes); redirects are followed, but
+        // only to https (`https_only`), as the URL itself must be; and no proxy is read from
+        // the environment, as before.
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_connect(Some(std::time::Duration::from_secs(30)))
+            .timeout_per_read(Some(std::time::Duration::from_secs(300)))
+            .https_only(true)
+            .proxy(None)
+            .build()
+            .into();
         let resp = agent
             .get(url)
             .call()
             .map_err(|e| format!("download failed for {url}: {e}"))?;
         let mut buf = Vec::new();
-        resp.into_reader()
+        resp.into_body()
+            .into_reader()
             .take(MAX_DOWNLOAD_BYTES + 1)
             .read_to_end(&mut buf)
             .map_err(|e| format!("reading the download body failed: {e}"))?;

@@ -512,6 +512,33 @@ fn a_nested_file_is_refused_cleanly() {
     let _ = std::fs::remove_file(path);
 }
 
+/// Files Helix writes must open in the readers people already have. parquet-rs 60 marks every
+/// float column with the IEEE_754_TOTAL_ORDER column order, and readers that predate it refuse
+/// the whole file (Python polars 1.20: "Invalid thrift: bad data"), so a float column must
+/// still carry the type-defined order. This fails if a parquet-rs upgrade changes that.
+#[test]
+fn written_parquet_uses_a_column_order_older_readers_know() {
+    use parquet::basic::ColumnOrder;
+    use parquet::file::reader::{FileReader, SerializedFileReader};
+
+    let path = tdir().join("column_order.parquet");
+    let p = path.to_str().expect("utf8 path");
+    let df = super::build_frame(data(), 0, 0).unwrap();
+    df.write_parquet(p, 0, 0).unwrap();
+    let reader = SerializedFileReader::new(std::fs::File::open(&path).unwrap()).unwrap();
+    let meta = reader.metadata().file_metadata();
+    let schema = meta.schema_descr();
+    for i in 0..schema.num_columns() {
+        let order = meta.column_order(i);
+        assert!(
+            matches!(order, ColumnOrder::TYPE_DEFINED_ORDER(_) | ColumnOrder::UNDEFINED),
+            "column `{}` is written with {order:?}, which older readers reject",
+            schema.column(i).name()
+        );
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
 #[cfg(feature = "dataframes")]
 mod parquet_cross_engine {
     use super::*;
