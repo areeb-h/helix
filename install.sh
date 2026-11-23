@@ -13,6 +13,8 @@
 #   HELIX_INSTALL_DIR   where to put the binary (default: $HOME/.local/bin)
 #   HELIX_VERSION       release tag to fetch (default: latest)
 #   HELIX_FROM_SOURCE   set to 1 to force a source build
+#   HELIX_NO_SOURCE     set to 1 to fail instead of building from source when no prebuilt
+#                       binary matches (release checks use it: they must test the artifact)
 #   HELIX_MUSL          set to 1 to force the fully-static musl binary on x86_64 Linux
 #                       (maximum portability / air-gapped; the default gnu build is PGO).
 #                       Auto-selected on musl distros and on glibc older than the gnu
@@ -192,6 +194,8 @@ main() {
     from_source
   elif from_release; then
     :
+  elif [ "${HELIX_NO_SOURCE:-0}" = "1" ]; then
+    die "no matching prebuilt release${HELIX_VERSION:+ for $HELIX_VERSION}, and HELIX_NO_SOURCE=1 forbids a source build."
   else
     say "no matching prebuilt release; falling back to a source build."
     from_source

@@ -354,3 +354,16 @@ jobs:
             esac
             exit $fail
           '
+      # A release check must test the published binary, never a local build: with
+      # HELIX_NO_SOURCE=1 a tag that has no binary fails, even inside a checkout with cargo.
+      - name: HELIX_NO_SOURCE refuses the source-build fallback
+        run: |
+          set +e
+          out=$(HELIX_VERSION=v0.0.0-no-such-release HELIX_NO_SOURCE=1 HELIX_INSTALL_DIR="$RUNNER_TEMP/bin" dash install.sh 2>&1)
+          rc=$?
+          set -e
+          echo "$out"
+          [ "$rc" -ne 0 ] || { echo "FAIL: exited 0"; exit 1; }
+          echo "$out" | grep -q "HELIX_NO_SOURCE=1 forbids a source build" || { echo "FAIL: wrong reason"; exit 1; }
+          if echo "$out" | grep -q "building from source"; then echo "FAIL: it built from source"; exit 1; fi
+          [ ! -e "$RUNNER_TEMP/bin/helix" ] || { echo "FAIL: a binary was installed"; exit 1; }
