@@ -86,20 +86,20 @@ needletail = { version = "0.7.3", optional = true }
 # BGZF; BCF is its binary form (same record model); GFF/BED add feature/interval
 # formats. Pure Rust, no system deps. The BCF version is pinned to the one that
 # depends on noodles-vcf 0.88 so a single copy of each noodles crate is resolved.
-noodles-vcf = { version = "0.88", optional = true }
-noodles-bcf = { version = "0.86", optional = true }
-noodles-gff = { version = "0.57", optional = true }
+noodles-vcf = { version = "0.96", optional = true }
+noodles-bcf = { version = "0.94", optional = true }
+noodles-gff = { version = "0.63", optional = true }
 # SAM/BAM sequence alignments (the most common post-FASTQ format). BAM is the
 # binary, BGZF-framed form of SAM; noodles yields the same alignment RecordBuf for
 # both, so read_sam/read_bam share one column-building core. Versions pinned to the
 # set that depends on the noodles-core/bgzf/csi already in the tree (single copy).
-noodles-sam = { version = "0.85", optional = true }
-noodles-bam = { version = "0.90", optional = true }
+noodles-sam = { version = "0.93", optional = true }
+noodles-bam = { version = "0.98", optional = true }
 # Genomic region/interval types (`Region` = "chr17:43k-44k") for indexed region
 # queries — read just the variants in a region from a bgzipped+tabix-indexed VCF
 # without scanning the whole file (the local-first capability). Pinned to the copy
 # already in the tree. The .tbi index reader lives in noodles-vcf.
-noodles-core = { version = "0.20", optional = true }
+noodles-core = { version = "0.21", optional = true }
 # musl's libm, ported to Rust — used ONLY for `erf`/`erfc` (src/stats.rs): the two
 # functions Rust's std does not provide, and which a rational approximation cannot
 # compute to double precision. Already compiled into this binary via
@@ -246,6 +246,10 @@ bytes = { version = "1", optional = true }
 # arrow half. The codec set exists for cross-engine truth: the polars engine
 # writes zstd by default, so a native build that cannot read zstd cannot read
 # files the sibling engine wrote.
+# Held at 59: parquet-rs 60 marks every float column with the new IEEE_754_TOTAL_ORDER column
+# order, and older readers refuse the whole file (Python polars 1.20: "Invalid thrift: bad
+# data"; the polars 0.54 engine: "ColumnOrder union has no variant set"). Files Helix writes
+# must open in the tools people already have. Revisit when parquet-rs can leave it out.
 parquet = { version = "59", default-features = false, features = [
     "snap",
     "zstd",
@@ -330,6 +334,6 @@ regex = ["dep:regex"]
 # Used only by the ignored `generate_*_index_fixture` tests to build the
 # bgzipped + tabix-indexed genomics fixtures from their text sources (no external
 # bgzip/tabix needed). Pinned to the copies already in the tree (single version).
-noodles-bgzf = "0.47"
-noodles-csi = "0.56"
-noodles-tabix = "0.62"
+noodles-bgzf = "0.52"
+noodles-csi = "0.62"
+noodles-tabix = "0.68"
