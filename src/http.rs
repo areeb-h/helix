@@ -56,31 +56,88 @@ const DEFAULT_MAX_BODY: usize = 10 * 1024 * 1024;
 #[cfg(feature = "http")]
 const MAX_RESPONSE_HEADERS: usize = 512;
 
+/// An agent with Helix's fixed policy: the given connect and per-read timeouts, `redirects`
+/// followed by ureq itself (0 for every client here except `open_stream`, which has always let
+/// ureq follow them), every status returned as a response rather than an error, any method
+/// allowed (`QUERY`), and NO proxy. ureq 3 reads `HTTPS_PROXY`/`HTTP_PROXY` by default; ureq 2
+/// never did, so an environment variable could otherwise start routing a program's requests,
+/// credentials included, through a host it never named.
+#[cfg(feature = "http")]
+fn new_agent(connect: std::time::Duration, per_read: Option<std::time::Duration>, redirects: u32) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_connect(Some(connect))
+        .timeout_per_read(per_read)
+        .max_redirects(redirects)
+        .max_redirects_will_error(true)
+        .http_status_as_error(false)
+        .allow_non_standard_methods(true)
+        .proxy(None)
+        .build()
+        .into()
+}
+
 /// The agent for a request with these limits: the shared pool unless the request
-/// tunes socket behaviour, which ureq 2 only supports agent-wide.
+/// tunes socket behaviour, which gets a dedicated agent.
 #[cfg(feature = "http")]
 fn agent_for(limits: &Limits) -> ureq::Agent {
     if limits.connect_ms.is_none() && limits.read_ms.is_none() {
         return agent();
     }
-    ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_millis(limits.connect_ms.unwrap_or(30_000)))
-        .timeout_read(std::time::Duration::from_millis(limits.read_ms.unwrap_or(120_000)))
-        .redirects(0)
-        .build()
+    new_agent(
+        std::time::Duration::from_millis(limits.connect_ms.unwrap_or(30_000)),
+        Some(std::time::Duration::from_millis(limits.read_ms.unwrap_or(120_000))),
+        0,
+    )
+}
+
+/// One request: `method` to `url` with `headers`, and `body` when it is not empty (an empty
+/// body sends none, as before). `total_ms` is a deadline for the whole exchange, body
+/// included. Built as an `http::Request` because ureq 3's builder only offers the standard
+/// methods by name.
+#[cfg(feature = "http")]
+fn send(
+    agent: &ureq::Agent,
+    method: &str,
+    url: &str,
+    headers: &[(String, String)],
+    body: &str,
+    total_ms: Option<u64>,
+) -> Result<ureq::http::Response<ureq::Body>, String> {
+    let mut b = ureq::http::Request::builder().method(method).uri(url);
+    for (k, v) in headers {
+        b = b.header(k.as_str(), v.as_str());
+    }
+    let req = b
+        .body(body.as_bytes().to_vec())
+        .map_err(|e| format!("HTTP {method} to {url}: the request is malformed: {e}"))?;
+    let req = match total_ms {
+        Some(ms) => agent
+            .configure_request(req)
+            .timeout_global(Some(std::time::Duration::from_millis(ms)))
+            .build(),
+        None => req,
+    };
+    agent.run(req).map_err(|e| match e {
+        ureq::Error::Timeout(ureq::Timeout::Global) if total_ms.is_some() => format!(
+            "HTTP {method} to {url} exceeded total_ms ({} ms): {e}",
+            total_ms.unwrap_or(0)
+        ),
+        e => format!("HTTP {method} to {url} failed: {e}"),
+    })
 }
 
 /// Read a response body to `max_body` bytes. One byte more is an ERROR that names the
 /// limit and the field that raises it — the body is attacker-sized, and handing back a
 /// prefix as if it were the whole is the silent-wrong-answer class.
 #[cfg(feature = "http")]
-fn read_body(resp: ureq::Response, max_body: usize) -> Result<String, String> {
+fn read_body(resp: ureq::http::Response<ureq::Body>, max_body: usize) -> Result<String, String> {
     use std::io::Read;
     let mut buf: Vec<u8> = Vec::new();
-    resp.into_reader()
+    resp.into_body()
+        .into_reader()
         .take(max_body as u64 + 1)
         .read_to_end(&mut buf)
-        .map_err(|e| format!("reading the response body failed: {e}"))?;
+        .map_err(|e| format!("reading the response body failed: {}", body_error(&e)))?;
     if buf.len() > max_body {
         return Err(format!(
             "the response body exceeds max_body ({max_body} bytes) — raise `max_body` in the request record, or stream it with `http_stream`"
@@ -90,6 +147,20 @@ fn read_body(resp: ureq::Response, max_body: usize) -> Result<String, String> {
         .map_err(|_| "the response body is not valid UTF-8 text".to_string())
 }
 
+/// A body-read failure in words that name the limit that fired, when it was one of ours.
+#[cfg(feature = "http")]
+fn body_error(e: &std::io::Error) -> String {
+    match e.get_ref().and_then(|inner| inner.downcast_ref::<ureq::Error>()) {
+        Some(ureq::Error::Timeout(ureq::Timeout::Global)) => {
+            "timed out: the request's total deadline (`total_ms`) passed".to_string()
+        }
+        Some(ureq::Error::Timeout(ureq::Timeout::PerRead)) => {
+            "timed out: no data arrived within the read timeout (`read_ms`, default 120 s)".to_string()
+        }
+        _ => e.to_string(),
+    }
+}
+
 #[cfg(feature = "http")]
 fn agent() -> ureq::Agent {
     use std::sync::OnceLock;
@@ -97,15 +168,11 @@ fn agent() -> ureq::Agent {
     AGENT
         .get_or_init(|| {
             // Connect/read timeouts so a hung or slow-loris server cannot stall the
-            // program indefinitely. (`into_string` already caps a body at ureq's 10 MiB.)
-            ureq::AgentBuilder::new()
-                .timeout_connect(std::time::Duration::from_secs(30))
-                .timeout_read(std::time::Duration::from_secs(120))
-                // We follow redirects ourselves (see `follow`), applying the boundary
-                // rules ureq cannot express. ureq must never follow one we have not
-                // vetted, so it returns every 3xx to us.
-                .redirects(0)
-                .build()
+            // program indefinitely; `read_body` caps the body.
+            // We follow redirects ourselves (see `follow`), applying the boundary rules
+            // ureq cannot express. ureq must never follow one we have not vetted, so it
+            // returns every 3xx to us (max_redirects 0).
+            new_agent(std::time::Duration::from_secs(30), Some(std::time::Duration::from_secs(120)), 0)
         })
         .clone()
 }
@@ -194,45 +261,28 @@ fn follow(
     let mut chain: Vec<String> = Vec::new();
 
     loop {
-        let mut req = agent_for(limits).request(cur_method.as_str(), cur_url.as_str());
-        if let Some(ms) = limits.total_ms {
-            req = req.timeout(std::time::Duration::from_millis(ms));
-        }
-        for (k, v) in &cur_headers {
-            req = req.set(k, v);
-        }
         // The jar's cookies for THIS hop's URL — recomputed per hop, so a redirect to a
         // new host sends that host's cookies, not the previous one's (the cross-origin
         // header strip above removed the old Cookie header; this adds the right one).
         let now = crate::cookiejar::now_unix();
+        let mut hop_headers = cur_headers.clone();
         if let Some(j) = jar
             && let Some(cookie) = j.cookie_header(&cur_url, now)
         {
-            req = req.set("Cookie", &cookie);
+            hop_headers.push(("Cookie".to_string(), cookie));
         }
-        let send = if cur_body.is_empty() { req.call() } else { req.send_string(&cur_body) };
-
-        // ureq returns a 3xx as `Ok` (only 4xx/5xx are `Err::Status`), so the response
-        // comes out here whether or not it redirects; a genuine transport failure is
-        // the only `Err`.
-        let resp = match send {
-            Ok(resp) => resp,
-            Err(ureq::Error::Status(_, resp)) => resp,
-            Err(e) => {
-                if limits.total_ms.is_some() && format!("{e}").contains("timed out") {
-                    return Err(format!(
-                        "HTTP {cur_method} to {cur_url} exceeded total_ms ({} ms): {e}",
-                        limits.total_ms.unwrap_or(0)
-                    ));
-                }
-                return Err(format!("HTTP {cur_method} to {cur_url} failed: {e}"));
-            }
-        };
-        let code = resp.status() as i64;
+        // Every status comes back as a response (http_status_as_error is off), 3xx
+        // included; a genuine transport failure is the only `Err`.
+        let resp = send(&agent_for(limits), &cur_method, cur_url.as_str(), &hop_headers, &cur_body, limits.total_ms)?;
+        let code = resp.status().as_u16() as i64;
         // A 3xx with a `Location` is a redirect to vet and follow; anything else is the
         // final response, returned as data.
         if (300..400).contains(&code)
-            && let Some(location) = resp.header("location").map(str::to_string)
+            && let Some(location) = resp
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
         {
                 if chain.len() >= MAX_REDIRECTS {
                     return Err(format!(
@@ -270,11 +320,9 @@ fn follow(
                 // cookie — so store from this response before following.
                 if let Some(j) = jar {
                     let host = cur_url.host_str().unwrap_or("");
-                    for name in resp.headers_names() {
-                        if name.eq_ignore_ascii_case("set-cookie") {
-                            for v in resp.all(&name) {
-                                j.store_from_header(host, v, now);
-                            }
+                    for v in resp.headers().get_all("set-cookie") {
+                        if let Ok(v) = v.to_str() {
+                            j.store_from_header(host, v, now);
                         }
                     }
                 }
@@ -340,50 +388,41 @@ pub fn open_stream(
     headers: &[(String, String)],
     timeout_ms: Option<u64>,
 ) -> Result<(i64, Box<dyn std::io::Read>), String> {
-    let mut builder =
-        ureq::AgentBuilder::new().timeout_connect(std::time::Duration::from_secs(30));
-    if let Some(ms) = timeout_ms {
-        builder = builder.timeout_read(std::time::Duration::from_millis(ms));
-    }
-    let agent = builder.build();
-    let mut req = agent.request(method, url);
-    for (k, v) in headers {
-        req = req.set(k, v);
-    }
-    let result = if body.is_empty() { req.call() } else { req.send_string(body) };
-    match result {
-        Ok(resp) | Err(ureq::Error::Status(_, resp)) => {
-            let status = resp.status() as i64;
-            Ok((status, resp.into_reader()))
-        }
-        Err(e) => Err(format!("HTTP stream {method} to {url} failed: {e}")),
-    }
+    // ureq follows up to 5 redirects here itself, as it always has for streams.
+    let agent = new_agent(
+        std::time::Duration::from_secs(30),
+        timeout_ms.map(std::time::Duration::from_millis),
+        5,
+    );
+    let resp = send(&agent, method, url, headers, body, None)
+        .map_err(|e| e.replacen("HTTP ", "HTTP stream ", 1))?;
+    let status = resp.status().as_u16() as i64;
+    Ok((status, Box::new(resp.into_body().into_reader())))
 }
 
-/// Split a `ureq::Response` into `(status, body, response_headers)`. Headers are collected
-/// before the body, since `into_string` consumes the response.
+/// Split a response into `(status, body, response_headers)`. Headers are collected before
+/// the body, since reading the body consumes the response.
 #[cfg(feature = "http")]
-fn collect_response(resp: ureq::Response, max_body: usize) -> Result<Fetched, String> {
-    let status = resp.status() as i64;
+fn collect_response(resp: ureq::http::Response<ureq::Body>, max_body: usize) -> Result<Fetched, String> {
+    let status = resp.status().as_u16() as i64;
     let mut hs = Vec::new();
-    // `headers_names()` yields a name once per OCCURRENCE, and `header(name)` answers
-    // the FIRST match — so a repeated header (`Set-Cookie`, canonically) used to come
-    // back as its first value repeated: not merely lost, wrong. `all(name)` gives
-    // every value in order; visit each unique name once and take them all.
-    let mut seen: Vec<String> = Vec::new();
-    for name in resp.headers_names() {
-        if seen.iter().any(|s| s.eq_ignore_ascii_case(&name)) {
-            continue;
-        }
-        for v in resp.all(&name) {
-            hs.push((name.clone(), v.to_string()));
+    // Each unique name once, in first-arrival order, with EVERY value it carries in
+    // order: a repeated header (`Set-Cookie`, canonically) must not collapse to its
+    // first value. Names are lowercase, as they have always been here. A value that is
+    // not text (obs-text bytes) is kept, read as Latin-1, rather than dropped.
+    for name in resp.headers().keys() {
+        for v in resp.headers().get_all(name) {
+            let text = match v.to_str() {
+                Ok(t) => t.to_string(),
+                Err(_) => v.as_bytes().iter().map(|&b| b as char).collect(),
+            };
+            hs.push((name.as_str().to_string(), text));
             if hs.len() > MAX_RESPONSE_HEADERS {
                 return Err(format!(
                     "the response carries more than {MAX_RESPONSE_HEADERS} headers"
                 ));
             }
         }
-        seen.push(name);
     }
     // This used to be `into_string().unwrap_or_default()`: a body-read failure — too
     // big, invalid UTF-8, a mid-body disconnect — became an EMPTY body under a intact

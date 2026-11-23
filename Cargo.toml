@@ -168,7 +168,7 @@ numpy = { version = "0.28", optional = true }
 # Verified HTTPS downloads for managed runtimes / packages / toolchains / self-update
 # (ADR 0010), behind the `managed` feature so the pure core stays dependency-free.
 # rustls (not OpenSSL) keeps the binary self-contained; sha2 is the trust boundary.
-ureq = { version = "2", optional = true }
+ureq = { version = "3", optional = true }
 # Native app windows (`--features desktop`, ADR 0055 Phase 4): the platform's own web view in a
 # native window. Not default: it links WebKitGTK on Linux, which the static musl build cannot.
 wry = { version = "0.57", optional = true }
