@@ -10726,7 +10726,9 @@ fn the_builtin_fallback_defers_to_owners_and_reports_honestly() {
 /// A Python attribute call must reach Python. This build has no Python support, and
 /// that is exactly what makes the assertion sharp: the error naming the missing feature
 /// proves the call was dispatched as a PYTHON call, where a rewrite would instead have
-/// produced an arity or type error from the Helix builtin.
+/// produced an arity or type error from the Helix builtin. (So it only means something in a
+/// build without the `python` feature; with it, the same calls run and succeed.)
+#[cfg(not(feature = "python"))]
 #[test]
 fn ufcs_never_captures_a_python_attribute_call() {
     let cases = [
