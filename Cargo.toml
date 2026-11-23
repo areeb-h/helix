@@ -246,7 +246,11 @@ bytes = { version = "1", optional = true }
 # arrow half. The codec set exists for cross-engine truth: the polars engine
 # writes zstd by default, so a native build that cannot read zstd cannot read
 # files the sibling engine wrote.
-parquet = { version = "60", default-features = false, features = [
+# Held at 59: parquet-rs 60 marks every float column with the new IEEE_754_TOTAL_ORDER column
+# order, and older readers refuse the whole file (Python polars 1.20: "Invalid thrift: bad
+# data"; the polars 0.54 engine: "ColumnOrder union has no variant set"). Files Helix writes
+# must open in the tools people already have. Revisit when parquet-rs can leave it out.
+parquet = { version = "59", default-features = false, features = [
     "snap",
     "zstd",
     "lz4",
