@@ -108,7 +108,7 @@ pub(crate) fn dict_method(
                         Value::Str(want) => map
                             .keys()
                             .filter_map(|c| match c.to_value() {
-                                Value::Str(ref s) => crate::error::typo_distance(want, s)
+                                Value::Str(s) => crate::error::typo_distance(want, &s)
                                     .map(|d| (d, (*s).clone())),
                                 _ => None,
                             })
@@ -150,7 +150,7 @@ pub(crate) fn dict_method(
             arity(0)?;
             Ok(Value::array(
                 map.iter()
-                    .map(|(k, v)| Value::Tuple(Rc::new(vec![k.to_value(), v.clone()])))
+                    .map(|(k, v)| Value::tuple(vec![k.to_value(), v.clone()]))
                     .collect(),
             ))
         }
@@ -170,7 +170,7 @@ pub(crate) fn dict_method(
 /// compile error. Static `rec.field` access is unchanged; this is for shapes you don't know
 /// until runtime.
 pub(crate) fn record_method(
-    fields: &Rc<Vec<(crate::symbol::Symbol, Value)>>,
+    fields: &Rc<crate::value::Fields>,
     name: &str,
     args: &[Value],
     line: usize,
@@ -267,7 +267,7 @@ pub(crate) fn record_method(
                 fields
                     .iter()
                     .map(|(s, v)| {
-                        Value::Tuple(Rc::new(vec![Value::Str(s.as_rc_string()), v.clone()]))
+                        Value::tuple(vec![Value::Str(s.as_rc_string()), v.clone()])
                     })
                     .collect(),
             ))

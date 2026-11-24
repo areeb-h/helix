@@ -912,10 +912,10 @@ fn array(vs: Vec<Value>) -> Value {
 }
 
 fn statement(sql: &str, params: Vec<Value>) -> Value {
-    Value::Record(std::rc::Rc::new(vec![
+    Value::record(vec![
         (crate::symbol::Symbol::intern("sql"), sv(sql)),
         (crate::symbol::Symbol::intern("params"), array(params)),
-    ]))
+    ])
 }
 
 fn cursor(c: &std::rc::Rc<super::Conn>, sql: &str, batch: i64) -> std::rc::Rc<super::Conn> {
@@ -1444,7 +1444,7 @@ fn a_flight_is_checked_before_it_is_sent() {
     let (port, h) = serve(Script { expect_read_only: true, columns: vec!["n"], rows: vec![vec!["1"]], tag: "SELECT 1" });
     let Value::Db(c) = postgres_open(&[sv(&url(port))], 1, 1).unwrap() else { panic!("not a connection") };
     let record = |fields: Vec<(&str, Value)>| {
-        Value::Record(std::rc::Rc::new(fields.into_iter().map(|(k, v)| (crate::symbol::Symbol::intern(k), v)).collect()))
+        Value::record(fields.into_iter().map(|(k, v)| (crate::symbol::Symbol::intern(k), v)).collect())
     };
     for (flight, second, needle) in [
         (array(vec![sv("select 1"), Value::Int(5)]), None, "statement 2 is an Int, which is not a statement"),

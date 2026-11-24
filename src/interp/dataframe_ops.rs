@@ -31,9 +31,9 @@ fn arg_as_column_name(
         // Making this rule uniform also supplies the thing the docs called missing: a column
         // named at RUN TIME. `k = "price"` then `df.sort(k)` sorts by `price`, where before
         // there was no way to express it in this position at all.
-        Expr::Ident { name, .. } => match resolve_var(name).as_ref() {
+        Expr::Ident { name, .. } => match resolve_var(name) {
             None => Ok(name.clone()),
-            Some(Value::Str(s)) => Ok(s.as_str().to_string()),
+            Some(Value::Str(s)) => Ok((*s).clone()),
             Some(other) => Err(HelixError::new(
                 format!(
                     "`{name}` is a {} in scope, and a column name must be a String",
@@ -52,8 +52,8 @@ fn arg_as_column_name(
         // produce would be a rule with no reason behind it.
         Expr::Str(s) => Ok(s.clone()),
         // A field of a bound record holding the name: `df.sort(m.sort_col)` in an app's view.
-        Expr::Field { .. } => match crate::backend::field_value(e, resolve_var).as_ref() {
-            Some(Value::Str(s)) => Ok(s.as_str().to_string()),
+        Expr::Field { .. } => match crate::backend::field_value(e, resolve_var) {
+            Some(Value::Str(s)) => Ok((*s).clone()),
             Some(other) => Err(HelixError::new(format!("a column name must be a String, and this is a {}", other.type_name()), line, col)),
             None => Err(HelixError::new("expected a column name", line, col)
                 .hint("a column is `@name`, a String (`\"price\"`), or a binding or field holding one (`m.sort_col`).")),
@@ -118,8 +118,8 @@ pub(crate) fn column_name_from_binding(
     if let Some(pinned) = name.strip_prefix('@') {
         return pinned.to_string();
     }
-    match resolve_var(name).as_ref() {
-        Some(Value::Str(s)) => s.as_str().to_string(),
+    match resolve_var(name) {
+        Some(Value::Str(s)) => (*s).clone(),
         _ => name.to_string(),
     }
 }
@@ -204,8 +204,8 @@ pub(crate) fn parse_join_spec(
                     }
                     how = match v {
                         Expr::Str(s) => s.clone(),
-                        Expr::Ident { name, .. } => match resolve_var(name).as_ref() {
-                            Some(Value::Str(s)) => s.as_str().to_string(),
+                        Expr::Ident { name, .. } => match resolve_var(name) {
+                            Some(Value::Str(s)) => (*s).clone(),
                             Some(other) => {
                                 return Err(HelixError::new(
                                     format!(
@@ -588,9 +588,9 @@ impl super::Interp {
                         .hint("e.g. `samples.join(meta, sample_id)`."))
                     }
                 };
-                let right = match other.into_dataframe() {
-                    Ok(lf) => lf,
-                    Err(v) => return Err(join_operand_err(&v, line, col)),
+                let right = match other {
+                    Value::DataFrame(lf) => lf,
+                    v => return Err(join_operand_err(&v, line, col)),
                 };
                 let resolve = |n: &str| {
                     let v = self.lookup(n).map(|b| b.value.clone());

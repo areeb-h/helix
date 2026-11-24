@@ -6168,7 +6168,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             Value::Float(1.5),
             Value::Float(f64::INFINITY),
             Value::Float(f64::NAN),
-            Value::Tuple(std::rc::Rc::new(vec![Value::Int(1), Value::Int(2)])),
+            Value::tuple(vec![Value::Int(1), Value::Int(2)]),
         ];
         // Every digit count from 1 to 19, both signs, plus the neighbours of each power
         // of ten — where the pair loop's odd/even tail branch changes.

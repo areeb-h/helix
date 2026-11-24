@@ -16,14 +16,124 @@ use crate::backend::Df;
 use crate::error::HelixError;
 use crate::symbol::Symbol;
 
-/// Freeing a value of any depth takes one level of native stack: see [`crate::deep`]. Without
-/// this, the compiler's drop glue recursed once per level and a deep enough value (a few
-/// million levels; a chain of dicts far fewer) killed the process merely by going out of
-/// scope.
-impl Drop for Value {
-    #[inline]
+macro_rules! payload_vec {
+    ($(#[$doc:meta])* $name:ident, $elem:ty) => {
+        $(#[$doc])*
+        #[derive(Clone, Default)]
+        pub struct $name(pub Vec<$elem>);
+        impl std::ops::Deref for $name {
+            type Target = Vec<$elem>;
+            #[inline]
+            fn deref(&self) -> &Vec<$elem> {
+                &self.0
+            }
+        }
+        impl std::ops::DerefMut for $name {
+            #[inline]
+            fn deref_mut(&mut self) -> &mut Vec<$elem> {
+                &mut self.0
+            }
+        }
+        impl From<Vec<$elem>> for $name {
+            #[inline]
+            fn from(v: Vec<$elem>) -> Self {
+                $name(v)
+            }
+        }
+        impl FromIterator<$elem> for $name {
+            #[inline]
+            fn from_iter<I: IntoIterator<Item = $elem>>(it: I) -> Self {
+                $name(it.into_iter().collect())
+            }
+        }
+    };
+}
+payload_vec!(
+    /// A tuple's elements. Its own type, not a bare `Vec`, so that freeing it can be
+    /// counted: see [`crate::deep`].
+    Items, Value
+);
+payload_vec!(
+    /// A record's fields, in declaration order. Its own type for the same reason as
+    /// [`Items`].
+    Fields, (Symbol, Value)
+);
+
+// Freeing a container's payload — which happens only when its LAST reference goes — frees
+// its contents on bounded native stack, so a value of any depth can go out of scope
+// (`crate::deep`). Without these the compiler's drop glue recursed once per level, and a
+// deep enough value (a few million levels; a chain of dicts far fewer) killed the process.
+impl Drop for Items {
     fn drop(&mut self) {
-        crate::deep::release(self);
+        crate::deep::free_values(&mut self.0);
+    }
+}
+
+impl Drop for Fields {
+    fn drop(&mut self) {
+        crate::deep::free_fields(&mut self.0);
+    }
+}
+
+impl Drop for ArrayData {
+    fn drop(&mut self) {
+        match self {
+            ArrayData::Values(v) => crate::deep::free_values(v),
+            ArrayData::Enumerate { inner } => crate::deep::free_source(inner),
+            ArrayData::Zip { a, b, .. } => {
+                crate::deep::free_source(a);
+                crate::deep::free_source(b);
+            }
+            ArrayData::Shared { buf, .. } => {
+                if let Some(cell) = Rc::get_mut(buf) {
+                    crate::deep::free_values(cell.get_mut());
+                }
+            }
+            ArrayData::Ints(_) | ArrayData::Floats(_) | ArrayData::Range { .. } => {}
+        }
+    }
+}
+
+impl Drop for Dict {
+    fn drop(&mut self) {
+        // Each part is the dict's to free only if no other dict of its chain still shares it,
+        // and worth counting only if it could nest.
+        if let Some(m) = Rc::get_mut(&mut self.base)
+            && crate::deep::map_nests(m)
+        {
+            crate::deep::free_map(std::mem::take(m));
+        }
+        if let Some(l) = Rc::get_mut(&mut self.adds)
+            && crate::deep::log_nests(l.get_mut())
+        {
+            crate::deep::free_log(std::mem::take(l.get_mut()));
+        }
+        if let Some(c) = Rc::get_mut(&mut self.cache)
+            && let Some((_, m)) = c.get_mut().as_mut()
+            && let Some(m) = Rc::get_mut(m)
+            && crate::deep::map_nests(m)
+        {
+            crate::deep::free_map(std::mem::take(m));
+        }
+    }
+}
+
+impl Drop for ClosureData {
+    fn drop(&mut self) {
+        if let Some(ups) = Rc::get_mut(&mut self.upvalues) {
+            crate::deep::free_values(ups);
+        }
+    }
+}
+
+impl Drop for FuncVal {
+    fn drop(&mut self) {
+        if let Some(c) = Rc::get_mut(&mut self.captured) {
+            crate::deep::free_named(c);
+        }
+        if let Some(d) = Rc::get_mut(&mut self.defaults) {
+            crate::deep::free_values(d);
+        }
     }
 }
 
@@ -39,13 +149,13 @@ pub enum Value {
     /// heterogeneous/nested data — a scientific language's central data structure.
     Array(Rc<ArrayData>),
     /// A fixed-size, heterogeneous tuple: `(1, "a", true)`.
-    Tuple(Rc<Vec<Value>>),
+    Tuple(Rc<Items>),
     /// An ordered record with identifier keys: `{name: "Ada", age: 41}`. Keys are
     /// interned [`Symbol`]s, so field lookup and dispatch compare a single `u32`
     /// (not a heap string), the names cost no per-record allocation, and equal
     /// field names across the whole program share one entry. The text is recovered
     /// only on cold paths (display, errors, JSON) via [`Symbol::as_str`].
-    Record(Rc<Vec<(Symbol, Value)>>),
+    Record(Rc<Fields>),
     /// A keyed map with O(log n) lookup (ADR 0020) — the escape from O(n) `.where`/
     /// `.contains` scans for counting, vocabularies, bigram tables, etc. A `BTreeMap`
     /// (not a hash map) so iteration order is **deterministic** (sorted by key),
@@ -246,20 +356,6 @@ pub struct Dict {
 }
 
 impl Dict {
-    /// For [`crate::deep::release`]: the values this dict is the last owner of — its base map,
-    /// its log and its merged cache — moved out so they can be freed under the depth count.
-    /// Storage another dict of the same chain still shares stays where it is; the last dict
-    /// to let go of it takes it then.
-    pub(crate) fn take_contents(&mut self) -> (DictMap, Vec<(DictKey, Option<Value>)>, DictMap) {
-        let map = Rc::get_mut(&mut self.base).map(std::mem::take).unwrap_or_default();
-        let log = Rc::get_mut(&mut self.adds).map(|l| std::mem::take(l.get_mut())).unwrap_or_default();
-        let cached = Rc::get_mut(&mut self.cache)
-            .and_then(|c| c.get_mut().take())
-            .and_then(|(_, mut m)| Rc::get_mut(&mut m).map(std::mem::take))
-            .unwrap_or_default();
-        (map, log, cached)
-    }
-
     pub fn from_map(m: std::collections::BTreeMap<DictKey, Value>) -> Dict {
         Dict::from_rc(Rc::new(m))
     }
@@ -653,7 +749,7 @@ impl ArrayData {
             // Lazy `enumerate`: the `(index, element)` tuple, built on demand — identical
             // to the materialized `Value::Tuple([Int(i), inner[i]])`.
             ArrayData::Enumerate { inner } => {
-                Value::Tuple(std::rc::Rc::new(vec![Value::Int(i as i64), inner.get(i)]))
+                Value::tuple(vec![Value::Int(i as i64), inner.get(i)])
             }
             // O(1). `i < len <= buf.len()` and the buffer is append-only, so this slot is
             // settled — no later append can change what an existing value reads.
@@ -668,7 +764,7 @@ impl ArrayData {
             // Lazy `zip`: the `(a[i], b[i])` pair, built on demand — identical to the
             // materialized `Value::Tuple([a[i], b[i]])` the eager path built.
             ArrayData::Zip { a, b, .. } => {
-                Value::Tuple(std::rc::Rc::new(vec![a.get(i), b.get(i)]))
+                Value::tuple(vec![a.get(i), b.get(i)])
             }
         }
     }
@@ -732,7 +828,7 @@ impl ArrayData {
     pub fn densified(&self) -> Option<ArrayData> {
         match self {
             ArrayData::Shared { .. } => match Value::array_sniff(self.to_values().into_owned()) {
-                Value::Array(ref a) => Some((**a).clone()),
+                Value::Array(a) => Some((*a).clone()),
                 // `array_sniff` returns `Value::Array` for every input; anything else
                 // would be a contract break rather than a case to handle.
                 _ => None,
@@ -1112,38 +1208,19 @@ fn type_slot(name: &str) -> Option<usize> {
     })
 }
 
-/// `Value` has a `Drop` (see [`crate::deep`]), so no pattern may move a payload out of an
-/// owned one. These take the payload out instead: a count bump and the old owner's release,
-/// so a sole owner stays the sole owner — the in-place fast paths (`Rc::try_unwrap`,
-/// `Rc::get_mut` on an accumulator) see exactly the uniqueness they saw before.
-macro_rules! into_payload {
-    ($($name:ident: $variant:ident => $ty:ty;)*) => {
-        impl Value {
-            $(
-                #[doc = concat!("The `", stringify!($variant), "` payload, or the value back.")]
-                #[inline]
-                pub fn $name(self) -> Result<$ty, Value> {
-                    match &self {
-                        Value::$variant(p) => {
-                            let p = Rc::clone(p);
-                            drop(self);
-                            Ok(p)
-                        }
-                        _ => Err(self),
-                    }
-                }
-            )*
-        }
-    };
-}
-into_payload! {
-    into_array: Array => Rc<ArrayData>;
-    into_str: Str => Rc<String>;
-    into_dict: Dict => Rc<Dict>;
-    into_dataframe: DataFrame => Rc<Df>;
-}
-
 impl Value {
+    /// A tuple of these elements.
+    #[inline]
+    pub fn tuple(items: Vec<Value>) -> Value {
+        Value::Tuple(Rc::new(Items(items)))
+    }
+
+    /// A record of these fields, in this order.
+    #[inline]
+    pub fn record(fields: Vec<(Symbol, Value)>) -> Value {
+        Value::Record(Rc::new(Fields(fields)))
+    }
+
     /// Wrap a backend DataFrame handle into a `Value`. The extra `Rc` keeps the
     /// `DataFrame` variant one word wide (see the variant's doc); construct through
     /// here so the wrapping lives in one place.
@@ -1915,22 +1992,21 @@ mod tests {
             Value::Str(Rc::new("a".to_string())),
             Value::Bool(true),
             Value::array(vec![Value::Int(1)]),
-            Value::Tuple(Rc::new(vec![Value::Int(1)])),
+            Value::tuple(vec![Value::Int(1)]),
             Value::Missing,
             Value::Unit,
             Value::Bytes(Rc::new(vec![1u8])),
         ];
         for v in &values {
-            match &v.type_value() {
+            match v.type_value() {
                 Value::Str(s) => assert_eq!(s.as_str(), v.type_name(), "{:?}", v.type_name()),
                 other => panic!("type_value gave {other:?}"),
             }
             // Interned: asking twice hands back the same allocation, not a copy of it.
-            let (a, b) = (v.type_value(), v.type_value());
-            let (Value::Str(a), Value::Str(b)) = (&a, &b) else {
+            let (Value::Str(a), Value::Str(b)) = (v.type_value(), v.type_value()) else {
                 panic!("type_value must answer a String");
             };
-            assert!(Rc::ptr_eq(a, b), "{} was allocated again", v.type_name());
+            assert!(Rc::ptr_eq(&a, &b), "{} was allocated again", v.type_name());
         }
     }
 }

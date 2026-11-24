@@ -44,10 +44,10 @@ pub(super) fn a_http_get(name: &str, args: Vec<Value>, line: usize, col: usize) 
                     let (status, body) =
                         crate::http::get(url).map_err(|e| HelixError::new(e, line, col))?;
                     // `{status, body}` — body is usually fed to `parse_json`.
-                    Ok(Value::Record(Rc::new(vec![
+                    Ok(Value::record(vec![
                         (Symbol::intern("status"), Value::Int(status)),
                         (Symbol::intern("body"), Value::Str(Rc::new(body))),
-                    ])))
+                    ]))
                 }
                 #[cfg(not(feature = "http"))]
                 {
@@ -78,10 +78,10 @@ pub(super) fn a_http_post(name: &str, args: Vec<Value>, line: usize, col: usize)
                 {
                     let (status, resp) = crate::http::post(url, body, "application/json")
                         .map_err(|e| HelixError::new(e, line, col))?;
-                    Ok(Value::Record(Rc::new(vec![
+                    Ok(Value::record(vec![
                         (Symbol::intern("status"), Value::Int(status)),
                         (Symbol::intern("body"), Value::Str(Rc::new(resp))),
-                    ])))
+                    ]))
                 }
                 #[cfg(not(feature = "http"))]
                 {
@@ -134,7 +134,7 @@ pub(super) fn a_http_request(name: &str, args: Vec<Value>, line: usize, col: usi
             // from HTTP/2), wire order is kept, and a repeated name —
             // `Set-Cookie` legitimately repeats — survives where a map
             // collapsed it silently.
-            Ok(Value::Record(Rc::new(vec![
+            Ok(Value::record(vec![
                 (Symbol::intern("status"), Value::Int(status)),
                 (Symbol::intern("body"), Value::Str(Rc::new(rbody))),
                 (Symbol::intern("headers"), Value::Headers(Rc::new(rhdrs))),
@@ -144,7 +144,7 @@ pub(super) fn a_http_request(name: &str, args: Vec<Value>, line: usize, col: usi
                     Symbol::intern("redirects"),
                     Value::array(redirects.into_iter().map(|u| Value::Str(Rc::new(u))).collect()),
                 ),
-            ])))
+            ]))
         }
         #[cfg(not(feature = "http"))]
         {
@@ -288,7 +288,7 @@ pub(super) fn a_parse_set_cookie(name: &str, args: Vec<Value>, line: usize, col:
                 }
                 fields.push((Symbol::intern("secure"), Value::Bool(c.secure)));
                 fields.push((Symbol::intern("http_only"), Value::Bool(c.http_only)));
-                Ok(Value::Record(Rc::new(fields)))
+                Ok(Value::record(fields))
             }
             other => Err(type_err("parse_set_cookie", "a string", other, line, col)),
         }

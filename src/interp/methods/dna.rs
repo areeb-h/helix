@@ -347,14 +347,14 @@ pub(crate) fn dna_method(
                 crate::align::Scoring::nucleotide(),
             );
             use crate::symbol::Symbol;
-            Ok(Value::Record(Rc::new(vec![
+            Ok(Value::record(vec![
                 (Symbol::intern("score"), Value::Int(a.score)),
                 (Symbol::intern("cigar"), Value::Str(Rc::new(a.cigar))),
                 (Symbol::intern("query"), Value::Str(Rc::new(a.x_aligned))),
                 (Symbol::intern("target"), Value::Str(Rc::new(a.y_aligned))),
                 (Symbol::intern("start"), Value::Int(a.y_start as i64)),
                 (Symbol::intern("end"), Value::Int(a.y_end as i64)),
-            ])))
+            ]))
         }
         "at_content" => {
             if !args.is_empty() {
@@ -383,13 +383,13 @@ pub(crate) fn dna_method(
             let (a, c, g, t) = crate::simd::base_counts(bytes);
             let n = bytes.len() as i64 - a - c - g - t;
             use crate::symbol::Symbol;
-            Ok(Value::Record(Rc::new(vec![
+            Ok(Value::record(vec![
                 (Symbol::intern("A"), Value::Int(a)),
                 (Symbol::intern("C"), Value::Int(c)),
                 (Symbol::intern("G"), Value::Int(g)),
                 (Symbol::intern("T"), Value::Int(t)),
                 (Symbol::intern("N"), Value::Int(n)),
-            ])))
+            ]))
         }
         // Hamming distance: differing positions between two equal-length sequences, in one
         // pass (no per-base slices). The other sequence may be a `Dna` or a `String`.
@@ -487,7 +487,7 @@ pub(crate) fn packed_kmer_counts(s: &str, k: usize, canonical: bool) -> Vec<Valu
                 let b = (c >> (2 * (k - 1 - i))) & 3;
                 km.push(b"ACGT"[b as usize] as char);
             }
-            Value::Tuple(Rc::new(vec![Value::Str(Rc::new(km)), Value::Int(n as i64)]))
+            Value::tuple(vec![Value::Str(Rc::new(km)), Value::Int(n as i64)])
         })
         .collect()
 }

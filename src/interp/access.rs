@@ -180,7 +180,7 @@ pub(crate) fn part_of(
     }
     Ok(match (v, rest && index == names) {
         (Value::Tuple(t), false) => t.get(index).cloned().unwrap_or(Value::Missing),
-        (Value::Tuple(t), true) => Value::Tuple(Rc::new(t.get(index..).map(<[Value]>::to_vec).unwrap_or_default())),
+        (Value::Tuple(t), true) => Value::tuple(t.get(index..).map(<[Value]>::to_vec).unwrap_or_default()),
         // In range: the length was held to the pattern above.
         (Value::Array(a), false) if index < a.len() => a.get(index),
         (Value::Array(a), true) => {
@@ -203,7 +203,7 @@ pub(crate) fn pattern_parts(
     col: usize,
 ) -> Result<Vec<Value>, HelixError> {
     let parts = match v {
-        Value::Tuple(t) => (**t).clone(),
+        Value::Tuple(t) => t.to_vec(),
         Value::Array(a) => a.to_values().into_owned(),
         other => {
             return Err(HelixError::new(
@@ -316,7 +316,7 @@ pub(crate) fn df_value_method(
                 headers.iter().map(|h| crate::symbol::Symbol::intern(h)).collect();
             Ok(Value::array(
                 rows.into_iter()
-                    .map(|r| Value::Record(Rc::new(keys.iter().copied().zip(r).collect())))
+                    .map(|r| Value::record(keys.iter().copied().zip(r).collect()))
                     .collect(),
             ))
         }
@@ -332,10 +332,10 @@ pub(crate) fn df_value_method(
                 lf.column_kinds(line, col)?
                     .into_iter()
                     .map(|(n, t)| {
-                        Value::Record(Rc::new(vec![
+                        Value::record(vec![
                             (kname, Value::Str(Rc::new(n))),
                             (ktype, Value::Str(Rc::new(t))),
-                        ]))
+                        ])
                     })
                     .collect(),
             ))

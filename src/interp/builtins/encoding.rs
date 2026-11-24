@@ -458,10 +458,10 @@ pub(super) fn a_ed25519_keygen(name: &str, args: Vec<Value>, line: usize, col: u
         let pk = sk.verifying_key();
         let priv_hex: String = sk.to_bytes().iter().map(|b| format!("{b:02x}")).collect();
         let pub_hex: String = pk.to_bytes().iter().map(|b| format!("{b:02x}")).collect();
-        Ok(Value::Record(Rc::new(vec![
+        Ok(Value::record(vec![
             (crate::symbol::Symbol::intern("private"), Value::Str(Rc::new(priv_hex))),
             (crate::symbol::Symbol::intern("public"), Value::Str(Rc::new(pub_hex))),
-        ])))
+        ]))
     
 }
 

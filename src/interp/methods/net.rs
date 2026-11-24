@@ -28,12 +28,12 @@ pub(crate) fn net_method(
                 }
                 // Each cookie as a record `{name, value, domain, path}`, in jar order.
                 let rows = jar.snapshot(now).into_iter().map(|(n, v, d, p)| {
-                    Value::Record(Rc::new(vec![
+                    Value::record(vec![
                         (crate::symbol::Symbol::intern("name"), Value::Str(Rc::new(n))),
                         (crate::symbol::Symbol::intern("value"), Value::Str(Rc::new(v))),
                         (crate::symbol::Symbol::intern("domain"), Value::Str(Rc::new(d))),
                         (crate::symbol::Symbol::intern("path"), Value::Str(Rc::new(p))),
-                    ]))
+                    ])
                 });
                 Ok(Value::array(rows.collect()))
             }

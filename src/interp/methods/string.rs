@@ -301,10 +301,10 @@ pub(crate) fn string_method(
                     .hint("split on a non-empty string, e.g. `s.split_once(\"=\")`."));
             }
             Ok(match s.split_once(sep) {
-                Some((a, b)) => Value::Tuple(Rc::new(vec![
+                Some((a, b)) => Value::tuple(vec![
                     Value::Str(Rc::new(a.to_string())),
                     Value::Str(Rc::new(b.to_string())),
-                ])),
+                ]),
                 None => Value::Missing,
             })
         }

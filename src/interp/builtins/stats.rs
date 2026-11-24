@@ -2,7 +2,6 @@
 //! (2026-08-24). The `call` guard names exactly the arms this file holds;
 //! `dispatch` is the original match text, arm for arm.
 
-use std::rc::Rc;
 
 use crate::error::HelixError;
 use crate::value::Value;
@@ -71,7 +70,7 @@ pub(super) fn a_t_test(name: &str, args: Vec<Value>, line: usize, col: usize) ->
                     (Symbol::intern("df"), Value::Float(df)),
                     (Symbol::intern("p_value"), Value::Float(p)),
                 ];
-                Ok(Value::Record(Rc::new(fields)))
+                Ok(Value::record(fields))
             }
             None => Err(HelixError::new(
                 "t-test is undefined: each sample needs at least two values with spread",
@@ -118,7 +117,7 @@ pub(super) fn a_linear_regression(name: &str, args: Vec<Value>, line: usize, col
                     (Symbol::intern("predictions"), floats(f.predictions)),
                     (Symbol::intern("residuals"), floats(f.residuals)),
                 ];
-                Ok(Value::Record(Rc::new(fields)))
+                Ok(Value::record(fields))
             }
             None => Err(HelixError::new(
                 "linear regression is undefined: need at least three points and variance in both x and y",
@@ -169,7 +168,7 @@ pub(super) fn a_multiple_regression(name: &str, args: Vec<Value>, line: usize, c
                     (Symbol::intern("predictions"), floats(f.predictions)),
                     (Symbol::intern("residuals"), floats(f.residuals)),
                 ];
-                Ok(Value::Record(Rc::new(fields)))
+                Ok(Value::record(fields))
             }
             None => Err(HelixError::new(
                 "multiple regression is undefined: need more observations than predictors, equal-length non-collinear predictors, and variance in y",
@@ -206,13 +205,13 @@ pub(super) fn a_least_squares(name: &str, args: Vec<Value>, line: usize, col: us
             _ => return Ok(Value::Missing),
         };
         match crate::stats::least_squares(&preds, &y, with_intercept) {
-            Some(f) => Ok(Value::Record(Rc::new(vec![
+            Some(f) => Ok(Value::record(vec![
                 (Symbol::intern("coefficients"), Value::float_array(f.coefficients)),
                 (Symbol::intern("rss"), Value::Float(f.rss)),
                 (Symbol::intern("r_squared"), Value::Float(f.r_squared)),
                 (Symbol::intern("predictions"), Value::float_array(f.predictions)),
                 (Symbol::intern("residuals"), Value::float_array(f.residuals)),
-            ]))),
+            ])),
             None => Err(HelixError::new(
                 "least squares is undefined: need at least as many rows as parameters, equal-length non-collinear predictors",
                 line,
@@ -343,11 +342,11 @@ pub(super) fn a_confusion_matrix(name: &str, args: Vec<Value>, line: usize, col:
         let (a, b) = label_pair(name, &args[0], &args[1], line, col)?;
         let pos = if args.len() == 3 { args[2].clone() } else { Value::Int(1) };
         let (tp, fp, fa_neg, tn) = binary_counts(&a, &b, &pos);
-        Ok(Value::Record(Rc::new(vec![
+        Ok(Value::record(vec![
             (Symbol::intern("tp"), Value::Int(tp)),
             (Symbol::intern("fp"), Value::Int(fp)),
             (Symbol::intern("fn"), Value::Int(fa_neg)),
             (Symbol::intern("tn"), Value::Int(tn)),
-        ])))
+        ]))
     
 }

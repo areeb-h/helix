@@ -482,8 +482,8 @@ fn sorted_fields(fields: &[(Symbol, Value)]) -> impl Iterator<Item = &(Symbol, V
 }
 
 fn render_record(fields: &[(Symbol, Value)], opts: &RenderOpts) -> String {
-    let inline = render_compact(&Value::Record(std::rc::Rc::new(fields.to_vec())), opts);
-    let plain_w = dw(&compact_plain(&Value::Record(std::rc::Rc::new(fields.to_vec())), opts));
+    let inline = render_compact(&Value::record(fields.to_vec()), opts);
+    let plain_w = dw(&compact_plain(&Value::record(fields.to_vec()), opts));
     if plain_w <= opts.width || fields.len() <= 1 {
         return inline;
     }
@@ -614,11 +614,10 @@ fn render_table(
     // Build cells for the shown rows.
     let mut col_numeric = vec![true; ncol];
     let mut cell_rows: Vec<Vec<Cell>> = Vec::with_capacity(shown_idx.len());
-    let missing = Value::Missing;
     for &r in &shown_idx {
         let mut cells = Vec::with_capacity(ncol);
         for (c, numeric) in col_numeric.iter_mut().enumerate() {
-            let v = rows[r].get(c).unwrap_or(&missing);
+            let v = rows[r].get(c).unwrap_or(&Value::Missing);
             let cell = cell_of(v, opts);
             if !cell.numeric {
                 *numeric = false;
@@ -888,7 +887,7 @@ mod tests {
     }
 
     fn rec(pairs: &[(&str, Value)]) -> Value {
-        Value::Record(Rc::new(pairs.iter().map(|(k, v)| (Symbol::intern(k), v.clone())).collect()))
+        Value::record(pairs.iter().map(|(k, v)| (Symbol::intern(k), v.clone())).collect())
     }
 
     #[test]

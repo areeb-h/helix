@@ -537,7 +537,7 @@ pub trait DataHandle {
 pub(crate) fn field_value(e: &Ast, resolve_var: &dyn Fn(&str) -> Option<Value>) -> Option<Value> {
     match e {
         Ast::Ident { name, .. } => resolve_var(name),
-        Ast::Field { recv, name, .. } => match &field_value(recv, resolve_var)? {
+        Ast::Field { recv, name, .. } => match field_value(recv, resolve_var)? {
             Value::Record(r) => r.iter().find(|(k, _)| k.as_str() == name).map(|(_, v)| v.clone()),
             _ => None,
         },

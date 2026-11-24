@@ -322,12 +322,12 @@ pub(super) fn a_file_info(name: &str, args: Vec<Value>, line: usize, col: usize)
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(Value::Missing, |d| Value::Float(d.as_secs_f64()));
     let base = path.file_name().map_or_else(|| s.to_string(), |n| n.to_string_lossy().into_owned());
-    Ok(Value::Record(Rc::new(vec![
+    Ok(Value::record(vec![
         (Symbol::intern("name"), Value::Str(Rc::new(base))),
         (Symbol::intern("kind"), Value::Str(Rc::new(kind.to_string()))),
         (Symbol::intern("size"), Value::Int(md.len() as i64)),
         (Symbol::intern("modified"), modified),
-    ])))
+    ]))
 }
 
 /// `read_at(path, offset, len)` — read a slice WITHOUT reading the whole file.

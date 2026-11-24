@@ -106,7 +106,7 @@ pub struct Conn {
 /// runtime can tell its own window from the network without trusting anything a peer sent.
 pub fn request_record(method: &str, path: &str, query: &str, body: &str) -> Value {
     let s = |x: &str| Value::Str(Rc::new(x.to_string()));
-    Value::Record(Rc::new(vec![
+    Value::record(vec![
         (Symbol::intern("method"), s(method)),
         (Symbol::intern("path"), s(path)),
         (Symbol::intern("query"), s(query)),
@@ -115,7 +115,7 @@ pub fn request_record(method: &str, path: &str, query: &str, body: &str) -> Valu
         (Symbol::intern("peer"), Value::Missing),
         (Symbol::intern("version"), s("1.1")),
         (Symbol::intern("transport"), s("window")),
-    ]))
+    ])
 }
 
 /// The paths a window's script may send, and how. Anything else from the page is dropped —

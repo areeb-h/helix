@@ -58,7 +58,7 @@ fn from_serde(v: serde_json::Value, budget: &mut usize) -> Result<Value, String>
                 })?;
                 fields.push((key, from_serde(v, budget)?));
             }
-            Value::Record(Rc::new(fields))
+            Value::record(fields)
         }
     })
 }
@@ -257,7 +257,7 @@ mod tests {
                 }
                 7 => {
                     let n = next() % 4;
-                    Value::Tuple(Rc::new((0..n).map(|_| make(next, depth - 1, strs, floats)).collect()))
+                    Value::tuple((0..n).map(|_| make(next, depth - 1, strs, floats)).collect())
                 }
                 8 => {
                     // Field names drawn so that declaration order is rarely sorted.
@@ -269,7 +269,7 @@ mod tests {
                             fields.push((Symbol::intern(name), make(next, depth - 1, strs, floats)));
                         }
                     }
-                    Value::Record(Rc::new(fields))
+                    Value::record(fields)
                 }
                 _ => {
                     let mut m = std::collections::BTreeMap::new();

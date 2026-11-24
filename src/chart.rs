@@ -571,8 +571,8 @@ mod tests {
         Value::array(xs.iter().map(|&i| Value::Int(i)).collect())
     }
     fn text(v: Value) -> String {
-        match &v {
-            Value::Str(s) => (**s).clone(),
+        match v {
+            Value::Str(s) => (*s).clone(),
             _ => panic!("expected a string"),
         }
     }

@@ -763,7 +763,7 @@ pub(crate) fn array_method(
                 (Symbol::intern("median"), Value::Float(crate::stats::quantile_sorted(&xs, 0.5))),
                 (Symbol::intern("max"), Value::Float(xs[xs.len() - 1])),
             ];
-            Ok(Value::Record(Rc::new(fields)))
+            Ok(Value::record(fields))
         }
         "sum" => {
             no_args(name)?;
@@ -1061,7 +1061,7 @@ pub(crate) fn array_method(
             };
             let n = items.len().min(other.len());
             let out: Vec<Value> = (0..n)
-                .map(|i| Value::Tuple(Rc::new(vec![items[i].clone(), other[i].clone()])))
+                .map(|i| Value::tuple(vec![items[i].clone(), other[i].clone()]))
                 .collect();
             Ok(Value::array(out))
         }
@@ -1070,7 +1070,7 @@ pub(crate) fn array_method(
             let out: Vec<Value> = items
                 .iter()
                 .enumerate()
-                .map(|(i, v)| Value::Tuple(Rc::new(vec![Value::Int(i as i64), v.clone()])))
+                .map(|(i, v)| Value::tuple(vec![Value::Int(i as i64), v.clone()]))
                 .collect();
             Ok(Value::array(out))
         }
@@ -1080,7 +1080,7 @@ pub(crate) fn array_method(
             let out: Vec<Value> = value_histogram(items)
                 .into_iter()
                 .take(n)
-                .map(|(v, c)| Value::Tuple(Rc::new(vec![v, Value::Int(c)])))
+                .map(|(v, c)| Value::tuple(vec![v, Value::Int(c)]))
                 .collect();
             Ok(Value::array(out))
         }
@@ -1090,7 +1090,7 @@ pub(crate) fn array_method(
             no_args(name)?;
             let out: Vec<Value> = value_histogram(items)
                 .into_iter()
-                .map(|(v, c)| Value::Tuple(Rc::new(vec![v, Value::Int(c)])))
+                .map(|(v, c)| Value::tuple(vec![v, Value::Int(c)]))
                 .collect();
             Ok(Value::array(out))
         }
@@ -1880,7 +1880,7 @@ impl Drop for KeyShape {
 
 fn list_parts(v: &Value) -> Option<Vec<Value>> {
     match v {
-        Value::Tuple(t) => Some(t.as_ref().clone()),
+        Value::Tuple(t) => Some(t.to_vec()),
         _ => None,
     }
 }

@@ -440,8 +440,8 @@ pub(crate) fn call_method(
                 for a in args {
                     match a {
                         Value::Array(add) => {
-                            match crate::value::ArrayData::concat_shared(&acc, add).map(Value::into_array) {
-                                Some(Ok(next)) => acc = next,
+                            match crate::value::ArrayData::concat_shared(&acc, add) {
+                                Some(Value::Array(next)) => acc = next,
                                 // Any decline abandons the whole fast path rather than
                                 // leaving a half-appended accumulator behind.
                                 _ => {
@@ -536,7 +536,7 @@ pub(crate) fn call_method(
 /// is a fixed-size positional product, and `map`/`filter` on the Array `values()` returns
 /// says so at the call site.
 fn tuple_method(
-    items: &std::rc::Rc<Vec<Value>>,
+    items: &std::rc::Rc<crate::value::Items>,
     name: &str,
     args: &[Value],
     line: usize,
@@ -557,7 +557,7 @@ fn tuple_method(
             if !args.is_empty() {
                 return Err(HelixError::new("`values` takes no arguments", line, col));
             }
-            Ok(Value::array((**items).clone()))
+            Ok(Value::array(items.to_vec()))
         }
         _ => Err(no_such_method(&Value::Tuple(items.clone()), name, line, col)),
     }

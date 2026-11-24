@@ -263,7 +263,7 @@ pub fn to_json(args: &[Value], line: usize, col: usize) -> Result<Value, HelixEr
                         .zip(r)
                         .map(|(h, val)| (Symbol::intern(h), val.clone()))
                         .collect();
-                    Value::Record(Rc::new(fields))
+                    Value::record(fields)
                 })
                 .collect();
             crate::json::stringify(&Value::array(recs)).map_err(|e| HelixError::new(e, line, col))?
@@ -695,11 +695,11 @@ mod tests {
     use super::*;
 
     fn rec(pairs: &[(&str, Value)]) -> Value {
-        Value::Record(Rc::new(pairs.iter().map(|(k, v)| (Symbol::intern(k), v.clone())).collect()))
+        Value::record(pairs.iter().map(|(k, v)| (Symbol::intern(k), v.clone())).collect())
     }
     fn text(v: Value) -> String {
-        match &v {
-            Value::Str(s) => (**s).clone(),
+        match v {
+            Value::Str(s) => (*s).clone(),
             _ => panic!("expected a string"),
         }
     }

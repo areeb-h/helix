@@ -204,7 +204,7 @@ pub fn session_tape(args: &[Value], line: usize, col: usize) -> Result<Value, He
                             }
                         }
                     }
-                    Value::Record(Rc::new(out))
+                    Value::record(out)
                 })
                 .collect();
             ENTRIES.with(|e| *e.borrow_mut() = Some(parsed));
@@ -291,14 +291,14 @@ pub fn decode(j: &J) -> Result<Value, String> {
                     let bytes = (0..h.len() / 2).map(|i| u8::from_str_radix(&h[2 * i..2 * i + 2], 16).map_err(|_| "bytes that are not hex".to_string())).collect::<Result<Vec<_>, _>>()?;
                     Value::Bytes(Rc::new(bytes))
                 }
-                "tuple" => Value::Tuple(Rc::new(body.as_array().ok_or("a malformed tuple")?.iter().map(decode).collect::<Result<_, _>>()?)),
+                "tuple" => Value::tuple(body.as_array().ok_or("a malformed tuple")?.iter().map(decode).collect::<Result<_, _>>()?),
                 "record" => {
                     let mut out = Vec::new();
                     for pair in body.as_array().ok_or("a malformed record")? {
                         let k = pair.get(0).and_then(J::as_str).ok_or("a malformed record field")?;
                         out.push((Symbol::intern(k), decode(pair.get(1).unwrap_or(&J::Null))?));
                     }
-                    Value::Record(Rc::new(out))
+                    Value::record(out)
                 }
                 "dict" => {
                     let mut m = std::collections::BTreeMap::new();
@@ -332,14 +332,14 @@ mod tests {
     #[test]
     fn values_round_trip_exactly() {
         let s = |x: &str| Value::Str(Rc::new(x.into()));
-        let v = Value::Record(Rc::new(vec![
+        let v = Value::record(vec![
             (Symbol::intern("n"), Value::Int(3)),
             (Symbol::intern("f"), Value::Float(1.0)),
             (Symbol::intern("nan"), Value::Float(f64::NAN)),
-            (Symbol::intern("t"), Value::Tuple(Rc::new(vec![s("a"), Value::Missing]))),
+            (Symbol::intern("t"), Value::tuple(vec![s("a"), Value::Missing])),
             (Symbol::intern("xs"), Value::array(vec![Value::Bool(true), Value::Int(-7)])),
             (Symbol::intern("u"), Value::Unit),
-        ]));
+        ]);
         let back = decode(&encode(&v)).unwrap();
         assert_eq!(format!("{back:?}"), format!("{v:?}"));
         // An Int and a Float stay apart; a record keeps its field order.

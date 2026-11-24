@@ -127,11 +127,11 @@ pub(crate) fn spread_fields(
     v: &Value,
     line: usize,
     col: usize,
-) -> Result<Rc<Vec<(Symbol, Value)>>, HelixError> {
+) -> Result<Rc<crate::value::Fields>, HelixError> {
     match v {
         Value::Record(f) => Ok(f.clone()),
         Value::Dict(map) => Ok(Rc::new(
-            crate::value::dict_as_record_fields(map).map_err(|m| HelixError::new(m, line, col))?,
+            crate::value::dict_as_record_fields(map).map_err(|m| HelixError::new(m, line, col))?.into(),
         )),
         other => Err(HelixError::new(
             format!(
@@ -199,15 +199,15 @@ pub(crate) fn const_default_value(e: &Expr) -> Option<Value> {
         Expr::Array(items) => {
             Value::array(items.iter().map(const_default_value).collect::<Option<Vec<_>>>()?)
         }
-        Expr::Tuple(items) => Value::Tuple(Rc::new(
+        Expr::Tuple(items) => Value::tuple(
             items.iter().map(const_default_value).collect::<Option<Vec<_>>>()?,
-        )),
-        Expr::Record(fields) => Value::Record(Rc::new(
+        ),
+        Expr::Record(fields) => Value::record(
             fields
                 .iter()
                 .map(|(k, v)| Some((Symbol::intern(k), const_default_value(v)?)))
                 .collect::<Option<Vec<_>>>()?,
-        )),
+        ),
         _ => return None,
     })
 }
@@ -672,7 +672,7 @@ impl Interp {
                 for it in items {
                     vals.push(self.eval(it)?);
                 }
-                Ok(Value::Tuple(Rc::new(vals)))
+                Ok(Value::tuple(vals))
             }
             Expr::Record(fields) => {
                 if let Some(e) = dataframe_ops::pinned_key_outside_frame(fields) {
@@ -682,7 +682,7 @@ impl Interp {
                 for (k, v) in fields {
                     vals.push((Symbol::intern(k), self.eval(v)?));
                 }
-                Ok(Value::Record(Rc::new(vals)))
+                Ok(Value::record(vals))
             }
             Expr::RecordUpdate { parts, line, col } => {
                 // The parts in written order, a later one winning: each spread's fields (a
@@ -701,7 +701,7 @@ impl Interp {
                         }
                     }
                 }
-                Ok(Value::Record(Rc::new(out)))
+                Ok(Value::record(out))
             }
             Expr::Field {
                 recv,
@@ -843,7 +843,7 @@ impl Interp {
                 }
                 let label = callee.call_label();
                 match callee_v {
-                    Value::Function(ref g) => self.call_function(&label, g, vals, *line, *col),
+                    Value::Function(g) => self.call_function(&label, &g, vals, *line, *col),
                     // The expression evaluated to something that isn't callable.
                     // ONE hint string with the VM's CallValue arm — the engines'
                     // errors are compared byte-for-byte.
@@ -1330,8 +1330,8 @@ impl Interp {
             }),
             _ => None,
         };
-        let built = match taken.map(Value::into_str) {
-            Some(Ok(cur)) => match Rc::try_unwrap(cur) {
+        let built = match taken {
+            Some(Value::Str(cur)) => match Rc::try_unwrap(cur) {
                 Ok(mut s) => {
                     if s.try_reserve(tail.len()).is_err() {
                         return Err(crate::vm::materialize_refused(
@@ -1673,8 +1673,8 @@ pub(crate) fn eval_unary(
             ),
             // The sweep found `-t` refusing while `0.0 - t` and `-variable(t)`
             // both worked — same for rationals. Every numeric value negates.
-            Value::Tensor(ref t) => Ok(Value::Tensor(std::rc::Rc::new(t.mapv(|x| -x)))),
-            Value::Rational(ref q) => Ok(Value::Rational(std::rc::Rc::new(-(**q).clone()))), // negation propagates
+            Value::Tensor(t) => Ok(Value::Tensor(std::rc::Rc::new(t.mapv(|x| -x)))),
+            Value::Rational(q) => Ok(Value::Rational(std::rc::Rc::new(-(*q).clone()))), // negation propagates
             other => Err(HelixError::new(
                 format!("cannot negate a value of type {}", other.type_name()),
                 line,
@@ -1938,12 +1938,12 @@ static TRY_KEYS: std::sync::LazyLock<TryKeys> = std::sync::LazyLock::new(|| TryK
 /// Shared by both engines so the record shape is identical.
 pub(crate) fn try_ok(v: Value) -> Value {
     let k = &*TRY_KEYS;
-    Value::Record(Rc::new(vec![
+    Value::record(vec![
         (k.ok, Value::Bool(true)),
         (k.value, v),
         (k.error, Value::Missing),
         (k.help, Value::Missing),
-    ]))
+    ])
 }
 
 /// The result record of `try EXPR` on a runtime error:
@@ -1953,12 +1953,12 @@ pub(crate) fn try_ok(v: Value) -> Value {
 /// guidance exists (field build); now it can.
 pub(crate) fn try_err(message: String, help: Option<String>) -> Value {
     let k = &*TRY_KEYS;
-    Value::Record(Rc::new(vec![
+    Value::record(vec![
         (k.ok, Value::Bool(false)),
         (k.value, Value::Missing),
         (k.error, Value::Str(Rc::new(message))),
         (k.help, help.map(|h| Value::Str(Rc::new(h))).unwrap_or(Value::Missing)),
-    ]))
+    ])
 }
 
 
@@ -2079,8 +2079,8 @@ fn apply_float_fn(
             None => Err(type_err(name, "a number or array of numbers", s, line, col)),
         })
     };
-    match v.into_array() {
-        Ok(mut a) => {
+    match v {
+        Value::Array(mut a) => {
             // A uniquely-owned `Floats` buffer is mapped IN PLACE (f64→f64 preserves type),
             // so chains like `sqrt(abs(xs))` reuse the intermediate instead of allocating.
             if let Some(ArrayData::Floats(buf)) = Rc::get_mut(&mut a) {
@@ -2101,22 +2101,20 @@ fn apply_float_fn(
                 | ArrayData::Shared { .. } => scalar_fallback(&Value::Array(a)),
             }
         }
-        Err(v) => match v {
-            Value::Tensor(ref t) => {
-                // Contiguous tensors map over the slice (parallel past the threshold);
-                // a non-contiguous view (e.g. a transpose) falls back to ndarray's mapv.
-                match t.as_slice() {
-                    Some(xs) => {
-                        let out = map_f64_buf(xs, f);
-                        let arr = ndarray::ArrayD::from_shape_vec(t.raw_dim(), out)
-                            .expect("same length as source tensor");
-                        Ok(Value::Tensor(Rc::new(arr)))
-                    }
-                    None => Ok(Value::Tensor(Rc::new(t.mapv(f)))),
+        Value::Tensor(t) => {
+            // Contiguous tensors map over the slice (parallel past the threshold);
+            // a non-contiguous view (e.g. a transpose) falls back to ndarray's mapv.
+            match t.as_slice() {
+                Some(xs) => {
+                    let out = map_f64_buf(xs, f);
+                    let arr = ndarray::ArrayD::from_shape_vec(t.raw_dim(), out)
+                        .expect("same length as source tensor");
+                    Ok(Value::Tensor(Rc::new(arr)))
                 }
+                None => Ok(Value::Tensor(Rc::new(t.mapv(f)))),
             }
-            other => scalar_fallback(&other),
-        },
+        }
+        other => scalar_fallback(&other),
     }
 }
 
@@ -2232,8 +2230,8 @@ pub(crate) fn apply_abs(v: Value, line: usize, col: usize) -> Result<Value, Heli
             other => Err(type_err("abs", "a number or array of numbers", other, line, col)),
         })
     };
-    match v.into_array() {
-        Ok(mut a) => {
+    match v {
+        Value::Array(mut a) => {
             // `abs` preserves the element type, so a uniquely-owned Int/Float buffer is
             // mapped IN PLACE; a shared one (or a `Values` array) takes the copy path.
             match Rc::get_mut(&mut a) {
@@ -2259,7 +2257,7 @@ pub(crate) fn apply_abs(v: Value, line: usize, col: usize) -> Result<Value, Heli
                 | ArrayData::Shared { .. } => boxed(&Value::Array(a)),
             }
         }
-        Err(other) => boxed(&other),
+        other => boxed(&other),
     }
 }
 

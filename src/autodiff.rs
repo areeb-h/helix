@@ -1221,7 +1221,7 @@ mod tests {
         let node = |v: &Value| to_node(v).expect("a tracked value");
         let grad_of = |reduced: Value| {
             let loss = method(&node(&reduced), "sum", &[], 0, 0).expect("whole sum");
-            match &gradient(&loss, &leaf, 0, 0).expect("gradient") {
+            match gradient(&loss, &leaf, 0, 0).expect("gradient") {
                 Value::Tensor(t) => t.iter().copied().collect::<Vec<f64>>(),
                 other => panic!("{other:?}"),
             }

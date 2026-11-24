@@ -49,7 +49,7 @@ pub fn run(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError>
         Some(Value::Array(a)) => a
             .iter_values()
             .map(|v| match v {
-                Value::Str(ref s) => Ok(s.to_string()),
+                Value::Str(s) => Ok(s.to_string()),
                 Value::Int(i) => Ok(i.to_string()),
                 Value::Float(f) => Ok(crate::value::fmt_float(f)),
                 Value::Bool(b) => Ok(b.to_string()),
@@ -86,11 +86,11 @@ pub fn run(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError>
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     let record = |status: i64| {
-        Value::Record(Rc::new(vec![
+        Value::record(vec![
             (crate::symbol::Symbol::intern("status"), Value::Int(status)),
             (crate::symbol::Symbol::intern("stdout"), Value::Str(Rc::new(stdout.clone()))),
             (crate::symbol::Symbol::intern("stderr"), Value::Str(Rc::new(stderr.clone()))),
-        ]))
+        ])
     };
 
     match out.status.code() {

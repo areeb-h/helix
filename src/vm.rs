@@ -755,9 +755,9 @@ fn rebuild_acc(template: &Value, buf: Vec<i64>) -> Value {
         Value::Record(r) => {
             let fields: Vec<(crate::symbol::Symbol, Value)> =
                 r.iter().zip(buf).map(|((sym, _), i)| (*sym, Value::Int(i))).collect();
-            Value::Record(std::rc::Rc::new(fields))
+            Value::record(fields)
         }
-        _ => Value::Tuple(std::rc::Rc::new(buf.into_iter().map(Value::Int).collect())),
+        _ => Value::tuple(buf.into_iter().map(Value::Int).collect()),
     }
 }
 
@@ -798,9 +798,9 @@ fn rebuild_acc_f64(template: &Value, buf: Vec<i64>) -> Value {
         Value::Record(r) => {
             let fields: Vec<(crate::symbol::Symbol, Value)> =
                 r.iter().zip(buf).map(|((sym, _), i)| (*sym, f(i))).collect();
-            Value::Record(std::rc::Rc::new(fields))
+            Value::record(fields)
         }
-        _ => Value::Tuple(std::rc::Rc::new(buf.into_iter().map(f).collect())),
+        _ => Value::tuple(buf.into_iter().map(f).collect()),
     }
 }
 
@@ -1127,7 +1127,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let add = add.clone();
                 // Now the take: the slot's `Rc` loses its second owner, so an accumulator
                 // nothing else aliases becomes unique and can be extended in place.
-                let Ok(cur) = std::mem::replace(&mut locals[at], Value::Unit).into_array() else {
+                let Value::Array(cur) = std::mem::replace(&mut locals[at], Value::Unit) else {
                     unreachable!("accumulator type checked immediately above")
                 };
                 locals[at] = Value::concat_in_place(cur, &add);
@@ -1153,7 +1153,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 }
                 let k = crate::value::DictKey::from_value(&kv)
                     .map_err(|m| HelixError::new(m, line, col))?;
-                let Ok(cur) = std::mem::replace(&mut locals[at], Value::Unit).into_dict() else {
+                let Value::Dict(cur) = std::mem::replace(&mut locals[at], Value::Unit) else {
                     unreachable!("accumulator type checked immediately above")
                 };
                 locals[at] = Value::insert_in_place(cur, k, v);
@@ -1203,7 +1203,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     //    0024), never aborts. A shared one (a kept init, a captured
                     //    accumulator) pays one content copy, bit-identical to the
                     //    ordinary lowering.
-                    let Ok(cur) = std::mem::replace(&mut locals[at], Value::Unit).into_str()
+                    let Value::Str(cur) = std::mem::replace(&mut locals[at], Value::Unit)
                     else {
                         unreachable!("accumulator type checked immediately above")
                     };
@@ -1328,8 +1328,8 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         }),
                         _ => None,
                     };
-                    match taken.map(Value::into_str) {
-                        Some(Ok(cur)) => match std::rc::Rc::try_unwrap(cur) {
+                    match taken {
+                        Some(Value::Str(cur)) => match std::rc::Rc::try_unwrap(cur) {
                             Ok(mut s) => {
                                 if s.try_reserve(tail.len()).is_err() {
                                     let bytes = s.len() + tail.len();
@@ -1757,7 +1757,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
             Op::MakeTuple(n) => {
                 let start = stack.len() - *n as usize;
                 let items: Vec<Value> = stack.split_off(start);
-                stack.push(Value::Tuple(std::rc::Rc::new(items)));
+                stack.push(Value::tuple(items));
             }
             Op::MakeRecord(names) => {
                 let start = stack.len() - names.len();
@@ -1766,7 +1766,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 // each) — no per-record key allocation.
                 let fields: Vec<(crate::symbol::Symbol, Value)> =
                     names.iter().copied().zip(vals).collect();
-                stack.push(Value::Record(std::rc::Rc::new(fields)));
+                stack.push(Value::record(fields));
             }
             Op::UpdateRecord(names) => {
                 let start = stack.len() - names.len();
@@ -1779,7 +1779,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 for (name, val) in names.iter().copied().zip(vals) {
                     crate::interp::set_field(&mut out, name, val);
                 }
-                stack.push(Value::Record(std::rc::Rc::new(out)));
+                stack.push(Value::record(out));
             }
             Op::SpreadRecord => {
                 let (Some(extra), Some(acc)) = (stack.pop(), stack.pop()) else {
@@ -1788,7 +1788,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let mut out: Vec<(crate::symbol::Symbol, Value)> = Vec::new();
                 crate::interp::spread_into(&mut out, &acc, line, col)?;
                 crate::interp::spread_into(&mut out, &extra, line, col)?;
-                stack.push(Value::Record(std::rc::Rc::new(out)));
+                stack.push(Value::record(out));
             }
             Op::GetField(name) => {
                 let recv = stack.pop().unwrap();
@@ -2163,9 +2163,9 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
             Op::CompInit(kind, missing_target) => {
                 let v = stack.pop().unwrap();
                 match v {
-                    Value::Array(ref a) => {
+                    Value::Array(a) => {
                         iters.push(CompIter {
-                            source: CompSource::Array { arr: a.clone(), idx: 0 },
+                            source: CompSource::Array { arr: a, idx: 0 },
                             cur_val: Value::Unit,
                             builder: crate::value::ColumnBuilder::default(),
                         });
@@ -3549,7 +3549,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     return Err(HelixError::new("internal: `map_values` found no result", line, col));
                 };
                 stack.push(match mapped {
-                    Value::Array(ref a) => {
+                    Value::Array(a) => {
                         crate::interp::map_values_rebuild(&recv, a.to_values().into_owned())
                     }
                     // `missing`, propagated by the loop's own landing.
@@ -3629,11 +3629,11 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 // the err-record. (The handler was already popped during the unwind.)
                 // The unwind pushed the message, then the help (or `missing`).
                 let help = match stack.pop() {
-                    Some(Value::Str(ref s)) => Some((**s).clone()),
+                    Some(Value::Str(s)) => Some((*s).clone()),
                     _ => None,
                 };
                 let msg = match stack.pop().unwrap() {
-                    Value::Str(ref s) => (**s).clone(),
+                    Value::Str(s) => (*s).clone(),
                     other => other.to_string(),
                 };
                 stack.push(crate::interp::try_err(msg, help));

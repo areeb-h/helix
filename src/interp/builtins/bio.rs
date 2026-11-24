@@ -2,7 +2,6 @@
 //! (2026-08-24). The `call` guard names exactly the arms this file holds;
 //! `dispatch` is the original match text, arm for arm.
 
-use std::rc::Rc;
 
 use crate::error::HelixError;
 use crate::value::Value;
@@ -278,12 +277,12 @@ pub(super) fn a_align(args: Vec<Value>, line: usize, col: usize) -> Result<Value
                 }
             }
         }
-        Ok(Value::Record(Rc::new(vec![
+        Ok(Value::record(vec![
             (Symbol::intern("score"), Value::Int(score)),
             (Symbol::intern("matches"), Value::Int(matches)),
             (Symbol::intern("length"), Value::Int(steps.len() as i64)),
             (Symbol::intern("a_aligned"), Value::array(a_al)),
             (Symbol::intern("b_aligned"), Value::array(b_al)),
-        ])))
+        ]))
     
 }

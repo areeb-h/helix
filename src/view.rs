@@ -170,7 +170,7 @@ fn parse(v: &Value, line: usize, col: usize) -> Result<Node, HelixError> {
         return Err(shape_err(&format!("found {}", crate::value::with_article(v.type_name())), line, col));
     }
     let tag = match get(v, "tag") {
-        Some(Value::Str(ref s)) => s.clone(),
+        Some(Value::Str(s)) => s,
         _ => return Err(shape_err("this one has no string `tag`", line, col)),
     };
     if tag.as_str() == "#text" {
@@ -275,7 +275,7 @@ fn parse(v: &Value, line: usize, col: usize) -> Result<Node, HelixError> {
             .join("; "),
         // Markup's `style="--fill: 40%"`: a string is the declarations as written.
         None => match style {
-            Some(Value::Str(ref s)) => s.as_str().to_string(),
+            Some(Value::Str(s)) => s.as_str().to_string(),
             _ => String::new(),
         },
     };
@@ -299,7 +299,7 @@ fn parse(v: &Value, line: usize, col: usize) -> Result<Node, HelixError> {
     }
     guard(tag.as_str(), &mut attrs, line, col)?;
     let mut kids = Vec::new();
-    if let Some(Value::Array(ref a)) = get(v, "children") {
+    if let Some(Value::Array(a)) = get(v, "children") {
         children(&a.to_values(), &mut kids, line, col)?;
     }
     Ok(Node::El { tag: tag.as_str().to_string(), key, attrs, kids })
@@ -425,7 +425,7 @@ fn path_value(path: &[usize]) -> Value {
     Value::int_array(path.iter().map(|&i| i as i64).collect())
 }
 fn op(fields: Vec<(&str, Value)>) -> Value {
-    Value::Record(Rc::new(fields.into_iter().map(|(k, v)| (Symbol::intern(k), v)).collect()))
+    Value::record(fields.into_iter().map(|(k, v)| (Symbol::intern(k), v)).collect())
 }
 
 /// The compact form the client builds a DOM from: a string for text, `[tag, [[name,
@@ -575,7 +575,7 @@ mod tests {
         rec(vec![("tag", s(tag)), ("props", rec(props)), ("children", Value::array(kids))])
     }
     fn ops_of(old: &Value, new: &Value) -> Vec<String> {
-        match &view_diff(old, new, 0, 0).expect("diff") {
+        match view_diff(old, new, 0, 0).expect("diff") {
             Value::Array(a) => a.to_values().iter().map(|o| format!("{o}")).collect(),
             other => panic!("not an array: {other}"),
         }
@@ -597,15 +597,12 @@ mod tests {
         assert!(err(bad).contains("not an attribute name"));
         // A scripting URL, however spelled, is made inert; ordinary and image-data URLs are kept.
         for url in ["javascript:alert(1)", " JaVa\tScRiPt:alert(1)", "vbscript:x", "data:text/html,<b>"] {
-            let h = render(el("a", vec![("attrs", rec(vec![("href", s(url))]))], vec![])).unwrap();
-            let Value::Str(h) = &h else { panic!() };
+            let Value::Str(h) = render(el("a", vec![("attrs", rec(vec![("href", s(url))]))], vec![])).unwrap() else { panic!() };
             assert_eq!(h.as_str(), "<a href=\"about:blank#blocked\"></a>", "{url}");
         }
-        let h = render(el("img", vec![("attrs", rec(vec![("src", s("data:image/png;base64,AA=="))]))], vec![])).unwrap();
-        let Value::Str(h) = &h else { panic!() };
+        let Value::Str(h) = render(el("img", vec![("attrs", rec(vec![("src", s("data:image/png;base64,AA=="))]))], vec![])).unwrap() else { panic!() };
         assert_eq!(h.as_str(), "<img src=\"data:image/png;base64,AA==\">");
-        let h = render(el("a", vec![("attrs", rec(vec![("href", s("https://example.com/?q=javascript:"))]))], vec![])).unwrap();
-        let Value::Str(h) = &h else { panic!() };
+        let Value::Str(h) = render(el("a", vec![("attrs", rec(vec![("href", s("https://example.com/?q=javascript:"))]))], vec![])).unwrap() else { panic!() };
         assert_eq!(h.as_str(), "<a href=\"https://example.com/?q=javascript:\"></a>");
         // SVG names keep working.
         assert!(render(el("clipPath", vec![("attrs", rec(vec![("xlink:href", s("#a")), ("stroke-width", s("2"))]))], vec![])).is_ok());
@@ -630,8 +627,7 @@ mod tests {
             ],
             vec![],
         );
-        let h = view_html(&t, 0, 0).expect("render");
-        let Value::Str(h) = &h else { panic!() };
+        let Value::Str(h) = view_html(&t, 0, 0).expect("render") else { panic!() };
         assert_eq!(
             h.as_str(),
             "<button class=\"btn\" id=\"b1\" role=\"switch\" data-value=\"7\" data-change=\"c\" data-dismiss=\"close\" \
@@ -656,8 +652,7 @@ mod tests {
             ],
             vec![],
         );
-        let h = view_html(&v, 0, 0).expect("render");
-        let Value::Str(h) = &h else { panic!() };
+        let Value::Str(h) = view_html(&v, 0, 0).expect("render") else { panic!() };
         assert_eq!(
             h.as_str(),
             "<div data-drag=\"thrown\" data-drag-axis=\"down\" data-drag-commit=\"96\" data-reorder=\"moved\" data-resize=\"size\" data-drag-handle=\"true\" data-reorder-group=\"board\" data-drop=\"dropped\"></div>"
@@ -667,8 +662,7 @@ mod tests {
     #[test]
     fn a_shared_element_names_itself_after_the_motion_props() {
         let t = el("span", vec![("share", s("seg-thumb")), ("layout", Value::Bool(true)), ("class", s("seg-thumb"))], vec![]);
-        let h = view_html(&t, 0, 0).expect("render");
-        let Value::Str(h) = &h else { panic!() };
+        let Value::Str(h) = view_html(&t, 0, 0).expect("render") else { panic!() };
         assert_eq!(h.as_str(), "<span class=\"seg-thumb\" data-layout=\"true\" data-share=\"seg-thumb\"></span>");
     }
 
@@ -679,8 +673,7 @@ mod tests {
             vec![("class", s("a\"b")), ("style", rec(vec![("border_radius", s("8px"))])), ("transition", s("x 1s"))],
             vec![text("<hi> & 'you'"), el("input", vec![("attrs", rec(vec![("value", Value::Float(3.5))]))], vec![])],
         );
-        let h = view_html(&t, 0, 0).expect("render");
-        let Value::Str(h) = &h else { panic!() };
+        let Value::Str(h) = view_html(&t, 0, 0).expect("render") else { panic!() };
         assert_eq!(
             h.as_str(),
             "<div class=\"a&quot;b\" style=\"border-radius: 8px; transition: x 1s\">&lt;hi&gt; &amp; &#39;you&#39;<input value=\"3.5\"></div>"
@@ -696,8 +689,7 @@ mod tests {
         m.insert(crate::value::DictKey::Str(Rc::new("clip-path".to_string())), s("url(#p)"));
         let dict = Value::Dict(Rc::new(crate::value::Dict::from_map(m)));
         let t = el("g", vec![("attrs", dict)], vec![]);
-        let h = view_html(&t, 0, 0).expect("render");
-        let Value::Str(h) = &h else { panic!() };
+        let Value::Str(h) = view_html(&t, 0, 0).expect("render") else { panic!() };
         assert_eq!(h.as_str(), "<g clip-path=\"url(#p)\"></g>");
     }
 
