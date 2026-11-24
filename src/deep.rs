@@ -205,7 +205,10 @@ mod tests {
         v
     }
 
-    fn shapes() -> Vec<(&'static str, fn(Value) -> Value)> {
+    /// A name, and how that container kind wraps the value below it once.
+    type Shape = (&'static str, fn(Value) -> Value);
+
+    fn shapes() -> Vec<Shape> {
         vec![
             ("array", |v| Value::array(vec![v, Value::Int(1)])),
             ("tuple", |v| Value::tuple(vec![v])),

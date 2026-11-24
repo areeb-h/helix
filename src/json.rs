@@ -299,7 +299,7 @@ mod tests {
             let k = if depth == 0 { next() % 5 } else { next() % 10 };
             match k {
                 0 => Value::Missing,
-                1 => Value::Bool(next() % 2 == 0),
+                1 => Value::Bool(next().is_multiple_of(2)),
                 2 => Value::Int(match next() % 4 { 0 => i64::MIN, 1 => i64::MAX, 2 => 0, _ => next() as i64 }),
                 3 => Value::Float(floats[pick(next(), floats.len())]),
                 4 => Value::Str(Rc::new(strs[pick(next(), strs.len())].to_string())),
@@ -335,7 +335,7 @@ mod tests {
                         };
                         m.insert(key, make(next, depth - 1, strs, floats));
                     }
-                    if next() % 3 == 0 {
+                    if next().is_multiple_of(3) {
                         m.insert(DictKey::Str(Rc::new("ACGT".to_string())), Value::Int(7));
                     }
                     Value::Dict(Rc::new(Dict::from_map(m)))
