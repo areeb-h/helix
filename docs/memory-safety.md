@@ -138,3 +138,44 @@ rare compile-fallback). Two measures keep them safe:
    so it could never have been the whole answer.
 
 `deep_recursion_is_safe` regression-tests both on the same large-stack thread.
+
+## Robustness: value depth
+
+Call depth is bounded; **value** depth is not. A program can nest a value as deep as its
+memory allows — a tail-recursive loop wrapping an accumulator (`build(n - 1, [acc])`) makes a
+million levels in under a second, on every engine, without a single deep call. Until
+2026-11-24 almost everything the runtime did to such a value recursed once per level on the
+native stack: printing it, `==`, `to_json`, `unique`, sorting tuples, arithmetic over nested
+arrays, rendering a table — 87 operations by the first count — and, last, **freeing** it,
+which is compiler-generated drop glue. All of them aborted the process (`fatal runtime
+error: stack overflow`), on all three engines. `src/deep.rs` holds the two measures:
+
+1. **Walks borrow stack as they deepen.** Every recursive walk over a value (display,
+   `eq3`/`values_equal`, tuple order, sort keys, JSON, broadcasting, table rendering, the
+   tensor shape) steps into a child through `deep::nested`, which continues on a fresh
+   heap-allocated segment below the same red zone the walker uses for calls. A walk's stack
+   is proportional to the depth it has reached and comes from the heap, like the value: a
+   program that could build the value can walk it.
+2. **Freeing is counted, on the payloads.** A container's payload — `Items` (a tuple's),
+   `Fields` (a record's), `ArrayData`, `Dict`, `ClosureData`, `FuncVal` — has a `Drop` that
+   runs only when its last reference goes. It moves its contents out and frees them itself,
+   counting the frees in progress on this thread; up to 512 that is ordinary recursion,
+   exactly what the glue did, and past it the contents are parked on a per-thread list that
+   the outermost free empties from the top of the stack. So no free uses more than ~512
+   levels of stack, whatever the depth. Because the hook is on the payload, dropping a scalar
+   or a reference to a shared container never reaches it (an earlier version hooked `Drop` on
+   `Value` itself and cost +2.9% of instructions on the examples; this one costs +0.2%).
+
+Two cost bugs hid behind the overflow and are fixed with it, because a stack fix alone would
+have traded a crash for a hang: printing copied each level's text into the level above it
+(O(d²); now one buffer), and `tensor` measured a nested array's first row twice per level
+(O(2^d); now once, and at most 64 axes). Tuple `<` compared each pair in full before
+descending into it (O(d²); now one pass).
+
+**Known limit:** a value that holds one sub-value many times — `[x, x]` wrapped forty deep —
+has 2^40 leaves however little memory it takes. Printing or serializing it stops at the
+one-string cap with a clean error; comparing two such values walks every leaf, which is
+exponential time (like any runaway loop, a CPU cost, not a crash).
+
+`values_nested_100k_deep_print_compare_serialize_and_free` (tests/cli.rs) and the unit tests
+in `src/deep.rs` pin this; `scripts/deepvalues.py` (docs/testing.md) runs the full matrix in CI.

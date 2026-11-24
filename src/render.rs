@@ -418,10 +418,22 @@ fn render_compact(v: &Value, opts: &RenderOpts) -> String {
     out
 }
 
+/// How much text one compact line may build before the rest is elided. A compact line is a
+/// cell or a list element on a terminal, cut to [`CELL_MAX`] or the screen's width anyway; the
+/// bound is what keeps a value holding one sub-value many times (`[x, x]` wrapped forty deep)
+/// from building more text than memory holds before the cut.
+const COMPACT_MAX: usize = 1 << 20;
+
 /// [`render_compact`], appended to `out`: one buffer for the whole value. Formatting each
 /// level into its own `String` copied every level once per level above it (O(d²) for a
 /// value nested `d` deep), and each step into a child is a guarded one ([`crate::deep`]).
 fn write_compact(out: &mut String, v: &Value, opts: &RenderOpts) {
+    if out.len() > COMPACT_MAX {
+        if !out.ends_with('…') {
+            out.push('…');
+        }
+        return;
+    }
     let items = |out: &mut String, xs: &[Value]| {
         for (i, e) in xs.iter().enumerate() {
             if i > 0 {

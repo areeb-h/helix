@@ -205,6 +205,14 @@ jobs:
       # its own job because it needs the binary this job just built.
       - name: Stranger corpus (never-abort / determinism / no-leak / has-help)
         run: python3 scripts/stranger.py --bin ./target/gate/helix
+      # Every operation on a value nested 100k deep, of every container kind, on all three
+      # engines with a 4 MB evaluator stack: no abort, engines agree, no quadratic walk, and
+      # deep values WORK (a "fix" that refused depth with an error fails it). ~90 s. The
+      # selftest first, so a harness that stopped being able to fail cannot pass quietly.
+      - name: Deep values (never-abort / engines-agree / in-time / as-expected)
+        run: |
+          python3 scripts/deepvalues.py --bin ./target/gate/helix --selftest
+          python3 scripts/deepvalues.py --bin ./target/gate/helix
 
   # The project's stated minimum supported Rust version must actually compile, or the
   # claim in Cargo.toml is decoration. Check only — the suite runs on stable above.

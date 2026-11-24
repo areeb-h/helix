@@ -1719,40 +1719,40 @@ impl fmt::Display for Value {
 /// other (leaf) value can't fail and delegates to `Display`.
 pub fn display_value(v: &Value, line: usize, col: usize) -> Result<String, HelixError> {
     let mut s = String::new();
-    write_display(&mut s, v, line, col)?;
+    write_display(&mut s, v, "print", line, col)?;
     Ok(s)
 }
 
 /// [`display_value`], appended to `s`. ONE buffer for the whole value: building each
 /// level's text as its own `String` and copying it into the level above made printing a
-/// value nested `d` deep cost O(d²) — a million-level list never finished.
-fn write_display(s: &mut String, v: &Value, line: usize, col: usize) -> Result<(), HelixError> {
-    use std::fmt::Write as _;
+/// value nested `d` deep cost O(d²) — a million-level list never finished. Every append
+/// goes through [`crate::interp::growth::push`], held to the one-string cap: a value that
+/// holds one sub-value many times (`[x, x]` wrapped forty deep) prints to more text than
+/// any memory, and that is the cap's clean error, not an abort (ADR 0024).
+fn write_display(s: &mut String, v: &Value, op: &str, line: usize, col: usize) -> Result<(), HelixError> {
+    use crate::interp::growth::push;
     match v {
-        Value::DataFrame(df) => s.push_str(&crate::framefmt::frame_text(&***df, line, col)?),
+        Value::DataFrame(df) => push(op, s, &crate::framefmt::frame_text(&***df, line, col)?, line, col)?,
         Value::Array(items) => {
-            s.push('[');
+            push(op, s, "[", line, col)?;
             for (i, it) in items.to_values().iter().enumerate() {
                 if i > 0 {
-                    s.push_str(", ");
+                    push(op, s, ", ", line, col)?;
                 }
-                write_elem(s, it, line, col)?;
+                write_elem(s, it, op, line, col)?;
             }
-            s.push(']');
+            push(op, s, "]", line, col)?;
         }
         Value::Tuple(items) => {
-            s.push('(');
+            push(op, s, "(", line, col)?;
             for (i, it) in items.iter().enumerate() {
                 if i > 0 {
-                    s.push_str(", ");
+                    push(op, s, ", ", line, col)?;
                 }
-                write_elem(s, it, line, col)?;
+                write_elem(s, it, op, line, col)?;
             }
             // a 1-tuple prints as `(x,)` to disambiguate from grouping
-            if items.len() == 1 {
-                s.push(',');
-            }
-            s.push(')');
+            push(op, s, if items.len() == 1 { ",)" } else { ")" }, line, col)?;
         }
         Value::Record(fields) => {
             // Canonical sorted field order — the same rule (and the same perf
@@ -1762,38 +1762,35 @@ fn write_display(s: &mut String, v: &Value, line: usize, col: usize) -> Result<(
             if !names.windows(2).all(|w| w[0] <= w[1]) {
                 order.sort_unstable_by(|&a, &b| names[a].cmp(names[b]));
             }
-            s.push('{');
+            push(op, s, "{", line, col)?;
             for (i, &fi) in order.iter().enumerate() {
                 let (k, val) = &fields[fi];
                 if i > 0 {
-                    s.push_str(", ");
+                    push(op, s, ", ", line, col)?;
                 }
-                s.push_str(&field_key_display(k.as_str()));
-                s.push_str(": ");
-                write_elem(s, val, line, col)?;
+                push(op, s, &field_key_display(k.as_str()), line, col)?;
+                push(op, s, ": ", line, col)?;
+                write_elem(s, val, op, line, col)?;
             }
-            s.push('}');
+            push(op, s, "}", line, col)?;
         }
-        // Scalars and other leaf values can't fail to render. Writing into a `String`
-        // is infallible.
-        other => {
-            let _ = write!(s, "{}", other);
-        }
+        // Scalars and other leaf values can't fail to render.
+        other => push(op, s, &other.to_string(), line, col)?,
     }
     Ok(())
 }
 
 /// One element of a container: strings quoted, anything else rendered in place — one
 /// level deeper, on stack that [`crate::deep::nested`] guarantees.
-fn write_elem(s: &mut String, v: &Value, line: usize, col: usize) -> Result<(), HelixError> {
+fn write_elem(s: &mut String, v: &Value, op: &str, line: usize, col: usize) -> Result<(), HelixError> {
+    use crate::interp::growth::push;
     match v {
         Value::Str(x) => {
-            s.push('"');
-            s.push_str(x);
-            s.push('"');
-            Ok(())
+            push(op, s, "\"", line, col)?;
+            push(op, s, x, line, col)?;
+            push(op, s, "\"", line, col)
         }
-        other => crate::deep::nested(|| write_display(s, other, line, col)),
+        other => crate::deep::nested(|| write_display(s, other, op, line, col)),
     }
 }
 
@@ -1825,7 +1822,7 @@ pub fn write_value(buf: &mut String, v: &Value, line: usize, col: usize) -> Resu
     use std::fmt::Write as _;
     match v {
         Value::Array(_) | Value::Tuple(_) | Value::Record(_) | Value::DataFrame(_) => {
-            write_display(buf, v, line, col)?;
+            write_display(buf, v, "interpolation", line, col)?;
         }
         // The shapes that dominate interpolation, appended DIRECTLY. `write!(buf, "{}",
         // value)` costs two nested `fmt::Arguments` dispatches — one to reach

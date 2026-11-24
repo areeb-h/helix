@@ -18835,3 +18835,56 @@ fn agent_study_round_two_hints() {
     let (out, _, _) = run(&["search", "doctest"], &[], "");
     assert!(out.contains("[syntax]"), "out:\n{out}");
 }
+
+/// A value nested 100,000 deep, of each container kind, through every operation that walked
+/// it one native frame per level — and then out of scope. Before `src/deep.rs` each of these
+/// died with `fatal runtime error: stack overflow` on all three engines (printing at ~1M
+/// levels on the default stack, freeing at a few million, a chain of dicts far sooner); here
+/// the evaluator stack is cut to 4 MB so 100k levels is already far past what recursion
+/// could hold. `scripts/deepvalues.py` runs the full matrix (175 programs) in CI; this is the
+/// part of it that pins exact answers.
+#[test]
+fn values_nested_100k_deep_print_compare_serialize_and_free() {
+    let shapes = [
+        ("array", "[acc]", "[[[[[1]]]]]"),
+        ("record", "{next: acc}", "{next: {next: {next: {next: {next: 1}}}}}"),
+        ("tuple", "(acc, 1)", "(((((1, 1), 1), 1), 1), 1)"),
+        ("dict", "dict().insert(\"k\", acc)", "{\"k\" => {\"k\" => {\"k\" => {\"k\" => {\"k\" => 1}}}}}"),
+    ];
+    for (shape, wrap, five) in shapes {
+        let src = format!(
+            "fn build(n, acc) = if n == 0 then acc else build(n - 1, {wrap})\n\
+             v = build(100000, 1)\nw = build(100000, 1)\n\
+             print(\"{{v}}\".length(), v == w, v != w, [v, w].unique().count(), [v].contains(w))\n\
+             print(v.to_json().length(), [v, w].frequencies().count(), {{a: v}}.a == w)\n\
+             print(build(5, 1))\n"
+        );
+        let mut outs = Vec::new();
+        for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+            let env: Vec<(&str, &str)> = env.iter().copied().chain([("HELIX_STACK_MB", "4")]).collect();
+            let (out, err, code) = run_source(&src, &env, &format!("deep_{shape}"));
+            assert_eq!(code, Some(0), "{shape} on {env:?} exited {code:?}; stderr:\n{err}");
+            assert!(!err.contains("overflow"), "{shape}: {err}");
+            outs.push(out);
+        }
+        assert!(outs.windows(2).all(|w| w[0] == w[1]), "{shape}: engines disagree: {outs:?}");
+        let lines: Vec<&str> = outs[0].lines().collect();
+        assert!(lines[0].ends_with(" true false 1 true"), "{shape}: {}", lines[0]);
+        assert!(lines[1].ends_with(" 1 true"), "{shape}: {}", lines[1]);
+        assert_eq!(lines[2], five, "{shape}: the printed form of a shallow value is unchanged");
+    }
+
+    // A tuple compares in one pass however deep: a pair at every level used to be compared
+    // in full and then descended into — quadratic, so this never finished.
+    let src = "fn build(n, acc) = if n == 0 then acc else build(n - 1, (acc, 1))\n\
+               print(build(100000, 1) < build(100000, 2), [build(100000, 2), build(100000, 1)].sort().count())\n";
+    let (out, err, code) = run_source(src, &[("HELIX_STACK_MB", "4")], "deep_tuple_order");
+    assert_eq!((code, out.as_str()), (Some(0), "true 2\n"), "stderr:\n{err}");
+
+    // A value that holds one sub-value 2^40 times prints to more text than any memory: the
+    // one-string cap's clean error, not an allocator abort.
+    let src = "fn g(x, n) = if n == 0 then x else g([x, x], n - 1)\nprint(g(1, 40))\n";
+    let (_, err, code) = run_source(src, &[], "deep_shared_print");
+    assert_eq!(code, Some(1), "stderr:\n{err}");
+    assert!(err.contains("`print` would exceed 1073741824 bytes"), "{err}");
+}
