@@ -37,8 +37,8 @@ pub(crate) const MAX_CALL_DEPTH: usize = 20_000;
 /// left, and below this red zone continues on a fresh segment of `STACK_SEGMENT` bytes
 /// (`stacker::maybe_grow`). The red zone is what ONE call may use before the next check:
 /// a body's own expression nesting, between two calls.
-const STACK_RED_ZONE: usize = if cfg!(debug_assertions) { 16 << 20 } else { 1 << 20 };
-const STACK_SEGMENT: usize = if cfg!(debug_assertions) { 256 << 20 } else { 32 << 20 };
+pub(crate) const STACK_RED_ZONE: usize = if cfg!(debug_assertions) { 16 << 20 } else { 1 << 20 };
+pub(crate) const STACK_SEGMENT: usize = if cfg!(debug_assertions) { 256 << 20 } else { 32 << 20 };
 
 /// Ceiling on a single interpolated string's byte length. Interpolation nests, so
 /// a doubling loop could otherwise grow a string until the allocator aborts; 1 GiB
@@ -843,7 +843,7 @@ impl Interp {
                 }
                 let label = callee.call_label();
                 match callee_v {
-                    Value::Function(g) => self.call_function(&label, &g, vals, *line, *col),
+                    Value::Function(ref g) => self.call_function(&label, g, vals, *line, *col),
                     // The expression evaluated to something that isn't callable.
                     // ONE hint string with the VM's CallValue arm — the engines'
                     // errors are compared byte-for-byte.
@@ -1330,8 +1330,8 @@ impl Interp {
             }),
             _ => None,
         };
-        let built = match taken {
-            Some(Value::Str(cur)) => match Rc::try_unwrap(cur) {
+        let built = match taken.map(Value::into_str) {
+            Some(Ok(cur)) => match Rc::try_unwrap(cur) {
                 Ok(mut s) => {
                     if s.try_reserve(tail.len()).is_err() {
                         return Err(crate::vm::materialize_refused(
@@ -1673,8 +1673,8 @@ pub(crate) fn eval_unary(
             ),
             // The sweep found `-t` refusing while `0.0 - t` and `-variable(t)`
             // both worked — same for rationals. Every numeric value negates.
-            Value::Tensor(t) => Ok(Value::Tensor(std::rc::Rc::new(t.mapv(|x| -x)))),
-            Value::Rational(q) => Ok(Value::Rational(std::rc::Rc::new(-(*q).clone()))), // negation propagates
+            Value::Tensor(ref t) => Ok(Value::Tensor(std::rc::Rc::new(t.mapv(|x| -x)))),
+            Value::Rational(ref q) => Ok(Value::Rational(std::rc::Rc::new(-(**q).clone()))), // negation propagates
             other => Err(HelixError::new(
                 format!("cannot negate a value of type {}", other.type_name()),
                 line,
@@ -1972,7 +1972,7 @@ fn broadcast_unary(
         Value::Array(items) => {
             let out: Result<Vec<Value>, HelixError> = items
                 .iter_values()
-                .map(|e| broadcast_unary(&e, scalar))
+                .map(|e| crate::deep::nested(|| broadcast_unary(&e, scalar)))
                 .collect();
             Ok(Value::array(out?))
         }
@@ -2079,8 +2079,8 @@ fn apply_float_fn(
             None => Err(type_err(name, "a number or array of numbers", s, line, col)),
         })
     };
-    match v {
-        Value::Array(mut a) => {
+    match v.into_array() {
+        Ok(mut a) => {
             // A uniquely-owned `Floats` buffer is mapped IN PLACE (f64→f64 preserves type),
             // so chains like `sqrt(abs(xs))` reuse the intermediate instead of allocating.
             if let Some(ArrayData::Floats(buf)) = Rc::get_mut(&mut a) {
@@ -2101,20 +2101,22 @@ fn apply_float_fn(
                 | ArrayData::Shared { .. } => scalar_fallback(&Value::Array(a)),
             }
         }
-        Value::Tensor(t) => {
-            // Contiguous tensors map over the slice (parallel past the threshold);
-            // a non-contiguous view (e.g. a transpose) falls back to ndarray's mapv.
-            match t.as_slice() {
-                Some(xs) => {
-                    let out = map_f64_buf(xs, f);
-                    let arr = ndarray::ArrayD::from_shape_vec(t.raw_dim(), out)
-                        .expect("same length as source tensor");
-                    Ok(Value::Tensor(Rc::new(arr)))
+        Err(v) => match v {
+            Value::Tensor(ref t) => {
+                // Contiguous tensors map over the slice (parallel past the threshold);
+                // a non-contiguous view (e.g. a transpose) falls back to ndarray's mapv.
+                match t.as_slice() {
+                    Some(xs) => {
+                        let out = map_f64_buf(xs, f);
+                        let arr = ndarray::ArrayD::from_shape_vec(t.raw_dim(), out)
+                            .expect("same length as source tensor");
+                        Ok(Value::Tensor(Rc::new(arr)))
+                    }
+                    None => Ok(Value::Tensor(Rc::new(t.mapv(f)))),
                 }
-                None => Ok(Value::Tensor(Rc::new(t.mapv(f)))),
             }
-        }
-        other => scalar_fallback(&other),
+            other => scalar_fallback(&other),
+        },
     }
 }
 
@@ -2230,8 +2232,8 @@ pub(crate) fn apply_abs(v: Value, line: usize, col: usize) -> Result<Value, Heli
             other => Err(type_err("abs", "a number or array of numbers", other, line, col)),
         })
     };
-    match v {
-        Value::Array(mut a) => {
+    match v.into_array() {
+        Ok(mut a) => {
             // `abs` preserves the element type, so a uniquely-owned Int/Float buffer is
             // mapped IN PLACE; a shared one (or a `Values` array) takes the copy path.
             match Rc::get_mut(&mut a) {
@@ -2257,7 +2259,7 @@ pub(crate) fn apply_abs(v: Value, line: usize, col: usize) -> Result<Value, Heli
                 | ArrayData::Shared { .. } => boxed(&Value::Array(a)),
             }
         }
-        other => boxed(&other),
+        Err(other) => boxed(&other),
     }
 }
 

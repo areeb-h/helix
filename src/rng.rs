@@ -211,7 +211,7 @@ mod tests {
     use super::*;
 
     fn floats(v: Value) -> Vec<f64> {
-        match v {
+        match &v {
             Value::Array(a) => a.to_values().iter().map(|x| x.as_f64().unwrap()).collect(),
             _ => panic!("expected an array"),
         }
@@ -255,7 +255,8 @@ mod tests {
     fn random_int_is_in_half_open_range() {
         let v = random_int(&[Value::Int(10_000), Value::Int(5), Value::Int(8), Value::Int(1)], 0, 0)
             .unwrap();
-        let Value::Array(a) = v else { panic!() };
+        let a = v;
+        let Value::Array(a) = &a else { panic!() };
         for x in a.to_values().iter() {
             let Value::Int(i) = x else { panic!("expected ints") };
             assert!((5..8).contains(i), "out of range: {i}");
@@ -266,7 +267,7 @@ mod tests {
     fn shuffle_is_a_permutation() {
         let items: Vec<Value> = (0..100).map(Value::Int).collect();
         let out = shuffle(&items, &[Value::Int(9)], 0, 0).unwrap();
-        let mut got: Vec<i64> = match out {
+        let mut got: Vec<i64> = match &out {
             Value::Array(a) => a.to_values().iter().map(|v| match v {
                 Value::Int(i) => *i,
                 _ => panic!(),
@@ -284,7 +285,7 @@ mod tests {
     fn sample_draws_k_distinct_without_replacement() {
         let items: Vec<Value> = (0..50).map(Value::Int).collect();
         let out = sample(&items, &[Value::Int(10), Value::Int(2)], 0, 0).unwrap();
-        let got: Vec<i64> = match out {
+        let got: Vec<i64> = match &out {
             Value::Array(a) => a.to_values().iter().map(|v| match v {
                 Value::Int(i) => *i,
                 _ => panic!(),

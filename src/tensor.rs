@@ -63,8 +63,25 @@ pub(crate) fn index_bounds_err(i: i64, len: i64, line: usize, col: usize) -> Hel
     )
 }
 
+/// The most axes a tensor may have — NumPy's own limit (`NPY_MAXDIMS`, 64 since 2.0). A
+/// nested array deeper than this has no tensor shape: refusing it is what keeps the shape
+/// walk below linear, since each level copies the shape beneath it.
+const MAX_DIMS: usize = 64;
+
 /// Infer the (rectangular) shape of a nested Helix value.
 fn shape_of(v: &Value, line: usize, col: usize) -> Result<Vec<usize>, HelixError> {
+    shape_at(v, 0, line, col)
+}
+
+fn shape_at(v: &Value, depth: usize, line: usize, col: usize) -> Result<Vec<usize>, HelixError> {
+    if depth > MAX_DIMS {
+        return Err(HelixError::new(
+            format!("this array is nested more than {MAX_DIMS} deep, so it has no tensor shape"),
+            line,
+            col,
+        )
+        .hint(format!("a tensor has at most {MAX_DIMS} axes (NumPy's limit too).")));
+    }
     match v {
         Value::Int(_) | Value::Float(_) => Ok(vec![]),
         Value::Array(items) => {
@@ -84,9 +101,13 @@ fn shape_of(v: &Value, line: usize, col: usize) -> Result<Vec<usize>, HelixError
             if items.is_empty() {
                 return Ok(vec![0]);
             }
-            let sub = shape_of(&items.get(0), line, col)?;
-            for it in items.to_values().iter() {
-                if shape_of(it, line, col)? != sub {
+            // The first element's shape is measured ONCE. The loop used to measure it
+            // again, which doubled the work at every level: `tensor` of a single-element
+            // array nested 40 deep took minutes, and 60 deep would not have finished.
+            let vals = items.to_values();
+            let sub = crate::deep::nested(|| shape_at(&vals[0], depth + 1, line, col))?;
+            for it in vals.iter().skip(1) {
+                if crate::deep::nested(|| shape_at(it, depth + 1, line, col))? != sub {
                     return Err(ragged_err(line, col));
                 }
             }

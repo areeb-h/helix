@@ -64,21 +64,128 @@ fn from_serde(v: serde_json::Value, budget: &mut usize) -> Result<Value, String>
 }
 
 /// Serialize a Helix value to a JSON string.
+///
+/// Written straight into one buffer with a guarded walk ([`crate::deep::nested`]). It used
+/// to build a `serde_json::Value` tree and serialize that, and every stage of that recursed
+/// once per level — building, serializing and freeing — so `to_json` of a deeply nested
+/// value killed the process. The bytes are serde_json's own: each scalar goes through
+/// `serde_json` (its number formatting and string escaping), objects are emitted with keys
+/// in the order `serde_json::Map` (a `BTreeMap` in every build — no crate enables
+/// `preserve_order`) iterates them, and where two dict keys spell the same string the later
+/// one wins, as an insert into that map would. `stringify_via_serde_matches` below checks
+/// it against the old route.
 pub fn stringify(v: &Value) -> Result<String, String> {
-    let j = to_serde(v)?;
-    serde_json::to_string(&j).map_err(|e| format!("could not serialize to JSON: {e}"))
+    let mut out: Vec<u8> = Vec::new();
+    write_json(&mut out, v)?;
+    // Every byte came from `serde_json` or is ASCII punctuation, so this cannot fail.
+    String::from_utf8(out).map_err(|e| format!("could not serialize to JSON: {e}"))
 }
 
+fn json_leaf<T: serde::Serialize + ?Sized>(out: &mut Vec<u8>, x: &T) -> Result<(), String> {
+    serde_json::to_writer(out, x).map_err(|e| format!("could not serialize to JSON: {e}"))
+}
+
+fn write_json(out: &mut Vec<u8>, v: &Value) -> Result<(), String> {
+    match v {
+        Value::Missing => out.extend_from_slice(b"null"),
+        Value::Bool(b) => out.extend_from_slice(if *b { b"true" } else { b"false" }),
+        Value::Int(i) => json_leaf(out, i)?,
+        // JSON has no NaN/Infinity — they serialize as `null` (the JSON convention, and
+        // what serde_json writes for a non-finite `f64`).
+        Value::Float(f) => json_leaf(out, f)?,
+        // JSON has no rational type. Integer-valued ratios serialize as integers;
+        // others as their nearest f64 (matching how Float serializes).
+        Value::Rational(r) => {
+            use num_traits::ToPrimitive;
+            if r.is_integer() {
+                match r.to_i64() {
+                    Some(i) => json_leaf(out, &i)?,
+                    None => out.extend_from_slice(b"null"),
+                }
+            } else {
+                match r.to_f64() {
+                    Some(f) => json_leaf(out, &f)?,
+                    None => out.extend_from_slice(b"null"),
+                }
+            }
+        }
+        Value::Str(s) | Value::Dna(s) => json_leaf(out, s.as_str())?,
+        Value::Array(xs) => write_json_array(out, &xs.to_values())?,
+        Value::Tuple(xs) => write_json_array(out, xs)?,
+        Value::Record(fields) => {
+            let mut entries: Vec<(&str, &Value)> = fields.iter().map(|(k, val)| (k.as_str(), val)).collect();
+            entries.sort_by(|a, b| a.0.cmp(b.0));
+            write_json_object(out, entries.into_iter())?;
+        }
+        // A Dict serializes as a JSON object — the natural way to build a dynamic-keyed
+        // payload (`{ properties: params.to_dict() }.to_json()`). JSON object keys must be
+        // strings, so a non-string dict key is stringified.
+        Value::Dict(map) => {
+            let map = map.map();
+            let mut entries: Vec<(String, &Value)> = map
+                .iter()
+                .map(|(k, val)| {
+                    let key = match k {
+                        crate::value::DictKey::Str(s) | crate::value::DictKey::Dna(s) => (**s).clone(),
+                        crate::value::DictKey::Int(i) => i.to_string(),
+                        crate::value::DictKey::Bool(b) => b.to_string(),
+                    };
+                    (key, val)
+                })
+                .collect();
+            // Stable, so keys that stringify alike keep the map's order; the last of
+            // each run is the one a map insert would have kept.
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut kept: Vec<(&str, &Value)> = Vec::with_capacity(entries.len());
+            for (k, val) in &entries {
+                match kept.last_mut() {
+                    Some(last) if last.0 == k.as_str() => last.1 = val,
+                    _ => kept.push((k.as_str(), val)),
+                }
+            }
+            write_json_object(out, kept.into_iter())?;
+        }
+        other => return Err(format!("can't serialize {} to JSON", crate::value::with_article(other.type_name()))),
+    }
+    Ok(())
+}
+
+fn write_json_array(out: &mut Vec<u8>, xs: &[Value]) -> Result<(), String> {
+    out.push(b'[');
+    for (i, x) in xs.iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        crate::deep::nested(|| write_json(out, x))?;
+    }
+    out.push(b']');
+    Ok(())
+}
+
+fn write_json_object<'a>(out: &mut Vec<u8>, entries: impl Iterator<Item = (&'a str, &'a Value)>) -> Result<(), String> {
+    out.push(b'{');
+    for (i, (k, val)) in entries.enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        json_leaf(out, k)?;
+        out.push(b':');
+        crate::deep::nested(|| write_json(out, val))?;
+    }
+    out.push(b'}');
+    Ok(())
+}
+
+/// The route `stringify` took before it wrote JSON directly — kept, test-only, as the
+/// oracle that the direct writer produces the same bytes.
+#[cfg(test)]
 fn to_serde(v: &Value) -> Result<serde_json::Value, String> {
     use serde_json::Value as J;
     Ok(match v {
         Value::Missing => J::Null,
         Value::Bool(b) => J::Bool(*b),
         Value::Int(i) => J::Number((*i).into()),
-        // JSON has no NaN/Infinity — they serialize as `null` (the JSON convention).
         Value::Float(f) => serde_json::Number::from_f64(*f).map(J::Number).unwrap_or(J::Null),
-        // JSON has no rational type. Integer-valued ratios serialize as integers;
-        // others as their nearest f64 (matching how Float serializes).
         Value::Rational(r) => {
             use num_traits::ToPrimitive;
             if r.is_integer() {
@@ -89,12 +196,8 @@ fn to_serde(v: &Value) -> Result<serde_json::Value, String> {
         }
         Value::Str(s) => J::String((**s).clone()),
         Value::Dna(s) => J::String((**s).clone()),
-        Value::Array(xs) => {
-            J::Array(xs.to_values().iter().map(to_serde).collect::<Result<_, _>>()?)
-        }
-        Value::Tuple(xs) => {
-            J::Array(xs.iter().map(to_serde).collect::<Result<_, _>>()?)
-        }
+        Value::Array(xs) => J::Array(xs.to_values().iter().map(to_serde).collect::<Result<_, _>>()?),
+        Value::Tuple(xs) => J::Array(xs.iter().map(to_serde).collect::<Result<_, _>>()?),
         Value::Record(fields) => {
             let mut m = serde_json::Map::new();
             for (k, val) in fields.iter() {
@@ -102,9 +205,6 @@ fn to_serde(v: &Value) -> Result<serde_json::Value, String> {
             }
             J::Object(m)
         }
-        // A Dict serializes as a JSON object — the natural way to build a dynamic-keyed
-        // payload (`{ properties: params.to_dict() }.to_json()`). JSON object keys must be
-        // strings, so a non-string dict key is stringified.
         Value::Dict(map) => {
             let map = map.map();
             let mut m = serde_json::Map::new();
@@ -125,6 +225,77 @@ fn to_serde(v: &Value) -> Result<serde_json::Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The direct writer must produce the bytes the serde_json route produced, for every
+    /// shape: escapes and non-ASCII in strings and keys, every float class, both integer
+    /// extremes, unsorted record fields, dict keys of each kind — including keys that
+    /// stringify alike (`1` and `"1"`), where the later one must win as a map insert did.
+    #[test]
+    fn stringify_matches_the_serde_route() {
+        use crate::value::{Dict, DictKey};
+        let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let strs = ["", "a", "\"q\"", "back\\slash", "nl\nt\tab", "\u{1}\u{1f}", "é", "日本", "😀", "</script>"];
+        let floats = [0.0, -0.0, 1.0, -1.5, 1e300, 1e-300, 0.1, 1e21, 1e-7, f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::MIN_POSITIVE];
+        fn make(next: &mut dyn FnMut() -> u64, depth: u32, strs: &[&str], floats: &[f64]) -> Value {
+            let pick = |n: u64, m: usize| (n % m as u64) as usize;
+            let k = if depth == 0 { next() % 5 } else { next() % 10 };
+            match k {
+                0 => Value::Missing,
+                1 => Value::Bool(next() % 2 == 0),
+                2 => Value::Int(match next() % 4 { 0 => i64::MIN, 1 => i64::MAX, 2 => 0, _ => next() as i64 }),
+                3 => Value::Float(floats[pick(next(), floats.len())]),
+                4 => Value::Str(Rc::new(strs[pick(next(), strs.len())].to_string())),
+                5 | 6 => {
+                    let n = next() % 4;
+                    Value::array((0..n).map(|_| make(next, depth - 1, strs, floats)).collect())
+                }
+                7 => {
+                    let n = next() % 4;
+                    Value::Tuple(Rc::new((0..n).map(|_| make(next, depth - 1, strs, floats)).collect()))
+                }
+                8 => {
+                    // Field names drawn so that declaration order is rarely sorted.
+                    let names = ["zeta", "a", "M", "b2", "é", "_", "a\"q"];
+                    let mut fields: Vec<(Symbol, Value)> = Vec::new();
+                    for _ in 0..next() % 5 {
+                        let name = names[pick(next(), names.len())];
+                        if !fields.iter().any(|(k, _)| k.as_str() == name) {
+                            fields.push((Symbol::intern(name), make(next, depth - 1, strs, floats)));
+                        }
+                    }
+                    Value::Record(Rc::new(fields))
+                }
+                _ => {
+                    let mut m = std::collections::BTreeMap::new();
+                    for _ in 0..next() % 6 {
+                        let key = match next() % 5 {
+                            0 => DictKey::Int(1),
+                            1 => DictKey::Str(Rc::new("1".to_string())),
+                            2 => DictKey::Bool(true),
+                            3 => DictKey::Str(Rc::new("true".to_string())),
+                            _ => DictKey::Dna(Rc::new("ACGT".to_string())),
+                        };
+                        m.insert(key, make(next, depth - 1, strs, floats));
+                    }
+                    if next() % 3 == 0 {
+                        m.insert(DictKey::Str(Rc::new("ACGT".to_string())), Value::Int(7));
+                    }
+                    Value::Dict(Rc::new(Dict::from_map(m)))
+                }
+            }
+        }
+        for _ in 0..20_000 {
+            let v = make(&mut next, 4, &strs, &floats);
+            let old = to_serde(&v).map(|j| serde_json::to_string(&j).unwrap());
+            assert_eq!(stringify(&v), old, "for {v}");
+        }
+    }
 
     #[test]
     fn parse_maps_json_onto_helix_values() {

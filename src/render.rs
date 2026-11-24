@@ -413,36 +413,54 @@ fn group_thousands(digits: &str) -> String {
 
 /// Render `v` as a single colored line — used for list elements and nested cells.
 fn render_compact(v: &Value, opts: &RenderOpts) -> String {
+    let mut out = String::new();
+    write_compact(&mut out, v, opts);
+    out
+}
+
+/// [`render_compact`], appended to `out`: one buffer for the whole value. Formatting each
+/// level into its own `String` copied every level once per level above it (O(d²) for a
+/// value nested `d` deep), and each step into a child is a guarded one ([`crate::deep`]).
+fn write_compact(out: &mut String, v: &Value, opts: &RenderOpts) {
+    let items = |out: &mut String, xs: &[Value]| {
+        for (i, e) in xs.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            crate::deep::nested(|| write_compact(out, e, opts));
+        }
+    };
     match v {
         Value::Array(a) => {
-            let inner: Vec<String> =
-                a.to_values().iter().map(|e| render_compact(e, opts)).collect();
-            format!("{}{}{}", opts.paint(Role::Dim, "["), inner.join(", "), opts.paint(Role::Dim, "]"))
+            out.push_str(&opts.paint(Role::Dim, "["));
+            items(out, &a.to_values());
+            out.push_str(&opts.paint(Role::Dim, "]"));
         }
-        Value::Tuple(items) => {
-            let mut inner: Vec<String> = items.iter().map(|e| render_compact(e, opts)).collect();
-            if items.len() == 1 {
-                inner.push(String::new()); // trailing comma → `(x,)`
+        Value::Tuple(xs) => {
+            out.push_str(&opts.paint(Role::Dim, "("));
+            items(out, xs);
+            if xs.len() == 1 {
+                out.push_str(", "); // trailing comma → `(x,)`, as the joined form wrote it
             }
-            format!("{}{}{}", opts.paint(Role::Dim, "("), inner.join(", "), opts.paint(Role::Dim, ")"))
+            out.push_str(&opts.paint(Role::Dim, ")"));
         }
         Value::Record(fields) => {
             // Canonical sorted field order — the same rule `Display` applies;
             // the sweep found the rich (TTY) path still showing insertion
             // order, so `print(r)` and `"{r}"` disagreed in one session.
-            let inner: Vec<String> = sorted_fields(fields)
-                .map(|(k, val)| {
-                    format!(
-                        "{}: {}",
-                        opts.paint(Role::Key, &crate::value::field_key_display(k.as_str())),
-                        render_compact(val, opts)
-                    )
-                })
-                .collect();
-            format!("{}{}{}", opts.paint(Role::Dim, "{"), inner.join(", "), opts.paint(Role::Dim, "}"))
+            out.push_str(&opts.paint(Role::Dim, "{"));
+            for (i, (k, val)) in sorted_fields(fields).enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&opts.paint(Role::Key, &crate::value::field_key_display(k.as_str())));
+                out.push_str(": ");
+                crate::deep::nested(|| write_compact(out, val, opts));
+            }
+            out.push_str(&opts.paint(Role::Dim, "}"));
         }
-        Value::DataFrame(_) => opts.paint(Role::Dim, "<dataframe>"),
-        leaf => color_leaf(leaf, opts, true),
+        Value::DataFrame(_) => out.push_str(&opts.paint(Role::Dim, "<dataframe>")),
+        leaf => out.push_str(&color_leaf(leaf, opts, true)),
     }
 }
 
@@ -596,10 +614,11 @@ fn render_table(
     // Build cells for the shown rows.
     let mut col_numeric = vec![true; ncol];
     let mut cell_rows: Vec<Vec<Cell>> = Vec::with_capacity(shown_idx.len());
+    let missing = Value::Missing;
     for &r in &shown_idx {
         let mut cells = Vec::with_capacity(ncol);
         for (c, numeric) in col_numeric.iter_mut().enumerate() {
-            let v = rows[r].get(c).unwrap_or(&Value::Missing);
+            let v = rows[r].get(c).unwrap_or(&missing);
             let cell = cell_of(v, opts);
             if !cell.numeric {
                 *numeric = false;

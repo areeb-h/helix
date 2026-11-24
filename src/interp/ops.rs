@@ -158,21 +158,21 @@ pub(crate) fn eval_binary(
                 }
                 let mut out = Vec::with_capacity(a.len());
                 for (x, y) in a.iter_values().zip(b.iter_values()) {
-                    out.push(eval_binary(op, x, y, line, col)?);
+                    out.push(crate::deep::nested(|| eval_binary(op, x, y, line, col))?);
                 }
                 return Ok(Value::array_sniff(out));
             }
             (Value::Array(a), scalar) => {
                 let mut out = Vec::with_capacity(a.len());
                 for x in a.iter_values() {
-                    out.push(eval_binary(op, x, scalar.clone(), line, col)?);
+                    out.push(crate::deep::nested(|| eval_binary(op, x, scalar.clone(), line, col))?);
                 }
                 return Ok(Value::array_sniff(out));
             }
             (scalar, Value::Array(b)) => {
                 let mut out = Vec::with_capacity(b.len());
                 for y in b.iter_values() {
-                    out.push(eval_binary(op, scalar.clone(), y, line, col)?);
+                    out.push(crate::deep::nested(|| eval_binary(op, scalar.clone(), y, line, col))?);
                 }
                 return Ok(Value::array_sniff(out));
             }
@@ -799,7 +799,7 @@ pub(crate) fn eq3(l: &Value, r: &Value) -> Option<bool> {
                     if a.len() != b.len() {
                         return Some(false);
                     }
-                    eq3_all(a.to_values().iter().zip(b.to_values().iter()).map(|(x, y)| eq3(x, y)))
+                    eq3_all(a.to_values().iter().zip(b.to_values().iter()).map(|(x, y)| crate::deep::nested(|| eq3(x, y))))
                 }
             }
         }
@@ -807,14 +807,14 @@ pub(crate) fn eq3(l: &Value, r: &Value) -> Option<bool> {
             if a.len() != b.len() {
                 return Some(false);
             }
-            eq3_all(a.iter().zip(b.iter()).map(|(x, y)| eq3(x, y)))
+            eq3_all(a.iter().zip(b.iter()).map(|(x, y)| crate::deep::nested(|| eq3(x, y))))
         }
         (Value::Record(a), Value::Record(b)) => {
             if a.len() != b.len() {
                 return Some(false);
             }
             eq3_all(a.iter().map(|(k, v)| match b.iter().find(|(k2, _)| k == k2) {
-                Some((_, v2)) => eq3(v, v2),
+                Some((_, v2)) => crate::deep::nested(|| eq3(v, v2)),
                 None => Some(false),
             }))
         }
@@ -826,7 +826,7 @@ pub(crate) fn eq3(l: &Value, r: &Value) -> Option<bool> {
                 return Some(false);
             }
             eq3_all(a.iter().map(|(k, v)| match b.get(k) {
-                Some(v2) => eq3(v, v2),
+                Some(v2) => crate::deep::nested(|| eq3(v, v2)),
                 None => Some(false),
             }))
         }
@@ -936,27 +936,27 @@ pub(crate) fn values_equal(l: &Value, r: &Value) -> bool {
                         && a.to_values()
                             .iter()
                             .zip(b.to_values().iter())
-                            .all(|(x, y)| values_equal(x, y))
+                            .all(|(x, y)| crate::deep::nested(|| values_equal(x, y)))
                 }
             }
         }
         // Tuples compare structurally, element by element (`(a, b) == (a, b)`).
         (Value::Tuple(a), Value::Tuple(b)) => {
-            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| values_equal(x, y))
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| crate::deep::nested(|| values_equal(x, y)))
         }
         // Records compare by field → value, independent of field order (a record is its
         // mapping). No duplicate keys, so equal length + every field matching is exact.
         (Value::Record(a), Value::Record(b)) => {
             a.len() == b.len()
                 && a.iter()
-                    .all(|(k, v)| b.iter().any(|(k2, v2)| k == k2 && values_equal(v, v2)))
+                    .all(|(k, v)| b.iter().any(|(k2, v2)| k == k2 && crate::deep::nested(|| values_equal(v, v2))))
         }
         // A dict is its key→value mapping: equal iff same keys with structurally-equal
         // values. Keys compare exactly (`DictKey: Eq`); values recurse through `values_equal`.
         (Value::Dict(a), Value::Dict(b)) => {
             let (a, b) = (a.map(), b.map());
             a.len() == b.len()
-                && a.iter().all(|(k, v)| b.get(k).is_some_and(|v2| values_equal(v, v2)))
+                && a.iter().all(|(k, v)| b.get(k).is_some_and(|v2| crate::deep::nested(|| values_equal(v, v2))))
         }
         // A FUNCTION IS EQUAL TO ITSELF — and to any function of the same code whose
         // captured values are equal. That is the one definition both engines compute the
@@ -974,19 +974,57 @@ pub(crate) fn values_equal(l: &Value, r: &Value) -> bool {
                     && a.captured
                         .iter()
                         .zip(b.captured.iter())
-                        .all(|((n, v), (m, w))| n == m && values_equal(v, w)))
+                        .all(|((n, v), (m, w))| n == m && crate::deep::nested(|| values_equal(v, w))))
         }
         (Value::VmFunc { idx: a, .. }, Value::VmFunc { idx: b, .. }) => a == b,
         (Value::Closure(a), Value::Closure(b)) => {
             Rc::ptr_eq(a, b)
                 || (a.idx == b.idx
                     && a.upvalues.len() == b.upvalues.len()
-                    && a.upvalues.iter().zip(b.upvalues.iter()).all(|(v, w)| values_equal(v, w)))
+                    && a.upvalues.iter().zip(b.upvalues.iter()).all(|(v, w)| crate::deep::nested(|| values_equal(v, w))))
         }
         (Value::VmFunc { idx, .. }, Value::Closure(c))
         | (Value::Closure(c), Value::VmFunc { idx, .. }) => c.idx == *idx && c.upvalues.is_empty(),
         _ => false,
     }
+}
+
+/// How far [`tuple_order`] got: the pairs it walked were all equal, or one decided.
+enum TupleOrder {
+    Equal,
+    Decided(Value),
+}
+
+/// Lexicographic tuple order, in ONE pass.
+///
+/// A pair of tuples is ordered by descending into it, not by first asking `eq3` whether the
+/// pair is equal and then descending: that asked the same question twice per level, and on
+/// tuples nested `d` deep it was O(d²) — `((…(a, 1)…), 1) < ((…(b, 1)…), 1)` a million deep
+/// would not have finished. The answers are the same: a pair whose prefix is all equal and
+/// whose lengths match is `Equal` (where `eq3` said `Some(true)`) and the walk moves on; the
+/// first `missing` met before any difference makes the answer `missing` (where `eq3` said
+/// `None` — Kleene: no definite difference anywhere, so none before it either); otherwise the
+/// first differing pair decides, exactly as the recursion into it did.
+fn tuple_order(op: &BinOp, a: &[Value], b: &[Value], line: usize, col: usize) -> Result<TupleOrder, HelixError> {
+    for (x, y) in a.iter().zip(b.iter()) {
+        if let (Value::Tuple(xa), Value::Tuple(ya)) = (x, y) {
+            match crate::deep::nested(|| tuple_order(op, xa, ya, line, col))? {
+                TupleOrder::Equal => continue,
+                decided => return Ok(decided),
+            }
+        }
+        match eq3(x, y) {
+            None => return Ok(TupleOrder::Decided(Value::Missing)),
+            Some(true) => continue,
+            // x != y definitely — this pair decides. Since they differ, `<=` ≡ `<` and
+            // `>=` ≡ `>`, so the original op's result on the pair IS the tuple's result.
+            Some(false) => return compare(op, x, y, line, col).map(TupleOrder::Decided),
+        }
+    }
+    Ok(match a.len().cmp(&b.len()) {
+        std::cmp::Ordering::Equal => TupleOrder::Equal,
+        ord => TupleOrder::Decided(finish_order(op, ord)?),
+    })
 }
 
 fn compare(op: &BinOp, l: &Value, r: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
@@ -1007,17 +1045,10 @@ fn compare(op: &BinOp, l: &Value, r: &Value, line: usize, col: usize) -> Result<
         // scalars would); an all-equal prefix falls to length. A `missing`
         // anywhere in the deciding prefix makes the answer unknown (ADR 0001).
         (Value::Tuple(a), Value::Tuple(b)) => {
-            for (x, y) in a.iter().zip(b.iter()) {
-                match eq3(x, y) {
-                    None => return Ok(Value::Missing),
-                    Some(true) => continue,
-                    // x != y definitely — this pair decides. Since they differ,
-                    // `<=` ≡ `<` and `>=` ≡ `>`, so the original op's result on
-                    // the pair IS the tuple's result.
-                    Some(false) => return compare(op, x, y, line, col),
-                }
-            }
-            a.len().cmp(&b.len())
+            return match tuple_order(op, a, b, line, col)? {
+                TupleOrder::Decided(v) => Ok(v),
+                TupleOrder::Equal => finish_order(op, std::cmp::Ordering::Equal),
+            };
         }
         _ => {
             // A mixed pair involving an orderable non-number gets a message

@@ -49,7 +49,7 @@ pub fn run(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError>
         Some(Value::Array(a)) => a
             .iter_values()
             .map(|v| match v {
-                Value::Str(s) => Ok(s.to_string()),
+                Value::Str(ref s) => Ok(s.to_string()),
                 Value::Int(i) => Ok(i.to_string()),
                 Value::Float(f) => Ok(crate::value::fmt_float(f)),
                 Value::Bool(b) => Ok(b.to_string()),

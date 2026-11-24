@@ -154,8 +154,8 @@
 
     #[test]
     fn to_table_aligns_columns() {
-        let t = match last("[{a: 1, name: \"hi\"}, {a: 22, name: \"x\"}].to_table()").unwrap() {
-            Value::Str(s) => (*s).clone(),
+        let t = match &last("[{a: 1, name: \"hi\"}, {a: 22, name: \"x\"}].to_table()").unwrap() {
+            Value::Str(s) => (**s).clone(),
             other => panic!("expected a string, got {:?}", other),
         };
         // 'a' is numeric → right-aligned to width 2; 'name' is text → left-aligned to
@@ -168,8 +168,8 @@
     #[test]
     fn string_layout_methods() {
         fn s(src: &str) -> String {
-            match last(src).unwrap() {
-                Value::Str(r) => (*r).clone(),
+            match &last(src).unwrap() {
+                Value::Str(r) => (**r).clone(),
                 other => panic!("expected a string, got {:?}", other),
             }
         }
@@ -343,7 +343,7 @@
             .stack_size(2 * 1024 * 1024 * 1024)
             .spawn(|| {
                 fn sole_owner(src: &str) {
-                    let count = match last(src).unwrap() {
+                    let count = match &last(src).unwrap() {
                         Value::Array(rc) => Rc::strong_count(&rc),
                         Value::Tuple(rc) => Rc::strong_count(&rc),
                         Value::Record(rc) => Rc::strong_count(&rc),
@@ -514,7 +514,7 @@
     #[test]
     fn hashing_and_dataframe_unique() {
         // sha256 matches the canonical hex digest of "helix" (verified vs sha256sum)
-        match last("sha256(\"helix\")").unwrap() {
+        match &last("sha256(\"helix\")").unwrap() {
             Value::Str(s) => assert_eq!(
                 s.as_str(),
                 "54a85d2ae7b0a4d8005ab5cf466d4e582c6ea9aa5060b261241ec65a0ea58506"
@@ -552,7 +552,7 @@
     #[test]
     fn interpolation_format_specs() {
         let s = |src: &str| -> String {
-            match last(src).unwrap() {
+            match &last(src).unwrap() {
                 Value::Str(s) => s.to_string(),
                 v => panic!("expected a string, got {:?}", v),
             }
@@ -610,7 +610,7 @@
         // descending via a negated key
         assert!(matches!(last("[3, 1, 4, 1, 5].sort_by(x => 0 - x)[0]").unwrap(), Value::Int(5)));
         // string keys work (argsort generalized to strings)
-        assert!(matches!(last("[{n: \"c\"}, {n: \"a\"}, {n: \"b\"}].sort_by(r => r.n)[0].n").unwrap(), Value::Str(s) if s.as_str() == "a"));
+        assert!(matches!(&last("[{n: \"c\"}, {n: \"a\"}, {n: \"b\"}].sort_by(r => r.n)[0].n").unwrap(), Value::Str(s) if s.as_str() == "a"));
         assert!(matches!(last("[\"b\", \"a\", \"c\"].argsort()[0]").unwrap(), Value::Int(1)));
         // as_int accepts integer-valued floats (least_squares/lll outputs); fractional errors
         assert!(matches!(last("gcd(12.0, 18.0)").unwrap(), Value::Int(6)));
@@ -681,8 +681,8 @@
     #[test]
     fn exact_rationals() {
         // construction reduces to lowest terms; integer-valued ratios print as integers
-        assert!(matches!(last("rational(4, 8)").unwrap(), Value::Rational(r) if r.to_string() == "1/2"));
-        assert!(matches!(last("rational(6, 3)").unwrap(), Value::Rational(r) if r.is_integer()));
+        assert!(matches!(&last("rational(4, 8)").unwrap(), Value::Rational(r) if r.to_string() == "1/2"));
+        assert!(matches!(&last("rational(6, 3)").unwrap(), Value::Rational(r) if r.is_integer()));
         // EXACT arithmetic — the headline: no float drift
         assert!(matches!(last("(rational(1,3) + rational(1,6)) == rational(1,2)").unwrap(), Value::Bool(true)));
         assert!(matches!(last("(rational(2,3) * rational(3,4)) == rational(1,2)").unwrap(), Value::Bool(true)));
@@ -697,7 +697,7 @@
         assert!(matches!(last("rational(2,1) == 2").unwrap(), Value::Bool(true)));
         assert!(matches!(last("rational(1,3) < rational(1,2)").unwrap(), Value::Bool(true)));
         // arbitrary precision — i64 would overflow these denominators
-        assert!(matches!(last("rational(1,1000000000) + rational(1,3000000000)").unwrap(),
+        assert!(matches!(&last("rational(1,1000000000) + rational(1,3000000000)").unwrap(),
             Value::Rational(r) if r.to_string() == "1/750000000"));
         // accessors and conversion
         assert!(matches!(last("numerator(rational(22,7))").unwrap(), Value::Int(22)));
@@ -876,8 +876,8 @@
         assert!(matches!(last(&format!("{a}.max()")).unwrap(), Value::Int(9007199254740993)));
         assert!(matches!(last(&format!("{a}.min()")).unwrap(), Value::Int(9007199254740992)));
         // Sort keeps the two distinct and correctly ordered.
-        let Value::Array(arr) = last("[9007199254740993, 9007199254740992].sort()").unwrap()
-        else {
+        let arr = last("[9007199254740993, 9007199254740992].sort()").unwrap();
+        let Value::Array(arr) = &arr else {
             panic!("expected an array");
         };
         let vs = arr.to_values();
@@ -907,21 +907,21 @@
     #[test]
     fn string_and_join_methods() {
         assert!(matches!(last(r#""a,b,c".split(",").count()"#).unwrap(), Value::Int(3)));
-        assert!(matches!(last(r#""  hi  ".trim()"#).unwrap(), Value::Str(s) if s.as_str() == "hi"));
+        assert!(matches!(&last(r#""  hi  ".trim()"#).unwrap(), Value::Str(s) if s.as_str() == "hi"));
         assert!(
-            matches!(last(r#""a-b-c".replace("-", "_")"#).unwrap(), Value::Str(s) if s.as_str() == "a_b_c")
+            matches!(&last(r#""a-b-c".replace("-", "_")"#).unwrap(), Value::Str(s) if s.as_str() == "a_b_c")
         );
         assert!(matches!(last(r#""hello".contains("ell")"#).unwrap(), Value::Bool(true)));
         assert!(matches!(last(r#""hello".starts_with("he")"#).unwrap(), Value::Bool(true)));
         assert!(matches!(last(r#""hello".ends_with("xo")"#).unwrap(), Value::Bool(false)));
         assert!(
-            matches!(last(r#"["a","b","c"].join("-")"#).unwrap(), Value::Str(s) if s.as_str() == "a-b-c")
+            matches!(&last(r#"["a","b","c"].join("-")"#).unwrap(), Value::Str(s) if s.as_str() == "a-b-c")
         );
         // `join` renders non-string elements too.
-        assert!(matches!(last(r#"[1,2,3].join(",")"#).unwrap(), Value::Str(s) if s.as_str() == "1,2,3"));
+        assert!(matches!(&last(r#"[1,2,3].join(",")"#).unwrap(), Value::Str(s) if s.as_str() == "1,2,3"));
         // Round-trips: split then join.
         assert!(
-            matches!(last(r#""x|y|z".split("|").join(",")"#).unwrap(), Value::Str(s) if s.as_str() == "x,y,z")
+            matches!(&last(r#""x|y|z".split("|").join(",")"#).unwrap(), Value::Str(s) if s.as_str() == "x,y,z")
         );
     }
 
@@ -957,7 +957,7 @@
     #[test]
     fn multiline_dot_chain() {
         let v = last("[3, 1, 2]\n    .sort()\n    .reverse()").unwrap();
-        match v {
+        match &v {
             Value::Array(a) => { let a = a.to_values();
                 let got: Vec<i64> = a
                     .iter()
@@ -972,15 +972,15 @@
     #[test]
     fn dna_gc_and_revcomp() {
         assert_eq!(float("dna(\"GGCC\").gc_content()"), 1.0);
-        match last("dna(\"ATGC\").reverse_complement()").unwrap() {
-            Value::Dna(s) => assert_eq!(&*s, "GCAT"),
+        match &last("dna(\"ATGC\").reverse_complement()").unwrap() {
+            Value::Dna(s) => assert_eq!(s.as_str(), "GCAT"),
             other => panic!("expected dna, got {:?}", other),
         }
     }
 
     #[test]
     fn kmers_count() {
-        match last("dna(\"ATGCG\").kmers(3)").unwrap() {
+        match &last("dna(\"ATGCG\").kmers(3)").unwrap() {
             Value::Array(a) => assert_eq!(a.len(), 3),
             other => panic!("expected array, got {:?}", other),
         }
@@ -1099,7 +1099,7 @@
 
     #[test]
     fn kmers_vs_windows() {
-        let strs = |src: &str| match last(src).unwrap() {
+        let strs = |src: &str| match &last(src).unwrap() {
             Value::Array(a) => a
                 .to_values()
                 .iter()
@@ -1138,7 +1138,7 @@
     #[test]
     fn array_top_frequencies() {
         // most common elements as (value, count) tuples, ties broken by value
-        match last("[\"a\", \"b\", \"a\", \"c\", \"a\", \"b\"].top(2)").unwrap() {
+        match &last("[\"a\", \"b\", \"a\", \"c\", \"a\", \"b\"].top(2)").unwrap() {
             Value::Array(a) => { let a = a.to_values();
                 assert_eq!(a.len(), 2);
                 match (&a[0], &a[1]) {
@@ -1194,12 +1194,12 @@
         // A string literal inside an interpolation expression must not end the
         // outer string or the interpolation early (both natural and escaped
         // quote forms work).
-        match last("g = dna(\"ATGCGT\")\n\"at {g.find(\"GCG\")}\"").unwrap() {
-            Value::Str(s) => assert_eq!(&*s, "at 2"),
+        match &last("g = dna(\"ATGCGT\")\n\"at {g.find(\"GCG\")}\"").unwrap() {
+            Value::Str(s) => assert_eq!(s.as_str(), "at 2"),
             other => panic!("expected string, got {:?}", other),
         }
-        match last("\"hi {\"world\".upper()}\"").unwrap() {
-            Value::Str(s) => assert_eq!(&*s, "hi WORLD"),
+        match &last("\"hi {\"world\".upper()}\"").unwrap() {
+            Value::Str(s) => assert_eq!(s.as_str(), "hi WORLD"),
             other => panic!("expected string, got {:?}", other),
         }
     }
@@ -1237,17 +1237,17 @@
     #[test]
     fn iupac_dna_and_complement() {
         // N + IUPAC ambiguity codes are accepted, matching `read_fasta` (was rejected).
-        match last("dna(\"ATGN\")").unwrap() {
-            Value::Dna(s) => assert_eq!(&*s, "ATGN"),
+        match &last("dna(\"ATGN\")").unwrap() {
+            Value::Dna(s) => assert_eq!(s.as_str(), "ATGN"),
             o => panic!("expected Dna, got {o:?}"),
         }
         // IUPAC-correct complementation: R↔Y, N→N.
-        match last("dna(\"ATGR\").complement()").unwrap() {
-            Value::Dna(s) => assert_eq!(&*s, "TACY"),
+        match &last("dna(\"ATGR\").complement()").unwrap() {
+            Value::Dna(s) => assert_eq!(s.as_str(), "TACY"),
             o => panic!("expected Dna, got {o:?}"),
         }
-        match last("dna(\"ATGN\").reverse_complement()").unwrap() {
-            Value::Dna(s) => assert_eq!(&*s, "NCAT"),
+        match &last("dna(\"ATGN\").reverse_complement()").unwrap() {
+            Value::Dna(s) => assert_eq!(s.as_str(), "NCAT"),
             o => panic!("expected Dna, got {o:?}"),
         }
         // gc_content excludes N from the denominator: "GCN" → 2/2 = 1.0, not 2/3.
@@ -1266,8 +1266,8 @@
         assert!(!b("dna(\"CAT\") < dna(\"ATG\")"));
         assert!(b("dna(\"ATG\") <= dna(\"ATG\")"));
         // sorting an array of DNA orders it lexicographically.
-        match last("[dna(\"CAT\"), dna(\"ATG\"), dna(\"GGG\")].sort().first()").unwrap() {
-            Value::Dna(s) => assert_eq!(&*s, "ATG"),
+        match &last("[dna(\"CAT\"), dna(\"ATG\"), dna(\"GGG\")].sort().first()").unwrap() {
+            Value::Dna(s) => assert_eq!(s.as_str(), "ATG"),
             other => panic!("expected Dna, got {other:?}"),
         }
     }
@@ -1284,8 +1284,8 @@
 
     #[test]
     fn if_expression() {
-        match last("if 5 > 3 then \"yes\" else \"no\"").unwrap() {
-            Value::Str(s) => assert_eq!(&*s, "yes"),
+        match &last("if 5 > 3 then \"yes\" else \"no\"").unwrap() {
+            Value::Str(s) => assert_eq!(s.as_str(), "yes"),
             other => panic!("expected string, got {:?}", other),
         }
         assert!(matches!(
@@ -1304,7 +1304,7 @@
 
     #[test]
     fn map_doubles() {
-        match last("[1, 2, 3].map(it * 2)").unwrap() {
+        match &last("[1, 2, 3].map(it * 2)").unwrap() {
             Value::Array(a) => { let a = a.to_values();
                 let got: Vec<i64> = a
                     .iter()
@@ -1341,7 +1341,7 @@
 
     #[test]
     fn explicit_named_binder() {
-        match last("[1, 2, 3].map(n => n * 10)").unwrap() {
+        match &last("[1, 2, 3].map(n => n * 10)").unwrap() {
             Value::Array(a) => assert_eq!(a.len(), 3),
             other => panic!("expected array, got {:?}", other),
         }
@@ -1401,7 +1401,7 @@
 
     #[test]
     fn missing_map_propagates_elementwise() {
-        match last("[1, missing, 3].map(it + 10)").unwrap() {
+        match &last("[1, missing, 3].map(it + 10)").unwrap() {
             Value::Array(a) => { let a = a.to_values();
                 assert!(matches!(a[0], Value::Int(11)));
                 assert!(matches!(a[1], Value::Missing));
@@ -1414,7 +1414,7 @@
     #[test]
     fn nested_map_with_named_binders() {
         // the readability win: name binders so nesting is unambiguous
-        match last("[[1, 2], [3, 4]].map(row => row.map(v => v + 1))").unwrap() {
+        match &last("[[1, 2], [3, 4]].map(row => row.map(v => v + 1))").unwrap() {
             Value::Array(a) => { let a = a.to_values();
                 assert_eq!(a.len(), 2);
                 match &a[1] {
@@ -1547,8 +1547,8 @@
     #[test]
     fn format_spec_radix_and_string_precision() {
         fn s(src: &str) -> String {
-            match last(src).unwrap() {
-                Value::Str(rc) => (*rc).clone(),
+            match &last(src).unwrap() {
+                Value::Str(rc) => (**rc).clone(),
                 other => panic!("expected a string, got {:?}", other),
             }
         }
@@ -1566,8 +1566,8 @@
     #[test]
     fn format_spec_g_matches_c_percent_g() {
         fn s(src: &str) -> String {
-            match last(src).unwrap() {
-                Value::Str(rc) => (*rc).clone(),
+            match &last(src).unwrap() {
+                Value::Str(rc) => (**rc).clone(),
                 other => panic!("expected a string, got {:?}", other),
             }
         }
@@ -1616,7 +1616,7 @@
 
     #[test]
     fn broadcast_propagates_missing() {
-        match last("[1, missing, 3] + 10").unwrap() {
+        match &last("[1, missing, 3] + 10").unwrap() {
             Value::Array(a) => { let a = a.to_values();
                 assert!(matches!(a[0], Value::Int(11)));
                 assert!(matches!(a[1], Value::Missing));
@@ -1662,7 +1662,7 @@
 
     #[test]
     fn tensor_construction_and_shape() {
-        match last("tensor([[1, 2], [3, 4]]).shape()").unwrap() {
+        match &last("tensor([[1, 2], [3, 4]]).shape()").unwrap() {
             Value::Array(a) => { let a = a.to_values();
                 assert!(matches!(a[0], Value::Int(2)));
                 assert!(matches!(a[1], Value::Int(2)));
@@ -1872,14 +1872,14 @@
         assert!(matches!(last("(3, 4)[1]").unwrap(), Value::Int(4)));
         assert!(matches!(last("(1, 2, 3)[-1]").unwrap(), Value::Int(3)));
         // a 1-tuple is distinct from grouping
-        match last("(5,)").unwrap() {
+        match &last("(5,)").unwrap() {
             Value::Tuple(t) => assert_eq!(t.len(), 1),
             other => panic!("expected 1-tuple, got {:?}", other),
         }
         // (x) is just grouping, not a tuple
         assert!(matches!(last("(5)").unwrap(), Value::Int(5)));
         // heterogeneous
-        match last("(\"a\", 1, true)").unwrap() {
+        match &last("(\"a\", 1, true)").unwrap() {
             Value::Tuple(t) => assert_eq!(t.len(), 3),
             other => panic!("{:?}", other),
         }
@@ -1935,14 +1935,14 @@
 
     #[test]
     fn zip_enumerate_yield_tuples() {
-        match last("[1, 2].zip([3, 4]).first()").unwrap() {
+        match &last("[1, 2].zip([3, 4]).first()").unwrap() {
             Value::Tuple(t) => {
                 assert!(matches!(t[0], Value::Int(1)));
                 assert!(matches!(t[1], Value::Int(3)));
             }
             other => panic!("expected tuple, got {:?}", other),
         }
-        match last("[7, 8].enumerate().first()").unwrap() {
+        match &last("[7, 8].enumerate().first()").unwrap() {
             Value::Tuple(t) => {
                 assert!(matches!(t[0], Value::Int(0)));
                 assert!(matches!(t[1], Value::Int(7)));
@@ -1954,7 +1954,7 @@
     #[test]
     fn slicing() {
         let nums = |src: &str| -> Vec<i64> {
-            match last(src).unwrap() {
+            match &last(src).unwrap() {
                 Value::Array(a) => a
                     .to_values()
                     .iter()
@@ -1971,12 +1971,12 @@
         assert_eq!(nums("[0,1,2,3,4,5][-2:]"), vec![4, 5]);
         assert_eq!(nums("[0,1,2,3,4,5][:-2]"), vec![0, 1, 2, 3]);
         // string + dna slicing
-        match last("\"helix\"[1:4]").unwrap() {
-            Value::Str(s) => assert_eq!(&*s, "eli"),
+        match &last("\"helix\"[1:4]").unwrap() {
+            Value::Str(s) => assert_eq!(s.as_str(), "eli"),
             other => panic!("{:?}", other),
         }
-        match last("dna(\"ATGC\")[::-1]").unwrap() {
-            Value::Dna(s) => assert_eq!(&*s, "CGTA"),
+        match &last("dna(\"ATGC\")[::-1]").unwrap() {
+            Value::Dna(s) => assert_eq!(s.as_str(), "CGTA"),
             other => panic!("{:?}", other),
         }
         // step of zero errors
@@ -1989,8 +1989,8 @@
             last("r = {name: \"Ada\", age: 41}\nr.age").unwrap(),
             Value::Int(41)
         ));
-        match last("r = {name: \"Ada\", age: 41}\nr.name").unwrap() {
-            Value::Str(s) => assert_eq!(&*s, "Ada"),
+        match &last("r = {name: \"Ada\", age: 41}\nr.name").unwrap() {
+            Value::Str(s) => assert_eq!(s.as_str(), "Ada"),
             other => panic!("expected string, got {:?}", other),
         }
         // nested field chain
@@ -2009,18 +2009,18 @@
 
     #[test]
     fn string_interpolation() {
-        match last("name = \"Ada\"\nage = 41\n\"hi {name}, {age + 9}\"").unwrap() {
-            Value::Str(s) => assert_eq!(&*s, "hi Ada, 50"),
+        match &last("name = \"Ada\"\nage = 41\n\"hi {name}, {age + 9}\"").unwrap() {
+            Value::Str(s) => assert_eq!(s.as_str(), "hi Ada, 50"),
             other => panic!("expected string, got {:?}", other),
         }
         // literal braces via doubling
-        match last("\"{{x}}\"").unwrap() {
-            Value::Str(s) => assert_eq!(&*s, "{x}"),
+        match &last("\"{{x}}\"").unwrap() {
+            Value::Str(s) => assert_eq!(s.as_str(), "{x}"),
             other => panic!("expected string, got {:?}", other),
         }
         // nested quotes + if-expression inside an interpolation
-        match last("\"g={if 5 > 3 then \"A\" else \"B\"}\"").unwrap() {
-            Value::Str(s) => assert_eq!(&*s, "g=A"),
+        match &last("\"g={if 5 > 3 then \"A\" else \"B\"}\"").unwrap() {
+            Value::Str(s) => assert_eq!(s.as_str(), "g=A"),
             other => panic!("expected string, got {:?}", other),
         }
     }
@@ -2076,7 +2076,7 @@
         // but the predicate lets a program branch *before* the comparison.
         assert_eq!(float("x = inf - inf\nif is_nan(x) then 0.0 else x"), 0.0);
         // array form → a Bool array
-        match last("is_finite([1.0, inf, 2.0])").unwrap() {
+        match &last("is_finite([1.0, inf, 2.0])").unwrap() {
             Value::Array(a) => {
                 let a = a.to_values();
                 assert!(matches!(a[0], Bool(true)));
@@ -2343,7 +2343,7 @@
 
     #[test]
     fn math_broadcasts_over_array() {
-        match last("sqrt([1, 4, 9])").unwrap() {
+        match &last("sqrt([1, 4, 9])").unwrap() {
             Value::Array(a) => { let a = a.to_values();
                 assert!(matches!(a[2], Value::Float(x) if (x - 3.0).abs() < 1e-9));
             }
@@ -2424,8 +2424,8 @@
     fn dataframe_column_extracts_typed_values_and_nulls() {
         // A string column comes back as `Str` values.
         assert!(matches!(
-            last("read_vcf(\"examples/data/variants.vcf\").column(\"chrom\").first()").unwrap(),
-            Value::Str(s) if &*s == "chr17"
+            &last("read_vcf(\"examples/data/variants.vcf\").column(\"chrom\").first()").unwrap(),
+            Value::Str(s) if s.as_str() == "chr17"
         ));
         // The VCF `id` column has `.` entries → Polars nulls → `missing`; `drop_missing`
         // leaves the 4 named variants of 6 (rows 3 and 5 are `.`).
@@ -2444,7 +2444,7 @@
             "s = read_csv(\"examples/data/samples.csv\")\ns.join(s, sample_id).columns()",
         )
         .unwrap();
-        match v {
+        match &v {
             Value::Array(cols) => { let cols = cols.to_values();
                 let names: Vec<String> = cols.iter().map(|c| format!("{c}")).collect();
                 assert!(names.contains(&"gene_right".to_string()), "got {names:?}");

@@ -1229,7 +1229,7 @@ type Response<'a> = (i64, Vec<(Cow<'static, str>, Cow<'static, str>)>, Cow<'a, s
 fn build_response<'a>(value: &'a Value, line: usize, col: usize) -> Result<Response<'a>, HelixError> {
     let json_of = |v: &Value| -> Result<String, HelixError> {
         match crate::writers::to_json(std::slice::from_ref(v), line, col)? {
-            Value::Str(s) => Ok((*s).clone()),
+            Value::Str(ref s) => Ok((**s).clone()),
             other => Ok(other.to_string()),
         }
     };
@@ -1529,7 +1529,7 @@ pub fn send(handle: &Rc<NetHandle>, value: &Value, line: usize, col: usize) -> R
         let text = match value {
             Value::Str(s) => s.to_string(),
             other => match crate::writers::to_json(std::slice::from_ref(other), line, col)? {
-                Value::Str(s) => (*s).clone(),
+                Value::Str(ref s) => (**s).clone(),
                 v => v.to_string(),
             },
         };
@@ -1552,8 +1552,8 @@ pub fn send(handle: &Rc<NetHandle>, value: &Value, line: usize, col: usize) -> R
         Value::Str(s) => s.as_str(),
         Value::Dna(s) => s.as_str(),
         other => match crate::writers::to_json(std::slice::from_ref(other), line, col)? {
-            Value::Str(s) => {
-                owned = (*s).clone();
+            Value::Str(ref s) => {
+                owned = (**s).clone();
                 owned.as_str()
             }
             v => {

@@ -16,8 +16,57 @@ use crate::backend::Df;
 use crate::error::HelixError;
 use crate::symbol::Symbol;
 
+/// Freeing a value of any depth takes one level of native stack: see [`crate::deep`]. Without
+/// this, the compiler's drop glue recursed once per level and a deep enough value (a few
+/// million levels; a chain of dicts far fewer) killed the process merely by going out of
+/// scope.
+impl Drop for Value {
+    #[inline]
+    fn drop(&mut self) {
+        crate::deep::release(self);
+    }
+}
+
 #[derive(Clone)]
 pub enum Value {
+    // The containers that can hold further values come FIRST, together: `Drop`
+    // (`crate::deep::release`) tests "is this a container I own alone?" on every value
+    // it frees, and with the six adjacent that test compiles to a range check and one
+    // load instead of a branch per variant. Nothing else depends on the order.
+    /// An immutable array. Held behind [`ArrayData`], which stores a homogeneous
+    /// numeric array as a packed `Vec<i64>`/`Vec<f64>` (half the memory of boxed
+    /// `Value`s, and cache/SIMD-friendly) and falls back to `Vec<Value>` for
+    /// heterogeneous/nested data — a scientific language's central data structure.
+    Array(Rc<ArrayData>),
+    /// A fixed-size, heterogeneous tuple: `(1, "a", true)`.
+    Tuple(Rc<Vec<Value>>),
+    /// An ordered record with identifier keys: `{name: "Ada", age: 41}`. Keys are
+    /// interned [`Symbol`]s, so field lookup and dispatch compare a single `u32`
+    /// (not a heap string), the names cost no per-record allocation, and equal
+    /// field names across the whole program share one entry. The text is recovered
+    /// only on cold paths (display, errors, JSON) via [`Symbol::as_str`].
+    Record(Rc<Vec<(Symbol, Value)>>),
+    /// A keyed map with O(log n) lookup (ADR 0020) — the escape from O(n) `.where`/
+    /// `.contains` scans for counting, vocabularies, bigram tables, etc. A `BTreeMap`
+    /// (not a hash map) so iteration order is **deterministic** (sorted by key),
+    /// matching Helix's reproducibility guarantee. Keys are hashable scalars
+    /// ([`DictKey`]: int, string, bool, or DNA); values are any `Value`. Immutable —
+    /// `insert`/`remove` return a new dict. Backed by [`Dict`]: a settled map plus
+    /// a shared append-only log, so an insert costs O(1) whether or not the value
+    /// is uniquely owned.
+    Dict(Rc<Dict>),
+    /// A VM **closure**: a compiled chunk plus the values it captured from its
+    /// enclosing scope (upvalues). `VmFunc` covers a non-capturing lambda; this
+    /// variant carries the captured environment for one that closes over enclosing
+    /// locals. Boxed behind an `Rc` so `Value` stays 16 bytes; renders identically
+    /// to any other function.
+    Closure(Rc<ClosureData>),
+    /// A function value — from `fn name(p) = expr` or an anonymous `p => expr`.
+    /// Used by the tree-walker (which evaluates `body` directly). The two `Rc`s are
+    /// collapsed behind one (`Rc<FuncVal>`) so this variant is one word, keeping
+    /// `Value` at 16 bytes; the VM uses the inline `VmFunc` instead, so this never
+    /// touches the bytecode hot path.
+    Function(Rc<FuncVal>),
     Int(i64),
     Float(f64),
     /// An exact arbitrary-precision rational (numerator/denominator, always in
@@ -40,13 +89,6 @@ pub enum Value {
     /// preserves that same ordering.
     Bytes(Rc<Vec<u8>>),
     Bool(bool),
-    /// An immutable array. Held behind [`ArrayData`], which stores a homogeneous
-    /// numeric array as a packed `Vec<i64>`/`Vec<f64>` (half the memory of boxed
-    /// `Value`s, and cache/SIMD-friendly) and falls back to `Vec<Value>` for
-    /// heterogeneous/nested data — a scientific language's central data structure.
-    Array(Rc<ArrayData>),
-    /// A fixed-size, heterogeneous tuple: `(1, "a", true)`.
-    Tuple(Rc<Vec<Value>>),
     /// HTTP headers — ordered `(name, value)` pairs whose LOOKUP is case-insensitive
     /// (RFC 9110 §5.1: field names are case-insensitive, and HTTP/2 lowercases them
     /// on the wire, so one program sees both spellings from different servers).
@@ -55,12 +97,6 @@ pub enum Value {
     /// Runtime-only (built by `http_request` responses and `conn.request()`); the
     /// checker sees `Unknown`, the opaque-type pattern shared with Dict and Net.
     Headers(Rc<Vec<(String, String)>>),
-    /// An ordered record with identifier keys: `{name: "Ada", age: 41}`. Keys are
-    /// interned [`Symbol`]s, so field lookup and dispatch compare a single `u32`
-    /// (not a heap string), the names cost no per-record allocation, and equal
-    /// field names across the whole program share one entry. The text is recovered
-    /// only on cold paths (display, errors, JSON) via [`Symbol::as_str`].
-    Record(Rc<Vec<(Symbol, Value)>>),
     /// A dense n-dimensional `f64` tensor (ndarray-backed). See ADR 0007.
     Tensor(Rc<ArrayD<f64>>),
     /// A columnar DataFrame, held behind the engine-agnostic backend seam (ADR
@@ -81,12 +117,6 @@ pub enum Value {
     /// (never stored in arrays or hot loops); inlining its two-word payload would
     /// bloat *every* `Value` — and thus every VM stack push/pop/clone — for nothing.
     GroupBy(Rc<GroupByData>),
-    /// A function value — from `fn name(p) = expr` or an anonymous `p => expr`.
-    /// Used by the tree-walker (which evaluates `body` directly). The two `Rc`s are
-    /// collapsed behind one (`Rc<FuncVal>`) so this variant is one word, keeping
-    /// `Value` at 16 bytes; the VM uses the inline `VmFunc` instead, so this never
-    /// touches the bytecode hot path.
-    Function(Rc<FuncVal>),
     /// A function value in the **VM**: a reference to a compiled chunk
     /// (`program.funcs[idx]`) plus its arity. Equivalent to `Function` for the user
     /// (same `<function/N>` rendering and `Function` type name); the VM uses a chunk
@@ -97,12 +127,6 @@ pub enum Value {
         idx: u32,
         arity: u32,
     },
-    /// A VM **closure**: a compiled chunk plus the values it captured from its
-    /// enclosing scope (upvalues). `VmFunc` covers a non-capturing lambda; this
-    /// variant carries the captured environment for one that closes over enclosing
-    /// locals. Boxed behind an `Rc` so `Value` stays 16 bytes; renders identically
-    /// to any other function.
-    Closure(Rc<ClosureData>),
     /// A validated DNA sequence (uppercase A/C/G/T).
     Dna(Rc<String>),
     /// Absent data — distinct from any real value and from float `NaN`.
@@ -122,15 +146,6 @@ pub enum Value {
     /// backpropagate. Created by `variable(x)`; one word (`Rc`), so `Value` stays
     /// 16 bytes. Pure at the surface — the graph's interior mutability is hidden.
     Node(Rc<crate::autodiff::Node>),
-    /// A keyed map with O(log n) lookup (ADR 0020) — the escape from O(n) `.where`/
-    /// `.contains` scans for counting, vocabularies, bigram tables, etc. A `BTreeMap`
-    /// (not a hash map) so iteration order is **deterministic** (sorted by key),
-    /// matching Helix's reproducibility guarantee. Keys are hashable scalars
-    /// ([`DictKey`]: int, string, bool, or DNA); values are any `Value`. Immutable —
-    /// `insert`/`remove` return a new dict. Backed by [`Dict`]: a settled map plus
-    /// a shared append-only log, so an insert costs O(1) whether or not the value
-    /// is uniquely owned.
-    Dict(Rc<Dict>),
     /// An opaque network handle — a bound HTTP listener or a single accepted
     /// connection (see `src/serve.rs`). Held behind an `Rc` so the variant is one
     /// word. Effect-only (created by `listen`, consumed by `accept`/`respond`); never
@@ -231,6 +246,20 @@ pub struct Dict {
 }
 
 impl Dict {
+    /// For [`crate::deep::release`]: the values this dict is the last owner of — its base map,
+    /// its log and its merged cache — moved out so they can be freed under the depth count.
+    /// Storage another dict of the same chain still shares stays where it is; the last dict
+    /// to let go of it takes it then.
+    pub(crate) fn take_contents(&mut self) -> (DictMap, Vec<(DictKey, Option<Value>)>, DictMap) {
+        let map = Rc::get_mut(&mut self.base).map(std::mem::take).unwrap_or_default();
+        let log = Rc::get_mut(&mut self.adds).map(|l| std::mem::take(l.get_mut())).unwrap_or_default();
+        let cached = Rc::get_mut(&mut self.cache)
+            .and_then(|c| c.get_mut().take())
+            .and_then(|(_, mut m)| Rc::get_mut(&mut m).map(std::mem::take))
+            .unwrap_or_default();
+        (map, log, cached)
+    }
+
     pub fn from_map(m: std::collections::BTreeMap<DictKey, Value>) -> Dict {
         Dict::from_rc(Rc::new(m))
     }
@@ -703,7 +732,7 @@ impl ArrayData {
     pub fn densified(&self) -> Option<ArrayData> {
         match self {
             ArrayData::Shared { .. } => match Value::array_sniff(self.to_values().into_owned()) {
-                Value::Array(a) => Some((*a).clone()),
+                Value::Array(ref a) => Some((**a).clone()),
                 // `array_sniff` returns `Value::Array` for every input; anything else
                 // would be a contract break rather than a case to handle.
                 _ => None,
@@ -1083,6 +1112,37 @@ fn type_slot(name: &str) -> Option<usize> {
     })
 }
 
+/// `Value` has a `Drop` (see [`crate::deep`]), so no pattern may move a payload out of an
+/// owned one. These take the payload out instead: a count bump and the old owner's release,
+/// so a sole owner stays the sole owner — the in-place fast paths (`Rc::try_unwrap`,
+/// `Rc::get_mut` on an accumulator) see exactly the uniqueness they saw before.
+macro_rules! into_payload {
+    ($($name:ident: $variant:ident => $ty:ty;)*) => {
+        impl Value {
+            $(
+                #[doc = concat!("The `", stringify!($variant), "` payload, or the value back.")]
+                #[inline]
+                pub fn $name(self) -> Result<$ty, Value> {
+                    match &self {
+                        Value::$variant(p) => {
+                            let p = Rc::clone(p);
+                            drop(self);
+                            Ok(p)
+                        }
+                        _ => Err(self),
+                    }
+                }
+            )*
+        }
+    };
+}
+into_payload! {
+    into_array: Array => Rc<ArrayData>;
+    into_str: Str => Rc<String>;
+    into_dict: Dict => Rc<Dict>;
+    into_dataframe: DataFrame => Rc<Df>;
+}
+
 impl Value {
     /// Wrap a backend DataFrame handle into a `Value`. The extra `Rc` keeps the
     /// `DataFrame` variant one word wide (see the variant's doc); construct through
@@ -1455,7 +1515,7 @@ impl fmt::Display for Value {
                     // Strings inside arrays are quoted for clarity.
                     match v {
                         Value::Str(s) => write!(f, "\"{}\"", s)?,
-                        other => write!(f, "{}", other)?,
+                        other => crate::deep::nested(|| write!(f, "{}", other))?,
                     }
                 }
                 write!(f, "]")
@@ -1468,7 +1528,7 @@ impl fmt::Display for Value {
                     }
                     match v {
                         Value::Str(s) => write!(f, "\"{}\"", s)?,
-                        other => write!(f, "{}", other)?,
+                        other => crate::deep::nested(|| write!(f, "{}", other))?,
                     }
                 }
                 // a 1-tuple prints as `(x,)` to disambiguate from grouping
@@ -1502,7 +1562,7 @@ impl fmt::Display for Value {
                     let key = field_key_display(k.as_str());
                     match v {
                         Value::Str(s) => write!(f, "{}: \"{}\"", key, s)?,
-                        other => write!(f, "{}: {}", key, other)?,
+                        other => crate::deep::nested(|| write!(f, "{}: {}", key, other))?,
                     }
                 }
                 write!(f, "}}")
@@ -1510,17 +1570,24 @@ impl fmt::Display for Value {
             // `{k => v}` arrow notation (sorted by key) — visually distinct from a
             // record's bare-identifier `{field: v}`; string keys and values are quoted.
             Value::Dict(map) => {
+                // Each side is written straight into the formatter: formatting an entry
+                // into its own `String` first copied every nested level once per level
+                // above it, which made a deep dict quadratic to print.
+                fn quoted(f: &mut fmt::Formatter, v: &Value) -> fmt::Result {
+                    match v {
+                        Value::Str(s) => write!(f, "\"{}\"", s),
+                        other => crate::deep::nested(|| write!(f, "{}", other)),
+                    }
+                }
                 write!(f, "{{")?;
-                let q = |v: &Value| match v {
-                    Value::Str(s) => format!("\"{}\"", s),
-                    other => format!("{}", other),
-                };
                 let map = map.map();
                 for (i, (k, v)) in map.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{} => {}", q(&k.to_value()), q(v))?;
+                    quoted(f, &k.to_value())?;
+                    write!(f, " => ")?;
+                    quoted(f, v)?;
                 }
                 write!(f, "}}")
             }
@@ -1548,33 +1615,41 @@ impl fmt::Display for Value {
 /// collections so a frame nested in an Array/Tuple/Record propagates too; every
 /// other (leaf) value can't fail and delegates to `Display`.
 pub fn display_value(v: &Value, line: usize, col: usize) -> Result<String, HelixError> {
+    let mut s = String::new();
+    write_display(&mut s, v, line, col)?;
+    Ok(s)
+}
+
+/// [`display_value`], appended to `s`. ONE buffer for the whole value: building each
+/// level's text as its own `String` and copying it into the level above made printing a
+/// value nested `d` deep cost O(d²) — a million-level list never finished.
+fn write_display(s: &mut String, v: &Value, line: usize, col: usize) -> Result<(), HelixError> {
+    use std::fmt::Write as _;
     match v {
-        Value::DataFrame(df) => crate::framefmt::frame_text(&***df, line, col),
+        Value::DataFrame(df) => s.push_str(&crate::framefmt::frame_text(&***df, line, col)?),
         Value::Array(items) => {
-            let mut s = String::from("[");
+            s.push('[');
             for (i, it) in items.to_values().iter().enumerate() {
                 if i > 0 {
                     s.push_str(", ");
                 }
-                s.push_str(&display_elem(it, line, col)?);
+                write_elem(s, it, line, col)?;
             }
             s.push(']');
-            Ok(s)
         }
         Value::Tuple(items) => {
-            let mut s = String::from("(");
+            s.push('(');
             for (i, it) in items.iter().enumerate() {
                 if i > 0 {
                     s.push_str(", ");
                 }
-                s.push_str(&display_elem(it, line, col)?);
+                write_elem(s, it, line, col)?;
             }
             // a 1-tuple prints as `(x,)` to disambiguate from grouping
             if items.len() == 1 {
                 s.push(',');
             }
             s.push(')');
-            Ok(s)
         }
         Value::Record(fields) => {
             // Canonical sorted field order — the same rule (and the same perf
@@ -1584,7 +1659,7 @@ pub fn display_value(v: &Value, line: usize, col: usize) -> Result<String, Helix
             if !names.windows(2).all(|w| w[0] <= w[1]) {
                 order.sort_unstable_by(|&a, &b| names[a].cmp(names[b]));
             }
-            let mut s = String::from("{");
+            s.push('{');
             for (i, &fi) in order.iter().enumerate() {
                 let (k, val) = &fields[fi];
                 if i > 0 {
@@ -1592,13 +1667,30 @@ pub fn display_value(v: &Value, line: usize, col: usize) -> Result<String, Helix
                 }
                 s.push_str(&field_key_display(k.as_str()));
                 s.push_str(": ");
-                s.push_str(&display_elem(val, line, col)?);
+                write_elem(s, val, line, col)?;
             }
             s.push('}');
-            Ok(s)
         }
-        // Scalars and other leaf values can't fail to render.
-        other => Ok(other.to_string()),
+        // Scalars and other leaf values can't fail to render. Writing into a `String`
+        // is infallible.
+        other => {
+            let _ = write!(s, "{}", other);
+        }
+    }
+    Ok(())
+}
+
+/// One element of a container: strings quoted, anything else rendered in place — one
+/// level deeper, on stack that [`crate::deep::nested`] guarantees.
+fn write_elem(s: &mut String, v: &Value, line: usize, col: usize) -> Result<(), HelixError> {
+    match v {
+        Value::Str(x) => {
+            s.push('"');
+            s.push_str(x);
+            s.push('"');
+            Ok(())
+        }
+        other => crate::deep::nested(|| write_display(s, other, line, col)),
     }
 }
 
@@ -1630,7 +1722,7 @@ pub fn write_value(buf: &mut String, v: &Value, line: usize, col: usize) -> Resu
     use std::fmt::Write as _;
     match v {
         Value::Array(_) | Value::Tuple(_) | Value::Record(_) | Value::DataFrame(_) => {
-            buf.push_str(&display_value(v, line, col)?);
+            write_display(buf, v, line, col)?;
         }
         // The shapes that dominate interpolation, appended DIRECTLY. `write!(buf, "{}",
         // value)` costs two nested `fmt::Arguments` dispatches — one to reach
@@ -1701,15 +1793,6 @@ fn push_i64(buf: &mut String, i: i64) {
             use std::fmt::Write as _;
             let _ = write!(buf, "{}", i);
         }
-    }
-}
-
-/// Element rendering inside a collection: strings are quoted (matching `Display`),
-/// everything else goes through `display_value` so nested frames stay fallible.
-fn display_elem(v: &Value, line: usize, col: usize) -> Result<String, HelixError> {
-    match v {
-        Value::Str(s) => Ok(format!("\"{}\"", s)),
-        other => display_value(other, line, col),
     }
 }
 
@@ -1838,15 +1921,16 @@ mod tests {
             Value::Bytes(Rc::new(vec![1u8])),
         ];
         for v in &values {
-            match v.type_value() {
+            match &v.type_value() {
                 Value::Str(s) => assert_eq!(s.as_str(), v.type_name(), "{:?}", v.type_name()),
                 other => panic!("type_value gave {other:?}"),
             }
             // Interned: asking twice hands back the same allocation, not a copy of it.
-            let (Value::Str(a), Value::Str(b)) = (v.type_value(), v.type_value()) else {
+            let (a, b) = (v.type_value(), v.type_value());
+            let (Value::Str(a), Value::Str(b)) = (&a, &b) else {
                 panic!("type_value must answer a String");
             };
-            assert!(Rc::ptr_eq(&a, &b), "{} was allocated again", v.type_name());
+            assert!(Rc::ptr_eq(a, b), "{} was allocated again", v.type_name());
         }
     }
 }

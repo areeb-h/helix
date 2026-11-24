@@ -1861,6 +1861,23 @@ enum KeyShape {
     List(Vec<KeyShape>),
 }
 
+/// A tuple key's shape is as deep as the key, so freeing it must not recurse (see
+/// [`crate::deep`]): nested lists are flattened onto a worklist and freed one by one.
+impl Drop for KeyShape {
+    fn drop(&mut self) {
+        if let KeyShape::List(cols) = self
+            && cols.iter().any(|c| matches!(c, KeyShape::List(_)))
+        {
+            let mut stack = std::mem::take(cols);
+            while let Some(mut c) = stack.pop() {
+                if let KeyShape::List(inner) = &mut c {
+                    stack.append(inner);
+                }
+            }
+        }
+    }
+}
+
 fn list_parts(v: &Value) -> Option<Vec<Value>> {
     match v {
         Value::Tuple(t) => Some(t.as_ref().clone()),
@@ -1896,13 +1913,13 @@ fn fits_shape(shape: &mut Option<KeyShape>, v: &Value) -> bool {
             for (i, p) in parts.iter().enumerate() {
                 if i == cols.len() {
                     let mut fresh = None;
-                    match (fits_shape(&mut fresh, p), fresh) {
+                    match (crate::deep::nested(|| fits_shape(&mut fresh, p)), fresh) {
                         (true, Some(f)) => cols.push(f),
                         _ => return false,
                     }
                 } else {
                     let mut have = Some(std::mem::replace(&mut cols[i], KeyShape::Num));
-                    let ok = fits_shape(&mut have, p);
+                    let ok = crate::deep::nested(|| fits_shape(&mut have, p));
                     match (ok, have) {
                         (true, Some(h)) => cols[i] = h,
                         _ => return false,
@@ -1934,7 +1951,7 @@ pub(crate) fn list_key_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
         _ => {
             let (x, y) = (list_parts(a).unwrap_or_default(), list_parts(b).unwrap_or_default());
             for (p, q) in x.iter().zip(y.iter()) {
-                let o = list_key_cmp(p, q);
+                let o = crate::deep::nested(|| list_key_cmp(p, q));
                 if o != Equal {
                     return o;
                 }

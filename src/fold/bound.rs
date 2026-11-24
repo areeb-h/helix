@@ -68,13 +68,13 @@ impl<'a> Reads<'a> {
     pub(super) fn closures_of(&mut self, init: &Expr) -> Vec<(String, Rc<FuncVal>)> {
         let fields = match self.eval(init, &mut Vec::new(), 0) {
             Known::Record(fs) => fs,
-            Known::Value(Value::Record(fs)) => fs.iter().map(|(s, v)| (s.as_str().to_string(), Known::Value(v.clone()))).collect(),
+            Known::Value(Value::Record(ref fs)) => fs.iter().map(|(s, v)| (s.as_str().to_string(), Known::Value(v.clone()))).collect(),
             _ => return Vec::new(),
         };
         fields
             .into_iter()
             .filter_map(|(k, v)| match v {
-                Known::Value(Value::Function(fv)) => Some((k, fv)),
+                Known::Value(Value::Function(ref fv)) => Some((k, fv.clone())),
                 _ => None,
             })
             .collect()
@@ -106,7 +106,7 @@ impl<'a> Reads<'a> {
                 for p in parts {
                     match p {
                         RecordPart::Spread(src) => match self.eval(src, env, depth) {
-                            Known::Value(Value::Record(fs)) => {
+                            Known::Value(Value::Record(ref fs)) => {
                                 for (s, v) in fs.iter() {
                                     put(&mut out, s.as_str().to_string(), Known::Value(v.clone()));
                                 }
@@ -137,7 +137,7 @@ impl<'a> Reads<'a> {
                 r
             }
             Expr::Field { recv, name, .. } => match self.eval(recv, env, depth) {
-                Known::Value(Value::Record(fs)) => {
+                Known::Value(Value::Record(ref fs)) => {
                     fs.iter().find(|(s, _)| s.as_str() == name).map(|(_, v)| Known::Value(v.clone())).unwrap_or(Known::Unknown)
                 }
                 Known::Record(fs) => fs.into_iter().find(|(k, _)| k == name).map(|(_, v)| v).unwrap_or(Known::Unknown),
@@ -161,11 +161,11 @@ impl<'a> Reads<'a> {
             // parameters. A name a record's own methods own is never a field call.
             Expr::Method { recv, name, args, named, .. } if named.is_empty() && !crate::registry::type_owns_method("Record", name) => {
                 let field = match self.eval(recv, env, depth) {
-                    Known::Value(Value::Record(fs)) => fs.iter().find(|(s, _)| s.as_str() == name).map(|(_, v)| Known::Value(v.clone())),
+                    Known::Value(Value::Record(ref fs)) => fs.iter().find(|(s, _)| s.as_str() == name).map(|(_, v)| Known::Value(v.clone())),
                     Known::Record(fs) => fs.into_iter().find(|(k, _)| k == name).map(|(_, v)| v),
                     _ => None,
                 };
-                let Some(Known::Value(Value::Function(fv))) = field else { return Known::Unknown };
+                let Some(Known::Value(Value::Function(ref fv))) = field else { return Known::Unknown };
                 if fv.params.len() != args.len() {
                     return Known::Unknown;
                 }

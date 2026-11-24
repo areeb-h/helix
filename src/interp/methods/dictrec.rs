@@ -108,7 +108,7 @@ pub(crate) fn dict_method(
                         Value::Str(want) => map
                             .keys()
                             .filter_map(|c| match c.to_value() {
-                                Value::Str(s) => crate::error::typo_distance(want, &s)
+                                Value::Str(ref s) => crate::error::typo_distance(want, s)
                                     .map(|d| (d, (*s).clone())),
                                 _ => None,
                             })

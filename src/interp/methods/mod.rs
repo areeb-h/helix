@@ -440,8 +440,8 @@ pub(crate) fn call_method(
                 for a in args {
                     match a {
                         Value::Array(add) => {
-                            match crate::value::ArrayData::concat_shared(&acc, add) {
-                                Some(Value::Array(next)) => acc = next,
+                            match crate::value::ArrayData::concat_shared(&acc, add).map(Value::into_array) {
+                                Some(Ok(next)) => acc = next,
                                 // Any decline abandons the whole fast path rather than
                                 // leaving a half-appended accumulator behind.
                                 _ => {

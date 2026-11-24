@@ -698,8 +698,8 @@ mod tests {
         Value::Record(Rc::new(pairs.iter().map(|(k, v)| (Symbol::intern(k), v.clone())).collect()))
     }
     fn text(v: Value) -> String {
-        match v {
-            Value::Str(s) => (*s).clone(),
+        match &v {
+            Value::Str(s) => (**s).clone(),
             _ => panic!("expected a string"),
         }
     }

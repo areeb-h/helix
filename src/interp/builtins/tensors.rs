@@ -24,9 +24,9 @@ pub(super) fn a_to_array(name: &str, args: Vec<Value>, line: usize, col: usize) 
             // could cross (the nn field report's top finding). A tracked
             // tensor's payload crosses the same way, via its VALUE — the tape
             // is not extended, exactly like `value_of`.
-            Value::Tensor(t) => Ok(Value::float_array(t.iter().copied().collect())),
-            Value::Node(n) => match crate::autodiff::node_value(&n) {
-                Value::Tensor(t) => {
+            Value::Tensor(ref t) => Ok(Value::float_array(t.iter().copied().collect())),
+            Value::Node(ref n) => match crate::autodiff::node_value(n) {
+                Value::Tensor(ref t) => {
                     Ok(Value::float_array(t.iter().copied().collect()))
                 }
                 other => Ok(Value::array(vec![other])),

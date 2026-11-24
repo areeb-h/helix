@@ -850,7 +850,7 @@ fn float_predicate(
             let out: Result<Vec<Value>, HelixError> = items
                 .to_values()
                 .iter()
-                .map(|e| float_predicate(e, name, f, on_exact, line, col))
+                .map(|e| crate::deep::nested(|| float_predicate(e, name, f, on_exact, line, col)))
                 .collect();
             Ok(Value::array(out?))
         }

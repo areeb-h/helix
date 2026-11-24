@@ -566,7 +566,7 @@ impl super::Interp {
         use crate::value::with_article;
         if is_concat {
             let arg = self.eval(&va[0])?;
-            let Value::Array(add) = arg else {
+            let Value::Array(ref add) = arg else {
                 return Err(HelixError::new(
                     format!(
                         "`concat` expects arrays, but argument 1 is {}",
@@ -584,7 +584,7 @@ impl super::Interp {
                     col,
                 ));
             }
-            let Value::Array(cur) = std::mem::replace(slot, Value::Unit) else {
+            let Ok(cur) = std::mem::replace(slot, Value::Unit).into_array() else {
                 unreachable!("accumulator type checked immediately above")
             };
             Ok(Value::concat_in_place(cur, &add))
@@ -601,7 +601,7 @@ impl super::Interp {
             }
             let k = crate::value::DictKey::from_value(&kv)
                 .map_err(|m| HelixError::new(m, line, col))?;
-            let Value::Dict(cur) = std::mem::replace(slot, Value::Unit) else {
+            let Ok(cur) = std::mem::replace(slot, Value::Unit).into_dict() else {
                 unreachable!("accumulator type checked immediately above")
             };
             Ok(Value::insert_in_place(cur, k, v))
@@ -652,7 +652,7 @@ impl super::Interp {
             if cur.len() + tail.len() > crate::interp::MAX_STRING_LEN {
                 return Err(too_long());
             }
-            let Value::Str(cur) = std::mem::replace(slot, Value::Unit) else {
+            let Ok(cur) = std::mem::replace(slot, Value::Unit).into_str() else {
                 unreachable!("accumulator type checked immediately above")
             };
             let new = match std::rc::Rc::try_unwrap(cur) {

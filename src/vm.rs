@@ -1127,7 +1127,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let add = add.clone();
                 // Now the take: the slot's `Rc` loses its second owner, so an accumulator
                 // nothing else aliases becomes unique and can be extended in place.
-                let Value::Array(cur) = std::mem::replace(&mut locals[at], Value::Unit) else {
+                let Ok(cur) = std::mem::replace(&mut locals[at], Value::Unit).into_array() else {
                     unreachable!("accumulator type checked immediately above")
                 };
                 locals[at] = Value::concat_in_place(cur, &add);
@@ -1153,7 +1153,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 }
                 let k = crate::value::DictKey::from_value(&kv)
                     .map_err(|m| HelixError::new(m, line, col))?;
-                let Value::Dict(cur) = std::mem::replace(&mut locals[at], Value::Unit) else {
+                let Ok(cur) = std::mem::replace(&mut locals[at], Value::Unit).into_dict() else {
                     unreachable!("accumulator type checked immediately above")
                 };
                 locals[at] = Value::insert_in_place(cur, k, v);
@@ -1203,7 +1203,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     //    0024), never aborts. A shared one (a kept init, a captured
                     //    accumulator) pays one content copy, bit-identical to the
                     //    ordinary lowering.
-                    let Value::Str(cur) = std::mem::replace(&mut locals[at], Value::Unit)
+                    let Ok(cur) = std::mem::replace(&mut locals[at], Value::Unit).into_str()
                     else {
                         unreachable!("accumulator type checked immediately above")
                     };
@@ -1328,8 +1328,8 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         }),
                         _ => None,
                     };
-                    match taken {
-                        Some(Value::Str(cur)) => match std::rc::Rc::try_unwrap(cur) {
+                    match taken.map(Value::into_str) {
+                        Some(Ok(cur)) => match std::rc::Rc::try_unwrap(cur) {
                             Ok(mut s) => {
                                 if s.try_reserve(tail.len()).is_err() {
                                     let bytes = s.len() + tail.len();
@@ -2163,9 +2163,9 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
             Op::CompInit(kind, missing_target) => {
                 let v = stack.pop().unwrap();
                 match v {
-                    Value::Array(a) => {
+                    Value::Array(ref a) => {
                         iters.push(CompIter {
-                            source: CompSource::Array { arr: a, idx: 0 },
+                            source: CompSource::Array { arr: a.clone(), idx: 0 },
                             cur_val: Value::Unit,
                             builder: crate::value::ColumnBuilder::default(),
                         });
@@ -3549,7 +3549,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     return Err(HelixError::new("internal: `map_values` found no result", line, col));
                 };
                 stack.push(match mapped {
-                    Value::Array(a) => {
+                    Value::Array(ref a) => {
                         crate::interp::map_values_rebuild(&recv, a.to_values().into_owned())
                     }
                     // `missing`, propagated by the loop's own landing.
@@ -3629,11 +3629,11 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 // the err-record. (The handler was already popped during the unwind.)
                 // The unwind pushed the message, then the help (or `missing`).
                 let help = match stack.pop() {
-                    Some(Value::Str(s)) => Some((*s).clone()),
+                    Some(Value::Str(ref s)) => Some((**s).clone()),
                     _ => None,
                 };
                 let msg = match stack.pop().unwrap() {
-                    Value::Str(s) => (*s).clone(),
+                    Value::Str(ref s) => (**s).clone(),
                     other => other.to_string(),
                 };
                 stack.push(crate::interp::try_err(msg, help));
