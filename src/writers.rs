@@ -84,7 +84,7 @@ pub fn write_json(args: &[Value], line: usize, col: usize) -> Result<Value, Heli
         return Err(HelixError::new("`write_json` takes (value, path)", line, col));
     }
     let path = as_path("write_json", &args[1], line, col)?;
-    let json = crate::json::stringify(&args[0]).map_err(|e| HelixError::new(e, line, col))?;
+    let json = crate::json::stringify(&args[0]).map_err(|e| json_err("write_json", e, line, col))?;
     std::fs::write(path, json).map_err(|e| io_err("write", path, e, line, col))?;
     Ok(Value::Unit)
 }
@@ -266,11 +266,45 @@ pub fn to_json(args: &[Value], line: usize, col: usize) -> Result<Value, HelixEr
                     Value::record(fields)
                 })
                 .collect();
-            crate::json::stringify(&Value::array(recs)).map_err(|e| HelixError::new(e, line, col))?
+            crate::json::stringify(&Value::array(recs)).map_err(|e| json_err("to_json", e, line, col))?
         }
-        other => crate::json::stringify(other).map_err(|e| HelixError::new(e, line, col))?,
+        // A string's JSON is the string escaped: up to six bytes for one (`\u0001`), and
+        // `s.to_json()` in a loop compounds that. Text past a sixth of the cap is measured
+        // exactly, refused past the cap, and written straight into a buffer of its exact
+        // size — without the copy of the whole string `json::stringify` would make first.
+        Value::Str(s) | Value::Dna(s) if s.len().saturating_mul(6) > crate::interp::MAX_STRING_LEN => {
+            let escaped: usize = s
+                .bytes()
+                .map(|b| match b {
+                    b'"' | b'\\' | 0x08 | 0x09 | 0x0a | 0x0c | 0x0d => 2,
+                    0x00..=0x1f => 6,
+                    _ => 1,
+                })
+                .sum();
+            let len = escaped + 2;
+            crate::interp::growth::check_text("to_json", len, line, col)?;
+            let mut buf: Vec<u8> = Vec::new();
+            buf.try_reserve_exact(len)
+                .map_err(|_| crate::interp::growth::no_memory_for("to_json", len, line, col))?;
+            serde_json::to_writer(&mut buf, s.as_str())
+                .map_err(|e| HelixError::new(format!("could not serialize to JSON: {e}"), line, col))?;
+            String::from_utf8(buf)
+                .map_err(|e| HelixError::new(format!("could not serialize to JSON: {e}"), line, col))?
+        }
+        other => crate::json::stringify(other).map_err(|e| json_err("to_json", e, line, col))?,
     };
     Ok(string(json))
+}
+
+/// A refused `json::stringify` as a Helix error, in the words every growing
+/// operation uses for the string cap and for an allocation the system refused.
+fn json_err(op: &str, e: crate::json::Refused, line: usize, col: usize) -> HelixError {
+    use crate::json::Refused;
+    match e {
+        Refused::TooLong => crate::interp::growth::text_too_long(op, line, col),
+        Refused::NoMemory(bytes) => crate::interp::growth::no_memory_for(op, bytes, line, col),
+        Refused::Other(m) => HelixError::new(m, line, col),
+    }
 }
 
 /// `values.svg_bar(labels?)` — a clean horizontal-bar SVG chart.

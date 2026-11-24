@@ -842,8 +842,13 @@ impl ArrayData {
     ///
     /// Seeding costs one copy of the receiver, which is why a fold is linear overall: the
     /// seed happens once (on a short or empty accumulator) and every later step is O(1).
-    /// Returning `None` is always safe — it is the behaviour that shipped.
-    pub fn concat_shared(cur: &std::rc::Rc<ArrayData>, add: &ArrayData) -> Option<Value> {
+    /// Returning `None` is always safe — it is the behaviour that shipped. Every buffer it
+    /// grows grows FALLIBLY: `Err` is an allocation the system refused (ADR 0024), which the
+    /// caller reports rather than letting `Vec` abort the process.
+    pub fn concat_shared(
+        cur: &std::rc::Rc<ArrayData>,
+        add: &ArrayData,
+    ) -> Result<Option<Value>, MaterializeLimit> {
         use std::rc::Rc;
         match &**cur {
             ArrayData::Shared { buf, len, views } => {
@@ -853,7 +858,9 @@ impl ArrayData {
                 // is a `RefCell` double borrow — a panic on a user-reachable path, which
                 // ADR 0024 forbids outright. Collecting first costs O(|add|), which is the
                 // payload's own cost and the same guard `concat_in_place` already pays.
-                let addition: Vec<Value> = add.iter_values().collect();
+                let mut addition: Vec<Value> = Vec::new();
+                reserve_more(&mut addition, add.len())?;
+                addition.extend(add.iter_values());
                 // A CYCLE IS REFUSED BEFORE THE CELL IS TAKEN. Appending a value that holds
                 // a view of THIS buffer (`a.concat([a])`, `a.concat([{inner: a}])`) would
                 // store, inside the buffer, an `Rc` to the buffer: a cycle no drop ever
@@ -876,42 +883,47 @@ impl ArrayData {
                 // two branches would see each other's elements. A cyclic addition goes the
                 // same way, for the reason above.
                 if b.len() != *len || cyclic {
-                    let mut fresh: Vec<Value> = b[..*len].to_vec();
+                    let mut fresh: Vec<Value> = Vec::new();
+                    reserve_more(&mut fresh, *len + addition.len())?;
+                    fresh.extend_from_slice(&b[..*len]);
                     drop(b);
                     fresh.extend(addition);
                     let len = fresh.len();
-                    return Some(Value::Array(Rc::new(ArrayData::Shared {
+                    return Ok(Some(Value::Array(Rc::new(ArrayData::Shared {
                         buf: Rc::new(std::cell::RefCell::new(fresh)),
                         len,
                         views: Rc::new(std::cell::Cell::new(views.get() || adds_view)),
-                    })));
+                    }))));
                 }
+                reserve_more(&mut *b, addition.len())?;
                 b.extend(addition);
                 let len = b.len();
                 drop(b);
                 if adds_view {
                     views.set(true);
                 }
-                Some(Value::Array(Rc::new(ArrayData::Shared {
+                Ok(Some(Value::Array(Rc::new(ArrayData::Shared {
                     buf: Rc::clone(buf),
                     len,
                     views: Rc::clone(views),
-                })))
+                }))))
             }
             // Seed. Every other variant becomes a buffer on its first append; the copy here
             // is the one the eager path would have made anyway. A brand-new buffer cannot be
             // reached by anything yet, so the only question is what it holds.
             _ => {
-                let mut fresh: Vec<Value> = cur.to_values().into_owned();
+                let mut fresh: Vec<Value> = Vec::new();
+                reserve_more(&mut fresh, cur.len() + add.len())?;
+                fresh.extend(cur.iter_values());
                 fresh.extend(add.iter_values());
                 let len = fresh.len();
                 let mut vb = CYCLE_SCAN_BUDGET;
                 let any_view = fresh.iter().any(|x| holds_view(x, &mut vb));
-                Some(Value::Array(Rc::new(ArrayData::Shared {
+                Ok(Some(Value::Array(Rc::new(ArrayData::Shared {
                     buf: Rc::new(std::cell::RefCell::new(fresh)),
                     len,
                     views: Rc::new(std::cell::Cell::new(any_view)),
-                })))
+                }))))
             }
         }
     }
@@ -987,6 +999,13 @@ fn reserve_one<T>(v: &mut Vec<T>) -> Result<(), MaterializeLimit> {
         })?;
     }
     Ok(())
+}
+
+/// Make room for `more` elements, growing as `Vec` would (amortized doubling) but
+/// *fallibly*: the many-element sibling of [`reserve_one`], for appends of a whole array.
+pub(crate) fn reserve_more<T>(v: &mut Vec<T>, more: usize) -> Result<(), MaterializeLimit> {
+    v.try_reserve(more)
+        .map_err(|_| MaterializeLimit::Alloc((v.len() + more).saturating_mul(std::mem::size_of::<T>())))
 }
 
 /// Promote a packed buffer to boxed `Value`s, reserving fallibly up front.
@@ -1287,16 +1306,20 @@ impl Value {
     /// spellings would silently diverge in performance and, through the packed paths,
     /// potentially in more than that. Everything else falls through to the identical
     /// `to_values` + `array_sniff` `concat` performs.
-    pub fn concat_in_place(cur: Rc<ArrayData>, add: &ArrayData) -> Value {
+    ///
+    /// Every buffer grows FALLIBLY; `Err` is an allocation the system refused (ADR 0024).
+    pub fn concat_in_place(cur: Rc<ArrayData>, add: &ArrayData) -> Result<Value, MaterializeLimit> {
         let mut cur = cur;
         match (Rc::get_mut(&mut cur), add) {
             (Some(ArrayData::Ints(v)), ArrayData::Ints(w)) if !v.is_empty() || !w.is_empty() => {
+                reserve_more(v, w.len())?;
                 v.extend_from_slice(w);
-                return Value::Array(cur);
+                return Ok(Value::Array(cur));
             }
             (Some(ArrayData::Floats(v)), ArrayData::Floats(w)) if !v.is_empty() || !w.is_empty() => {
+                reserve_more(v, w.len())?;
                 v.extend_from_slice(w);
-                return Value::Array(cur);
+                return Ok(Value::Array(cur));
             }
             // A `Values` accumulator whose argument carries a NON-NUMERIC witness. The
             // representation argument that keeps this fast path honest: `array_sniff`
@@ -1315,14 +1338,17 @@ impl Value {
                     .iter()
                     .any(|x| !matches!(x, Value::Int(_) | Value::Float(_))) =>
             {
+                reserve_more(v, add.len())?;
                 v.extend(add.to_values().iter().cloned());
-                return Value::Array(cur);
+                return Ok(Value::Array(cur));
             }
             _ => {}
         }
-        let mut out = cur.to_values().into_owned();
-        out.extend(add.to_values().iter().cloned());
-        Value::array_sniff(out)
+        let mut out: Vec<Value> = Vec::new();
+        reserve_more(&mut out, cur.len() + add.len())?;
+        out.extend(cur.iter_values());
+        out.extend(add.iter_values());
+        Ok(Value::array_sniff(out))
     }
 
     /// `cur.insert(k, v)` — O(1) amortized whoever else holds `cur`, by appending to its

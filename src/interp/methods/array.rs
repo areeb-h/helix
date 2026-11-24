@@ -4,6 +4,7 @@
 use super::super::*;
 #[allow(unused_imports)]
 use super::*;
+use crate::interp::growth::check_array;
 #[allow(unused_imports)]
 use std::rc::Rc;
 
@@ -1007,8 +1008,31 @@ pub(crate) fn array_method(
             let sep = str_arg(args, 0, "join", line, col)?;
             // Each element is rendered with its normal display (a string element is
             // its raw text, not a quoted form), then joined: `[1,2,3].join("-")`.
-            let joined = items.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(sep);
-            Ok(Value::Str(Rc::new(joined)))
+            //
+            // The result's length is known before it is allocated — a string element
+            // is borrowed rather than copied, and only the others are rendered — so a
+            // join past the string cap is refused instead of built.
+            let parts: Vec<std::borrow::Cow<'_, str>> = items
+                .iter()
+                .map(|v| match v {
+                    Value::Str(t) => std::borrow::Cow::Borrowed(t.as_str()),
+                    other => std::borrow::Cow::Owned(other.to_string()),
+                })
+                .collect();
+            let total = parts
+                .iter()
+                .fold(sep.len().saturating_mul(parts.len().saturating_sub(1)), |n, p| {
+                    n.saturating_add(p.len())
+                });
+            crate::interp::growth::check_text("join", total, line, col)?;
+            let mut out = crate::interp::growth::text_buffer("join", total, line, col)?;
+            for (i, p) in parts.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(sep);
+                }
+                out.push_str(p);
+            }
+            Ok(Value::Str(Rc::new(out)))
         }
         "reverse" => {
             no_args(name)?;
@@ -1181,7 +1205,16 @@ pub(crate) fn array_method(
         // `xs.concat(a, b, …)` — append the elements of each array argument. The
         // result is re-sniffed so a numeric concat stays a packed (fast) array.
         "concat" => {
-            let mut out = items.to_vec();
+            // Sized up front and reserved fallibly: the size guard already ran in
+            // `call_method`, and a result under the budget can still be refused memory.
+            let total = args.iter().fold(items.len(), |n, a| match a {
+                Value::Array(arr) => n.saturating_add(arr.len()),
+                _ => n,
+            });
+            let mut out: Vec<Value> = Vec::new();
+            crate::value::reserve_more(&mut out, total)
+                .map_err(|lim| crate::vm::materialize_refused(lim, line, col))?;
+            out.extend_from_slice(items);
             for (k, a) in args.iter().enumerate() {
                 match a {
                     Value::Array(arr) => out.extend(arr.to_values().iter().cloned()),
@@ -1229,6 +1262,15 @@ pub(crate) fn array_method(
                 if n <= items.len() {
                     let count = items.len() - n + 1;
                     window_count_guard("windows", count, line, col)?;
+                    // Overlapping windows copy each element up to `n` times: 100k
+                    // elements in windows of 50k is 2.5 BILLION slots. Each window is a
+                    // boxed array of `n` plus its slot in the result.
+                    check_array(
+                        "windows",
+                        count.saturating_mul(n + 1).saturating_mul(crate::interp::growth::SLOT),
+                        line,
+                        col,
+                    )?;
                     out.reserve(count);
                     for w in items.windows(n) {
                         out.push(Value::array(w.to_vec()));
@@ -1239,7 +1281,15 @@ pub(crate) fn array_method(
                 // the last group is short when the length does not divide evenly —
                 // dropping it would silently lose data, which is worse than a ragged
                 // tail the caller can see and handle.
-                window_count_guard("chunks", items.len().div_ceil(n), line, col)?;
+                let count = items.len().div_ceil(n);
+                window_count_guard("chunks", count, line, col)?;
+                // Every element once, plus one slot per chunk — `chunks(1)` doubles it.
+                check_array(
+                    "chunks",
+                    (items.len() + count).saturating_mul(crate::interp::growth::SLOT),
+                    line,
+                    col,
+                )?;
                 for c in items.chunks(n) {
                     out.push(Value::array(c.to_vec()));
                 }
@@ -1252,6 +1302,7 @@ pub(crate) fn array_method(
             if !args.is_empty() {
                 return Err(HelixError::new("`flatten` takes no arguments", line, col));
             }
+            crate::interp::growth::flatten_guard(items, line, col)?;
             // Concatenating packed columns needs no boxing at all. The general path below
             // boxes every inner element twice — once when `to_values()` materializes the
             // inner array, again into `out` — before `array_sniff` unpacks the lot again:
@@ -1274,8 +1325,10 @@ pub(crate) fn array_method(
                 !items.is_empty() && items.iter().all(|v| inner(v).is_some_and(f))
             };
             let width = || items.iter().filter_map(inner).map(|a| a.len()).sum();
+            let refused = |lim| crate::vm::materialize_refused(lim, line, col);
             if all(|a| matches!(a, ArrayData::Ints(_) | ArrayData::Range { .. })) {
-                let mut out: Vec<i64> = Vec::with_capacity(width());
+                let mut out: Vec<i64> = Vec::new();
+                crate::value::reserve_more(&mut out, width()).map_err(refused)?;
                 for a in items.iter().filter_map(inner) {
                     if let Some(xs) = a.to_ints() {
                         out.extend_from_slice(&xs);
@@ -1284,7 +1337,8 @@ pub(crate) fn array_method(
                 return Ok(Value::int_array(out));
             }
             if all(|a| matches!(a, ArrayData::Floats(_))) {
-                let mut out: Vec<f64> = Vec::with_capacity(width());
+                let mut out: Vec<f64> = Vec::new();
+                crate::value::reserve_more(&mut out, width()).map_err(refused)?;
                 for a in items.iter().filter_map(inner) {
                     if let ArrayData::Floats(xs) = a {
                         out.extend_from_slice(xs);
@@ -1292,10 +1346,15 @@ pub(crate) fn array_method(
                 }
                 return Ok(Value::float_array(out));
             }
-            let mut out: Vec<Value> = Vec::with_capacity(items.len());
+            let total = items.iter().fold(0usize, |n, v| match v {
+                Value::Array(a) => n.saturating_add(a.len()),
+                _ => n.saturating_add(1),
+            });
+            let mut out: Vec<Value> = Vec::new();
+            crate::value::reserve_more(&mut out, total).map_err(refused)?;
             for v in items {
                 match v {
-                    Value::Array(a) => out.extend(a.to_values().iter().cloned()),
+                    Value::Array(a) => out.extend(a.iter_values()),
                     other => out.push(other.clone()),
                 }
             }

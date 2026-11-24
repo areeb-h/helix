@@ -34,7 +34,7 @@ pub(crate) fn string_method(
     match name {
         "upper" => {
             arity(0)?;
-            Ok(Value::Str(Rc::new(s.to_uppercase())))
+            Ok(Value::Str(Rc::new(upper(s, line, col)?)))
         }
         // Unicode normal forms. NFC by default — the form under which "é" typed as one code
         // point and as `e` + a combining acute are the SAME string, so a name typed on one
@@ -60,10 +60,10 @@ pub(crate) fn string_method(
                 }
             };
             let out: String = match form {
-                "nfc" => s.nfc().collect(),
-                "nfd" => s.nfd().collect(),
-                "nfkc" => s.nfkc().collect(),
-                "nfkd" => s.nfkd().collect(),
+                "nfc" => normalized(s, s.nfc(), line, col)?,
+                "nfd" => normalized(s, s.nfd(), line, col)?,
+                "nfkc" => normalized(s, s.nfkc(), line, col)?,
+                "nfkd" => normalized(s, s.nfkd(), line, col)?,
                 other => {
                     return Err(HelixError::new(
                         format!("`normalize` knows the forms \"nfc\", \"nfd\", \"nfkc\" and \"nfkd\", not \"{other}\""),
@@ -76,6 +76,9 @@ pub(crate) fn string_method(
         }
         "lower" => {
             arity(0)?;
+            // Lowercasing is context-sensitive (a final `Σ` becomes `ς`), so it stays
+            // `str::to_lowercase`; it grows text by at most half (`İ`, 2 bytes to 3).
+            case_guard(name, s, false, line, col)?;
             Ok(Value::Str(Rc::new(s.to_lowercase())))
         }
         "count" | "length" => {
@@ -94,6 +97,13 @@ pub(crate) fn string_method(
         // and would disagree with every other method here).
         "chars" => {
             arity(0)?;
+            // One fresh string per character: ~50 bytes of slot and allocation for every
+            // byte of input, so a 25 MB string asks for over a gigabyte. Bounded by the
+            // byte length first; only a string near the line counts its characters.
+            let bound = |n: usize| n.saturating_mul(crate::interp::growth::STR_ELEMENT).saturating_add(s.len());
+            if bound(s.len()) > crate::value::MATERIALIZE_BUDGET {
+                crate::interp::growth::check_array(name, bound(s.chars().count()), line, col)?;
+            }
             Ok(Value::array(
                 s.chars().map(|c| Value::Str(Rc::new(c.to_string()))).collect::<Vec<_>>(),
             ))
@@ -183,7 +193,14 @@ pub(crate) fn string_method(
                 return Err(HelixError::new("`split` separator cannot be empty", line, col)
                     .hint("split on a non-empty string, e.g. `s.split(\",\")`."));
             }
-            window_count_guard("split", s.matches(sep).count() + 1, line, col)?;
+            let parts = s.matches(sep).count() + 1;
+            window_count_guard("split", parts, line, col)?;
+            crate::interp::growth::check_array(
+                name,
+                parts.saturating_mul(crate::interp::growth::STR_ELEMENT).saturating_add(s.len()),
+                line,
+                col,
+            )?;
             let parts: Vec<Value> =
                 s.split(sep).map(|p| Value::Str(Rc::new(p.to_string()))).collect();
             Ok(Value::array(parts))
@@ -315,7 +332,9 @@ pub(crate) fn string_method(
         "concat" => {
             arity(1)?;
             let other = str_arg(args, 0, name, line, col)?;
-            let mut out = String::with_capacity(s.len() + other.len());
+            let len = s.len().saturating_add(other.len());
+            crate::interp::growth::check_text(name, len, line, col)?;
+            let mut out = crate::interp::growth::text_buffer(name, len, line, col)?;
             out.push_str(s);
             out.push_str(other);
             Ok(Value::Str(Rc::new(out)))
@@ -324,7 +343,7 @@ pub(crate) fn string_method(
             arity(2)?;
             let from = str_arg(args, 0, name, line, col)?;
             let to = str_arg(args, 1, name, line, col)?;
-            Ok(Value::Str(Rc::new(s.replace(from, to))))
+            Ok(Value::Str(Rc::new(crate::interp::growth::replace_all(name, s, from, to, line, col)?)))
         }
         // `replace` swaps EVERY occurrence; this swaps exactly the first — the
         // pair every string library ends up needing both halves of.
@@ -332,7 +351,19 @@ pub(crate) fn string_method(
             arity(2)?;
             let from = str_arg(args, 0, name, line, col)?;
             let to = str_arg(args, 1, name, line, col)?;
-            Ok(Value::Str(Rc::new(s.replacen(from, to, 1))))
+            // At most one swap, so the result's size is exact once the pattern is found —
+            // the search `replacen` would have made anyway — and it is built into a buffer
+            // of that size. No match is the receiver itself: strings are immutable.
+            let Some(at) = s.find(from) else {
+                return Ok(Value::Str(s.clone()));
+            };
+            let len = (s.len() - from.len()).saturating_add(to.len());
+            crate::interp::growth::check_text(name, len, line, col)?;
+            let mut out = crate::interp::growth::text_buffer(name, len, line, col)?;
+            out.push_str(&s[..at]);
+            out.push_str(to);
+            out.push_str(&s[at + from.len()..]);
+            Ok(Value::Str(Rc::new(out)))
         }
         "contains" => {
             arity(1)?;
@@ -424,3 +455,56 @@ pub(crate) fn string_method(
     }
 }
 
+
+/// `upper`/`lower` can GROW text: one character may map to several (`"ΐ".upper()` is three
+/// characters, 2 bytes to 6). No mapping more than triples a string's bytes, so only a string
+/// past a third of the cap is measured exactly — one pass, and only for text that large.
+fn case_guard(name: &str, s: &str, upper: bool, line: usize, col: usize) -> Result<Option<usize>, HelixError> {
+    if s.len().saturating_mul(3) <= crate::interp::MAX_STRING_LEN {
+        return Ok(None);
+    }
+    let bytes: usize = if upper {
+        s.chars().map(|c| c.to_uppercase().map(char::len_utf8).sum::<usize>()).sum()
+    } else {
+        s.chars().map(|c| c.to_lowercase().map(char::len_utf8).sum::<usize>()).sum()
+    };
+    crate::interp::growth::check_text(name, bytes, line, col)?;
+    Ok(Some(bytes))
+}
+
+/// `s.upper()`: `str::to_uppercase` for ordinary text; text large enough to be measured is
+/// built into a buffer of its exact size (uppercasing is context-free, character by
+/// character, so this is the same text `to_uppercase` produces).
+fn upper(s: &str, line: usize, col: usize) -> Result<String, HelixError> {
+    let Some(bytes) = case_guard("upper", s, true, line, col)? else {
+        return Ok(s.to_uppercase());
+    };
+    let mut out = crate::interp::growth::text_buffer("upper", bytes, line, col)?;
+    out.extend(s.chars().flat_map(char::to_uppercase));
+    Ok(out)
+}
+
+/// Collect a normal form, refusing one that would pass the string cap. A decomposition can
+/// grow text many times over — U+FDFA is 3 bytes, and eighteen characters (33 bytes) under
+/// NFKD, the worst case in Unicode — so an input under 1/18 of the cap (margin included) is
+/// collected directly, and anything larger is measured as it is built: the normalizer
+/// streams, so the output stops at the cap instead of passing it.
+fn normalized(s: &str, chars: impl Iterator<Item = char>, line: usize, col: usize) -> Result<String, HelixError> {
+    if s.len().saturating_mul(18) <= crate::interp::MAX_STRING_LEN {
+        return Ok(chars.collect());
+    }
+    let mut out = crate::interp::growth::text_buffer("normalize", s.len(), line, col)?;
+    for c in chars {
+        let need = out.len() + c.len_utf8();
+        if need > crate::interp::MAX_STRING_LEN {
+            return Err(crate::interp::growth::text_too_long("normalize", line, col));
+        }
+        if need > out.capacity() {
+            let to = crate::interp::growth::capped_capacity(out.capacity(), need);
+            out.try_reserve_exact(to - out.len())
+                .map_err(|_| crate::interp::growth::no_memory_for("normalize", to, line, col))?;
+        }
+        out.push(c);
+    }
+    Ok(out)
+}

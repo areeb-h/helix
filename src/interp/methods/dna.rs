@@ -205,6 +205,16 @@ pub(crate) fn dna_method(
             let mut out = Vec::new();
             if k <= bytes.len() {
                 window_count_guard("kmers", bytes.len() - k + 1, line, col)?;
+                // Every window is the upper bound; only when THAT passes the budget are the
+                // unambiguous ones counted (one pass over the runs of ACGT).
+                if substrings_guard("kmers", bytes.len() - k + 1, k, line, col).is_err() {
+                    let (mut run, mut count) = (0usize, 0usize);
+                    for &b in bytes {
+                        run = if matches!(b, b'A' | b'C' | b'G' | b'T') { run + 1 } else { 0 };
+                        count += usize::from(run >= k);
+                    }
+                    substrings_guard("kmers", count, k, line, col)?;
+                }
                 for w in bytes.windows(k) {
                     if w.iter().all(|&b| matches!(b, b'A' | b'C' | b'G' | b'T')) {
                         // SAFETY: a window of an ASCII DNA string is valid UTF-8.
@@ -224,6 +234,7 @@ pub(crate) fn dna_method(
             if k <= bytes.len() {
                 let count = bytes.len() - k + 1;
                 window_count_guard("windows", count, line, col)?;
+                substrings_guard("windows", count, k, line, col)?;
                 out.reserve(count);
                 for w in bytes.windows(k) {
                     // SAFETY: a window of an ASCII DNA string is valid UTF-8.
@@ -517,6 +528,14 @@ pub(crate) fn window_count_guard(name: &str, count: usize, line: usize, col: usi
         .hint("use a longer k, a shorter input, or `kmer_counts(k)` for the spectrum."));
     }
     Ok(())
+}
+
+/// Overlapping substrings copy each base up to `k` times: a 100 kb sequence in windows of
+/// 50 kb is 2.5 GB of text. `count` strings of `k` bytes each, refused past the array budget
+/// (`kmers` keeps only the unambiguous ones, so all of them is its upper bound).
+fn substrings_guard(name: &str, count: usize, k: usize, line: usize, col: usize) -> Result<(), HelixError> {
+    let per = k.saturating_add(crate::interp::growth::STR_ELEMENT);
+    crate::interp::growth::check_array(name, count.saturating_mul(per), line, col)
 }
 
 pub(crate) fn kmer_k(name: &str, args: &[Value], line: usize, col: usize) -> Result<usize, HelixError> {

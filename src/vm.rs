@@ -1114,7 +1114,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         col,
                     ));
                 };
-                if !matches!(locals[at], Value::Array(_)) {
+                let Value::Array(held) = &locals[at] else {
                     return Err(HelixError::new(
                         format!(
                             "{} has no method `concat`",
@@ -1123,14 +1123,17 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         line,
                         col,
                     ));
-                }
+                };
+                // The size guard every `concat` passes (the walker's twin calls the same).
+                crate::interp::growth::concat_one_guard(held, add, line, col)?;
                 let add = add.clone();
                 // Now the take: the slot's `Rc` loses its second owner, so an accumulator
                 // nothing else aliases becomes unique and can be extended in place.
                 let Value::Array(cur) = std::mem::replace(&mut locals[at], Value::Unit) else {
                     unreachable!("accumulator type checked immediately above")
                 };
-                locals[at] = Value::concat_in_place(cur, &add);
+                locals[at] = Value::concat_in_place(cur, &add)
+                    .map_err(|lim| materialize_refused(lim, line, col))?;
             }
             Op::InsertIntoLocal(slot) => {
                 // Pushed key-then-value, so the value pops first. Both pops are guaranteed

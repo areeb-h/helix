@@ -63,6 +63,17 @@ fn from_serde(v: serde_json::Value, budget: &mut usize) -> Result<Value, String>
     })
 }
 
+/// Why [`stringify`] produced no text.
+#[derive(Debug)]
+pub(crate) enum Refused {
+    /// The text would pass the one-string cap (`MAX_STRING_LEN`).
+    TooLong,
+    /// The allocator refused to grow the text to this many bytes.
+    NoMemory(usize),
+    /// The value cannot be JSON (a function, say), in the serializer's words.
+    Other(String),
+}
+
 /// Serialize a Helix value to a JSON string.
 ///
 /// Written straight into one buffer with a guarded walk ([`crate::deep::nested`]). It used
@@ -72,23 +83,66 @@ fn from_serde(v: serde_json::Value, budget: &mut usize) -> Result<Value, String>
 /// `serde_json` (its number formatting and string escaping), objects are emitted with keys
 /// in the order `serde_json::Map` (a `BTreeMap` in every build — no crate enables
 /// `preserve_order`) iterates them, and where two dict keys spell the same string the later
-/// one wins, as an insert into that map would. `stringify_via_serde_matches` below checks
-/// it against the old route.
-pub fn stringify(v: &Value) -> Result<String, String> {
-    let mut out: Vec<u8> = Vec::new();
-    write_json(&mut out, v)?;
-    // Every byte came from `serde_json` or is ASCII punctuation, so this cannot fail.
-    String::from_utf8(out).map_err(|e| format!("could not serialize to JSON: {e}"))
+/// one wins, as an insert into that map would. `stringify_matches_the_serde_route` below
+/// checks it against the old route.
+///
+/// The text is held to the one-string cap AS IT IS WRITTEN ([`Capped`]): escaping can grow a
+/// string sixfold, and a value that holds one sub-value many times prints exponentially, so
+/// the size is not knowable up front (ADR 0024).
+pub(crate) fn stringify(v: &Value) -> Result<String, Refused> {
+    let mut out = Capped { buf: Vec::new(), refused: None };
+    match write_json(&mut out, v) {
+        // Every byte came from `serde_json` or is ASCII punctuation, so the check passes.
+        Ok(()) => String::from_utf8(out.buf).map_err(|e| Refused::Other(format!("could not serialize to JSON: {e}"))),
+        Err(e) => Err(out.refused.take().unwrap_or(Refused::Other(e))),
+    }
 }
 
-fn json_leaf<T: serde::Serialize + ?Sized>(out: &mut Vec<u8>, x: &T) -> Result<(), String> {
+/// A `Vec<u8>` writer that refuses the write that would pass `MAX_STRING_LEN`, and a growth
+/// the allocator refuses, freeing what it holds — the caller only reports the refusal.
+struct Capped {
+    buf: Vec<u8>,
+    refused: Option<Refused>,
+}
+
+impl std::io::Write for Capped {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let need = self.buf.len().saturating_add(data.len());
+        if need > crate::interp::MAX_STRING_LEN {
+            self.refused = Some(Refused::TooLong);
+        } else if need > self.buf.capacity() {
+            let to = crate::interp::growth::capped_capacity(self.buf.capacity(), need);
+            if self.buf.try_reserve_exact(to - self.buf.len()).is_err() {
+                self.refused = Some(Refused::NoMemory(to));
+            }
+        }
+        if self.refused.is_some() {
+            self.buf = Vec::new();
+            return Err(std::io::Error::other("JSON text refused"));
+        }
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Punctuation, through the cap like everything else.
+fn put(out: &mut Capped, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write as _;
+    out.write_all(bytes).map_err(|e| e.to_string())
+}
+
+fn json_leaf<T: serde::Serialize + ?Sized>(out: &mut Capped, x: &T) -> Result<(), String> {
     serde_json::to_writer(out, x).map_err(|e| format!("could not serialize to JSON: {e}"))
 }
 
-fn write_json(out: &mut Vec<u8>, v: &Value) -> Result<(), String> {
+fn write_json(out: &mut Capped, v: &Value) -> Result<(), String> {
     match v {
-        Value::Missing => out.extend_from_slice(b"null"),
-        Value::Bool(b) => out.extend_from_slice(if *b { b"true" } else { b"false" }),
+        Value::Missing => put(out, b"null")?,
+        Value::Bool(b) => put(out, if *b { b"true" } else { b"false" })?,
         Value::Int(i) => json_leaf(out, i)?,
         // JSON has no NaN/Infinity — they serialize as `null` (the JSON convention, and
         // what serde_json writes for a non-finite `f64`).
@@ -100,12 +154,12 @@ fn write_json(out: &mut Vec<u8>, v: &Value) -> Result<(), String> {
             if r.is_integer() {
                 match r.to_i64() {
                     Some(i) => json_leaf(out, &i)?,
-                    None => out.extend_from_slice(b"null"),
+                    None => put(out, b"null")?,
                 }
             } else {
                 match r.to_f64() {
                     Some(f) => json_leaf(out, &f)?,
-                    None => out.extend_from_slice(b"null"),
+                    None => put(out, b"null")?,
                 }
             }
         }
@@ -150,30 +204,28 @@ fn write_json(out: &mut Vec<u8>, v: &Value) -> Result<(), String> {
     Ok(())
 }
 
-fn write_json_array(out: &mut Vec<u8>, xs: &[Value]) -> Result<(), String> {
-    out.push(b'[');
+fn write_json_array(out: &mut Capped, xs: &[Value]) -> Result<(), String> {
+    put(out, b"[")?;
     for (i, x) in xs.iter().enumerate() {
         if i > 0 {
-            out.push(b',');
+            put(out, b",")?;
         }
         crate::deep::nested(|| write_json(out, x))?;
     }
-    out.push(b']');
-    Ok(())
+    put(out, b"]")
 }
 
-fn write_json_object<'a>(out: &mut Vec<u8>, entries: impl Iterator<Item = (&'a str, &'a Value)>) -> Result<(), String> {
-    out.push(b'{');
+fn write_json_object<'a>(out: &mut Capped, entries: impl Iterator<Item = (&'a str, &'a Value)>) -> Result<(), String> {
+    put(out, b"{")?;
     for (i, (k, val)) in entries.enumerate() {
         if i > 0 {
-            out.push(b',');
+            put(out, b",")?;
         }
         json_leaf(out, k)?;
-        out.push(b':');
+        put(out, b":")?;
         crate::deep::nested(|| write_json(out, val))?;
     }
-    out.push(b'}');
-    Ok(())
+    put(out, b"}")
 }
 
 /// The route `stringify` took before it wrote JSON directly — kept, test-only, as the
@@ -293,7 +345,11 @@ mod tests {
         for _ in 0..20_000 {
             let v = make(&mut next, 4, &strs, &floats);
             let old = to_serde(&v).map(|j| serde_json::to_string(&j).unwrap());
-            assert_eq!(stringify(&v), old, "for {v}");
+            let new = stringify(&v).map_err(|e| match e {
+                Refused::Other(m) => m,
+                other => panic!("refused {other:?} for {v}"),
+            });
+            assert_eq!(new, old, "for {v}");
         }
     }
 

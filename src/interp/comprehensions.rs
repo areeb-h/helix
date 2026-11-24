@@ -577,17 +577,20 @@ impl super::Interp {
                 ));
             };
             let slot = &mut self.env.get_mut(pa).unwrap().value;
-            if !matches!(slot, Value::Array(_)) {
+            let Value::Array(held) = &*slot else {
                 return Err(HelixError::new(
                     format!("{} has no method `concat`", with_article(slot.type_name())),
                     line,
                     col,
                 ));
-            }
+            };
+            // The size guard every `concat` passes, checked before the take so a refusal
+            // leaves the binding exactly as the ordinary lowering would.
+            crate::interp::growth::concat_one_guard(held, &add, line, col)?;
             let Value::Array(cur) = std::mem::replace(slot, Value::Unit) else {
                 unreachable!("accumulator type checked immediately above")
             };
-            Ok(Value::concat_in_place(cur, &add))
+            Value::concat_in_place(cur, &add).map_err(|lim| crate::vm::materialize_refused(lim, line, col))
         } else {
             let kv = self.eval(&va[0])?;
             let v = self.eval(&va[1])?;

@@ -2434,4 +2434,6 @@ pub(crate) use builtins::ASSERTIONS_RUN;
 pub(crate) use builtins::{capture_begin, capture_take};
 
 mod comprehensions;
+
+pub(crate) mod growth;
 pub(crate) use comprehensions::{map_values_elements, map_values_rebuild, map_values_shape, not_an_array};
