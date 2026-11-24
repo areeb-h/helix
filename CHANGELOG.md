@@ -4,6 +4,23 @@
 
 ### Fixed
 
+- **Growing a string or array past 1 GB killed the process.** A loop that doubled a value with
+  `replace`, `re_replace`, `concat`, `join`, `html_escape`, `to_json`, `hex_encode`, `flatten`,
+  an array spread `[...xs, ...xs]`, or a large `windows` died with `memory allocation of N
+  bytes failed` (SIGABRT) on all three engines, and `try` could not catch it. Every operation
+  whose result can be larger than its inputs now works out the result's size before building
+  it and refuses past the limits Helix already had — 1 GiB for one string (as `repeat` and
+  interpolation do), 1 GiB of elements for one array (as `map` does): `` `replace` would exceed
+  1073741824 bytes `` or `` `concat` would build an array of more than 1024 MB, which is too
+  large ``, each with a hint, the same on every engine. This covers the string methods
+  `replace`, `replace_first`, `re_replace`, `concat`, `upper`, `normalize`, `chars`, `split`,
+  `re_split`, `re_find_all`; `html_escape`, `url_encode`, `base64_encode`, `hex_encode`,
+  `to_json` and `write_json`; `Bytes` `concat`, `to_hex` and `to_base64`; and the array
+  methods `concat` (with spreads and the `reduce` fast path), `join`, `flatten` (so
+  `flat_map`), `windows`, `chunks`, and `Dna` `windows` and `kmers`. Ordinary inputs pay only
+  an O(1) bound. A result under the limit that the system still has no memory for is a clean
+  error too ("there is not enough memory to hold …"), and `hex_encode` no longer takes
+  minutes on large input.
 - **A sharded server's listening sockets leaked into the programs it ran.** `listen(port, n)`
   with `n > 1` made its sockets without close-on-exec, so any program the app ran with `run`
   inherited them and could accept the app's connections. They are close-on-exec now,

@@ -81,7 +81,12 @@ pub(crate) fn bytes_method(
             arity(name, args, 1, line, col)?;
             match &args[0] {
                 Value::Bytes(o) => {
-                    let mut out = Vec::with_capacity(b.len() + o.len());
+                    // `Bytes` is held to the same 1 GiB line as one string.
+                    let len = b.len().saturating_add(o.len());
+                    crate::interp::growth::check_text(name, len, line, col)?;
+                    let mut out = Vec::new();
+                    out.try_reserve_exact(len)
+                        .map_err(|_| crate::interp::growth::no_memory_for(name, len, line, col))?;
                     out.extend_from_slice(b);
                     out.extend_from_slice(o);
                     Ok(Value::Bytes(Rc::new(out)))
@@ -92,13 +97,12 @@ pub(crate) fn bytes_method(
         }
         "to_hex" => {
             arity(name, args, 0, line, col)?;
+            crate::interp::growth::check_text(name, b.len().saturating_mul(2), line, col)?;
             Ok(Value::Str(Rc::new(crate::value::bytes_to_hex(b))))
         }
         "to_base64" => {
             arity(name, args, 0, line, col)?;
-            use base64::Engine;
-            let enc = base64::engine::general_purpose::STANDARD.encode(b.as_slice());
-            Ok(Value::Str(Rc::new(enc)))
+            Ok(Value::Str(Rc::new(crate::interp::growth::base64(name, b, line, col)?)))
         }
         // THE ONE THAT CAN FAIL, and the reason `Bytes` exists as a separate type. Arbitrary
         // bytes are not text: this refuses by name rather than substituting U+FFFD, which

@@ -63,10 +63,61 @@ fn from_serde(v: serde_json::Value, budget: &mut usize) -> Result<Value, String>
     })
 }
 
-/// Serialize a Helix value to a JSON string.
-pub fn stringify(v: &Value) -> Result<String, String> {
-    let j = to_serde(v)?;
-    serde_json::to_string(&j).map_err(|e| format!("could not serialize to JSON: {e}"))
+/// Why [`stringify`] produced no text.
+#[derive(Debug)]
+pub(crate) enum Refused {
+    /// The text would pass the one-string cap (`MAX_STRING_LEN`).
+    TooLong,
+    /// The allocator refused to grow the text to this many bytes.
+    NoMemory(usize),
+    /// The value cannot be JSON (a function, say), in the serializer's words.
+    Other(String),
+}
+
+/// Serialize a Helix value to a JSON string, held to the one-string cap AS IT IS WRITTEN.
+/// Escaping can grow a string sixfold, so `s.to_json()` in a loop used to grow until the
+/// allocator aborted the process (ADR 0024). [`Capped`] refuses the write that would pass the cap, and grows
+/// its buffer fallibly, never past the cap.
+pub(crate) fn stringify(v: &Value) -> Result<String, Refused> {
+    let j = to_serde(v).map_err(Refused::Other)?;
+    let mut out = Capped { buf: Vec::new(), refused: None };
+    match serde_json::to_writer(&mut out, &j) {
+        // SAFETY: `serde_json` writes only valid UTF-8 — `serde_json::to_string` relies on
+        // exactly this to make the same unchecked conversion of the same bytes.
+        Ok(()) => Ok(unsafe { String::from_utf8_unchecked(out.buf) }),
+        Err(e) => Err(out.refused.unwrap_or_else(|| Refused::Other(format!("could not serialize to JSON: {e}")))),
+    }
+}
+
+/// A `Vec<u8>` writer that refuses the write that would pass `MAX_STRING_LEN`, and a growth
+/// the allocator refuses, freeing what it holds — the caller only reports the refusal.
+struct Capped {
+    buf: Vec<u8>,
+    refused: Option<Refused>,
+}
+
+impl std::io::Write for Capped {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let need = self.buf.len().saturating_add(data.len());
+        if need > crate::interp::MAX_STRING_LEN {
+            self.refused = Some(Refused::TooLong);
+        } else if need > self.buf.capacity() {
+            let to = crate::interp::growth::capped_capacity(self.buf.capacity(), need);
+            if self.buf.try_reserve_exact(to - self.buf.len()).is_err() {
+                self.refused = Some(Refused::NoMemory(to));
+            }
+        }
+        if self.refused.is_some() {
+            self.buf = Vec::new();
+            return Err(std::io::Error::other("JSON text refused"));
+        }
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn to_serde(v: &Value) -> Result<serde_json::Value, String> {

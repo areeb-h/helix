@@ -109,6 +109,7 @@ pub fn method(
         "re_find_all" => {
             want(1)?;
             let re = compiled(pattern(0)?, line, col)?;
+            pieces_guard(name, s, || re.find_iter(s).count(), line, col)?;
             Ok(Value::array(re.find_iter(s).map(|m| str_val(m.as_str())).collect()))
         }
         "re_replace" => {
@@ -125,7 +126,48 @@ pub fn method(
             // EVERY occurrence, matching the literal `replace` beside it. `replace_first`
             // is the literal family's opt-out and a `re_replace_first` can join it later;
             // silently differing from its neighbour would be the worse default.
-            Ok(str_val(&re.replace_all(s, to.as_str())))
+            //
+            // The result can pass the string cap — `s.re_replace("a", "aa")` in a loop
+            // doubles — and its size is not known until each match is expanded. So this is
+            // `Regex::replace_all`'s own loop (`find_iter` for a literal template,
+            // `captures_iter` + `expand` otherwise), building into a buffer that is held to
+            // the cap and grows fallibly: one comparison per piece, where the crate's
+            // version would grow without asking until the allocator aborted the process.
+            //
+            // A LITERAL template's result is decided before anything is built: its worst
+            // case (every boundary a match) settles ordinary calls in O(1), and only one
+            // whose worst case passes the cap counts its matches (one more regex pass) to
+            // size the result exactly — refusing it, or reserving exactly that much.
+            use crate::interp::growth::push;
+            let literal = !to.contains('$');
+            let mut size = s.len();
+            if literal && s.len().saturating_add((s.len() + 1).saturating_mul(to.len())) > crate::interp::MAX_STRING_LEN {
+                let (hits, matched) =
+                    re.find_iter(s).fold((0usize, 0usize), |(n, m), x| (n + 1, m + x.len()));
+                size = (s.len() - matched).saturating_add(hits.saturating_mul(to.len()));
+                crate::interp::growth::check_text(name, size, line, col)?;
+            }
+            let mut out = crate::interp::growth::text_buffer(name, size, line, col)?;
+            let mut last = 0;
+            if literal {
+                for m in re.find_iter(s) {
+                    push(name, &mut out, &s[last..m.start()], line, col)?;
+                    push(name, &mut out, to, line, col)?;
+                    last = m.end();
+                }
+            } else {
+                let mut piece = String::new();
+                for caps in re.captures_iter(s) {
+                    let Some(m) = caps.get(0) else { continue };
+                    push(name, &mut out, &s[last..m.start()], line, col)?;
+                    piece.clear();
+                    caps.expand(to, &mut piece);
+                    push(name, &mut out, &piece, line, col)?;
+                    last = m.end();
+                }
+            }
+            push(name, &mut out, &s[last..], line, col)?;
+            Ok(Value::Str(Rc::new(out)))
         }
         "re_captures" => {
             want(1)?;
@@ -146,10 +188,31 @@ pub fn method(
         "re_split" => {
             want(1)?;
             let re = compiled(pattern(0)?, line, col)?;
+            pieces_guard(name, s, || re.split(s).count(), line, col)?;
             Ok(Value::array(re.split(s).map(str_val).collect()))
         }
         _ => Err(HelixError::new(format!("`{name}` is not a regex method"), line, col)),
     }
+}
+
+/// The array-size guard for `re_find_all`/`re_split`: one fresh string per piece. The
+/// pieces never hold more text than the input, and there are at most `len + 1` of them, so
+/// an input under ~22 MB needs no count at all; only a larger one runs `count` (one more
+/// pass of the regex) to see whether it really passes the budget.
+#[cfg(feature = "regex")]
+fn pieces_guard(
+    name: &str,
+    s: &str,
+    count: impl FnOnce() -> usize,
+    line: usize,
+    col: usize,
+) -> Result<(), HelixError> {
+    use crate::interp::growth::{STR_ELEMENT, check_array};
+    let size = |n: usize| n.saturating_mul(STR_ELEMENT).saturating_add(s.len());
+    if size(s.len() + 1) <= crate::value::MATERIALIZE_BUDGET {
+        return Ok(());
+    }
+    check_array(name, size(count()), line, col)
 }
 
 /// The error a regex method answers with in a build without the `regex` feature — ADR
