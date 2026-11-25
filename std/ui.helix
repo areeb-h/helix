@@ -3305,9 +3305,12 @@ fn record_event(spec, path, ev, inputs, model) = do {
 
 # Replay a recorded session and check every screen. Prints one line per step that differs
 # (at most 5), then a summary; raises — exit status 1 — if any differ.
-export fn replay_check(spec, path) = do {
-  entries = read_text(path).split("\n").filter((l) => l.count() > 0).map((l) => l.parse_json())
-  out = entries.reduce({model: spec.init, n: 0, bad: []}, (acc, x) => do {
+export fn replay_check(spec, path, startup = "") = do {
+  # The `startup` line was replayed before the program ran (src/tape.rs); here it is only skipped.
+  entries = read_text(path).split("\n").filter((l) => l.count() > 0).map((l) => l.parse_json()).filter((x) => x.get("ev").is_missing() == false)
+  # `startup` is "" when `main` used the recording exactly, else why not.
+  first_bad = if (startup ?? "") == "" then [] else [{step: 0, ev: {msg: "(startup: before ui.app)"}, want: "", got: "", diverged: "startup: {startup}"}]
+  out = entries.reduce({model: spec.init, n: 0, bad: first_bad}, (acc, x) => do {
     # A log from before the input tape has no `inputs`: an app that read nothing.
     opened = tape_begin(x.get("inputs") ?? "[]")
     m = step(spec, acc.model, x.ev)
@@ -3440,11 +3443,15 @@ fn adopt(spec, kept) = if kept.is_missing() then spec.init else do {
 }
 
 export fn app(spec) = do {
+  # In a recorded or replayed session the whole program has been on the input tape since it
+  # started (src/tape.rs): close it here. What `main` read before this call is the session's
+  # `startup`. Outside a session no tape is open, and this is `missing`.
+  startup = tape_end()
   rp = session_replay_path()
-  if rp.is_missing() then serve_app(spec) else replay_check(spec, rp)
+  if rp.is_missing() then serve_app(spec, startup) else replay_check(spec, rp, startup)
 }
 
-fn serve_app(spec) = do {
+fn serve_app(spec, startup = missing) = do {
   port = if spec.get("port").is_missing() then 8080 else spec.port
   l = listen(port)
   generation = dev_generation()
@@ -3452,6 +3459,12 @@ fn serve_app(spec) = do {
   d0 = design_of(spec, spec.init, missing)
   rt0 = {...session(port), rec: session_record_path(), dev: not generation.is_missing(), design: d0, css: css_with(spec, d0), title: "{spec.title}", client: sha256(CLIENT), known: {"": true}, util: ""}
   rt = with_classes(rt0, (spec.view)(spec.init)).rt
+  # A recording starts with what the program read before `ui.app`, and starts a fresh file:
+  # one file is one session.
+  begun = if rt.rec.is_missing() then false else do {
+    first = {startup: startup ?? "[]"}.to_json()
+    "{first}\n".write_to(rt.rec)
+  }
   url = "http://127.0.0.1:{port}/?token={rt.token}"
   # Under `--watch` the supervisor reads this line and shows the link once, on the first start.
   logged = elog("{spec.title} on {url}")

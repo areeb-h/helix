@@ -1634,7 +1634,7 @@ Open the input tape: `missing` records what impure builtins return; a recorded t
 
 ### `tape_end()`
 
-Close the input tape: the recorded tape as a string, or (replaying) "" when the recording was used exactly, else why not.
+Close the input tape: the recorded tape as a string, or (replaying) "" when the recording was used exactly, else why not; missing if none is open.
 
 **Note:** SESSION REPLAY. A replay diverges when the app asks for a different input than the recording holds, or fewer or more of them; the string names the call. Keywords: tape, record, replay, divergence.
 

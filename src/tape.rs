@@ -67,7 +67,10 @@ pub fn takes_method(name: &str) -> bool {
 }
 
 fn is_open() -> bool {
-    TAPE.with(|t| !matches!(*t.borrow(), Tape::Off))
+    // Constant folding (ADR 0050) tries calls while the program loads and abandons any that
+    // turn out impure. Those attempts are the compiler's, not the program's: they never reach
+    // the world, and taping them would make a recording depend on what the folder tried.
+    !crate::fold::sandbox_active() && TAPE.with(|t| !matches!(*t.borrow(), Tape::Off))
 }
 
 /// Run `call` through the tape under `label`: record what it returns, or return what was
@@ -97,8 +100,9 @@ pub fn through(
     }
     let next = TAPE.with(|t| match &mut *t.borrow_mut() {
         Tape::Replay { queue, diverged } => {
-            if diverged.is_some() {
-                return Err("(already diverged)".to_string());
+            // After a divergence nothing more is replayed; every later call says why.
+            if let Some(w) = diverged {
+                return Err(w.clone());
             }
             let e = queue.pop_front();
             let why = match &e {
@@ -136,6 +140,35 @@ pub fn through(
     Err(err)
 }
 
+/// Open the tape for the whole program, before it runs, when a session is being recorded or
+/// replayed. Without this, code an app runs before `ui.app` — first-run setup, a migration —
+/// would read and write the replaying machine's world. `std.ui`'s `app()` closes it
+/// (`tape_end()`) and records it as the session's `startup`; a replay reads that line here,
+/// first, so `main`'s reads return what they returned on the device and its writes don't happen.
+///
+/// Called on the evaluating thread (the tape is thread-local), by `helix run` only.
+pub fn open_for_program() {
+    let next = if let Ok(path) = std::env::var("HELIX_REPLAY").map(std::path::PathBuf::from) {
+        // The first line of a log written since the startup tape exists is `{"startup": …}`.
+        // An older log, or one that can't be read, replays with an empty startup: a program
+        // that reads nothing before `ui.app` replays exactly; one that does is told where.
+        let startup = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| s.lines().next().map(str::to_string))
+            .and_then(|l| serde_json::from_str::<J>(&l).ok())
+            .and_then(|j| j.get("startup").and_then(J::as_str).map(str::to_string))
+            .and_then(|t| serde_json::from_str::<J>(&t).ok())
+            .and_then(|j| j.as_array().cloned())
+            .unwrap_or_default();
+        Tape::Replay { queue: startup.into(), diverged: None }
+    } else if std::env::var_os("HELIX_RECORD").is_some_and(|p| !p.is_empty()) {
+        Tape::Record(Vec::new())
+    } else {
+        return;
+    };
+    TAPE.with(|t| *t.borrow_mut() = next);
+}
+
 // --- The builtins. -------------------------------------------------------------------------
 
 /// `tape_begin(recorded)` — open the tape. `missing` records; a string (what `tape_end`
@@ -169,14 +202,15 @@ pub fn tape_begin(args: &[Value], line: usize, col: usize) -> Result<Value, Heli
 }
 
 /// `tape_end()` — close the tape. Recording: the tape, as a JSON string. Replaying: `""` when
-/// every recorded input was used exactly as recorded, otherwise why it was not.
+/// every recorded input was used exactly as recorded, otherwise why it was not. `missing` when
+/// no tape is open (so `ui.app` can close the program's startup tape, if there is one).
 pub fn tape_end(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
     if !args.is_empty() {
         return Err(HelixError::new(format!("`tape_end` takes no arguments, got {}", args.len()), line, col));
     }
     let was = TAPE.with(|t| std::mem::replace(&mut *t.borrow_mut(), Tape::Off));
     let out = match was {
-        Tape::Off => return Err(HelixError::new("`tape_end`: the tape is not open", line, col)),
+        Tape::Off => return Ok(Value::Missing),
         Tape::Record(v) => J::Array(v).to_string(),
         Tape::Replay { diverged: Some(w), .. } => w,
         Tape::Replay { queue, .. } if !queue.is_empty() => format!(
@@ -325,6 +359,9 @@ mod tests {
         let e = through("read_text", 0, 0, || panic!("replay must not run the builtin")).unwrap_err();
         assert_eq!((e.message.as_str(), e.hint.as_deref()), ("no such file", Some("check the path")));
         assert!(matches!(tape_end(&[], 0, 0).unwrap(), Value::Str(s) if s.is_empty()));
+
+        // Closing a closed tape answers `missing`: there was nothing to close.
+        assert!(matches!(tape_end(&[], 0, 0).unwrap(), Value::Missing));
 
         // Asking for something else is a divergence, named.
         tape_begin(&[Value::Str(tape)], 0, 0).unwrap();

@@ -2328,6 +2328,9 @@ fn run_file_capture_args(
     }
     // Errors render against the spans the loader produced, so a cross-module error
     // points at the dependency's own source and line (not the entry file).
+    // Session record / replay: the whole program goes on the input tape, not only an app's
+    // `update` and `view` — `main`'s own setup reads and writes too (src/tape.rs).
+    tape::open_for_program();
     run_program(&mut stmts, &loaded.spans, loaded.multi_module)
 }
 

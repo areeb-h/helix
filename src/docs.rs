@@ -1210,7 +1210,7 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
     DocEntry {
         name: "tape_end",
         sig: "tape_end()",
-        doc: "Close the input tape: the recorded tape as a string, or (replaying) \"\" when the recording was used exactly, else why not.",
+        doc: "Close the input tape: the recorded tape as a string, or (replaying) \"\" when the recording was used exactly, else why not; missing if none is open.",
         example: "tape_end()",
         example_out: "",
         notes: "SESSION REPLAY. A replay diverges when the app asks for a different input than the recording holds, or fewer or more of them; the string names the call. Keywords: tape, record, replay, divergence.",
