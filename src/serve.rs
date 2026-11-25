@@ -75,6 +75,11 @@ pub enum NetHandle {
         /// sends `Connection: keep-alive` instead of closing.
         open: Cell<bool>,
         event: Cell<bool>,
+        /// Whether the request now being answered asked to keep the connection open
+        /// (`wants_keep_alive`). Set by `poll_request` for each request it carves out, and
+        /// read by `respond`: on the event-loop path the request is handed to the program,
+        /// not stored here, so this is how the reply knows what the client asked for.
+        persist: Cell<bool>,
         /// WHICH KIND of streaming response is open, which decides how `send` frames the
         /// next piece and whether `close` owes a terminator. A bool could not express it:
         /// an SSE stream and an HTTP/1.0 chunkless stream are both "not chunked" and are
@@ -561,6 +566,7 @@ fn finish_connection(
             inbuf: RefCell::new(Vec::new()),
             open: Cell::new(true),
             event: Cell::new(false),
+            persist: Cell::new(false),
             stream_mode: Cell::new(Streaming::No),
             peer,
         }))),
@@ -853,8 +859,8 @@ fn parse_request(
 /// - a **string** is sent as `text/plain`;
 /// - any other value is serialized as JSON.
 pub fn respond(handle: &Rc<NetHandle>, value: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
-    let (cell, event, open) = match &**handle {
-        NetHandle::Conn { stream, event, open, .. } => (stream, event, open),
+    let (cell, event, open, persist) = match &**handle {
+        NetHandle::Conn { stream, event, open, persist, .. } => (stream, event, open, persist),
         _ => {
             return Err(HelixError::new(
                 "`respond` works on a connection from `accept()`, not a listener",
@@ -884,9 +890,16 @@ pub fn respond(handle: &Rc<NetHandle>, value: &Value, line: usize, col: usize) -
     }
     // Content-Length and Connection are computed here (a custom `headers` value can't
     // override them — see `merge_headers`), so they are appended after the user's. An
-    // event-loop connection (`accept_poll`) is kept alive for the next request; a plain
-    // blocking connection is closed after the reply.
-    let ka = event.get();
+    // event-loop connection (`accept_poll`) is kept alive for the next request **when the
+    // client asked for that** (`wants_keep_alive`); a plain blocking connection is closed
+    // after the reply.
+    //
+    // Keeping every event-loop connection open was a bug: HTTP/1.0 closes after each
+    // reply unless the client says otherwise, and any version may send
+    // `Connection: close`. A client that reads to end-of-stream (the 1.0 framing) then
+    // sat until its own timeout, and told the server it would close while the server
+    // held the socket.
+    let ka = event.get() && persist.get();
     let conn_hdr = if ka { "keep-alive" } else { "close" };
     let _ = write!(head, "Content-Length: {}\r\nConnection: {conn_hdr}\r\n\r\n", body.len());
     head.push_str(&body);
@@ -922,7 +935,40 @@ pub fn respond(handle: &Rc<NetHandle>, value: &Value, line: usize, col: usize) -
     // undeliverable response and keep the program's accept loop alive.
     let _ = write(&mut stream);
     let _ = stream.shutdown(Shutdown::Both);
+    // An event-loop connection closed here must say so, or the loop keeps polling a
+    // socket that is gone. (A blocking connection's `open` is otherwise inert.)
+    open.set(false);
     Ok(Value::Unit)
+}
+
+/// Whether the client asked to keep the connection open after this reply (RFC 9112 §9.3):
+/// HTTP/1.1 and later persist unless `Connection` lists `close`; HTTP/1.0 persists only if
+/// it lists `keep-alive` (and not `close`); 0.9 never does. `Connection` is a
+/// comma-separated, case-insensitive token list and may be sent more than once.
+fn wants_keep_alive(request: &Value) -> bool {
+    let Value::Record(fields) = request else { return false };
+    let k = request_keys();
+    let mut version = "1.0";
+    let (mut close, mut keep) = (false, false);
+    for (key, v) in fields.iter() {
+        match v {
+            Value::Str(s) if *key == k.6 => version = s.as_str(),
+            Value::Headers(hs) if *key == k.3 => {
+                for (_, val) in hs.iter().filter(|(n, _)| n.eq_ignore_ascii_case("connection")) {
+                    for tok in val.split(',').map(str::trim) {
+                        close |= tok.eq_ignore_ascii_case("close");
+                        keep |= tok.eq_ignore_ascii_case("keep-alive");
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    match version {
+        "1.1" | "2.0" => !close,
+        "1.0" => keep && !close,
+        _ => false,
+    }
 }
 
 /// The result of trying to parse one request out of a connection's accumulated bytes.
@@ -1044,6 +1090,7 @@ pub fn accept_poll(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Va
                 inbuf: RefCell::new(Vec::new()),
                 open: Cell::new(true),
                 event: Cell::new(true),
+                persist: Cell::new(false),
                 stream_mode: Cell::new(Streaming::No),
                 peer: peer_value(&peer),
             })))
@@ -1058,8 +1105,8 @@ pub fn accept_poll(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Va
 /// else `missing`. `missing` means either "not ready yet" (still open — check `is_open`) or
 /// "closed" (`is_open` is now false). A malformed/oversized request closes the connection.
 pub fn poll_request(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, HelixError> {
-    let (stream, inbuf, open, peer) = match &**handle {
-        NetHandle::Conn { stream, inbuf, open, peer, .. } => (stream, inbuf, open, peer),
+    let (stream, inbuf, open, peer, persist) = match &**handle {
+        NetHandle::Conn { stream, inbuf, open, peer, persist, .. } => (stream, inbuf, open, peer, persist),
         _ => {
             return Err(HelixError::new(
                 "`poll_request` works on a connection from `accept_poll()`",
@@ -1116,6 +1163,7 @@ pub fn poll_request(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<V
     match parse_request_buf(&buf, peer) {
         BufParse::Complete(req, consumed) => {
             buf.drain(..consumed);
+            persist.set(wants_keep_alive(&req));
             INBUF_PENDING.with(|c| c.set(c.get().saturating_sub(consumed)));
             // `drain` keeps capacity: without this a connection that once carried a
             // large body holds its high-water buffer for its whole keep-alive life
