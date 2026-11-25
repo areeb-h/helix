@@ -3265,12 +3265,14 @@ fn ack_of(ev) = do {
 # event must not take the app down with it. Under `HELIX_RECORD` (`rec`), the event is also
 # recorded with the hash of the screen it led to — see "Session replay" below.
 fn step(spec, model, ev, rec = missing) = do {
+  opened = if rec.is_missing() then false else tape_begin(missing)
   tried = try (spec.update)(model, ev)
+  inputs = if rec.is_missing() then "" else tape_end()
   next = if tried.ok then tried.value else do {
     logged = elog("update failed on {ev.to_json()}: {tried.error}")
     model
   }
-  recorded = if rec.is_missing() then false else record_event(spec, rec, ev, next)
+  recorded = if rec.is_missing() then false else record_event(spec, rec, ev, inputs, next)
   next
 }
 
@@ -3282,14 +3284,22 @@ fn step(spec, model, ev, rec = missing) = do {
 # it — on another machine, another engine, another build — is the same fold; every screen is
 # re-rendered and must hash the same. A different hash is a different screen.
 #
+# What `update` and `view` read from the world — `now()`, files, the network, processes — is
+# recorded too, on the input tape (`tape_begin` / `tape_end`, src/tape.rs): `inputs` for the
+# update, `view_inputs` for the screen. Replaying, those calls do not run; they return what
+# they returned on the device, so a replay reaches nothing and writes nothing.
+#
 # Known gaps (prototype): a view that raises undoes its round in `serve` but is recorded
 # here as "view-failed"; a `--watch` model handover is not recorded; the log is user data.
 fn screen_hash(spec, model) = do {
   shown = try render((spec.view)(model))
   if shown.ok then sha256(shown.value) else "view-failed"
 }
-fn record_event(spec, path, ev, model) = do {
-  line = {ev: ev, screen: screen_hash(spec, model)}.to_json()
+fn record_event(spec, path, ev, inputs, model) = do {
+  opened = tape_begin(missing)
+  screen = screen_hash(spec, model)
+  view_inputs = tape_end()
+  line = {ev: ev, inputs: inputs, screen: screen, view_inputs: view_inputs}.to_json()
   "{line}\n".append_to(path)
 }
 
@@ -3298,12 +3308,19 @@ fn record_event(spec, path, ev, model) = do {
 export fn replay_check(spec, path) = do {
   entries = read_text(path).split("\n").filter((l) => l.count() > 0).map((l) => l.parse_json())
   out = entries.reduce({model: spec.init, n: 0, bad: []}, (acc, x) => do {
+    # A log from before the input tape has no `inputs`: an app that read nothing.
+    opened = tape_begin(x.get("inputs") ?? "[]")
     m = step(spec, acc.model, x.ev)
+    why = tape_end()
+    opened_view = tape_begin(x.get("view_inputs") ?? "[]")
     got = screen_hash(spec, m)
-    bad = if got == x.screen then acc.bad else acc.bad.concat([{step: acc.n + 1, ev: x.ev, want: x.screen, got: got}])
+    why_view = tape_end()
+    diverged = if why != "" then "update: {why}" else if why_view != "" then "view: {why_view}" else ""
+    ok = got == x.screen and diverged == ""
+    bad = if ok then acc.bad else acc.bad.concat([{step: acc.n + 1, ev: x.ev, want: x.screen, got: got, diverged: diverged}])
     {model: m, n: acc.n + 1, bad: bad}
   })
-  shown = out.bad.take(5).map((b) => print("step {b.step}: screen differs after {b.ev.to_json()} (recorded {b.want.take(12)}, replayed {b.got.take(12)})"))
+  shown = out.bad.take(5).map((b) => print(if b.diverged != "" then "step {b.step}: inputs diverged after {b.ev.to_json()}: {b.diverged}" else "step {b.step}: screen differs after {b.ev.to_json()} (recorded {b.want.take(12)}, replayed {b.got.take(12)})"))
   if out.bad.count() == 0 then print("replay ok: {out.n} events, {out.n} screens identical to the recording") else raise("replay FAILED: {out.bad.count()} of {out.n} screens differ from the recording", "the app's update or view changed what the user saw; the first differing step is listed above")
 }
 

@@ -1200,6 +1200,22 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         notes: "SESSION REPLAY. An app is a fold of `update` over its events, so the event log IS the session. A host sets `HELIX_RECORD` and every event an app handles — clicks and timer ticks alike — is appended as one JSON line with the SHA-256 of the screen it produced. Keywords: record, session, replay, event log, crash report.",
     },
     DocEntry {
+        name: "tape_begin",
+        sig: "tape_begin(recorded)",
+        doc: "Open the input tape: `missing` records what impure builtins return; a recorded tape replays it without running them.",
+        example: "tape_begin(missing)",
+        example_out: "",
+        notes: "SESSION REPLAY. `std.ui` opens the tape around an app's `update` and `view`, so a replay sees exactly what the device saw from `now()`, files, the network and processes — and, replaying, reaches none of them and writes nothing. Close it with `tape_end()`. Keywords: tape, record, replay, inputs, determinism.",
+    },
+    DocEntry {
+        name: "tape_end",
+        sig: "tape_end()",
+        doc: "Close the input tape: the recorded tape as a string, or (replaying) \"\" when the recording was used exactly, else why not.",
+        example: "tape_end()",
+        example_out: "",
+        notes: "SESSION REPLAY. A replay diverges when the app asks for a different input than the recording holds, or fewer or more of them; the string names the call. Keywords: tape, record, replay, divergence.",
+    },
+    DocEntry {
         name: "session_replay_path",
         sig: "session_replay_path()",
         doc: "The file `HELIX_REPLAY` names: a recorded session `std.ui` replays and checks instead of serving; otherwise missing.",

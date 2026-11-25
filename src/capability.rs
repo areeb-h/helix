@@ -505,6 +505,10 @@ mod tests {
             // file itself is reached by `append_to` / `read_text`, which spend fs authority.
             "session_record_path",
             "session_replay_path",
+            // The input tape opens and closes a thread-local recording; it reaches nothing.
+            // What runs under it is gated as usual (and, replaying, does not run at all).
+            "tape_begin",
+            "tape_end",
             // A native window that shows ONLY the app's own `http://127.0.0.1:<port>` page:
             // any other URL is refused before anything opens, navigation away from that origin
             // is refused inside the window, and pages cannot open more windows. It reaches

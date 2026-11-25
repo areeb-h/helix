@@ -1622,6 +1622,26 @@ The file `HELIX_REPLAY` names: a recorded session `std.ui` replays and checks in
 missing
 ```
 
+### `tape_begin(recorded)`
+
+Open the input tape: `missing` records what impure builtins return; a recorded tape replays it without running them.
+
+**Note:** SESSION REPLAY. `std.ui` opens the tape around an app's `update` and `view`, so a replay sees exactly what the device saw from `now()`, files, the network and processes — and, replaying, reaches none of them and writes nothing. Close it with `tape_end()`. Keywords: tape, record, replay, inputs, determinism.
+
+```
+>>> tape_begin(missing)
+```
+
+### `tape_end()`
+
+Close the input tape: the recorded tape as a string, or (replaying) "" when the recording was used exactly, else why not.
+
+**Note:** SESSION REPLAY. A replay diverges when the app asks for a different input than the recording holds, or fewer or more of them; the string names the call. Keywords: tape, record, replay, divergence.
+
+```
+>>> tape_end()
+```
+
 ### `utility_css(classes)`
 
 The stylesheet for the utility classes among `classes` — Tailwind's names, Helix's tokens, no build step.

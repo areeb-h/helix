@@ -22,7 +22,13 @@ impl super::Interp {
         line: usize,
         col: usize,
     ) -> Result<Value, HelixError> {
-        let out = self.call_builtin_arm(name, args, line, col)?;
+        // Session replay: while std.ui runs an app's own code, what an impure builtin returns
+        // is recorded — or, replaying, returned from the recording without running it.
+        let out = if crate::tape::takes_builtin(name) {
+            crate::tape::through(name, line, col, || self.call_builtin_arm(name, args, line, col))?
+        } else {
+            self.call_builtin_arm(name, args, line, col)?
+        };
         // The folding sandbox pays for what a builtin PRODUCES as well as what it is
         // handed (ADR 0050): `to_array(range(0, n))` costs `n`, so no attempt holds more
         // than its budget. A field read, nothing on an engine's path.
@@ -152,6 +158,8 @@ impl super::Interp {
             "dev_generation" => return crate::devwatch::dev_generation(&args, line, col),
             "session_record_path" => return crate::devwatch::session_record_path(&args, line, col),
             "session_replay_path" => return crate::devwatch::session_replay_path(&args, line, col),
+            "tape_begin" => return crate::tape::tape_begin(&args, line, col),
+            "tape_end" => return crate::tape::tape_end(&args, line, col),
             "open_window" => return crate::desktop::open_window(&args, line, col),
             "url_encode" => return encoding::a_url_encode(args, line, col),
             "url_decode" => return encoding::a_url_decode(name, args, line, col),

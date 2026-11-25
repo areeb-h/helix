@@ -114,6 +114,7 @@ mod sam {
 mod serve;
 mod simd;
 mod stats;
+mod tape;
 mod view;
 mod style;
 mod style_palette;

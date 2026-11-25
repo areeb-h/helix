@@ -112,6 +112,22 @@ pub(crate) fn call_method(
     line: usize,
     col: usize,
 ) -> Result<Value, HelixError> {
+    // Session replay: a write method run by an app's own code is taped like an impure
+    // builtin — replaying, it writes nothing and returns what it returned on the device.
+    if crate::tape::takes_method(name) {
+        let label = format!(".{name}");
+        return crate::tape::through(&label, line, col, || call_method_untaped(recv, name, args, line, col));
+    }
+    call_method_untaped(recv, name, args, line, col)
+}
+
+fn call_method_untaped(
+    recv: &Value,
+    name: &str,
+    args: &[Value],
+    line: usize,
+    col: usize,
+) -> Result<Value, HelixError> {
     // `is_missing` is universal: true only for the `missing` value itself.
     if name == "is_missing" {
         if !args.is_empty() {
