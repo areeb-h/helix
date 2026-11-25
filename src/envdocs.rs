@@ -131,7 +131,7 @@ pub static ENV: &[EnvDoc] = &[
         values: "a file path",
         default: "unset — nothing is recorded",
         doc: "Session replay: `std.ui` appends every event and its screen's hash here.",
-        notes: "Read by `session_record_path()`. A header line `{session, app, startup}`, then one JSON line per round: `{events, calls, screen, undone}`. Starts a fresh file. Writing it spends `fs-write`. The log holds what the user typed and what the app read (file contents, responses, host names): treat it as user data. Ignored under `--watch`. Keywords: record, session, replay.",
+        notes: "Read by `session_record_path()`. A header line `{session, app, program, startup}` (`program`: `session_program()`), then one JSON line per round: `{events, calls, screen, undone}`. Starts a fresh file. Writing it spends `fs-write`. The log holds what the user typed and what the app read (file contents, responses, host names): treat it as user data. Ignored under `--watch`. Keywords: record, session, replay.",
     },
     EnvDoc {
         name: "HELIX_REPLAY",
@@ -139,6 +139,13 @@ pub static ENV: &[EnvDoc] = &[
         default: "unset — the app serves as usual",
         doc: "Session replay: replay and verify this recorded session instead of serving.",
         notes: "Read by `session_replay_path()`. Exits 0 when every round replays to the screen recorded; 1, naming the rounds, when a screen differs or the app's calls differ from the device's. A file of another session format is refused. Keywords: replay, verify, regression.",
+    },
+    EnvDoc {
+        name: "HELIX_REPLAY_VIEW",
+        values: "a file path ending in .html",
+        default: "unset — no viewer is written",
+        doc: "Session replay: also write a self-contained HTML viewer that steps through the replayed rounds.",
+        notes: "Read by `session_view_path()`, only while replaying. `helix replay <log> <app> --view <file>` sets it for one run. The viewer shows each round's screen, its events, what the app read, and whether it matched; it holds the session's contents, so it is user data like the log. Keywords: replay, viewer, bug report, send session.",
     },
     EnvDoc {
         name: "HELIX_DEV_GENERATION",

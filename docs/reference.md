@@ -1600,6 +1600,17 @@ Show this app's own page in a native window; true if one opened, false where non
 >>> open_window("http://127.0.0.1:8080/", "My app", 1100, 760)
 ```
 
+### `session_program()`
+
+In a recorded or replayed run, `{sha256, modules, args, helix}`: a fingerprint of every module the program loaded, the command line `main` was given, and this Helix's version; otherwise missing.
+
+**Note:** SEND-SESSION. `std.ui` writes it into a session's header. A replay compares it with its own: the same program is a reproduction, another one (an edit, a new Helix) tests that change against the session, and the replay says which. `helix replay` runs `main` with the recorded `args`. The fingerprint covers module sources in load order, not file names. Keywords: session, program, fingerprint, version, reproduce.
+
+```
+>>> session_program()
+missing
+```
+
 ### `session_record_path()`
 
 The file `HELIX_RECORD` names, where `std.ui` records the session — each round's events, what the app read, the screen it drew; otherwise missing.
@@ -1619,6 +1630,17 @@ The file `HELIX_REPLAY` names: a recorded session `std.ui` replays and checks in
 
 ```
 >>> session_replay_path()
+missing
+```
+
+### `session_view_path()`
+
+Where a replay writes its session viewer (`HELIX_REPLAY_VIEW`, or `helix replay --view`); otherwise missing.
+
+**Note:** SEND-SESSION. The viewer is one self-contained HTML file: every round's screen as replayed (in a sandboxed frame), the events that caused it, what the app read from the world, and whether it matched the recording. It needs no Helix, server or network, so it is what a bug report links to; `#round=N` opens a round. Keywords: replay, viewer, bug report, session, timeline.
+
+```
+>>> session_view_path()
 missing
 ```
 
@@ -1803,7 +1825,7 @@ Session replay: `std.ui` appends every event and its screen's hash here.
 - **Values:** a file path
 - **Unset:** unset — nothing is recorded
 
-**Note:** Read by `session_record_path()`. A header line `{session, app, startup}`, then one JSON line per round: `{events, calls, screen, undone}`. Starts a fresh file. Writing it spends `fs-write`. The log holds what the user typed and what the app read (file contents, responses, host names): treat it as user data. Ignored under `--watch`. Keywords: record, session, replay.
+**Note:** Read by `session_record_path()`. A header line `{session, app, program, startup}` (`program`: `session_program()`), then one JSON line per round: `{events, calls, screen, undone}`. Starts a fresh file. Writing it spends `fs-write`. The log holds what the user typed and what the app read (file contents, responses, host names): treat it as user data. Ignored under `--watch`. Keywords: record, session, replay.
 
 ### `HELIX_REPLAY`
 
@@ -1813,6 +1835,15 @@ Session replay: replay and verify this recorded session instead of serving.
 - **Unset:** unset — the app serves as usual
 
 **Note:** Read by `session_replay_path()`. Exits 0 when every round replays to the screen recorded; 1, naming the rounds, when a screen differs or the app's calls differ from the device's. A file of another session format is refused. Keywords: replay, verify, regression.
+
+### `HELIX_REPLAY_VIEW`
+
+Session replay: also write a self-contained HTML viewer that steps through the replayed rounds.
+
+- **Values:** a file path ending in .html
+- **Unset:** unset — no viewer is written
+
+**Note:** Read by `session_view_path()`, only while replaying. `helix replay <log> <app> --view <file>` sets it for one run. The viewer shows each round's screen, its events, what the app read, and whether it matched; it holds the session's contents, so it is user data like the log. Keywords: replay, viewer, bug report, send session.
 
 ### `HELIX_DEV_GENERATION`
 

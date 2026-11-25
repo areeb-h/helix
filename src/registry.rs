@@ -58,7 +58,7 @@ pub fn category_of(name: &str) -> &'static str {
         "chr" | "ord" | "to_float" | "to_int" | "numerator" | "denominator"
         | "from_hex" | "from_base64" | "html_escape" => "conversion",
         // An app's view tree, rendered and diffed (ADR 0055).
-        "view_html" | "view_diff" | "view_classes" | "utility_css" | "dev_generation" | "session_record_path" | "session_replay_path" | "tape_begin" | "tape_end" | "open_window" => "ui",
+        "view_html" | "view_diff" | "view_classes" | "utility_css" | "dev_generation" | "session_record_path" | "session_replay_path" | "session_view_path" | "session_program" | "tape_begin" | "tape_end" | "open_window" => "ui",
         // Math — elementwise, broadcasting, missing-propagating.
         "sqrt" | "cbrt" | "abs" | "exp" | "ln" | "log10" | "log2" | "log" | "sin" | "cos"
         | "tan" | "asin" | "acos" | "atan" | "atan2" | "sinh" | "cosh" | "tanh" | "floor"
@@ -190,6 +190,8 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "dev_generation", pure: false },
     BuiltinDef { path: "session_record_path", pure: false },
     BuiltinDef { path: "session_replay_path", pure: false },
+    BuiltinDef { path: "session_view_path", pure: false },
+    BuiltinDef { path: "session_program", pure: false },
     BuiltinDef { path: "tape_begin", pure: false },
     BuiltinDef { path: "tape_end", pure: false },
     BuiltinDef { path: "open_window", pure: false },
@@ -682,7 +684,8 @@ mod tests {
             BUILTINS.len(),
             // 172 as of `session_record_path` / `session_replay_path` (session replay), no feature.
             // 174 as of `tape_begin` / `tape_end` (the input tape), no feature.
-            174,
+            // 176 as of `session_view_path` / `session_program` (send-session), no feature.
+            176,
             "a builtin was added or removed — decide whether it needs a Cargo feature, add it \
              to `feature_of` if it does, and update this count in the same change"
         );

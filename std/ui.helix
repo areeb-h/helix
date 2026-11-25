@@ -3316,6 +3316,156 @@ fn design_in(spec, model, last, sess) = do {
   }
 }
 
+VIEWER_CSS = """
+:root { color-scheme: light dark; --bg: #f6f6f4; --panel: #fff; --ink: #1b1b1a; --muted: #6b6b66; --line: #e3e3de; --ok: #1f7a44; --ok-bg: #e5f4ea; --bad: #b4232c; --bad-bg: #fbe9ea; --warn: #8a5a00; --warn-bg: #fdf1d8; --ev: #3b5bdb; --focus: #3b5bdb; }
+@media (prefers-color-scheme: dark) { :root { --bg: #121211; --panel: #1c1c1b; --ink: #ececea; --muted: #9a9a94; --line: #2e2e2c; --ok: #5cc98a; --ok-bg: #16301f; --bad: #f2777d; --bad-bg: #3a1a1c; --warn: #f0c060; --warn-bg: #33280f; --ev: #8ea4ff; } }
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--ink); height: 100vh; display: grid; grid-template-rows: auto 1fr auto; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; padding: 14px 20px 10px; border-bottom: 1px solid var(--line); }
+h1 { font-size: 17px; margin: 0; font-weight: 650; }
+.pill { font-size: 12.5px; font-weight: 600; padding: 2px 10px; border-radius: 999px; }
+.pill.ok { color: var(--ok); background: var(--ok-bg); } .pill.bad { color: var(--bad); background: var(--bad-bg); }
+.meta { color: var(--muted); font-size: 12.5px; }
+.body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 380px); min-height: 0; }
+.stage { display: grid; place-items: center; padding: 18px; min-height: 0; }
+.phone { height: 100%; max-height: 900px; aspect-ratio: 412 / 892; border: 10px solid #111; border-radius: 34px; overflow: hidden; background: #fff; box-shadow: 0 10px 30px rgb(0 0 0 / .18); box-sizing: content-box; }
+.phone iframe { width: 412px; height: 892px; border: 0; display: block; background: #fff; transform-origin: 0 0; }
+aside { border-left: 1px solid var(--line); background: var(--panel); padding: 16px 18px; overflow: auto; }
+h2 { font-size: 15px; margin: 0 0 10px; } h3 { font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 18px 0 6px; font-weight: 600; }
+.verdict { padding: 8px 10px; border-radius: 8px; font-size: 13px; }
+.verdict.ok { color: var(--ok); background: var(--ok-bg); } .verdict.bad { color: var(--bad); background: var(--bad-bg); } .verdict.warn { color: var(--warn); background: var(--warn-bg); }
+ul { list-style: none; margin: 0; padding: 0; } li { padding: 4px 0; border-bottom: 1px solid var(--line); } li:last-child { border-bottom: 0; }
+code { font: 12.5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+.none { color: var(--muted); font-style: italic; }
+.call { color: var(--muted); font-size: 12px; } .err { color: var(--bad); }
+footer { border-top: 1px solid var(--line); padding: 10px 20px 14px; display: grid; gap: 8px; background: var(--panel); }
+.controls { display: flex; gap: 6px; align-items: center; }
+button { font: inherit; font-size: 13px; padding: 5px 11px; border-radius: 7px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); cursor: pointer; }
+button:hover { border-color: var(--muted); } button:disabled { opacity: .45; cursor: default; }
+button:focus-visible, .ticks button:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.where { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12.5px; }
+.ticks { display: flex; height: 26px; gap: 1px; align-items: stretch; }
+.ticks button { flex: 1 1 0; min-width: 0; padding: 0; border: 0; border-radius: 2px; background: var(--line); }
+.ticks button.ev { background: color-mix(in srgb, var(--ev) 45%, var(--line)); }
+.ticks button.bad { background: var(--bad); }
+.ticks button.here { background: var(--ink); }
+@media (max-width: 760px) { .body { grid-template-columns: 1fr; grid-template-rows: 60vh auto; } aside { border-left: 0; border-top: 1px solid var(--line); } }
+"""
+
+VIEWER_JS = """
+(() => {
+  const D = JSON.parse(document.getElementById('session').textContent);
+  const R = D.rounds;
+  const el = (tag, attrs = {}, ...kids) => {
+    const e = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs)) if (k === 'class') e.className = v; else if (k === 'text') e.textContent = v; else e.setAttribute(k, v);
+    e.append(...kids);
+    return e;
+  };
+  const short = (v) => { const s = JSON.stringify(v); return s === undefined ? '' : s.length > 120 ? s.slice(0, 117) + '…' : s; };
+
+  // Header: what this is, and whether it matched.
+  const bad = R.filter((r) => r.problem).length;
+  const prog = D.same === true ? 'the same program as recorded' : D.same === false ? 'a different program from the recording: this replay tests the change' : '';
+  const args = D.recorded && D.recorded.args && D.recorded.args.length ? 'arguments: ' + D.recorded.args.join(' ') : '';
+  const helix = D.recorded ? 'recorded with Helix ' + D.recorded.helix : '';
+  document.body.append(
+    el('header', {}, el('h1', {text: D.app}), el('span', {class: 'pill ' + (D.ok ? 'ok' : 'bad'), text: D.summary}),
+      el('span', {class: 'meta', text: [prog, args, helix].filter(Boolean).join(' · ')})));
+
+  const frame = el('iframe', {sandbox: '', title: 'The screen after this round'});
+  const side = el('aside', {'aria-live': 'polite'});
+  const phone = el('div', {class: 'phone'}, frame);
+  document.body.append(el('div', {class: 'body'}, el('section', {class: 'stage'}, phone), side));
+  // The screen is laid out at a phone's width (412 CSS px, a typical Android phone) and
+  // scaled to fit, so it wraps as it did on the device instead of at the viewer's size.
+  const fit = () => { frame.style.transform = 'scale(' + (phone.clientWidth / 412) + ')'; };
+  new ResizeObserver(fit).observe(phone);
+
+  const prev = el('button', {text: '← Prev', title: 'Previous round (←)'});
+  const play = el('button', {text: 'Play', title: 'Play (space)'});
+  const next = el('button', {text: 'Next →', title: 'Next round (→)'});
+  const nextEv = el('button', {text: 'Next event', title: 'Next round with an event (E)'});
+  const nextBad = el('button', {text: 'Next difference', title: 'Next round that differs (D)'});
+  const where = el('span', {class: 'where'});
+  const ticks = el('div', {class: 'ticks', role: 'group', 'aria-label': 'Rounds'});
+  const tick = R.map((r, n) => {
+    const b = el('button', {class: (r.problem ? 'bad' : r.events.length ? 'ev' : ''), title: label(n), 'aria-label': label(n)});
+    b.onclick = () => go(n);
+    ticks.append(b);
+    return b;
+  });
+  if (!bad) nextBad.disabled = true;
+  document.body.append(el('footer', {}, el('div', {class: 'controls'}, prev, play, next, nextEv, nextBad, where), ticks));
+
+  function label(n) {
+    const r = R[n];
+    const what = n === 0 ? 'first screen' : r.events.map((e) => e.msg ?? '?').join(', ');
+    return 'Round ' + n + (what ? ': ' + what : '') + (r.problem ? ' (differs)' : '');
+  }
+  function doc(r) {
+    const theme = String(r.theme).replace(/[^a-z-]/gi, '');
+    return '<!doctype html><html data-theme="' + theme + '"><head><meta charset="utf-8"><style>' + D.styles[r.style] + '</style></head><body><main id="root">' + r.html + '</main></body></html>';
+  }
+  function list(items, empty) {
+    return items.length ? el('ul', {}, ...items) : el('p', {class: 'none', text: empty});
+  }
+  let i = 0, timer = null, shown = -1;
+  function go(n) {
+    i = Math.max(0, Math.min(R.length - 1, n));
+    const r = R[i];
+    if (shown < 0 || R[shown].html !== r.html || R[shown].style !== r.style || R[shown].theme !== r.theme) frame.srcdoc = doc(r);
+    if (shown >= 0) tick[shown].classList.remove('here');
+    tick[i].classList.add('here');
+    shown = i;
+    const verdict = r.problem ? el('div', {class: 'verdict bad', text: r.problem})
+      : r.undone ? el('div', {class: 'verdict warn', text: 'The view failed on this round, so its events were undone (as on the device).'})
+      : el('div', {class: 'verdict ok', text: 'Matches the recording.'});
+    const events = r.events.map((e) => el('li', {}, el('code', {text: (e.msg ?? '?') + (e.value === undefined || e.value === null ? '' : ' ' + short(e.value))})));
+    const reads = r.calls.flatMap((c) => c.reads.map((t) => el('li', {}, el('code', {class: t.ok ? '' : 'err', text: t.fn + (t.ok ? '' : ' (failed)')}), ' ', el('span', {class: 'call', text: 'in ' + c.call}))));
+    side.replaceChildren(
+      el('h2', {text: i === 0 ? 'First screen' : 'Round ' + i + ' of ' + (R.length - 1)}), verdict,
+      el('h3', {text: 'Events'}), list(events, i === 0 ? 'None: the screen the app opened with.' : 'None.'),
+      el('h3', {text: 'Read from the world'}), list(reads, 'Nothing: this round used no clock, file, network or process.'),
+      ...(i === 0 && D.startup.length ? [el('h3', {text: 'Before the app started'}), el('div', {class: 'verdict bad', text: D.startup.join('; ')})] : []));
+    where.textContent = (i + 1) + ' / ' + R.length;
+    prev.disabled = i === 0;
+    next.disabled = i === R.length - 1;
+    history.replaceState(null, '', '#round=' + i);
+  }
+  const seek = (from, test) => { for (let n = from + 1; n < R.length; n++) if (test(R[n])) return go(n); };
+  const stop = () => { clearInterval(timer); timer = null; play.textContent = 'Play'; };
+  const toggle = () => {
+    if (timer) return stop();
+    if (i === R.length - 1) go(0);
+    play.textContent = 'Pause';
+    timer = setInterval(() => (i === R.length - 1 ? stop() : go(i + 1)), 250);
+  };
+  prev.onclick = () => { stop(); go(i - 1); };
+  next.onclick = () => { stop(); go(i + 1); };
+  nextEv.onclick = () => { stop(); seek(i, (r) => r.events.length > 0); };
+  nextBad.onclick = () => { stop(); seek(i, (r) => r.problem); };
+  play.onclick = toggle;
+  addEventListener('keydown', (e) => {
+    if (e.target.closest && e.target.closest('input, textarea')) return;
+    const k = e.key;
+    if (k === 'ArrowLeft') { stop(); go(i - 1); }
+    else if (k === 'ArrowRight') { stop(); go(i + 1); }
+    else if (k === 'Home') { stop(); go(0); }
+    else if (k === 'End') { stop(); go(R.length - 1); }
+    else if (k === ' ' && e.target === document.body) toggle();
+    else if (k === 'e' || k === 'E') { stop(); seek(i, (r) => r.events.length > 0); }
+    else if (k === 'd' || k === 'D') { stop(); seek(i, (r) => r.problem); }
+    else return;
+    e.preventDefault();
+  });
+  // A link can point at a round (`#round=48`); otherwise open at the first difference, if any.
+  const m = /round=(\d+)/.exec(location.hash);
+  const first = R.findIndex((r) => r.problem);
+  go(m ? Number(m[1]) : first >= 0 ? first : 0);
+})();
+"""
+
 # --- Session replay --------------------------------------------------------------------------
 #
 # Every call `play_round` makes into the app goes through `app_call`. Outside a session that is just
@@ -3328,7 +3478,10 @@ fn design_in(spec, model, last, sess) = do {
 #
 # The log is one JSON line per round, after a header:
 #
-#   {"session": 2, "app": title, "startup": [calls]}     what `main` read before `ui.app`
+#   {"session": 2, "app": title, "program": p, "startup": [calls]}
+#                                                         `program`: which program, with which
+#                                                         command line (`session_program()`);
+#                                                         `startup`: what `main` read before `ui.app`
 #   {"events": [], "calls": [...], "screen": h}          round 0: the first screen
 #   {"events": [ev, …], "calls": [...], "screen": h, "undone": false}
 #
@@ -3370,10 +3523,13 @@ export fn replay_check(spec, path, startup = missing) = do {
   version = if type_of(head) == "Record" then head.get("session") else missing
   known = if type_of(version) == "Int" then version == SESSION_VERSION else false
   if not known then raise("`{path}` is not a session recorded by this version of Helix (session format {SESSION_VERSION})", "record it again with HELIX_RECORD") else do {
+    which = same_program(head.get("program"), session_program())
+    said = if which.note == "" then false else print(which.note)
+    view = session_view_path()
     why_startup = startup.get("diverged") ?? ""
     bad0 = if why_startup == "" then [] else [{round: "startup", events: [], why: "before ui.app: {why_startup}"}]
     blank = {model: spec.init, tree: missing, theme: "light", design: missing}
-    out = lines.drop(1).reduce({s: blank, n: 0, events: 0, bad: bad0}, (acc, x) => do {
+    out = lines.drop(1).reduce({s: blank, n: 0, events: 0, bad: bad0, shots: [], styles: []}, (acc, x) => do {
       sess = {mode: "replay", calls: x.calls, diverged: ""}
       r = if acc.n == 0 then draw(spec, acc.s, spec.init, sess) else play_round(spec, acc.s, x.events, sess)
       left = if r.sess.calls.count() == 0 then "" else "the recording has {r.sess.calls.count()} more call(s) in this round, starting with `{r.sess.calls[0].call}`, that the app did not make"
@@ -3382,11 +3538,54 @@ export fn replay_check(spec, path, startup = missing) = do {
       same_screen = (got ?? "") == (x.screen ?? "") and r.undone == (x.undone ?? false)
       problem = if why != "" then "inputs diverged — {why}" else if not same_screen then "screen differs (recorded {(x.screen ?? "none").take(12)}, replayed {(got ?? "none").take(12)})" else ""
       bad = if problem == "" then acc.bad else acc.bad.concat([{round: acc.n, events: x.events, why: problem}])
-      {s: r.s, n: acc.n + 1, events: acc.events + x.events.count(), bad: bad}
+      shot = if view.is_missing() then {shots: acc.shots, styles: acc.styles} else shot_of(spec, r, x, problem, acc)
+      {s: r.s, n: acc.n + 1, events: acc.events + x.events.count(), bad: bad, shots: shot.shots, styles: shot.styles}
     })
     shown = out.bad.take(5).map((b) => print("round {b.round} ({b.events.map((e) => e.get("msg") ?? "?").join(", ")}): {b.why}"))
-    if out.bad.count() == 0 then print("replay ok: {out.n} rounds, {out.events} events, every screen identical to the recording") else raise("replay FAILED: {out.bad.count()} of {out.n} rounds differ from the recording", "the first differing rounds are listed above")
+    summary = if out.bad.count() == 0 then "replay ok: {out.n} rounds, {out.events} events, every screen identical to the recording" else "replay FAILED: {out.bad.count()} of {out.n} rounds differ from the recording"
+    wrote = if view.is_missing() then false else do {
+      page = viewer_page(spec, head, which, summary, out)
+      w = page.write_to(view)
+      print("wrote the session viewer: {view}")
+    }
+    if out.bad.count() == 0 then print(summary) else raise(summary, "the first differing rounds are listed above")
   }
+}
+
+# Whether a replay runs the program that was recorded. The same program is a reproduction:
+# every screen must match. Another one (an edit, a new Helix) is a test of that change against
+# a real session. Both are legitimate; the replay says which it is.
+fn same_program(rec, now) = if rec.is_missing() or now.is_missing() then {same: missing, note: "", recorded: rec, replayed: now} else do {
+  same = rec.sha256 == now.sha256
+  helix = if rec.helix == now.helix then "" else " Helix {rec.helix} recorded it; this is Helix {now.helix}."
+  note = if same then "" else "note: this is not the program that was recorded (recorded {rec.sha256.take(12)}, replaying {now.sha256.take(12)}): the session tests the change.{helix}"
+  {same: same, note: note, recorded: rec, replayed: now}
+}
+
+# --- The session viewer ----------------------------------------------------------------------
+#
+# `helix replay log app --view out.html` writes ONE self-contained file: every round's screen as
+# replayed, what triggered it, what the app read from the world, and whether it matched. It is
+# the thing a bug report links to: open it anywhere, no Helix, no server, no network.
+#
+# Screens are shown in sandboxed frames (no scripts run), so the app's content cannot act.
+# Stylesheets are stored once each and referenced by index: most rounds share one.
+
+fn shot_of(spec, r, x, problem, acc) = do {
+  css = "{css_with(spec, r.s.design)}{utility_css(view_classes(r.s.tree))}"
+  at = acc.styles.index_of(css)
+  styles = if at.is_missing() then acc.styles.concat([css]) else acc.styles
+  reads = x.calls.map((c) => {call: c.call, reads: c.tape.map((t) => {fn: t.get("fn") ?? "?", ok: t.get("err").is_missing() and t.get("unrecordable").is_missing()})})
+  shot = {events: x.events, calls: reads, problem: problem, undone: r.undone, drew: r.drew, html: render(r.s.tree), style: at ?? (styles.count() - 1), theme: r.s.theme}
+  {shots: acc.shots.concat([shot]), styles: styles}
+}
+
+fn viewer_page(spec, head, which, summary, out) = do {
+  data = {app: "{spec.title}", summary: summary, ok: out.bad.count() == 0, startup: out.bad.filter((b) => b.round == "startup").map((b) => b.why), same: which.same, recorded: which.recorded, replayed: which.replayed, styles: out.styles, rounds: out.shots}
+  # `<` never appears raw inside the script, so no string in the data can close it.
+  json = data.to_json().replace("<", "\\u003c")
+  title = html_escape("{spec.title} · session")
+  "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{title}</title><style>{VIEWER_CSS}</style></head><body><script id=\"session\" type=\"application/json\">{json}</script><script>{VIEWER_JS}</script></body></html>"
 }
 
 # A frame is the patch operations that bring a client's page up to date, and the theme.
@@ -3526,7 +3725,7 @@ fn serve_app(spec, startup = missing) = do {
   rt = with_classes(rt0, s0.tree).rt
   # A recording is a fresh file: the header (with what `main` read before `ui.app`), then round 0.
   begun = if rec.is_missing() then false else do {
-    head = {session: SESSION_VERSION, app: "{spec.title}", startup: if startup.is_missing() then [] else startup.tape}.to_json()
+    head = {session: SESSION_VERSION, app: "{spec.title}", program: session_program(), startup: if startup.is_missing() then [] else startup.tape}.to_json()
     w = "{head}\n".write_to(rec)
     record_round(spec, rec, [], r0)
   }

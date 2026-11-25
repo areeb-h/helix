@@ -51,6 +51,7 @@ fn untaped(name: &str) -> bool {
         "raise" | "assert" | "assert_eq" | "assert_error" | "assert_close"
             | "print" | "emit" | "write" | "elog"
             | "tape_begin" | "tape_end" | "session_record_path" | "session_replay_path"
+            | "session_view_path" | "session_program"
             | "dev_generation"
     )
 }
@@ -193,8 +194,31 @@ pub fn through(
 /// first, so `main`'s reads return what they returned on the device and its writes don't happen.
 ///
 /// Called on the evaluating thread (the tape is thread-local), by `helix run` only.
-pub fn open_for_program() {
-    let next = if let Ok(path) = std::env::var("HELIX_REPLAY").map(std::path::PathBuf::from) {
+pub fn open_for_program(spans: &[crate::module::Span], argv: &[String]) {
+    let replay = crate::devwatch::replay_path();
+    if replay.is_none() && !crate::devwatch::recording() {
+        return;
+    }
+    // Which program this session is of, so a replay can say whether it is replaying the
+    // program that was recorded (reproducing a bug) or another one (testing a change).
+    let program = {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        for s in spans {
+            // Every module the program loaded, std.ui included: it is part of what ran. The
+            // sources only, in load order, not their file names: a session is sent as
+            // `inputs-<date>.helix` but ran as `app.helix`, and it is the same program.
+            // (Which module an import names is in the importing source already.)
+            h.update((s.source.len() as u64).to_le_bytes());
+            h.update(s.source.as_bytes());
+        }
+        let sha: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        json!({"sha256": sha, "modules": spans.len(), "args": argv, "helix": env!("CARGO_PKG_VERSION")})
+    };
+    if let Ok(mut p) = PROGRAM.write() {
+        *p = Some(program);
+    }
+    let next = if let Some(path) = replay.map(std::path::PathBuf::from) {
         // The first line of a session log is `{"session": 2, "startup": [ … ]}`. A file that
         // can't be read, or isn't a version-2 session, opens an empty startup tape; std.ui's
         // replay then refuses the file with the reason, before replaying anything.
@@ -206,12 +230,40 @@ pub fn open_for_program() {
             .and_then(|j| j.get("startup").and_then(J::as_array).cloned())
             .unwrap_or_default();
         Tape::Replay { queue: startup.into(), diverged: None }
-    } else if std::env::var_os("HELIX_RECORD").is_some_and(|p| !p.is_empty()) {
-        Tape::Record(Vec::new())
     } else {
-        return;
+        Tape::Record(Vec::new())
     };
     TAPE.with(|t| *t.borrow_mut() = next);
+}
+
+/// The running program's identity, set by `open_for_program` in a recorded or replayed run.
+/// A `RwLock`, not the tape's thread-local: it describes the process, and is read from
+/// whichever thread evaluates.
+static PROGRAM: std::sync::RwLock<Option<J>> = std::sync::RwLock::new(None);
+
+/// `session_program()` — in a recorded or replayed run, `{sha256, modules, args, helix}`: a
+/// fingerprint of every module the program loaded, the command line `main` was given, and
+/// this Helix's version. `missing` otherwise.
+pub fn session_program(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
+    if !args.is_empty() {
+        return Err(HelixError::new(format!("`session_program` takes no arguments, got {}", args.len()), line, col));
+    }
+    let p = PROGRAM.read().ok().and_then(|p| p.clone());
+    match p {
+        None => Ok(Value::Missing),
+        Some(j) => crate::json::parse(&j.to_string())
+            .map_err(|e| HelixError::new(format!("`session_program`: {e}"), line, col)),
+    }
+}
+
+/// Why the open tape's replay diverged, if it did. A diverged call fails, and an app may catch
+/// that failure (`try`) and raise its own error about it, which would hide the cause: so a
+/// replayed program that fails reports this first (`run_file_capture_args`).
+pub fn divergence() -> Option<String> {
+    TAPE.with(|t| match &*t.borrow() {
+        Tape::Replay { diverged, .. } => diverged.clone(),
+        _ => None,
+    })
 }
 
 /// The session-log format this build writes and reads (std.ui writes the header line).

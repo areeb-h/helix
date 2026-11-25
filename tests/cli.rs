@@ -18513,8 +18513,8 @@ fn session_record_then_replay_the_file_manager_without_its_folder() {
     BufReader::new(app.0.stderr.take().unwrap()).read_line(&mut banner).unwrap();
     let token = banner.split("token=").nth(1).map(|t| t.trim().to_string()).unwrap_or_default();
     assert_eq!(token.len(), 64, "the app should print its link: {banner}");
-    // The app keeps an event-loop connection alive, so a response is read by its
-    // Content-Length rather than to end-of-stream (which would wait out the timeout).
+    // A response is read by its Content-Length: the framing the server promises, whether or
+    // not it then closes the connection.
     let ask = |raw: String| -> String {
         let s = TcpStream::connect(("127.0.0.1", PORT)).expect("the app has stopped");
         s.set_read_timeout(Some(Duration::from_secs(10))).ok();
@@ -18563,5 +18563,64 @@ fn session_record_then_replay_the_file_manager_without_its_folder() {
         assert!(out.contains("replay ok: 4 rounds, 3 events"), "{env:?}: {out}");
         assert!(!root.exists(), "a replay recreated the folder the session browsed");
     }
+
+    // SEND-SESSION. `helix replay` needs only the session and the app: the command line the
+    // app ran with comes from the session itself, and `--view` writes a viewer to step through.
+    let helix = |args: &[&str]| {
+        let o = Command::new(env!("CARGO_BIN_EXE_helix")).current_dir(env!("CARGO_MANIFEST_DIR")).args(args).output().unwrap();
+        (String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr), o.status.code())
+    };
+    let view = base.join("session.html");
+    let (out, code) = helix(&["replay", log.to_str().unwrap(), "examples/apps/files.helix", "--view", view.to_str().unwrap()]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.contains("replay ok: 4 rounds, 3 events"), "{out}");
+    assert!(!out.contains("note:"), "the program that was recorded is not another program: {out}");
+    assert!(!root.exists(), "`helix replay` recreated the folder the session browsed");
+    let html = std::fs::read_to_string(&view).expect("--view writes the viewer");
+    assert!(html.contains("<script id=\"session\" type=\"application/json\">"), "the session's rounds are in the file");
+    assert!(html.contains("\"same\":true"), "the viewer says it is the recorded program");
+    assert_eq!(html.matches("\"problem\":\"\"").count(), 4, "four rounds, none differing");
+
+    // Another program (an edited copy) is named as one: the session now tests the change. The
+    // title is the page's `<title>`, not part of any screen, so this change passes.
+    let changed = base.join("files-changed.helix");
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/apps/files.helix")).unwrap();
+    std::fs::write(&changed, src.replacen("title: \"Files\"", "title: \"Files 2\"", 1)).unwrap();
+    let (out, code) = helix(&["replay", log.to_str().unwrap(), changed.to_str().unwrap()]);
+    assert!(out.contains("note: this is not the program that was recorded"), "{out}");
+    assert_eq!(code, Some(0), "no screen shows the title, so none differs: {out}");
+
+    // `-- <args>` replaces the recorded command line: another folder is another session.
+    let (out, code) = helix(&["replay", log.to_str().unwrap(), "examples/apps/files.helix", "--", "--root", base.join("elsewhere").to_str().unwrap()]);
+    assert_eq!(code, Some(1), "{out}");
+    assert!(out.contains("replay diverged before the app started") && out.contains("other arguments"), "main's first call is named as the cause: {out}");
     let _ = std::fs::remove_dir_all(&base);
+}
+
+/// The viewer embeds what the session recorded (events, screens) in a page. Recorded text is
+/// data: nothing in it can end the script it sits in or add markup, and screens are shown in
+/// sandboxed frames.
+#[test]
+fn session_viewer_keeps_recorded_text_inert() {
+    let dir = std::env::temp_dir().join(format!("helix_viewer_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let fixture = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/ui/sessions/stopwatch-android.jsonl")).unwrap();
+    // The `start` event's value is ignored by the stopwatch, so the session still replays.
+    let hostile = fixture.replacen("\"msg\":\"start\",\"value\":null", "\"msg\":\"start\",\"value\":\"</script><img src=x onerror=alert(1)>\"", 1);
+    assert_ne!(hostile, fixture, "the fixture has a start event");
+    let log = dir.join("hostile.jsonl");
+    std::fs::write(&log, hostile).unwrap();
+    let view = dir.join("hostile.html");
+    let o = Command::new(env!("CARGO_BIN_EXE_helix"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args(["replay", log.to_str().unwrap(), "examples/apps/stopwatch.helix", "--view", view.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert_eq!(o.status.code(), Some(0), "{out}{}", String::from_utf8_lossy(&o.stderr));
+    let html = std::fs::read_to_string(&view).unwrap();
+    assert_eq!(html.matches("</script>").count(), 2, "only the page's own two scripts end");
+    assert!(!html.contains("<img"), "recorded text became markup");
+    assert!(html.contains("sandbox"), "screens are shown in sandboxed frames");
+    let _ = std::fs::remove_dir_all(&dir);
 }

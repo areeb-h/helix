@@ -505,6 +505,9 @@ mod tests {
             // file itself is reached by `append_to` / `read_text`, which spend fs authority.
             "session_record_path",
             "session_replay_path",
+            "session_view_path",
+            // The program's own identity (a hash of its sources, its argv): reaches nothing.
+            "session_program",
             // The input tape opens and closes a thread-local recording; it reaches nothing.
             // What runs under it is gated as usual (and, replaying, does not run at all).
             "tape_begin",

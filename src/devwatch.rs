@@ -70,14 +70,51 @@ const ENV_RECORD: &str = "HELIX_RECORD";
 /// A recorded session for `std.ui` to replay instead of serving: every event through
 /// `update`, every screen re-rendered and checked against the hash recorded with it.
 const ENV_REPLAY: &str = "HELIX_REPLAY";
+/// Where a replay writes its viewer: one self-contained HTML file that steps through the
+/// session's rounds. Only read while replaying.
+const ENV_VIEW: &str = "HELIX_REPLAY_VIEW";
+
+/// `helix replay` sets the replay and view paths for THIS process, without touching the
+/// environment: a child the app starts must not inherit "you are a replay", and mutating
+/// the environment of a running process is unsound once threads exist.
+static OVERRIDES: std::sync::OnceLock<Vec<(&'static str, String)>> = std::sync::OnceLock::new();
+
+/// Make this process a replay of `session`, writing the viewer to `view` if given.
+pub fn replay_instead(session: String, view: Option<String>) {
+    let mut v = vec![(ENV_REPLAY, session)];
+    if let Some(view) = view {
+        v.push((ENV_VIEW, view));
+    }
+    let _ = OVERRIDES.set(v);
+}
+
+/// A session variable: what `helix replay` set, else the environment. Empty is unset.
+fn session_var(var: &str) -> Option<String> {
+    if let Some(o) = OVERRIDES.get() {
+        // Under `helix replay` the overrides are the whole truth: an inherited
+        // `HELIX_RECORD` or `HELIX_REPLAY_VIEW` must not leak into the replay.
+        return o.iter().find(|(k, _)| *k == var).map(|(_, v)| v.clone()).filter(|v| !v.is_empty());
+    }
+    std::env::var(var).ok().filter(|v| !v.is_empty())
+}
+
+/// The session being replayed, if any (`HELIX_REPLAY` or `helix replay`).
+pub fn replay_path() -> Option<String> {
+    session_var(ENV_REPLAY)
+}
+
+/// Whether this run records a session.
+pub fn recording() -> bool {
+    replay_path().is_none() && session_var(ENV_RECORD).is_some()
+}
 
 fn env_path(var: &str, name: &str, args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
     if !args.is_empty() {
         return Err(HelixError::new(format!("`{name}` takes no arguments, got {}", args.len()), line, col));
     }
-    Ok(match std::env::var(var) {
-        Ok(p) if !p.is_empty() => Value::Str(p.into()),
-        _ => Value::Missing,
+    Ok(match session_var(var) {
+        Some(p) => Value::Str(p.into()),
+        None => Value::Missing,
     })
 }
 
@@ -89,6 +126,12 @@ pub fn session_record_path(args: &[Value], line: usize, col: usize) -> Result<Va
 /// `session_replay_path()` — the file `HELIX_REPLAY` names, or `missing`.
 pub fn session_replay_path(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
     env_path(ENV_REPLAY, "session_replay_path", args, line, col)
+}
+
+/// `session_view_path()` — where a replay writes its viewer (`HELIX_REPLAY_VIEW`, or
+/// `helix replay --view`), or `missing`.
+pub fn session_view_path(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
+    env_path(ENV_VIEW, "session_view_path", args, line, col)
 }
 
 /// Under `helix run --watch`, exit when the supervisor does. The supervisor holds the write

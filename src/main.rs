@@ -385,6 +385,8 @@ fn run() -> ExitCode {
             print_help();
             ExitCode::SUCCESS
         }
+        // `helix replay <session> <app>` — replay a recorded session (send-session).
+        Some("replay") => cli_replay(&args[2..]),
         // `helix run <script>` — the explicit form.
         // `helix run --watch <script>` — rerun on save, keeping an app's state (ADR 0055).
         Some("run") if args.get(2).map(String::as_str) == Some("--watch") => match args.get(3) {
@@ -2085,6 +2087,8 @@ fn print_help() {
          helix sync               resolve dependencies and write helix.lock\n    \
          helix verify             check the project matches helix.lock (no build)\n    \
          helix test [path]        run *_test.helix files (`--engines` cross-checks all 3)\n    \
+         helix replay <log> <app> replay a recorded session and check every screen\n    \
+         \x20                        (`--view out.html` writes a viewer to step through)\n    \
          helix doc [Type]         list a type's methods (Array/String/Dna/…) or `builtins`\n    \
          helix search <term>      find a capability by what it does (names, docs, notes)\n    \
          helix describe [what]    the API as JSON — a name, a Type, or everything\n    \
@@ -2175,6 +2179,60 @@ fn run_watch(path: &str, argv: &[String]) -> ExitCode {
         })
     };
     devwatch::run_watch(&script, argv, &check)
+}
+
+/// `helix replay <session.jsonl> <app.helix> [--view <out.html>] [-- <args>…]` — replay a
+/// recorded session (`HELIX_RECORD`) and check every screen, as `HELIX_REPLAY` does, but
+/// with the command line `main` was given ON THE DEVICE, which the session's header keeps:
+/// a session sent from a phone replays with one command. `-- <args>` replaces them.
+/// `--view` also writes a self-contained HTML file that steps through the rounds.
+fn cli_replay(args: &[String]) -> ExitCode {
+    const USAGE: &str = "usage: helix replay <session.jsonl> <app.helix> [--view <out.html>] [-- <args>…]";
+    let (ours, theirs) = match args.iter().position(|a| a == "--") {
+        Some(i) => (&args[..i], Some(&args[i + 1..])),
+        None => (args, None),
+    };
+    let mut view = None;
+    let mut pos = Vec::new();
+    let mut it = ours.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--view" => match it.next() {
+                Some(p) => view = Some(p.clone()),
+                None => {
+                    eprintln!("error: `--view` needs a file to write, e.g. `--view session.html`\n{USAGE}");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                return ExitCode::SUCCESS;
+            }
+            _ => pos.push(a.clone()),
+        }
+    }
+    let [session, app] = pos.as_slice() else {
+        eprintln!("error: `helix replay` takes a session and the app it is a session of\n{USAGE}");
+        return ExitCode::FAILURE;
+    };
+    let head = match std::fs::read_to_string(session) {
+        Ok(s) => s.lines().next().and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok()),
+        Err(e) => {
+            eprintln!("error: could not read the session `{session}`: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    // The device's command line. A session recorded before it was kept has none: the
+    // app's defaults, which is also what a phone shell (no command line) ran with.
+    let recorded: Vec<String> = head
+        .as_ref()
+        .and_then(|h| h.pointer("/program/args"))
+        .and_then(|a| a.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    let argv = theirs.map(<[String]>::to_vec).unwrap_or(recorded);
+    devwatch::replay_instead(session.clone(), view);
+    run_file_with_args(app, &argv)
 }
 
 /// `helix run <script> [args…]` — the script's own command line is `argv` (ADR 0037 D1).
@@ -2330,8 +2388,18 @@ fn run_file_capture_args(
     // points at the dependency's own source and line (not the entry file).
     // Session record / replay: the whole program goes on the input tape, not only an app's
     // `update` and `view` — `main`'s own setup reads and writes too (src/tape.rs).
-    tape::open_for_program();
-    run_program(&mut stmts, &loaded.spans, loaded.multi_module)
+    tape::open_for_program(&loaded.spans, argv);
+    run_program(&mut stmts, &loaded.spans, loaded.multi_module).map_err(|e| match tape::divergence() {
+        // A replay that left the recording before `ui.app` (the startup tape is still open):
+        // the app's own error is a consequence of reading something the device never read.
+        Some(why) => format!(
+            "error: replay diverged before the app started: {why}\n\
+             help: replay with the command line the session was recorded with (`helix replay` \
+             uses it by default), or record the session again\n\
+             then the app failed:\n{e}"
+        ),
+        None => e,
+    })
 }
 
 /// Load, namespace-resolve and type-check a file WITHOUT running it, returning the

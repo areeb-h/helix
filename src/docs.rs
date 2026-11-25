@@ -1224,6 +1224,22 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         notes: "SESSION REPLAY. `HELIX_REPLAY=log.jsonl helix run app.helix` plays the recorded rounds through the same code the live loop runs, hands each call into the app the inputs it had on the device (so the replay reaches no file, socket or process, and writes nothing), and compares every screen with the one recorded. It names the first rounds that differ — a different screen, or a call the app made differently (another builtin, or the same one with other arguments) — and exits 1. Keywords: replay, verify, regression, session, event log.",
     },
     DocEntry {
+        name: "session_view_path",
+        sig: "session_view_path()",
+        doc: "Where a replay writes its session viewer (`HELIX_REPLAY_VIEW`, or `helix replay --view`); otherwise missing.",
+        example: "session_view_path()",
+        example_out: "missing",
+        notes: "SEND-SESSION. The viewer is one self-contained HTML file: every round's screen as replayed (in a sandboxed frame), the events that caused it, what the app read from the world, and whether it matched the recording. It needs no Helix, server or network, so it is what a bug report links to; `#round=N` opens a round. Keywords: replay, viewer, bug report, session, timeline.",
+    },
+    DocEntry {
+        name: "session_program",
+        sig: "session_program()",
+        doc: "In a recorded or replayed run, `{sha256, modules, args, helix}`: a fingerprint of every module the program loaded, the command line `main` was given, and this Helix's version; otherwise missing.",
+        example: "session_program()",
+        example_out: "missing",
+        notes: "SEND-SESSION. `std.ui` writes it into a session's header. A replay compares it with its own: the same program is a reproduction, another one (an edit, a new Helix) tests that change against the session, and the replay says which. `helix replay` runs `main` with the recorded `args`. The fingerprint covers module sources in load order, not file names. Keywords: session, program, fingerprint, version, reproduce.",
+    },
+    DocEntry {
         name: "dev_generation",
         sig: "dev_generation()",
         doc: "Under `helix run --watch`, which start of the program this is (1 for the first); otherwise missing.",
