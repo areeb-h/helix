@@ -150,6 +150,8 @@ impl super::Interp {
             "html_escape" => return encoding::a_html_escape(name, args, line, col),
             "view_html" | "view_diff" | "view_classes" | "utility_css" => return a_view(name, args, line, col),
             "dev_generation" => return crate::devwatch::dev_generation(&args, line, col),
+            "session_record_path" => return crate::devwatch::session_record_path(&args, line, col),
+            "session_replay_path" => return crate::devwatch::session_replay_path(&args, line, col),
             "open_window" => return crate::desktop::open_window(&args, line, col),
             "url_encode" => return encoding::a_url_encode(args, line, col),
             "url_decode" => return encoding::a_url_decode(name, args, line, col),

@@ -61,6 +61,36 @@ pub fn dev_generation(args: &[Value], line: usize, col: usize) -> Result<Value, 
     })
 }
 
+// --- Session record / replay (prototype). --------------------------------------------
+
+/// Where `std.ui` appends one JSON line per event an app handles, with the hash of the
+/// screen it produced. Set by a host (a mobile shell, a test harness). A PATH, not authority:
+/// writing it still spends the `fs-write` the app needs anyway.
+const ENV_RECORD: &str = "HELIX_RECORD";
+/// A recorded session for `std.ui` to replay instead of serving: every event through
+/// `update`, every screen re-rendered and checked against the hash recorded with it.
+const ENV_REPLAY: &str = "HELIX_REPLAY";
+
+fn env_path(var: &str, name: &str, args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
+    if !args.is_empty() {
+        return Err(HelixError::new(format!("`{name}` takes no arguments, got {}", args.len()), line, col));
+    }
+    Ok(match std::env::var(var) {
+        Ok(p) if !p.is_empty() => Value::Str(p.into()),
+        _ => Value::Missing,
+    })
+}
+
+/// `session_record_path()` — the file `HELIX_RECORD` names, or `missing`.
+pub fn session_record_path(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
+    env_path(ENV_RECORD, "session_record_path", args, line, col)
+}
+
+/// `session_replay_path()` — the file `HELIX_REPLAY` names, or `missing`.
+pub fn session_replay_path(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
+    env_path(ENV_REPLAY, "session_replay_path", args, line, col)
+}
+
 /// Under `helix run --watch`, exit when the supervisor does. The supervisor holds the write
 /// end of this process's stdin and never writes to it, so end-of-file on stdin means it is
 /// gone — killed outright, not only by Ctrl-C (which reaches both). Without this an app

@@ -3247,7 +3247,7 @@ fn route(spec, st, c, req) = match "{req.method} {req.path}" {
     ev = if parsed.ok then parsed.value else missing
     if type_of(ev) != "Record" then refuse(st, c, 400, "an event is a JSON record {{msg, value}}") else do {
       sent = c.respond({status: 204, text: ""})
-      {...st, model: step(spec, st.model, ev), keep: st.keep.concat([c]), changed: true, acks: st.acks.concat(ack_of(ev))}
+      {...st, model: step(spec, st.model, ev, st.rt.rec), keep: st.keep.concat([c]), changed: true, acks: st.acks.concat(ack_of(ev))}
     }
   },
   _ => refuse(st, c, 404, "not found"),
@@ -3262,13 +3262,49 @@ fn ack_of(ev) = do {
 }
 
 # One event through `update`. An update that raises is logged and the model kept: one bad
-# event must not take the app down with it.
-fn step(spec, model, ev) = do {
-  next = try (spec.update)(model, ev)
-  if next.ok then next.value else do {
-    logged = elog("update failed on {ev.to_json()}: {next.error}")
+# event must not take the app down with it. Under `HELIX_RECORD` (`rec`), the event is also
+# recorded with the hash of the screen it led to — see "Session replay" below.
+fn step(spec, model, ev, rec = missing) = do {
+  tried = try (spec.update)(model, ev)
+  next = if tried.ok then tried.value else do {
+    logged = elog("update failed on {ev.to_json()}: {tried.error}")
     model
   }
+  recorded = if rec.is_missing() then false else record_event(spec, rec, ev, next)
+  next
+}
+
+# --- Session replay -------------------------------------------------------------------------
+#
+# An app is a fold of `update` over its events, and time arrives AS an event (a tick carries
+# `now()`), so the event log is the whole session. Recording it is one JSON line per event:
+# the event exactly as `update` saw it, and the SHA-256 of the screen it produced. Replaying
+# it — on another machine, another engine, another build — is the same fold; every screen is
+# re-rendered and must hash the same. A different hash is a different screen.
+#
+# Known gaps (prototype): a view that raises undoes its round in `serve` but is recorded
+# here as "view-failed"; a `--watch` model handover is not recorded; the log is user data.
+fn screen_hash(spec, model) = do {
+  shown = try render((spec.view)(model))
+  if shown.ok then sha256(shown.value) else "view-failed"
+}
+fn record_event(spec, path, ev, model) = do {
+  line = {ev: ev, screen: screen_hash(spec, model)}.to_json()
+  "{line}\n".append_to(path)
+}
+
+# Replay a recorded session and check every screen. Prints one line per step that differs
+# (at most 5), then a summary; raises — exit status 1 — if any differ.
+export fn replay_check(spec, path) = do {
+  entries = read_text(path).split("\n").filter((l) => l.count() > 0).map((l) => l.parse_json())
+  out = entries.reduce({model: spec.init, n: 0, bad: []}, (acc, x) => do {
+    m = step(spec, acc.model, x.ev)
+    got = screen_hash(spec, m)
+    bad = if got == x.screen then acc.bad else acc.bad.concat([{step: acc.n + 1, ev: x.ev, want: x.screen, got: got}])
+    {model: m, n: acc.n + 1, bad: bad}
+  })
+  shown = out.bad.take(5).map((b) => print("step {b.step}: screen differs after {b.ev.to_json()} (recorded {b.want.take(12)}, replayed {b.got.take(12)})"))
+  if out.bad.count() == 0 then print("replay ok: {out.n} events, {out.n} screens identical to the recording") else raise("replay FAILED: {out.bad.count()} of {out.n} screens differ from the recording", "the app's update or view changed what the user saw; the first differing step is listed above")
 }
 
 # A frame is the patch operations that bring a client's page up to date, and the theme.
@@ -3307,7 +3343,7 @@ fn serve(l, spec, rt, model, tree, conns, streams, timers) = do {
   st = live.reduce({model: model, rt: rt, keep: [], streams: [], changed: false, acks: []}, (s, c) => handle(spec, s, c))
   t = clock_monotonic()
   due = timers.filter((x) => x.due <= t)
-  ticked = due.reduce(st.model, (m, x) => step(spec, m, {msg: x.msg, value: now()}))
+  ticked = due.reduce(st.model, (m, x) => step(spec, m, {msg: x.msg, value: now()}, rt.rec))
   changed_now = st.changed or due.count() > 0
   # A view that raises must not end the app either. The events of this round are undone — the
   # model goes back to what the screen shows — and the error is logged; the screen stays
@@ -3387,12 +3423,17 @@ fn adopt(spec, kept) = if kept.is_missing() then spec.init else do {
 }
 
 export fn app(spec) = do {
+  rp = session_replay_path()
+  if rp.is_missing() then serve_app(spec) else replay_check(spec, rp)
+}
+
+fn serve_app(spec) = do {
   port = if spec.get("port").is_missing() then 8080 else spec.port
   l = listen(port)
   generation = dev_generation()
   reload = if generation.is_missing() then false else generation > 1
   d0 = design_of(spec, spec.init, missing)
-  rt0 = {...session(port), dev: not generation.is_missing(), design: d0, css: css_with(spec, d0), title: "{spec.title}", client: sha256(CLIENT), known: {"": true}, util: ""}
+  rt0 = {...session(port), rec: session_record_path(), dev: not generation.is_missing(), design: d0, css: css_with(spec, d0), title: "{spec.title}", client: sha256(CLIENT), known: {"": true}, util: ""}
   rt = with_classes(rt0, (spec.view)(spec.init)).rt
   url = "http://127.0.0.1:{port}/?token={rt.token}"
   # Under `--watch` the supervisor reads this line and shows the link once, on the first start.

@@ -501,6 +501,10 @@ mod tests {
             // `now()` of reloading. The model and session cross reloads on the app's own
             // authenticated HTTP (`src/devwatch.rs`), under the `net` it already holds.
             "dev_generation",
+            // Session record / replay: each reads ONE fixed variable naming a file. The
+            // file itself is reached by `append_to` / `read_text`, which spend fs authority.
+            "session_record_path",
+            "session_replay_path",
             // A native window that shows ONLY the app's own `http://127.0.0.1:<port>` page:
             // any other URL is refused before anything opens, navigation away from that origin
             // is refused inside the window, and pages cannot open more windows. It reaches

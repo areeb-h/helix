@@ -1192,6 +1192,22 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         notes: "ADR 0055 PHASE 4: the platform's web view (WebView2, WKWebView, WebKitGTK) in a native window, instead of a browser tab. `std.ui` calls it for `ui.app({…, window: true})`. ONLY the app's own `http://127.0.0.1:<port>` origin: any other URL is refused, navigation away from it is refused inside the window, and pages cannot open more windows — a frame around what the app serves, not a browser. Closing the window ends the program. Answers false in a build without `--features desktop` or on a machine with no display, so the caller can open the browser instead (`open_url`). Keywords: window, desktop, native, gui, app, webview.",
     },
     DocEntry {
+        name: "session_record_path",
+        sig: "session_record_path()",
+        doc: "The file `HELIX_RECORD` names, where `std.ui` records each event and the hash of its screen; otherwise missing.",
+        example: "session_record_path()",
+        example_out: "missing",
+        notes: "SESSION REPLAY. An app is a fold of `update` over its events, so the event log IS the session. A host sets `HELIX_RECORD` and every event an app handles — clicks and timer ticks alike — is appended as one JSON line with the SHA-256 of the screen it produced. Keywords: record, session, replay, event log, crash report.",
+    },
+    DocEntry {
+        name: "session_replay_path",
+        sig: "session_replay_path()",
+        doc: "The file `HELIX_REPLAY` names: a recorded session `std.ui` replays and checks instead of serving; otherwise missing.",
+        example: "session_replay_path()",
+        example_out: "missing",
+        notes: "SESSION REPLAY. `HELIX_REPLAY=log.jsonl helix run app.helix` runs every recorded event through `update`, re-renders every screen, and compares it with the hash recorded on the device. It prints the first step that differs and exits non-zero. Keywords: replay, verify, regression, session, event log.",
+    },
+    DocEntry {
         name: "dev_generation",
         sig: "dev_generation()",
         doc: "Under `helix run --watch`, which start of the program this is (1 for the first); otherwise missing.",

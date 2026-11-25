@@ -127,6 +127,20 @@ pub static ENV: &[EnvDoc] = &[
         notes: "Searched BEFORE the install-relative standard-library locations, so a directory here shadows a stdlib module of the same path — which is how a local copy is tested, and how one is shadowed by accident. Keywords: import, module, search, library, include, resolve.",
     },
     EnvDoc {
+        name: "HELIX_RECORD",
+        values: "a file path",
+        default: "unset — nothing is recorded",
+        doc: "Session replay: `std.ui` appends every event and its screen's hash here.",
+        notes: "Read by `session_record_path()`. One JSON line per event: `{ev, screen}`. Writing the file spends `fs-write`. The log holds whatever the user typed: treat it as user data. Keywords: record, session, replay.",
+    },
+    EnvDoc {
+        name: "HELIX_REPLAY",
+        values: "a file path written under `HELIX_RECORD`",
+        default: "unset — the app serves as usual",
+        doc: "Session replay: replay and verify this recorded session instead of serving.",
+        notes: "Read by `session_replay_path()`. Exits 0 when every screen matches its recorded hash, 1 at the first that does not. Keywords: replay, verify, regression.",
+    },
+    EnvDoc {
         name: "HELIX_DEV_GENERATION",
         values: "a positive integer, set by `helix run --watch`",
         default: "1",
