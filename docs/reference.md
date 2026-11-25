@@ -1600,6 +1600,28 @@ Show this app's own page in a native window; true if one opened, false where non
 >>> open_window("http://127.0.0.1:8080/", "My app", 1100, 760)
 ```
 
+### `session_record_path()`
+
+The file `HELIX_RECORD` names, where `std.ui` records each event and the hash of its screen; otherwise missing.
+
+**Note:** SESSION REPLAY. An app is a fold of `update` over its events, so the event log IS the session. A host sets `HELIX_RECORD` and every event an app handles — clicks and timer ticks alike — is appended as one JSON line with the SHA-256 of the screen it produced. Keywords: record, session, replay, event log, crash report.
+
+```
+>>> session_record_path()
+missing
+```
+
+### `session_replay_path()`
+
+The file `HELIX_REPLAY` names: a recorded session `std.ui` replays and checks instead of serving; otherwise missing.
+
+**Note:** SESSION REPLAY. `HELIX_REPLAY=log.jsonl helix run app.helix` runs every recorded event through `update`, re-renders every screen, and compares it with the hash recorded on the device. It prints the first step that differs and exits non-zero. Keywords: replay, verify, regression, session, event log.
+
+```
+>>> session_replay_path()
+missing
+```
+
 ### `utility_css(classes)`
 
 The stylesheet for the utility classes among `classes` — Tailwind's names, Helix's tokens, no build step.
@@ -1753,6 +1775,24 @@ Extra roots searched for a non-local import.
 - **Unset:** unset — only the entry's project and the install-relative stdlib are searched
 
 **Note:** Searched BEFORE the install-relative standard-library locations, so a directory here shadows a stdlib module of the same path — which is how a local copy is tested, and how one is shadowed by accident. Keywords: import, module, search, library, include, resolve.
+
+### `HELIX_RECORD`
+
+Session replay: `std.ui` appends every event and its screen's hash here.
+
+- **Values:** a file path
+- **Unset:** unset — nothing is recorded
+
+**Note:** Read by `session_record_path()`. One JSON line per event: `{ev, screen}`. Writing the file spends `fs-write`. The log holds whatever the user typed: treat it as user data. Keywords: record, session, replay.
+
+### `HELIX_REPLAY`
+
+Session replay: replay and verify this recorded session instead of serving.
+
+- **Values:** a file path written under `HELIX_RECORD`
+- **Unset:** unset — the app serves as usual
+
+**Note:** Read by `session_replay_path()`. Exits 0 when every screen matches its recorded hash, 1 at the first that does not. Keywords: replay, verify, regression.
 
 ### `HELIX_DEV_GENERATION`
 
