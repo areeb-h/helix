@@ -60,6 +60,8 @@ fi
 # Same exclusions as scripts/capture-compat.sh, for the same reasons: bench/
 # fixtures are generated rather than tracked, examples/api blocks or needs the
 # network, examples/apps serves until stopped, examples/python is feature-gated.
+# tests/ui/ holds app fixtures for the CLI tests (session replays): apps too, so they
+# serve until stopped, and run here they would write into the checkout.
 mapfile -t files < <(git ls-files '*.helix' \
   | grep -vE '^bench/' | grep -vE '^examples/(api|python|apps)/' | grep -vE '^tests/ui/')
 

@@ -450,6 +450,90 @@ fn event_loop_server_serves_keepalive() {
 }
 
 #[test]
+fn event_loop_server_closes_when_the_client_asks() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::{Duration, Instant};
+
+    // The event-loop server used to keep EVERY connection open after replying. HTTP/1.0
+    // closes after each reply unless the client sends `Connection: keep-alive`, and any
+    // version may send `Connection: close`; a client reading to end-of-stream (1.0's
+    // framing) then waited for its own timeout. Each case below reads to end-of-stream,
+    // which only returns promptly if the server closed.
+    let dir = std::env::temp_dir();
+    let src = dir.join("helix_evclose.helix");
+    std::fs::write(
+        &src,
+        "fn evloop(l, conns) = do {\n\
+           ready = l.wait(conns, 50)\n\
+           fresh = l.accept_poll()\n\
+           live = if fresh.is_missing() then conns else conns.concat([fresh])\n\
+           active = live.filter(c => do {\n\
+             req = c.poll_request()\n\
+             if req.is_missing() then c.is_open() else do {\n\
+               sent = c.respond({ status: 200, text: req.path })\n\
+               c.is_open()\n\
+             }\n\
+           })\n\
+           evloop(l, active)\n\
+         }\n\
+         evloop(listen(18234), [])\n",
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_helix"))
+        .arg(&src)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn the event-loop server");
+    let connect = || {
+        for _ in 0..100 {
+            if let Ok(s) = TcpStream::connect("127.0.0.1:18234") {
+                s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+                return s;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("event-loop server never started listening on 18234");
+    };
+    // Send one request and read until the server closes; how long that took, and the reply.
+    let until_closed = |req: &[u8]| {
+        let mut s = connect();
+        s.write_all(req).unwrap();
+        let t = Instant::now();
+        let mut out = String::new();
+        let closed = s.read_to_string(&mut out).is_ok();
+        (closed, t.elapsed(), out)
+    };
+
+    let plain_10 = until_closed(b"GET /a HTTP/1.0\r\nHost: x\r\n\r\n");
+    let close_11 = until_closed(b"GET /b HTTP/1.1\r\nHost: x\r\nConnection: Close\r\n\r\n");
+    let listed = until_closed(b"GET /c HTTP/1.1\r\nHost: x\r\nConnection: TE, close\r\n\r\n");
+
+    // HTTP/1.0 that ASKS for keep-alive gets it: two requests on one connection.
+    let mut s = connect();
+    s.write_all(b"GET /d HTTP/1.0\r\nConnection: keep-alive\r\n\r\nGET /e HTTP/1.0\r\n\r\n").unwrap();
+    let mut both = String::new();
+    let ka_closed = s.read_to_string(&mut both).is_ok();
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_file(&src);
+
+    for (name, (closed, took, out), path) in
+        [("HTTP/1.0", plain_10, "/a"), ("Connection: Close", close_11, "/b"), ("TE, close", listed, "/c")]
+    {
+        assert!(closed && took < Duration::from_secs(2), "{name}: not closed promptly ({took:?}):\n{out}");
+        assert!(out.contains("200 OK") && out.ends_with(path), "{name}: reply:\n{out}");
+        assert!(out.contains("Connection: close"), "{name}: should announce the close:\n{out}");
+    }
+    // The first reply is keep-alive, the second (a plain 1.0 request) closes.
+    assert!(ka_closed, "the 1.0 keep-alive connection should close after its plain 1.0 request");
+    assert!(both.contains("Connection: keep-alive") && both.contains("/d"), "{both}");
+    assert!(both.ends_with("/e") && both.matches("200 OK").count() == 2, "{both}");
+}
+
+#[test]
 fn http_server_sends_custom_headers_and_redirects() {
     use std::io::Read;
     use std::net::TcpStream;
@@ -4771,6 +4855,10 @@ fn the_file_manager_asks_the_disk_again_before_it_acts() {
         let body = format!("{{\"msg\":\"{msg}\",\"value\":{value}}}");
         let r = ask(format!("POST /event HTTP/1.0\r\nHost: 127.0.0.1:{PORT}\r\n{cookie}Content-Length: {}\r\n\r\n{body}", body.len()));
         assert!(r.starts_with("HTTP/1.1 204"), "{body}: {r}");
+        // 204 means the event was ACCEPTED; it is applied when the round ends. A request on a
+        // new connection is served in a later round, so this page is drawn after the event
+        // took effect: a sync point, before the test looks at the disk.
+        let _ = ask(format!("GET / HTTP/1.0\r\nHost: 127.0.0.1:{PORT}\r\n{cookie}\r\n"));
     };
     let page = || ask(format!("GET / HTTP/1.0\r\nHost: 127.0.0.1:{PORT}\r\n{cookie}\r\n"));
     let names = |d: &std::path::Path| {
