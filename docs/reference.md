@@ -1602,9 +1602,9 @@ Show this app's own page in a native window; true if one opened, false where non
 
 ### `session_record_path()`
 
-The file `HELIX_RECORD` names, where `std.ui` records each event and the hash of its screen; otherwise missing.
+The file `HELIX_RECORD` names, where `std.ui` records the session — each round's events, what the app read, the screen it drew; otherwise missing.
 
-**Note:** SESSION REPLAY. An app is a fold of `update` over its events, so the event log IS the session. A host sets `HELIX_RECORD` and every event an app handles — clicks and timer ticks alike — is appended as one JSON line with the SHA-256 of the screen it produced. Keywords: record, session, replay, event log, crash report.
+**Note:** SESSION REPLAY. An app is a fold of `update` over its events, so the event log is the session. A host sets `HELIX_RECORD` and `std.ui` writes a header (with what `main` read before `ui.app`), then one JSON line per round: its events (clicks and timer ticks alike), every call it made into the app with what that call read from the world (`tape_begin`), and the SHA-256 of the screen drawn — tree, theme and stylesheet. Not recorded under `--watch`. Keywords: record, session, replay, event log, crash report.
 
 ```
 >>> session_record_path()
@@ -1615,7 +1615,7 @@ missing
 
 The file `HELIX_REPLAY` names: a recorded session `std.ui` replays and checks instead of serving; otherwise missing.
 
-**Note:** SESSION REPLAY. `HELIX_REPLAY=log.jsonl helix run app.helix` runs every recorded event through `update`, re-renders every screen, and compares it with the hash recorded on the device. It prints the first step that differs and exits non-zero. Keywords: replay, verify, regression, session, event log.
+**Note:** SESSION REPLAY. `HELIX_REPLAY=log.jsonl helix run app.helix` plays the recorded rounds through the same code the live loop runs, hands each call into the app the inputs it had on the device (so the replay reaches no file, socket or process, and writes nothing), and compares every screen with the one recorded. It names the first rounds that differ — a different screen, or a call the app made differently (another builtin, or the same one with other arguments) — and exits 1. Keywords: replay, verify, regression, session, event log.
 
 ```
 >>> session_replay_path()
@@ -1634,9 +1634,9 @@ Open the input tape: `missing` records what impure builtins return; a recorded t
 
 ### `tape_end()`
 
-Close the input tape: the recorded tape as a string, or (replaying) "" when the recording was used exactly, else why not; missing if none is open.
+Close the input tape: `{tape}` (the recorded calls) when recording, `{diverged}` ("" when the recording was used exactly) when replaying; missing if none is open.
 
-**Note:** SESSION REPLAY. A replay diverges when the app asks for a different input than the recording holds, or fewer or more of them; the string names the call. Keywords: tape, record, replay, divergence.
+**Note:** SESSION REPLAY. A replay diverges when the app makes a different call than the recording holds — another builtin, or the same one with other arguments (each call's arguments are fingerprinted) — or fewer or more calls; `diverged` names the call. Keywords: tape, record, replay, divergence.
 
 ```
 >>> tape_end()
@@ -1803,7 +1803,7 @@ Session replay: `std.ui` appends every event and its screen's hash here.
 - **Values:** a file path
 - **Unset:** unset — nothing is recorded
 
-**Note:** Read by `session_record_path()`. One JSON line per event: `{ev, screen}`. Writing the file spends `fs-write`. The log holds whatever the user typed: treat it as user data. Keywords: record, session, replay.
+**Note:** Read by `session_record_path()`. A header line `{session, app, startup}`, then one JSON line per round: `{events, calls, screen, undone}`. Starts a fresh file. Writing it spends `fs-write`. The log holds what the user typed and what the app read (file contents, responses, host names): treat it as user data. Ignored under `--watch`. Keywords: record, session, replay.
 
 ### `HELIX_REPLAY`
 
@@ -1812,7 +1812,7 @@ Session replay: replay and verify this recorded session instead of serving.
 - **Values:** a file path written under `HELIX_RECORD`
 - **Unset:** unset — the app serves as usual
 
-**Note:** Read by `session_replay_path()`. Exits 0 when every screen matches its recorded hash, 1 at the first that does not. Keywords: replay, verify, regression.
+**Note:** Read by `session_replay_path()`. Exits 0 when every round replays to the screen recorded; 1, naming the rounds, when a screen differs or the app's calls differ from the device's. A file of another session format is refused. Keywords: replay, verify, regression.
 
 ### `HELIX_DEV_GENERATION`
 

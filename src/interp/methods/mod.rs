@@ -116,7 +116,8 @@ pub(crate) fn call_method(
     // builtin — replaying, it writes nothing and returns what it returned on the device.
     if crate::tape::takes_method(name) {
         let label = format!(".{name}");
-        return crate::tape::through(&label, line, col, || call_method_untaped(recv, name, args, line, col));
+        let c = crate::tape::Call { label: &label, recv: Some(recv), args };
+        return crate::tape::through(c, line, col, || call_method_untaped(recv, name, args, line, col));
     }
     call_method_untaped(recv, name, args, line, col)
 }

@@ -25,7 +25,12 @@ impl super::Interp {
         // Session replay: while std.ui runs an app's own code, what an impure builtin returns
         // is recorded — or, replaying, returned from the recording without running it.
         let out = if crate::tape::takes_builtin(name) {
-            crate::tape::through(name, line, col, || self.call_builtin_arm(name, args, line, col))?
+            // The fingerprint borrows the arguments; the call takes them. Values are
+            // reference-counted, so the copy is a list of pointer bumps — and only while a
+            // session is recording or replaying.
+            let call_args = args.clone();
+            let c = crate::tape::Call { label: name, recv: None, args: &args };
+            crate::tape::through(c, line, col, || self.call_builtin_arm(name, call_args, line, col))?
         } else {
             self.call_builtin_arm(name, args, line, col)?
         };

@@ -18280,3 +18280,196 @@ print(b0({where: @age > V and @id < V and @age < 90}).s)\n";
         assert_eq!(out, want, "{label}");
     }
 }
+
+// --- Session replay ------------------------------------------------------------------------
+//
+// `HELIX_RECORD=<file>` records an app's session — every round's events, what the app's code
+// read from the world, and the screen it drew; `HELIX_REPLAY=<file>` replays it, reaching
+// nothing and writing nothing, and checks every screen. The fixtures in tests/ui/sessions were
+// recorded on an Android emulator by the spike shell (rust-mobile), so these tests are also a
+// cross-device check: a phone's session replayed on whatever machine runs the suite.
+
+fn replay(app: &str, log: &str, args: &[&str], env: &[(&str, &str)]) -> (String, String, Option<i32>) {
+    let mut all: Vec<(&str, &str)> = vec![("HELIX_REPLAY", log)];
+    all.extend_from_slice(env);
+    let mut cmd = vec!["run", app];
+    cmd.extend_from_slice(args);
+    run(&cmd, &all, "")
+}
+
+/// A stopwatch session recorded on Android — 153 rounds, two of them with a tap and a tick
+/// together — replays with every screen identical on all three engines.
+#[test]
+fn session_replay_android_stopwatch_on_three_engines() {
+    for env in [vec![], vec![("HELIX_NOJIT", "1")], vec![("HELIX_NOVM", "1")]] {
+        let (out, err, code) = replay("examples/apps/stopwatch.helix", "tests/ui/sessions/stopwatch-android.jsonl", &[], &env);
+        assert_eq!(code, Some(0), "{env:?}: {out}{err}");
+        assert!(out.contains("replay ok: 153 rounds, 154 events"), "{env:?}: {out}");
+    }
+}
+
+/// A change to what the user sees is caught at the round where they would have seen it: laps
+/// listed oldest-first differ from round 48, the second Lap tap.
+#[test]
+fn session_replay_catches_a_changed_screen_at_its_round() {
+    let src = std::fs::read_to_string("examples/apps/stopwatch.helix").unwrap();
+    let changed = src.replace(
+        r#""lap" => {...m, laps: [m.elapsed].concat(m.laps)},"#,
+        r#""lap" => {...m, laps: m.laps.concat([m.elapsed])},"#,
+    );
+    assert_ne!(src, changed, "the stopwatch's lap rule moved; update this test");
+    let dir = std::env::temp_dir().join(format!("helix_replay_changed_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let app = dir.join("stopwatch.helix");
+    std::fs::write(&app, changed).unwrap();
+    let (out, err, code) = replay(app.to_str().unwrap(), "tests/ui/sessions/stopwatch-android.jsonl", &[], &[]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code, Some(1), "{out}{err}");
+    let first = out.lines().next().unwrap_or("");
+    assert!(first.starts_with("round 48 (lap): screen differs"), "{out}");
+}
+
+/// A session that read the phone's world — its clock, files, an HTTP URL, a process — and wrote
+/// to it, in `main` and in `update`, replays here: every screen as the phone drew it, and nothing
+/// created or written. The app runs with the phone's own arguments (its folder is `world`,
+/// relative); run with another folder, its very first call differs from the phone's and the
+/// replay stops there rather than reading this machine.
+#[test]
+fn session_replay_android_inputs_reach_nothing() {
+    let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("world");
+    assert!(!here.exists(), "{} exists before the test", here.display());
+    for env in [vec![], vec![("HELIX_NOJIT", "1")], vec![("HELIX_NOVM", "1")]] {
+        let (out, err, code) = replay("tests/ui/sessions/inputs.helix", "tests/ui/sessions/inputs-android.jsonl", &[], &env);
+        assert_eq!(code, Some(0), "{env:?}: {out}{err}");
+        assert!(out.contains("replay ok: 11 rounds, 10 events"), "{env:?}: {out}");
+        assert!(!here.exists(), "a replay created {}", here.display());
+    }
+    let elsewhere = std::env::temp_dir().join(format!("helix_replay_inputs_{}", std::process::id()));
+    let (out, err, code) = replay(
+        "tests/ui/sessions/inputs.helix",
+        "tests/ui/sessions/inputs-android.jsonl",
+        &["--dir", elsewhere.to_str().unwrap()],
+        &[],
+    );
+    assert_eq!(code, Some(1), "{out}{err}");
+    assert!(err.contains("the app called `file_exists(") && err.contains("other arguments"), "{err}");
+    assert!(!elsewhere.exists(), "a diverged replay created {}", elsewhere.display());
+}
+
+/// A call made with other arguments than on the device is reported AT that call, naming it.
+#[test]
+fn session_replay_names_a_call_with_changed_arguments() {
+    let src = std::fs::read_to_string("tests/ui/sessions/inputs.helix").unwrap();
+    let changed = src.replace(r#"note = read_text("{m.dir}/note.txt")"#, r#"note = read_text("{m.dir}/notes.txt")"#);
+    assert_ne!(src, changed);
+    let dir = std::env::temp_dir().join(format!("helix_replay_args_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let app = dir.join("inputs.helix");
+    std::fs::write(&app, changed).unwrap();
+    let (out, err, code) = replay(app.to_str().unwrap(), "tests/ui/sessions/inputs-android.jsonl", &[], &[]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code, Some(1), "{out}{err}");
+    assert!(
+        out.contains("round 2 (files): inputs diverged — update: the app called `read_text(world/notes.txt)`, but on the device `read_text` was called with other arguments"),
+        "{out}"
+    );
+}
+
+/// A file that is not a session of this format is refused before anything runs.
+#[test]
+fn session_replay_refuses_another_format() {
+    let dir = std::env::temp_dir().join(format!("helix_replay_old_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("old.jsonl");
+    std::fs::write(&log, "{\"ev\":{\"msg\":\"start\",\"value\":null},\"screen\":\"00\"}\n").unwrap();
+    let (out, err, code) = replay("examples/apps/stopwatch.helix", log.to_str().unwrap(), &[], &[]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code, Some(1), "{out}{err}");
+    assert!(err.contains("is not a session recorded by this version of Helix"), "{err}");
+}
+
+/// End to end on a real app: the file manager is driven over HTTP with HELIX_RECORD set, the
+/// folder it browsed is DELETED, and the session replays on all three engines — every screen
+/// as it was — without recreating anything.
+#[test]
+fn session_record_then_replay_the_file_manager_without_its_folder() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    const PORT: u16 = 18741;
+    let base = std::env::temp_dir().join(format!("helix_session_files_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let root = base.join("root");
+    std::fs::create_dir_all(root.join("z")).unwrap();
+    std::fs::write(root.join("a.txt"), "ROOT").unwrap();
+    std::fs::write(root.join("z/b.txt"), "SUB").unwrap();
+    let log = base.join("session.jsonl");
+
+    struct App(std::process::Child);
+    impl Drop for App {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut app = App(Command::new(env!("CARGO_BIN_EXE_helix"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args(["run", "examples/apps/files.helix", "--root", root.to_str().unwrap(), "--port", &PORT.to_string()])
+        .env("HELIX_RECORD", &log)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap());
+    let mut banner = String::new();
+    BufReader::new(app.0.stderr.take().unwrap()).read_line(&mut banner).unwrap();
+    let token = banner.split("token=").nth(1).map(|t| t.trim().to_string()).unwrap_or_default();
+    assert_eq!(token.len(), 64, "the app should print its link: {banner}");
+    // The app keeps an event-loop connection alive, so a response is read by its
+    // Content-Length rather than to end-of-stream (which would wait out the timeout).
+    let ask = |raw: String| -> String {
+        let s = TcpStream::connect(("127.0.0.1", PORT)).expect("the app has stopped");
+        s.set_read_timeout(Some(Duration::from_secs(10))).ok();
+        (&s).write_all(raw.as_bytes()).unwrap();
+        let mut r = BufReader::new(&s);
+        let mut head = String::new();
+        let mut len = 0usize;
+        loop {
+            let mut l = String::new();
+            if r.read_line(&mut l).unwrap_or(0) == 0 || l == "\r\n" {
+                break;
+            }
+            if let Some(v) = l.to_ascii_lowercase().strip_prefix("content-length:") {
+                len = v.trim().parse().unwrap_or(0);
+            }
+            head.push_str(&l);
+        }
+        let mut body = vec![0u8; len];
+        r.read_exact(&mut body).unwrap();
+        head + &String::from_utf8_lossy(&body)
+    };
+    let cookie = format!("Cookie: helix_app_{PORT}={token}\r\n");
+    let post = |msg: &str, value: &str| {
+        let body = format!("{{\"msg\":\"{msg}\",\"value\":{value}}}");
+        let r = ask(format!("POST /event HTTP/1.0\r\nHost: 127.0.0.1:{PORT}\r\n{cookie}Content-Length: {}\r\n\r\n{body}", body.len()));
+        assert!(r.starts_with("HTTP/1.1 204"), "{body}: {r}");
+    };
+    let page = || ask(format!("GET / HTTP/1.0\r\nHost: 127.0.0.1:{PORT}\r\n{cookie}\r\n"));
+    post("sel", "\"a.txt\"");
+    assert!(page().contains("ROOT"), "the selected file is previewed");
+    post("open", "\"z\"");
+    assert!(page().contains("b.txt"), "the folder is opened");
+    post("crumb", "\"0\"");
+    // A page load is served after the round before it, so the last round is on disk now.
+    assert!(page().contains("a.txt"));
+    drop(app);
+
+    std::fs::remove_dir_all(&root).unwrap();
+    for env in [vec![], vec![("HELIX_NOJIT", "1")], vec![("HELIX_NOVM", "1")]] {
+        let (out, err, code) = replay("examples/apps/files.helix", log.to_str().unwrap(), &["--root", root.to_str().unwrap()], &env);
+        assert_eq!(code, Some(0), "{env:?}: {out}{err}");
+        assert!(out.contains("replay ok: 4 rounds, 3 events"), "{env:?}: {out}");
+        assert!(!root.exists(), "a replay recreated the folder the session browsed");
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}

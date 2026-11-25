@@ -73,23 +73,64 @@ fn is_open() -> bool {
     !crate::fold::sandbox_active() && TAPE.with(|t| !matches!(*t.borrow(), Tape::Off))
 }
 
-/// Run `call` through the tape under `label`: record what it returns, or return what was
-/// recorded without running it.
+/// What identifies one call on the tape: its name and a fingerprint of everything it was
+/// handed (the receiver too, for a method). A replay that asks for the same name with other
+/// arguments is a divergence at THAT call, not some calls later.
+pub struct Call<'a> {
+    pub label: &'a str,
+    pub recv: Option<&'a Value>,
+    pub args: &'a [Value],
+}
+
+impl Call<'_> {
+    /// The SHA-256 (128 bits, hex) of the arguments' lossless encoding. A value the tape
+    /// cannot encode (a function, a frame) contributes its type name: two calls that differ
+    /// only inside such a value are not told apart.
+    fn fingerprint(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let part = |v: &Value| encode(v).unwrap_or_else(|kind| json!({"type": kind}));
+        let all = json!([self.recv.map(part), self.args.iter().map(part).collect::<Vec<_>>()]);
+        let digest = Sha256::digest(all.to_string().as_bytes());
+        digest[..16].iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// How the call reads in a message: `name(arg, …)`, each argument shortened.
+    fn shown(&self) -> String {
+        // Long arguments keep both ends: a path differs in its last component, a URL in its
+        // tail, so cutting only the end would hide exactly the part that changed.
+        let short = |v: &Value| {
+            let t = crate::value::display_value(v, 0, 0).unwrap_or_else(|_| v.type_name().to_string());
+            let n = t.chars().count();
+            if n <= 60 {
+                return t;
+            }
+            let head: String = t.chars().take(20).collect();
+            let tail: String = t.chars().skip(n - 36).collect();
+            format!("{head}…{tail}")
+        };
+        let args: Vec<String> = self.recv.into_iter().chain(self.args.iter()).map(short).collect();
+        format!("{}({})", self.label, args.join(", "))
+    }
+}
+
+/// Run `call` through the tape: record what it returns, or return what was recorded without
+/// running it.
 pub fn through(
-    label: &str,
+    c: Call<'_>,
     line: usize,
     col: usize,
     call: impl FnOnce() -> Result<Value, HelixError>,
 ) -> Result<Value, HelixError> {
+    let fp = c.fingerprint();
     let replaying = TAPE.with(|t| matches!(*t.borrow(), Tape::Replay { .. }));
     if !replaying {
         let out = call();
         let entry = match &out {
             Ok(v) => match encode(v) {
-                Ok(e) => json!({"fn": label, "ok": e}),
-                Err(kind) => json!({"fn": label, "unrecordable": kind}),
+                Ok(e) => json!({"fn": c.label, "args": fp, "ok": e}),
+                Err(kind) => json!({"fn": c.label, "args": fp, "unrecordable": kind}),
             },
-            Err(e) => json!({"fn": label, "err": e.message, "hint": e.hint}),
+            Err(e) => json!({"fn": c.label, "args": fp, "err": e.message, "hint": e.hint}),
         };
         TAPE.with(|t| {
             if let Tape::Record(v) = &mut *t.borrow_mut() {
@@ -105,11 +146,16 @@ pub fn through(
                 return Err(w.clone());
             }
             let e = queue.pop_front();
+            let recorded = |e: &J| e.get("fn").and_then(J::as_str).unwrap_or("?").to_string();
             let why = match &e {
-                None => Some(format!("the app called `{label}`, but the recording has no more inputs for this step")),
-                Some(e) if e.get("fn").and_then(J::as_str) != Some(label) => Some(format!(
-                    "the app called `{label}` where the recording has `{}`",
-                    e.get("fn").and_then(J::as_str).unwrap_or("?")
+                None => Some(format!("the app called `{}`, and the recording has no more calls here", c.shown())),
+                Some(e) if recorded(e) != c.label => {
+                    Some(format!("the app called `{}` where the recording has a call to `{}`", c.shown(), recorded(e)))
+                }
+                Some(e) if e.get("args").and_then(J::as_str) != Some(fp.as_str()) => Some(format!(
+                    "the app called `{}`, but on the device `{}` was called with other arguments",
+                    c.shown(),
+                    c.label
                 )),
                 _ => None,
             };
@@ -123,11 +169,11 @@ pub fn through(
     });
     let entry = next.map_err(|w| HelixError::new(format!("replay diverged: {w}"), line, col))?;
     if let Some(ok) = entry.get("ok") {
-        return decode(ok).map_err(|m| HelixError::new(format!("replay: bad recorded value for `{label}`: {m}"), line, col));
+        return decode(ok).map_err(|m| HelixError::new(format!("replay: bad recorded value for `{}`: {m}", c.label), line, col));
     }
     if let Some(kind) = entry.get("unrecordable").and_then(J::as_str) {
         return Err(HelixError::new(
-            format!("replay: `{label}` returned a {kind} on the device, which session replay cannot record yet"),
+            format!("replay: `{}` returned a {kind} on the device, which session replay cannot record yet", c.label),
             line,
             col,
         ));
@@ -149,16 +195,15 @@ pub fn through(
 /// Called on the evaluating thread (the tape is thread-local), by `helix run` only.
 pub fn open_for_program() {
     let next = if let Ok(path) = std::env::var("HELIX_REPLAY").map(std::path::PathBuf::from) {
-        // The first line of a log written since the startup tape exists is `{"startup": …}`.
-        // An older log, or one that can't be read, replays with an empty startup: a program
-        // that reads nothing before `ui.app` replays exactly; one that does is told where.
+        // The first line of a session log is `{"session": 2, "startup": [ … ]}`. A file that
+        // can't be read, or isn't a version-2 session, opens an empty startup tape; std.ui's
+        // replay then refuses the file with the reason, before replaying anything.
         let startup = std::fs::read_to_string(&path)
             .ok()
             .and_then(|s| s.lines().next().map(str::to_string))
             .and_then(|l| serde_json::from_str::<J>(&l).ok())
-            .and_then(|j| j.get("startup").and_then(J::as_str).map(str::to_string))
-            .and_then(|t| serde_json::from_str::<J>(&t).ok())
-            .and_then(|j| j.as_array().cloned())
+            .filter(|j| j.get("session").and_then(J::as_i64) == Some(SESSION_VERSION))
+            .and_then(|j| j.get("startup").and_then(J::as_array).cloned())
             .unwrap_or_default();
         Tape::Replay { queue: startup.into(), diverged: None }
     } else if std::env::var_os("HELIX_RECORD").is_some_and(|p| !p.is_empty()) {
@@ -169,23 +214,31 @@ pub fn open_for_program() {
     TAPE.with(|t| *t.borrow_mut() = next);
 }
 
+/// The session-log format this build writes and reads (std.ui writes the header line).
+pub const SESSION_VERSION: i64 = 2;
+
 // --- The builtins. -------------------------------------------------------------------------
 
-/// `tape_begin(recorded)` — open the tape. `missing` records; a string (what `tape_end`
-/// returned when recording) replays it.
+/// `tape_begin(recorded)` — open the tape. `missing` records; a tape `tape_end` returned
+/// (as data, possibly read back from a log with `parse_json`) replays it.
 pub fn tape_begin(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
     if args.len() != 1 {
         return Err(HelixError::new(format!("`tape_begin` takes one argument, got {}", args.len()), line, col));
     }
     let next = match &args[0] {
         Value::Missing => Tape::Record(Vec::new()),
-        Value::Str(s) => match serde_json::from_str::<J>(s) {
-            Ok(J::Array(v)) => Tape::Replay { queue: v.into(), diverged: None },
-            _ => return Err(HelixError::new("`tape_begin`: a recorded tape is a JSON array", line, col)),
-        },
+        v @ Value::Array(_) => {
+            // The tape is tagged JSON; a parse_json / to_json round trip leaves it intact,
+            // because every kind is carried by its tag, not by how JSON spells numbers.
+            let text = crate::json::stringify(v).map_err(|e| HelixError::new(format!("`tape_begin`: {e}"), line, col))?;
+            match serde_json::from_str::<J>(&text) {
+                Ok(J::Array(v)) => Tape::Replay { queue: v.into(), diverged: None },
+                _ => return Err(HelixError::new("`tape_begin`: a recorded tape is a list", line, col)),
+            }
+        }
         other => {
             return Err(HelixError::new(
-                format!("`tape_begin` takes `missing` (record) or a recorded tape string, got {}", other.type_name()),
+                format!("`tape_begin` takes `missing` (record) or a recorded tape (a list), got {}", other.type_name()),
                 line,
                 col,
             ))
@@ -201,26 +254,35 @@ pub fn tape_begin(args: &[Value], line: usize, col: usize) -> Result<Value, Heli
     })
 }
 
-/// `tape_end()` — close the tape. Recording: the tape, as a JSON string. Replaying: `""` when
-/// every recorded input was used exactly as recorded, otherwise why it was not. `missing` when
-/// no tape is open (so `ui.app` can close the program's startup tape, if there is one).
+/// `tape_end()` — close the tape. Recording: `{tape}`, the recorded calls as data. Replaying:
+/// `{diverged}`, `""` when every recorded call was made exactly as recorded, else why not.
+/// `missing` when no tape is open (so `ui.app` can close the program's startup tape, if any).
 pub fn tape_end(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
     if !args.is_empty() {
         return Err(HelixError::new(format!("`tape_end` takes no arguments, got {}", args.len()), line, col));
     }
     let was = TAPE.with(|t| std::mem::replace(&mut *t.borrow_mut(), Tape::Off));
-    let out = match was {
-        Tape::Off => return Ok(Value::Missing),
-        Tape::Record(v) => J::Array(v).to_string(),
-        Tape::Replay { diverged: Some(w), .. } => w,
-        Tape::Replay { queue, .. } if !queue.is_empty() => format!(
-            "the recording has {} more input(s) for this step, starting with `{}`, that the app did not ask for",
-            queue.len(),
-            queue[0].get("fn").and_then(J::as_str).unwrap_or("?")
-        ),
-        Tape::Replay { .. } => String::new(),
-    };
-    Ok(Value::Str(Rc::new(out)))
+    let field = |k: &str, v: Value| Value::Record(Rc::new(vec![(Symbol::intern(k), v)]));
+    Ok(match was {
+        Tape::Off => Value::Missing,
+        Tape::Record(v) => {
+            let tape = crate::json::parse(&J::Array(v).to_string())
+                .map_err(|e| HelixError::new(format!("`tape_end`: {e}"), line, col))?;
+            field("tape", tape)
+        }
+        Tape::Replay { diverged, queue } => {
+            let why = match (diverged, queue.front()) {
+                (Some(w), _) => w,
+                (None, Some(next)) => format!(
+                    "the recording has {} more call(s) here, starting with `{}`, that the app did not make",
+                    queue.len(),
+                    next.get("fn").and_then(J::as_str).unwrap_or("?")
+                ),
+                (None, None) => String::new(),
+            };
+            field("diverged", Value::Str(Rc::new(why)))
+        }
+    })
 }
 
 // --- Lossless encoding. ----------------------------------------------------------------------
@@ -346,27 +408,63 @@ mod tests {
         assert!(matches!(round(Value::Int(1)), Value::Int(1)));
     }
 
+    fn call<'a>(label: &'a str, args: &'a [Value]) -> Call<'a> {
+        Call { label, recv: None, args }
+    }
+
+    fn tape_of(v: Value) -> Value {
+        match v {
+            Value::Record(fs) => fs[0].1.clone(),
+            other => panic!("expected a record, got {other:?}"),
+        }
+    }
+
+    fn diverged(v: Value) -> String {
+        match tape_of(v) {
+            Value::Str(s) => s.to_string(),
+            other => panic!("expected a string, got {other:?}"),
+        }
+    }
+
     #[test]
     fn replay_returns_recorded_results_without_running() {
+        let here = [Value::Str(Rc::new("a.txt".into()))];
+        let there = [Value::Str(Rc::new("b.txt".into()))];
         tape_begin(&[Value::Missing], 0, 0).unwrap();
-        through("now", 0, 0, || Ok(Value::Float(42.5))).unwrap();
-        through("read_text", 0, 0, || Err(HelixError::new("no such file", 0, 0).hint("check the path"))).unwrap_err();
-        let Value::Str(tape) = tape_end(&[], 0, 0).unwrap() else { panic!() };
+        through(call("now", &[]), 0, 0, || Ok(Value::Float(42.5))).unwrap();
+        through(call("read_text", &here), 0, 0, || Err(HelixError::new("no such file", 0, 0).hint("check the path"))).unwrap_err();
+        let tape = tape_of(tape_end(&[], 0, 0).unwrap());
 
-        tape_begin(&[Value::Str(tape.clone())], 0, 0).unwrap();
-        let t = through("now", 0, 0, || panic!("replay must not run the builtin")).unwrap();
+        // The tape survives a trip through the log's JSON, as it does on disk.
+        let tape = crate::json::parse(&crate::json::stringify(&tape).unwrap()).unwrap();
+
+        tape_begin(std::slice::from_ref(&tape), 0, 0).unwrap();
+        let t = through(call("now", &[]), 0, 0, || panic!("replay must not run the builtin")).unwrap();
         assert!(matches!(t, Value::Float(f) if f == 42.5));
-        let e = through("read_text", 0, 0, || panic!("replay must not run the builtin")).unwrap_err();
+        let e = through(call("read_text", &here), 0, 0, || panic!("replay must not run the builtin")).unwrap_err();
         assert_eq!((e.message.as_str(), e.hint.as_deref()), ("no such file", Some("check the path")));
-        assert!(matches!(tape_end(&[], 0, 0).unwrap(), Value::Str(s) if s.is_empty()));
+        assert_eq!(diverged(tape_end(&[], 0, 0).unwrap()), "");
 
         // Closing a closed tape answers `missing`: there was nothing to close.
         assert!(matches!(tape_end(&[], 0, 0).unwrap(), Value::Missing));
 
-        // Asking for something else is a divergence, named.
-        tape_begin(&[Value::Str(tape)], 0, 0).unwrap();
-        through("http_get", 0, 0, || panic!()).unwrap_err();
-        let Value::Str(why) = tape_end(&[], 0, 0).unwrap() else { panic!() };
-        assert!(why.contains("`http_get`") && why.contains("`now`"), "{why}");
+        // Another builtin is a divergence, named.
+        tape_begin(std::slice::from_ref(&tape), 0, 0).unwrap();
+        through(call("http_get", &[]), 0, 0, || panic!()).unwrap_err();
+        let why = diverged(tape_end(&[], 0, 0).unwrap());
+        assert!(why.contains("`http_get()`") && why.contains("`now`"), "{why}");
+
+        // The same builtin with other arguments is a divergence AT that call.
+        tape_begin(std::slice::from_ref(&tape), 0, 0).unwrap();
+        through(call("now", &[]), 0, 0, || panic!()).unwrap();
+        through(call("read_text", &there), 0, 0, || panic!()).unwrap_err();
+        let why = diverged(tape_end(&[], 0, 0).unwrap());
+        assert!(why.contains("`read_text(b.txt)`") && why.contains("other arguments"), "{why}");
+
+        // A call the recording has and the app no longer makes is named too.
+        tape_begin(&[tape], 0, 0).unwrap();
+        through(call("now", &[]), 0, 0, || panic!()).unwrap();
+        let why = diverged(tape_end(&[], 0, 0).unwrap());
+        assert!(why.contains("1 more call") && why.contains("`read_text`"), "{why}");
     }
 }

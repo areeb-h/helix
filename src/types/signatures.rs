@@ -400,11 +400,12 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Unit)
         }
+        // `{tape}` recording, `{diverged}` replaying, `missing` when no tape is open.
         "tape_end" => {
             if !args.is_empty() {
                 return Err(arity_err(name, 0, 0, args.len(), line, col));
             }
-            Ok(Type::String)
+            Ok(Type::Unknown)
         }
         "session_record_path" | "session_replay_path" => {
             if !args.is_empty() {

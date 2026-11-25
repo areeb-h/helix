@@ -1194,10 +1194,10 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
     DocEntry {
         name: "session_record_path",
         sig: "session_record_path()",
-        doc: "The file `HELIX_RECORD` names, where `std.ui` records each event and the hash of its screen; otherwise missing.",
+        doc: "The file `HELIX_RECORD` names, where `std.ui` records the session — each round's events, what the app read, the screen it drew; otherwise missing.",
         example: "session_record_path()",
         example_out: "missing",
-        notes: "SESSION REPLAY. An app is a fold of `update` over its events, so the event log IS the session. A host sets `HELIX_RECORD` and every event an app handles — clicks and timer ticks alike — is appended as one JSON line with the SHA-256 of the screen it produced. Keywords: record, session, replay, event log, crash report.",
+        notes: "SESSION REPLAY. An app is a fold of `update` over its events, so the event log is the session. A host sets `HELIX_RECORD` and `std.ui` writes a header (with what `main` read before `ui.app`), then one JSON line per round: its events (clicks and timer ticks alike), every call it made into the app with what that call read from the world (`tape_begin`), and the SHA-256 of the screen drawn — tree, theme and stylesheet. Not recorded under `--watch`. Keywords: record, session, replay, event log, crash report.",
     },
     DocEntry {
         name: "tape_begin",
@@ -1210,10 +1210,10 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
     DocEntry {
         name: "tape_end",
         sig: "tape_end()",
-        doc: "Close the input tape: the recorded tape as a string, or (replaying) \"\" when the recording was used exactly, else why not; missing if none is open.",
+        doc: "Close the input tape: `{tape}` (the recorded calls) when recording, `{diverged}` (\"\" when the recording was used exactly) when replaying; missing if none is open.",
         example: "tape_end()",
         example_out: "",
-        notes: "SESSION REPLAY. A replay diverges when the app asks for a different input than the recording holds, or fewer or more of them; the string names the call. Keywords: tape, record, replay, divergence.",
+        notes: "SESSION REPLAY. A replay diverges when the app makes a different call than the recording holds — another builtin, or the same one with other arguments (each call's arguments are fingerprinted) — or fewer or more calls; `diverged` names the call. Keywords: tape, record, replay, divergence.",
     },
     DocEntry {
         name: "session_replay_path",
@@ -1221,7 +1221,7 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         doc: "The file `HELIX_REPLAY` names: a recorded session `std.ui` replays and checks instead of serving; otherwise missing.",
         example: "session_replay_path()",
         example_out: "missing",
-        notes: "SESSION REPLAY. `HELIX_REPLAY=log.jsonl helix run app.helix` runs every recorded event through `update`, re-renders every screen, and compares it with the hash recorded on the device. It prints the first step that differs and exits non-zero. Keywords: replay, verify, regression, session, event log.",
+        notes: "SESSION REPLAY. `HELIX_REPLAY=log.jsonl helix run app.helix` plays the recorded rounds through the same code the live loop runs, hands each call into the app the inputs it had on the device (so the replay reaches no file, socket or process, and writes nothing), and compares every screen with the one recorded. It names the first rounds that differ — a different screen, or a call the app made differently (another builtin, or the same one with other arguments) — and exits 1. Keywords: replay, verify, regression, session, event log.",
     },
     DocEntry {
         name: "dev_generation",

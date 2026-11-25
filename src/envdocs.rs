@@ -131,14 +131,14 @@ pub static ENV: &[EnvDoc] = &[
         values: "a file path",
         default: "unset — nothing is recorded",
         doc: "Session replay: `std.ui` appends every event and its screen's hash here.",
-        notes: "Read by `session_record_path()`. One JSON line per event: `{ev, screen}`. Writing the file spends `fs-write`. The log holds whatever the user typed: treat it as user data. Keywords: record, session, replay.",
+        notes: "Read by `session_record_path()`. A header line `{session, app, startup}`, then one JSON line per round: `{events, calls, screen, undone}`. Starts a fresh file. Writing it spends `fs-write`. The log holds what the user typed and what the app read (file contents, responses, host names): treat it as user data. Ignored under `--watch`. Keywords: record, session, replay.",
     },
     EnvDoc {
         name: "HELIX_REPLAY",
         values: "a file path written under `HELIX_RECORD`",
         default: "unset — the app serves as usual",
         doc: "Session replay: replay and verify this recorded session instead of serving.",
-        notes: "Read by `session_replay_path()`. Exits 0 when every screen matches its recorded hash, 1 at the first that does not. Keywords: replay, verify, regression.",
+        notes: "Read by `session_replay_path()`. Exits 0 when every round replays to the screen recorded; 1, naming the rounds, when a screen differs or the app's calls differ from the device's. A file of another session format is refused. Keywords: replay, verify, regression.",
     },
     EnvDoc {
         name: "HELIX_DEV_GENERATION",

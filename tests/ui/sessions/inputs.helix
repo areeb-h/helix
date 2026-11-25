@@ -1,0 +1,76 @@
+# A test app for session replay of INPUTS: every event reads the world in a different way.
+#
+#   HELIX_RECORD=log.jsonl helix run inputs.helix --dir DIR --url URL
+#   HELIX_REPLAY=log.jsonl helix run inputs.helix --dir DIR --url URL
+#
+# On replay none of these reads (or the write) happen: each returns what it returned
+# when the session was recorded.
+
+import std.ui
+
+fn update(m, e) = match e.msg {
+  # The clock, and a random draw seeded from it.
+  "clock" => do {
+    t = now()
+    {...m, last: "clock {t}", draws: m.draws.concat([random(1, (t * 1000.0).to_int())[0]])}
+  },
+  # A directory listing and one file's contents and size.
+  "files" => do {
+    names = read_dir(m.dir).sort()
+    note = read_text("{m.dir}/note.txt")
+    info = file_info("{m.dir}/note.txt")
+    {...m, last: "files {names.join(", ")}; note={note.trim()}; size={info.size}"}
+  },
+  # The network.
+  "fetch" => do {
+    r = try http_get(m.url)
+    {...m, last: if r.ok then "fetch {r.value.status} {r.value.body.trim()}" else "fetch failed: {r.error}"}
+  },
+  # A process.
+  "proc" => do {
+    out = run("uname", ["-n"])
+    {...m, last: "proc {out.stdout.trim()}"}
+  },
+  # A write: the audit line goes to disk on the device, and nowhere on replay.
+  "save" => do {
+    written = "saved {m.draws.count()} draws\n".append_to("{m.dir}/audit.log")
+    {...m, last: "saved", saves: m.saves + 1}
+  },
+  # A read that fails.
+  "missing" => do {
+    r = try read_text("{m.dir}/does-not-exist.txt")
+    {...m, last: if r.ok then "found?!" else "missing: {r.error}"}
+  },
+  _ => m,
+}
+
+ACTIONS = [["Clock", "clock"], ["Files", "files"], ["Fetch", "fetch"], ["Process", "proc"], ["Save", "save"], ["Missing", "missing"]]
+
+fn view(m) = ui.column([
+  ui.heading("Inputs"),
+  ui.el("div", {style: {display: "flex", flex_wrap: "wrap", gap: "8px"}}, ACTIONS.map((a) => ui.button(a[0], a[1]))),
+  ui.card("Last", [ui.text(m.last)]),
+  ui.card("Draws", [ui.text(m.draws.map((d) => "{d:.6f}").join(" "))]),
+  ui.card("Saves", [ui.text("{m.saves}")]),
+  # The view reads the world too: the file count, at render time.
+  ui.card("Files now", [ui.text("{read_dir(m.dir).count()}")]),
+])
+
+# Defaults suit the Android spike shell: it runs the app with no arguments, in the app's files
+# directory, and 10.0.2.2 is the emulator's name for the machine it runs on.
+fn main(dir: String = "world", url: String = "http://10.0.2.2:8142/answer.txt", port: Int = 8141) = do {
+  # A world to read on first run (outside the app's update/view, so not on the tape).
+  made = if file_exists("{dir}/note.txt") then false else do {
+    m = mkdir(dir)
+    w1 = "hello from the device\n".write_to("{dir}/note.txt")
+    w2 = "".write_to("{dir}/a.txt")
+    true
+  }
+  ui.app({
+    title: "Inputs",
+    init: {dir: dir, url: url, last: "", draws: [], saves: 0},
+    update: update,
+    view: view,
+    port: port,
+  })
+}

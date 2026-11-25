@@ -3191,20 +3191,18 @@ fn is_design(d) = type_of(d) == "Record" and ["light", "dark", "effects", "mater
 fn css_with(spec, d) = "@layer hx-components, hx-utilities; :root {{ {motion_tokens()} }}{design_css(d)}{scope_css(d)}@layer hx-components {{ {THEME} }}{spec.get("style") ?? ""}"
 fn css_of(spec, model) = css_with(spec, design_of(spec, model, missing))
 
-fn page(spec, rt, model) = do {
+# The page is the screen the last round drew (`s.tree`, `s.theme`) — the app's `view` is not
+# called again for it, so a page load shows exactly what every subscriber is shown.
+fn page(spec, rt, s) = do {
   title = html_escape("{spec.title}")
-  tree = (spec.view)(model)
+  tree = s.tree
   body = render(tree)
   # The utilities this page uses: those already sent, and any its own tree adds.
   util = utility_css(rt.known.keys().concat(view_classes(tree)))
-  theme = theme_of(spec, model)
+  theme = s.theme
   effects = rt.design.effects
   fx = if effects == "auto" then "" else " data-effects=\"{effects}\""
   "<!doctype html><html lang=\"en\" data-theme=\"{theme}\"{fx} data-client=\"{rt.client}\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{title}</title><style id=\"hx-style\">{rt.css}</style><style id=\"hx-util\">{util}</style></head><body><main id=\"root\">{body}</main><script>{CLIENT}</script></body></html>"
-}
-fn theme_of(spec, model) = if spec.get("theme").is_missing() then "light" else do {
-  t = try (spec.theme)(model)
-  if t.ok then t.value else "light"
 }
 
 # --- The loop. ----------------------------------------------------------------------------
@@ -3233,7 +3231,7 @@ fn refuse(st, c, status, why) = do {
 
 fn route(spec, st, c, req) = match "{req.method} {req.path}" {
   "GET /" => do {
-    sent = c.respond({status: 200, html: page(spec, st.rt, st.model)})
+    sent = c.respond({status: 200, html: page(spec, st.rt, st.s)})
     {...st, keep: st.keep.concat([c])}
   },
   "GET /events" => do {
@@ -3247,7 +3245,7 @@ fn route(spec, st, c, req) = match "{req.method} {req.path}" {
     ev = if parsed.ok then parsed.value else missing
     if type_of(ev) != "Record" then refuse(st, c, 400, "an event is a JSON record {{msg, value}}") else do {
       sent = c.respond({status: 204, text: ""})
-      {...st, model: step(spec, st.model, ev, st.rt.rec), keep: st.keep.concat([c]), changed: true, acks: st.acks.concat(ack_of(ev))}
+      {...st, events: st.events.concat([ev]), keep: st.keep.concat([c]), acks: st.acks.concat(ack_of(ev))}
     }
   },
   _ => refuse(st, c, 404, "not found"),
@@ -3261,70 +3259,134 @@ fn ack_of(ev) = do {
   if type_of(q) == "String" and q.count() <= 40 then [q] else []
 }
 
-# One event through `update`. An update that raises is logged and the model kept: one bad
-# event must not take the app down with it. Under `HELIX_RECORD` (`rec`), the event is also
-# recorded with the hash of the screen it led to — see "Session replay" below.
-fn step(spec, model, ev, rec = missing) = do {
-  opened = if rec.is_missing() then false else tape_begin(missing)
-  tried = try (spec.update)(model, ev)
-  inputs = if rec.is_missing() then "" else tape_end()
-  next = if tried.ok then tried.value else do {
-    logged = elog("update failed on {ev.to_json()}: {tried.error}")
-    model
-  }
-  recorded = if rec.is_missing() then false else record_event(spec, rec, ev, inputs, next)
-  next
+# --- Rounds --------------------------------------------------------------------------------
+#
+# The loop works in ROUNDS. A round takes every event that arrived — posted by the page, then
+# the timers that fell due — folds them through `update`, and if there were any, draws once:
+# `view`, then the app's `theme` and `design` when they are functions. That drawing is what the
+# user sees. An `update` that raises is logged and the model kept; a `view` that raises undoes
+# the round, so the model goes back to what the screen shows. One bad event must not end the app.
+#
+# `play_round` is the only place an app's own code runs on the screen's behalf (`subscriptions` only
+# schedules timers, whose ticks are events). The live loop calls it, and so does a replay, so
+# the two cannot drift apart.
+#
+# `s` is what is on screen: `{model, tree, theme, design}`.
+fn play_round(spec, s, events, sess, redraw = false) = do {
+  folded = events.reduce({model: s.model, sess: sess}, (acc, ev) => do {
+    c = app_call(acc.sess, "update", () => (spec.update)(acc.model, ev))
+    m = if c.r.ok then c.r.value else do {
+      logged = elog("update failed on {ev.to_json()}: {c.r.error}")
+      acc.model
+    }
+    {model: m, sess: c.sess}
+  })
+  if events.count() == 0 and not redraw then {s: s, drew: false, undone: false, sess: sess} else draw(spec, s, folded.model, folded.sess)
 }
 
-# --- Session replay -------------------------------------------------------------------------
-#
-# An app is a fold of `update` over its events, and time arrives AS an event (a tick carries
-# `now()`), so the event log is the whole session. Recording it is one JSON line per event:
-# the event exactly as `update` saw it, and the SHA-256 of the screen it produced. Replaying
-# it — on another machine, another engine, another build — is the same fold; every screen is
-# re-rendered and must hash the same. A different hash is a different screen.
-#
-# What `update` and `view` read from the world — `now()`, files, the network, processes — is
-# recorded too, on the input tape (`tape_begin` / `tape_end`, src/tape.rs): `inputs` for the
-# update, `view_inputs` for the screen. Replaying, those calls do not run; they return what
-# they returned on the device, so a replay reaches nothing and writes nothing.
-#
-# Known gaps (prototype): a view that raises undoes its round in `serve` but is recorded
-# here as "view-failed"; a `--watch` model handover is not recorded; the log is user data.
-fn screen_hash(spec, model) = do {
-  shown = try render((spec.view)(model))
-  if shown.ok then sha256(shown.value) else "view-failed"
+# Draw a model: its view, then the theme and design it implies. A view that raises leaves the
+# screen — and with it the model — as it was (`s`).
+fn draw(spec, s, model, sess) = do {
+  v = app_call(sess, "view", () => (spec.view)(model))
+  if not v.r.ok then do {
+    logged = elog("view failed: {v.r.error}; the events that led to it were undone")
+    {s: s, drew: false, undone: true, sess: v.sess}
+  } else do {
+    th = theme_in(spec, model, v.sess)
+    ds = design_in(spec, model, s.design, th.sess)
+    {s: {model: model, tree: v.r.value, theme: th.value, design: ds.value}, drew: true, undone: false, sess: ds.sess}
+  }
 }
-fn record_event(spec, path, ev, inputs, model) = do {
+
+fn theme_in(spec, model, sess) = if spec.get("theme").is_missing() then {value: "light", sess: sess} else do {
+  c = app_call(sess, "theme", () => (spec.theme)(model))
+  {value: if c.r.ok then c.r.value else "light", sess: c.sess}
+}
+
+# A design given as a value is std.ui's to compute; one given as a function is the app's code.
+fn design_in(spec, model, last, sess) = do {
+  d = spec.get("design")
+  if type_of(d) != "Function" then {value: design_of(spec, model, last), sess: sess} else do {
+    c = app_call(sess, "design", () => d(model))
+    value = if c.r.ok and is_design(c.r.value) then c.r.value else do {
+      logged = elog(if c.r.ok then "design returned {type_of(c.r.value)}, which is not a `ui.design(…)`; the last design is kept" else "design failed: {c.r.error}; the last design is kept")
+      last ?? default_design()
+    }
+    {value: value, sess: c.sess}
+  }
+}
+
+# --- Session replay --------------------------------------------------------------------------
+#
+# Every call `play_round` makes into the app goes through `app_call`. Outside a session that is just
+# the call. In a session (`HELIX_RECORD` / `HELIX_REPLAY`), each call runs on the input tape
+# (src/tape.rs): recording, what it read from the world — the clock, files, the network,
+# processes — and wrote is kept, in order, with the round (`sess.calls`); replaying, each call
+# is handed its own recorded tape, so it reads what the device read and writes nothing. A call
+# the recording doesn't have at that point runs on an EMPTY tape: whatever it reads diverges,
+# rather than reading the replaying machine's world.
+#
+# The log is one JSON line per round, after a header:
+#
+#   {"session": 2, "app": title, "startup": [calls]}     what `main` read before `ui.app`
+#   {"events": [], "calls": [...], "screen": h}          round 0: the first screen
+#   {"events": [ev, …], "calls": [...], "screen": h, "undone": false}
+#
+# `screen` is the SHA-256 of what was shown: the rendered tree, its theme and its stylesheet.
+# Replaying runs the same rounds and must produce the same screens.
+SESSION_VERSION = 2
+
+fn app_call(sess, label, f) = if sess.is_missing() then {r: try f(), sess: sess} else if sess.mode == "record" then do {
   opened = tape_begin(missing)
-  screen = screen_hash(spec, model)
-  view_inputs = tape_end()
-  line = {ev: ev, inputs: inputs, screen: screen, view_inputs: view_inputs}.to_json()
+  r = try f()
+  closed = tape_end()
+  {r: r, sess: {...sess, calls: sess.calls.concat([{call: label, tape: closed.tape}])}}
+} else do {
+  next = if sess.calls.count() == 0 then missing else sess.calls[0]
+  unexpected = if next.is_missing() then "a call to `{label}`, and the recording has no more calls in this round" else if next.call != label then "a call to `{label}` where the recording has `{next.call}`" else ""
+  opened = tape_begin(if unexpected == "" then next.tape else [])
+  r = try f()
+  closed = tape_end()
+  why = if unexpected != "" then "the app made {unexpected}" else if closed.diverged != "" then "{label}: {closed.diverged}" else ""
+  {r: r, sess: {...sess, calls: if next.is_missing() then [] else sess.calls.drop(1), diverged: if sess.diverged != "" then sess.diverged else why}}
+}
+
+fn screen_of(spec, s) = sha256("{render(s.tree)}\n{s.theme}\n{css_with(spec, s.design)}")
+
+fn recording(rec) = if rec.is_missing() then missing else {mode: "record", calls: [], diverged: ""}
+
+fn record_round(spec, path, events, r) = do {
+  line = {events: events, calls: r.sess.calls, screen: if r.drew then screen_of(spec, r.s) else missing, undone: r.undone}.to_json()
   "{line}\n".append_to(path)
 }
 
-# Replay a recorded session and check every screen. Prints one line per step that differs
-# (at most 5), then a summary; raises — exit status 1 — if any differ.
-export fn replay_check(spec, path, startup = "") = do {
-  # The `startup` line was replayed before the program ran (src/tape.rs); here it is only skipped.
-  entries = read_text(path).split("\n").filter((l) => l.count() > 0).map((l) => l.parse_json()).filter((x) => x.get("ev").is_missing() == false)
-  # `startup` is "" when `main` used the recording exactly, else why not.
-  first_bad = if (startup ?? "") == "" then [] else [{step: 0, ev: {msg: "(startup: before ui.app)"}, want: "", got: "", diverged: "startup: {startup}"}]
-  out = entries.reduce({model: spec.init, n: 0, bad: first_bad}, (acc, x) => do {
-    # A log from before the input tape has no `inputs`: an app that read nothing.
-    opened = tape_begin(x.get("inputs") ?? "[]")
-    m = step(spec, acc.model, x.ev)
-    why = tape_end()
-    opened_view = tape_begin(x.get("view_inputs") ?? "[]")
-    got = screen_hash(spec, m)
-    why_view = tape_end()
-    diverged = if why != "" then "update: {why}" else if why_view != "" then "view: {why_view}" else ""
-    ok = got == x.screen and diverged == ""
-    bad = if ok then acc.bad else acc.bad.concat([{step: acc.n + 1, ev: x.ev, want: x.screen, got: got, diverged: diverged}])
-    {model: m, n: acc.n + 1, bad: bad}
-  })
-  shown = out.bad.take(5).map((b) => print(if b.diverged != "" then "step {b.step}: inputs diverged after {b.ev.to_json()}: {b.diverged}" else "step {b.step}: screen differs after {b.ev.to_json()} (recorded {b.want.take(12)}, replayed {b.got.take(12)})"))
-  if out.bad.count() == 0 then print("replay ok: {out.n} events, {out.n} screens identical to the recording") else raise("replay FAILED: {out.bad.count()} of {out.n} screens differ from the recording", "the app's update or view changed what the user saw; the first differing step is listed above")
+# Replay a recorded session: the same rounds, each call handed its recorded inputs, every
+# screen compared with the one recorded. Prints the rounds that differ (at most 5), then a
+# summary; raises — exit status 1 — if any differ. `startup` is how `main`'s own replay went
+# (`tape_end()` in `app`).
+export fn replay_check(spec, path, startup = missing) = do {
+  lines = read_text(path).split("\n").filter((l) => l.count() > 0).map((l) => l.parse_json())
+  head = if lines.count() == 0 then missing else lines[0]
+  version = if type_of(head) == "Record" then head.get("session") else missing
+  known = if type_of(version) == "Int" then version == SESSION_VERSION else false
+  if not known then raise("`{path}` is not a session recorded by this version of Helix (session format {SESSION_VERSION})", "record it again with HELIX_RECORD") else do {
+    why_startup = startup.get("diverged") ?? ""
+    bad0 = if why_startup == "" then [] else [{round: "startup", events: [], why: "before ui.app: {why_startup}"}]
+    blank = {model: spec.init, tree: missing, theme: "light", design: missing}
+    out = lines.drop(1).reduce({s: blank, n: 0, events: 0, bad: bad0}, (acc, x) => do {
+      sess = {mode: "replay", calls: x.calls, diverged: ""}
+      r = if acc.n == 0 then draw(spec, acc.s, spec.init, sess) else play_round(spec, acc.s, x.events, sess)
+      left = if r.sess.calls.count() == 0 then "" else "the recording has {r.sess.calls.count()} more call(s) in this round, starting with `{r.sess.calls[0].call}`, that the app did not make"
+      why = if r.sess.diverged != "" then r.sess.diverged else left
+      got = if r.drew then screen_of(spec, r.s) else missing
+      same_screen = (got ?? "") == (x.screen ?? "") and r.undone == (x.undone ?? false)
+      problem = if why != "" then "inputs diverged — {why}" else if not same_screen then "screen differs (recorded {(x.screen ?? "none").take(12)}, replayed {(got ?? "none").take(12)})" else ""
+      bad = if problem == "" then acc.bad else acc.bad.concat([{round: acc.n, events: x.events, why: problem}])
+      {s: r.s, n: acc.n + 1, events: acc.events + x.events.count(), bad: bad}
+    })
+    shown = out.bad.take(5).map((b) => print("round {b.round} ({b.events.map((e) => e.get("msg") ?? "?").join(", ")}): {b.why}"))
+    if out.bad.count() == 0 then print("replay ok: {out.n} rounds, {out.events} events, every screen identical to the recording") else raise("replay FAILED: {out.bad.count()} of {out.n} rounds differ from the recording", "the first differing rounds are listed above")
+  }
 }
 
 # A frame is the patch operations that bring a client's page up to date, and the theme.
@@ -3356,41 +3418,35 @@ fn first_frame(ops, theme, rt) = {ops: ops, theme: theme, css: rt.css, util: rt.
 # `tree` is the view every current subscriber is showing. A change sends them its diff — and
 # nothing at all when the diff is empty, as a timer whose `update` changed nothing leaves it; a
 # client that has just subscribed gets the whole tree instead (`view_diff(missing, tree)`).
-fn serve(l, spec, rt, model, tree, conns, streams, timers) = do {
+fn serve(l, spec, rt, s, conns, streams, timers) = do {
   ready = l.wait(conns, sleep_ms(timers, clock_monotonic()))
   fresh = l.accept_poll()
   live = if fresh.is_missing() then conns else conns.concat([fresh])
-  st = live.reduce({model: model, rt: rt, keep: [], streams: [], changed: false, acks: []}, (s, c) => handle(spec, s, c))
+  st = live.reduce({s: s, rt: rt, keep: [], streams: [], events: [], acks: [], redraw: false}, (x, c) => handle(spec, x, c))
   t = clock_monotonic()
   due = timers.filter((x) => x.due <= t)
-  ticked = due.reduce(st.model, (m, x) => step(spec, m, {msg: x.msg, value: now()}, rt.rec))
-  changed_now = st.changed or due.count() > 0
-  # A view that raises must not end the app either. The events of this round are undone — the
-  # model goes back to what the screen shows — and the error is logged; the screen stays
-  # consistent with the model, and the next event starts from there.
-  drawn = if changed_now then try (spec.view)(ticked) else {ok: true, value: tree}
-  logged_view = if drawn.ok then false else elog("view failed: {drawn.error}; the events that led to it were undone")
-  ticked = if drawn.ok then ticked else model
-  changed = changed_now and drawn.ok
-  next = if changed then drawn.value else tree
-  theme = theme_of(spec, ticked)
-  ops = if changed then view_diff(tree, next) else []
+  # The round's events: what the page posted, then the timers that fell due, each carrying the
+  # clock it fired at — time arrives as an event.
+  events = st.events.concat(due.map((x) => {msg: x.msg, value: now()}))
+  r = play_round(spec, st.s, events, recording(st.rt.rec), st.redraw)
+  recorded = if st.rt.rec.is_missing() or events.count() == 0 then false else record_round(spec, st.rt.rec, events, r)
+  shown = r.s
+  ops = if r.drew then view_diff(s.tree, shown.tree) else []
   # A design that changed restyles every page: the new stylesheet rides on the frame.
-  d_now = if changed and type_of(spec.get("design")) == "Function" then design_of(spec, ticked, st.rt.design) else st.rt.design
-  restyled = changed and d_now != st.rt.design
-  rt1 = if restyled then {...st.rt, design: d_now, css: css_with(spec, d_now)} else st.rt
-  cl = if changed then with_classes(rt1, next) else {rt: rt1, util: missing}
+  restyled = r.drew and shown.design != st.rt.design
+  rt1 = if restyled then {...st.rt, design: shown.design, css: css_with(spec, shown.design)} else st.rt
+  cl = if r.drew then with_classes(rt1, shown.tree) else {rt: rt1, util: missing}
   rt2 = cl.rt
   kept = if ops.count() == 0 and not restyled and st.acks.count() == 0 and cl.util.is_missing() then streams else do {
-    f = frame(ops, theme, rt2, restyled, st.acks, cl.util)
-    streams.filter((s) => s.send(f))
+    f = frame(ops, shown.theme, rt2, restyled, st.acks, cl.util)
+    streams.filter((x) => x.send(f))
   }
   first = if st.streams.count() == 0 then [] else do {
-    f = first_frame(view_diff(missing, next), theme, rt2)
-    st.streams.filter((s) => s.send(f))
+    f = first_frame(view_diff(missing, shown.tree), shown.theme, rt2)
+    st.streams.filter((x) => x.send(f))
   }
-  later = schedule(timers.map((x) => if x.due <= t then advance(x, t) else x), subs_of(spec, ticked), t)
-  serve(l, spec, rt2, ticked, next, st.keep, kept.concat(first), later)
+  later = schedule(timers.map((x) => if x.due <= t then advance(x, t) else x), subs_of(spec, shown.model), t)
+  serve(l, spec, rt2, shown, st.keep, kept.concat(first), later)
 }
 
 # --- Hot reload. ---------------------------------------------------------------------------
@@ -3412,7 +3468,7 @@ fn serve(l, spec, rt, model, tree, conns, streams, timers) = do {
 # app keeps `init` and says why.
 fn dev_route(spec, st, c, req) = match "{req.method} {req.path}" {
   "GET /__dev/model" => do {
-    json = try st.model.to_json()
+    json = try st.s.model.to_json()
     sent = if json.ok then c.respond({status: 200, text: json.value}) else c.respond({status: 409, text: "this model is not JSON, so it cannot cross a reload"})
     {...st, keep: st.keep.concat([c])}
   },
@@ -3425,9 +3481,9 @@ fn dev_route(spec, st, c, req) = match "{req.method} {req.path}" {
     if not valid then {...st, keep: st.keep.concat([c])} else {
       ...st,
       rt: {...rt, macs: rt.macs.concat([hmac_sha256(rt.key, token)])},
-      model: adopt(spec, a.value.get("model")),
+      s: {...st.s, model: adopt(spec, a.value.get("model"))},
       keep: st.keep.concat([c]),
-      changed: true,
+      redraw: true,
     }
   },
   _ => refuse(st, c, 404, "not found"),
@@ -3456,14 +3512,23 @@ fn serve_app(spec, startup = missing) = do {
   l = listen(port)
   generation = dev_generation()
   reload = if generation.is_missing() then false else generation > 1
-  d0 = design_of(spec, spec.init, missing)
-  rt0 = {...session(port), rec: session_record_path(), dev: not generation.is_missing(), design: d0, css: css_with(spec, d0), title: "{spec.title}", client: sha256(CLIENT), known: {"": true}, util: ""}
-  rt = with_classes(rt0, (spec.view)(spec.init)).rt
-  # A recording starts with what the program read before `ui.app`, and starts a fresh file:
-  # one file is one session.
-  begun = if rt.rec.is_missing() then false else do {
-    first = {startup: startup ?? "[]"}.to_json()
-    "{first}\n".write_to(rt.rec)
+  # A hot reload replaces the program mid-session, so a `--watch` run is never recorded: the
+  # log would describe no single program, and could not be replayed.
+  rec_asked = session_record_path()
+  rec = if rec_asked.is_missing() or generation.is_missing() then rec_asked else do {
+    logged = elog("HELIX_RECORD is ignored under --watch: a session is one program, and a reload replaces it")
+    missing
+  }
+  # Round 0: the first screen, drawn like any other.
+  r0 = draw(spec, {model: spec.init, tree: missing, theme: "light", design: missing}, spec.init, recording(rec))
+  s0 = if r0.drew then r0.s else raise("the app's first view failed, so there is nothing to show", "see the error logged above")
+  rt0 = {...session(port), rec: rec, dev: not generation.is_missing(), design: s0.design, css: css_with(spec, s0.design), title: "{spec.title}", client: sha256(CLIENT), known: {"": true}, util: ""}
+  rt = with_classes(rt0, s0.tree).rt
+  # A recording is a fresh file: the header (with what `main` read before `ui.app`), then round 0.
+  begun = if rec.is_missing() then false else do {
+    head = {session: SESSION_VERSION, app: "{spec.title}", startup: if startup.is_missing() then [] else startup.tape}.to_json()
+    w = "{head}\n".write_to(rec)
+    record_round(spec, rec, [], r0)
   }
   url = "http://127.0.0.1:{port}/?token={rt.token}"
   # Under `--watch` the supervisor reads this line and shows the link once, on the first start.
@@ -3478,7 +3543,7 @@ fn serve_app(spec, startup = missing) = do {
   in_window = if windowed and generation.is_missing() then open_window(url, "{spec.title}", size.get("width") ?? 1100, size.get("height") ?? 760) else false
   wants_open = if spec.get("open").is_missing() then false else spec.open
   opened = if in_window or reload then false else if windowed or wants_open then open_url(url) else false
-  serve(l, spec, rt, spec.init, (spec.view)(spec.init), [], [], schedule([], subs_of(spec, spec.init), clock_monotonic()))
+  serve(l, spec, rt, s0, [], [], schedule([], subs_of(spec, s0.model), clock_monotonic()))
 }
 
 # Replay a list of events through `update` and return every screen as HTML — the property a
