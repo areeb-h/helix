@@ -90,7 +90,8 @@ pub(crate) enum Refused {
 /// string sixfold, and a value that holds one sub-value many times prints exponentially, so
 /// the size is not knowable up front (ADR 0024).
 pub(crate) fn stringify(v: &Value) -> Result<String, Refused> {
-    let mut out = Capped { buf: Vec::new(), refused: None };
+    let _walk = crate::deep::scope();
+    let mut out = Capped { buf: Vec::new(), refused: None, walk: crate::deep::walk_id() };
     match write_json(&mut out, v) {
         // Every byte came from `serde_json` or is ASCII punctuation, so the check passes.
         Ok(()) => String::from_utf8(out.buf).map_err(|e| Refused::Other(format!("could not serialize to JSON: {e}"))),
@@ -103,6 +104,44 @@ pub(crate) fn stringify(v: &Value) -> Result<String, Refused> {
 struct Capped {
     buf: Vec<u8>,
     refused: Option<Refused>,
+    /// This walk's number: a remembered span is an offset into THIS buffer.
+    walk: usize,
+}
+
+impl Capped {
+    /// Write again the `len` bytes that start at `start` — the text of a container this walk
+    /// has already written — under the same cap as any other write.
+    fn repeat(&mut self, start: usize, len: usize) -> Result<(), String> {
+        let need = self.buf.len().saturating_add(len);
+        if need > crate::interp::MAX_STRING_LEN {
+            self.refused = Some(Refused::TooLong);
+        } else if self.buf.try_reserve(len).is_err() {
+            self.refused = Some(Refused::NoMemory(need));
+        }
+        if self.refused.is_some() {
+            self.buf = Vec::new();
+            return Err("JSON text refused".to_string());
+        }
+        self.buf.extend_from_within(start..start + len);
+        Ok(())
+    }
+}
+
+/// One element or member value: a scalar written, a container written one level deeper on
+/// guarded stack — or, when this walk has already written that very container, copied from
+/// where its text lies. A value that holds one sub-value many times is thus refused as soon
+/// as its text would pass the cap, not after a walk of every path through it.
+fn write_child(out: &mut Capped, v: &Value) -> Result<(), String> {
+    let Some(node) = crate::deep::node(v) else { return write_json(out, v) };
+    let (step, hit) = crate::deep::step((node.key, out.walk, crate::deep::REL_JSON), node.shared);
+    if let Some(Value::Int(span)) = hit {
+        return out.repeat((span >> 32) as usize, (span & 0xffff_ffff) as usize);
+    }
+    let start = out.buf.len();
+    crate::deep::nested(|| write_json(out, v))?;
+    let len = out.buf.len() - start;
+    step.done(|| Some(Value::Int((start as i64) << 32 | len as i64)), v, v);
+    Ok(())
 }
 
 impl std::io::Write for Capped {
@@ -210,7 +249,7 @@ fn write_json_array(out: &mut Capped, xs: &[Value]) -> Result<(), String> {
         if i > 0 {
             put(out, b",")?;
         }
-        crate::deep::nested(|| write_json(out, x))?;
+        write_child(out, x)?;
     }
     put(out, b"]")
 }
@@ -223,7 +262,7 @@ fn write_json_object<'a>(out: &mut Capped, entries: impl Iterator<Item = (&'a st
         }
         json_leaf(out, k)?;
         put(out, b":")?;
-        crate::deep::nested(|| write_json(out, val))?;
+        write_child(out, val)?;
     }
     put(out, b"}")
 }

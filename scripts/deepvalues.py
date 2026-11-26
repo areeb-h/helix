@@ -17,6 +17,13 @@ were also quadratic in depth (each level copied the text below it) and one was
 exponential (`tensor` measured the first row twice per level), so a stack fix alone would
 have traded a crash for a hang.
 
+The second half is SHARING. A value that holds one sub-value twice at each of 100,000
+levels is 100,001 containers and 2^100000 leaves. Walks that followed paths (`==`, `unique`,
+sorting) never finished; walks that built a tree from it (`v + 1`, the sort-key shape check,
+a table cell's text) ran out of memory and died. Each walk now answers once per distinct
+container (`deep::once`), and text is refused at the one-string cap in about the time the
+cap takes to fill. The `shared-*` shapes hold every operation to that.
+
 No other generator in this tree makes such a value. `stranger.py` and `opfuzz.py` emit
 programs a person would type, the differential fuzzers build ASTs, and tests/corpus is
 hand-written; none of them nests a VALUE more than a few levels. This one does nothing
@@ -64,12 +71,25 @@ SHAPES = {
     "dict": 'dict().insert("k", acc)',
     "closure": "(x) => if x then acc else 0",
     "mixed": 'if n % 3 == 0 then [acc] else if n % 3 == 1 then {next: acc} else (acc, n)',
+    # SHARING: each level holds the level below TWICE. 100,000 levels is 100,001 containers
+    # and 2^100000 leaves, so any walk that follows paths instead of containers never ends,
+    # and any that builds a tree from one runs out of memory.
+    "shared-array": "[acc, acc]",
+    "shared-record": "{a: acc, b: acc}",
+    "shared-tuple": "(acc, acc)",
+    "shared-dict": 'dict().insert("a", acc).insert("b", acc)',
 }
+SHARED = {s for s in SHAPES if s.startswith("shared-")}
+# What a shared value's TEXT must do: it is longer than any string may be, so writing it is
+# the one-string cap's clean error (in about the time the cap takes to fill), never a hang.
+SHARED_EXPECT = {"print": "error", "interpolate": "error", "to-json": "error", "write-json": "error"}
 
 # (name, program tail, shapes it applies to, expectation). `v` and `w` are deep values of
 # the same shape; the tail must print something deterministic.
 ALL = set(SHAPES)
 DATA = ALL - {"closure"}
+TUPLES = {"tuple", "shared-tuple"}
+ARRAYS = {"array", "pair", "shared-array"}
 OPS = [
     ("drop", 'print("built")', ALL, "ok"),
     ("print", "print(v)", DATA, "ok"),
@@ -91,20 +111,20 @@ OPS = [
     ("dict-value", 'print(dict().insert("a", v) == dict().insert("a", w))', ALL, "ok"),
     ("record-field", "print({a: v}.a == w)", ALL, "ok"),
     ("type-of", "print(type_of(v))", ALL, "ok"),
-    ("lt", "print(v < w)", {"tuple"}, "ok"),
-    ("le", "print(v <= w)", {"tuple"}, "ok"),
-    ("sort", "print([w, v].sort().count())", {"tuple"}, "ok"),
-    ("sort-by", "print([w, v].sort_by((x) => x).count())", {"tuple"}, "ok"),
-    ("min", "print([v, w].min() == v)", {"tuple"}, "ok"),
-    ("argmax", "print([v, w].argmax())", {"tuple"}, "ok"),
-    ("add", "print((v + 1) == v)", {"array", "pair"}, "ok"),
-    ("mul", "print((v * 2) == v)", {"array", "pair"}, "ok"),
-    ("abs", "print(abs(v) == v)", {"array", "pair"}, "ok"),
-    ("sign", "print(sign(v) == v)", {"array", "pair"}, "ok"),
-    ("sqrt", "print(sqrt(v) == v)", {"array", "pair"}, "ok"),
-    ("is-nan", "print(is_nan(v) == v)", {"array", "pair"}, "ok"),
-    ("tensor", "print(tensor(v).count())", {"array"}, "error"),
-    ("flatten", "print([v].flatten().count())", {"array", "pair"}, "ok"),
+    ("lt", "print(v < w)", TUPLES, "ok"),
+    ("le", "print(v <= w)", TUPLES, "ok"),
+    ("sort", "print([w, v].sort().count())", TUPLES, "ok"),
+    ("sort-by", "print([w, v].sort_by((x) => x).count())", TUPLES, "ok"),
+    ("min", "print([v, w].min() == v)", TUPLES, "ok"),
+    ("argmax", "print([v, w].argmax())", TUPLES, "ok"),
+    ("add", "print((v + 1) == v)", ARRAYS, "ok"),
+    ("mul", "print((v * 2) == v)", ARRAYS, "ok"),
+    ("abs", "print(abs(v) == v)", ARRAYS, "ok"),
+    ("sign", "print(sign(v) == v)", ARRAYS, "ok"),
+    ("sqrt", "print(sqrt(v) == v)", ARRAYS, "ok"),
+    ("is-nan", "print(is_nan(v) == v)", ARRAYS, "ok"),
+    ("tensor", "print(tensor(v).count())", {"array", "shared-array"}, "error"),
+    ("flatten", "print([v].flatten().count())", ARRAYS, "ok"),
     ("to-table", "print([{a: v}].to_table().length() > 0)", DATA, "ok"),
     ("to-markdown", "print([{a: v}].to_markdown().length() > 0)", DATA, "ok"),
     ("to-html", "print([{a: v}].to_html().length() > 0)", DATA, "ok"),
@@ -120,6 +140,8 @@ def programs(depth):
             if shape not in shapes:
                 continue
             src = build + "v = build(%d, 1)\nw = build(%d, 1)\n%s\n" % (depth, depth, tail)
+            if shape in SHARED:
+                expect = SHARED_EXPECT.get(name, expect)
             out.append(("%s/%s" % (shape, name), src, expect))
     return out
 

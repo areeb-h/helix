@@ -204,6 +204,9 @@ pub(crate) const REL_KEY: u32 = 4;
 pub(crate) const REL_SHAPE: u32 = 5;
 pub(crate) const REL_UNARY: u32 = 6;
 pub(crate) const REL_PREDICATE: u32 = 7;
+pub(crate) const REL_TEXT: u32 = 9;
+pub(crate) const REL_JSON: u32 = 10;
+pub(crate) const REL_TRACKED: u32 = 11;
 /// Elementwise arithmetic: the caller adds the operator and each operand's [`Ident`] kind.
 pub(crate) const REL_BINARY: u32 = 8 << 16;
 
@@ -211,6 +214,20 @@ pub(crate) const REL_BINARY: u32 = 8 << 16;
 /// deciding again is cheaper than the bookkeeping; so ordinary data — rows, small records,
 /// anything a few thousand containers across — never enters the memo at all.
 const MEMO_COST: u64 = 4096;
+
+/// [`MEMO_COST`], which a test may lower to exercise the memo on small values or raise to
+/// switch it off — the two must give the same answers.
+#[inline]
+fn memo_cost() -> u64 {
+    #[cfg(test)]
+    {
+        tests::COST.get()
+    }
+    #[cfg(not(test))]
+    {
+        MEMO_COST
+    }
+}
 
 /// `(left, right, relation)` → the answer, with both operands held so that neither address
 /// can be freed and reused while the entry lives.
@@ -275,7 +292,23 @@ pub(crate) fn ident(v: &Value) -> Option<Ident> {
 
 /// One walk's bookkeeping, ended when its outermost step returns — on every path out, so
 /// nothing is left held.
-struct WalkScope;
+pub(crate) struct WalkScope;
+
+/// Hold one walk open across several top-level steps, so what the first decided is still
+/// known to the last (a renderer writing a container's elements one after another).
+#[inline]
+pub(crate) fn scope() -> WalkScope {
+    WalkScope::enter()
+}
+
+/// A number no other walk on this thread has: what a walk adds to its keys when its answers
+/// mean something only to itself (offsets into its own buffer).
+pub(crate) fn walk_id() -> usize {
+    thread_local! {
+        static NEXT: std::cell::Cell<usize> = const { std::cell::Cell::new(1) };
+    }
+    NEXT.replace(NEXT.get().wrapping_add(1))
+}
 
 impl WalkScope {
     #[inline]
@@ -312,19 +345,54 @@ fn remember(key: (usize, usize, u32), answer: Value, l: &Value, r: &Value) {
     HAS_MEMO.set(true);
 }
 
-/// Run `f` — one step of a walk, answering for the operands `l` and `r` under `key` — once
-/// per distinct key, however many paths lead to it.
-///
-/// The answer is remembered when reaching it was expensive ([`MEMO_COST`]) and `encode` says
-/// it can be reused; a later step with the same key gets `decode` of it instead of the walk.
-/// So a walk costs in proportion to the DISTINCT containers it meets, not to the paths
-/// through them.
+/// One step of a memoized walk, between asking whether its answer is known and reporting it.
+pub(crate) struct Step {
+    key: (usize, usize, u32),
+    start: u64,
+    shared: bool,
+    _scope: WalkScope,
+}
+
+/// Begin the step answering for `key`: the answer, when an earlier step of this walk already
+/// reached it.
 ///
 /// Data without sharing pays two counter updates per container step and nothing else. A step
 /// is looked up or remembered only when `shared` — something besides its parent holds one of
 /// its containers — because only such a step can be the first one a walk meets twice: a step
 /// over solely-owned containers recurs only beneath a recurring ancestor, and that ancestor,
 /// at least as expensive, is the entry.
+#[inline]
+pub(crate) fn step(key: (usize, usize, u32), shared: bool) -> (Step, Option<Value>) {
+    let scope = WalkScope::enter();
+    let start = WALK_STEPS.get();
+    WALK_STEPS.set(start.wrapping_add(1));
+    let hit = if shared && HAS_MEMO.get() {
+        MEMO.with(|m| m.borrow().as_ref().and_then(|m| m.get(&key).map(|e| e.0.clone())))
+    } else {
+        None
+    };
+    (Step { key, start, shared, _scope: scope }, hit)
+}
+
+impl Step {
+    /// The step is answered. The answer is remembered when reaching it was expensive
+    /// ([`MEMO_COST`]) and `answer` gives one that can be reused; `l` and `r` are the operands
+    /// the key's addresses belong to, held for as long as the entry lives.
+    #[inline]
+    pub(crate) fn done(self, answer: impl FnOnce() -> Option<Value>, l: &Value, r: &Value) {
+        if self.shared
+            && WALK_STEPS.get().wrapping_sub(self.start) >= memo_cost()
+            && let Some(a) = answer()
+        {
+            remember(self.key, a, l, r);
+        }
+    }
+}
+
+/// Run `f` — one step of a walk, answering for the operands `l` and `r` under `key` — once
+/// per distinct key, however many paths lead to it: a walk costs in proportion to the
+/// DISTINCT containers it meets, not to the paths through them. See [`step`] for what it
+/// costs data that does not share.
 #[inline]
 pub(crate) fn once<R>(
     key: (usize, usize, u32),
@@ -335,23 +403,12 @@ pub(crate) fn once<R>(
     decode: impl FnOnce(Value) -> R,
     f: impl FnOnce() -> R,
 ) -> R {
-    let _scope = WalkScope::enter();
-    let start = WALK_STEPS.get();
-    WALK_STEPS.set(start.wrapping_add(1));
-    if !shared {
-        return f();
-    }
-    if HAS_MEMO.get()
-        && let Some(hit) = MEMO.with(|m| m.borrow().as_ref().and_then(|m| m.get(&key).map(|e| e.0.clone())))
-    {
+    let (step, hit) = step(key, shared);
+    if let Some(hit) = hit {
         return decode(hit);
     }
     let out = f();
-    if WALK_STEPS.get().wrapping_sub(start) >= MEMO_COST
-        && let Some(answer) = encode(&out)
-    {
-        remember(key, answer, l, r);
-    }
+    step.done(|| encode(&out), l, r);
     out
 }
 
@@ -391,6 +448,130 @@ pub(crate) fn mapped<E>(rel: u32, v: &Value, tag: usize, f: impl FnOnce() -> Res
 mod tests {
     use super::*;
     use std::rc::Rc;
+
+    thread_local! {
+        /// What a step must cost to be remembered, on this test's thread.
+        pub(super) static COST: std::cell::Cell<u64> = const { std::cell::Cell::new(MEMO_COST) };
+    }
+
+    /// A value that holds earlier values of itself many times over: a pool where each new
+    /// container draws its children from the pool. Small as a tree, so the plain walk is
+    /// the oracle; shared everywhere, so the memo is exercised at every level.
+    fn shared_values(seed: u64, numeric: bool) -> Vec<Value> {
+        let mut state = seed | 1;
+        let mut next = move |n: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % n
+        };
+        let mut pool: Vec<Value> = if numeric {
+            vec![Value::Int(1), Value::Float(2.5), Value::Int(-3), Value::Float(f64::NAN), Value::Missing]
+        } else {
+            vec![
+                Value::Int(1),
+                Value::Float(2.5),
+                Value::Float(f64::NAN),
+                Value::Missing,
+                Value::Bool(true),
+                Value::Str(Rc::new("a\"b".to_string())),
+                Value::Str(Rc::new("é".to_string())),
+            ]
+        };
+        for _ in 0..14 {
+            let width = 1 + next(3) as usize;
+            let kids: Vec<Value> = (0..width).map(|_| pool[next(pool.len() as u64) as usize].clone()).collect();
+            let made = match if numeric { 0 } else { next(4) } {
+                0 => Value::array(kids),
+                1 => Value::tuple(kids),
+                2 => Value::record(
+                    kids.into_iter().enumerate().map(|(i, k)| (Symbol::intern(["z", "a", "m"][i]), k)).collect(),
+                ),
+                _ => {
+                    let mut m = std::collections::BTreeMap::new();
+                    for (i, k) in kids.into_iter().enumerate() {
+                        m.insert(DictKey::Int(i as i64), k);
+                    }
+                    Value::Dict(Rc::new(crate::value::Dict::from_map(m)))
+                }
+            };
+            pool.push(made);
+        }
+        pool
+    }
+
+    /// Everything a memoized walk answers about one pool, as text.
+    fn answers(pool: &[Value], numeric: bool) -> Vec<String> {
+        use crate::ast::BinOp;
+        let mut out = Vec::new();
+        let last = &pool[pool.len() - 1];
+        for v in pool.iter().rev().take(6) {
+            out.push(format!("{:?} {}", crate::interp::ops::eq3(v, last), crate::interp::ops::values_equal(v, last)));
+            out.push(format!("{:?} {}", crate::interp::ops::eq3(v, v), crate::interp::ops::values_equal(v, v)));
+            out.push(crate::value::display_value(v, 1, 1).unwrap());
+            out.push(v.to_string());
+            out.push(format!("{:?}", crate::json::stringify(v).map_err(|e| format!("{e:?}"))));
+            for op in [BinOp::Lt, BinOp::Ge] {
+                out.push(match crate::interp::ops::eval_binary(&op, v.clone(), last.clone(), 1, 1) {
+                    Ok(x) => x.to_string(),
+                    Err(e) => e.message,
+                });
+            }
+            if numeric {
+                for (l, r) in [(v.clone(), Value::Int(2)), (Value::Float(0.5), v.clone()), (v.clone(), v.clone())] {
+                    out.push(match crate::interp::ops::eval_binary(&BinOp::Mul, l, r, 1, 1) {
+                        Ok(x) => x.to_string(),
+                        Err(e) => e.message,
+                    });
+                }
+                out.push(match crate::interp::apply_abs(v.clone(), 1, 1) {
+                    Ok(x) => x.to_string(),
+                    Err(e) => e.message,
+                });
+                out.push(format!("{:?}", crate::tensor::from_value(v, 1, 1).map(|t| t.to_string()).map_err(|e| e.message)));
+            }
+        }
+        out
+    }
+
+    /// The memo changes what a walk costs and never what it answers: with every step
+    /// remembered and with none, 300 pools of shared values give the same equality, order,
+    /// text, JSON, arithmetic and tensors.
+    #[test]
+    fn remembering_shared_containers_changes_no_answer() {
+        for seed in 1..=300u64 {
+            for numeric in [false, true] {
+                let pool = shared_values(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15), numeric);
+                COST.set(u64::MAX);
+                let plain = answers(&pool, numeric);
+                COST.set(0);
+                let remembered = answers(&pool, numeric);
+                COST.set(MEMO_COST);
+                assert_eq!(plain, remembered, "seed {seed}, numeric {numeric}");
+            }
+        }
+    }
+
+    /// A value 60 levels of `[x, x]` deep has 2^60 leaves and sixty-one containers. Every
+    /// walk that answers about it must cost the containers.
+    #[test]
+    fn a_value_that_shares_is_walked_once_per_container() {
+        let wrap = |v: Value| Value::array(vec![v.clone(), v]);
+        let (mut a, mut b) = (Value::Int(1), Value::Int(1));
+        for _ in 0..60 {
+            a = wrap(a);
+            b = wrap(b);
+        }
+        assert_eq!(crate::interp::ops::eq3(&a, &b), Some(true));
+        assert!(crate::interp::ops::values_equal(&a, &a));
+        let plus = crate::interp::ops::eval_binary(&crate::ast::BinOp::Add, a.clone(), Value::Int(1), 1, 1).unwrap();
+        assert_eq!(crate::interp::ops::eq3(&plus, &a), Some(false));
+        // Its text is past the one-string cap: refused, in about the time the cap takes to fill.
+        assert!(crate::value::display_value(&a, 1, 1).is_err());
+        assert!(a.to_string().ends_with('…'));
+        assert!(crate::json::stringify(&a).is_err());
+        assert!(crate::tensor::from_value(&a, 1, 1).is_err());
+    }
 
     /// Runs `f` on a thread with a deliberately small stack — far less than a recursive free
     /// or walk of the values built below would need — so each test fails by overflowing if
