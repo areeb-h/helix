@@ -2883,12 +2883,7 @@ pub(crate) fn eligible_set<'a>(funcs: &[FnDef<'a>], kind: NumKind) -> HashSet<&'
 /// self-call test — but the JIT no longer *depends* on that front-end policy.
 pub(crate) fn recursive_funcs<'a>(funcs: &[FnDef<'a>]) -> HashSet<&'a str> {
     let n = funcs.len();
-    // Call graph over the user functions: edge i -> j iff funcs[i]'s body calls
-    // funcs[j] (by name). `body_calls` is the per-edge primitive.
-    let adj: Vec<Vec<usize>> = funcs
-        .iter()
-        .map(|f| (0..n).filter(|&j| body_calls(f.body, funcs[j].name)).collect())
-        .collect();
+    let adj = call_graph(funcs);
     let mut recursive = HashSet::new();
     for i in 0..n {
         // Reachability: can function i reach itself through call edges?
@@ -2908,9 +2903,53 @@ pub(crate) fn recursive_funcs<'a>(funcs: &[FnDef<'a>]) -> HashSet<&'a str> {
     recursive
 }
 
-/// True if `e` contains a call to function `name`. The per-edge primitive for the
-/// `recursive_funcs` call graph. Only the node kinds that can appear in an eligible
-/// body need traversal; anything else means the function is ineligible anyway.
+/// The call graph over the user functions: `adj[i]` lists, in ascending order, every `j`
+/// for which `body_calls(funcs[i].body, funcs[j].name)`.
+///
+/// Each body is walked ONCE for the names it calls and the edges are read off that set.
+/// Asking `body_calls` of every (body, name) pair walked every body once per function —
+/// quadratic — and the graph is wanted seven times per program plus once per
+/// self-recursive function: with `std.ui` imported (some 300 functions) that was a fifth of
+/// an app's whole run before its first event.
+fn call_graph(funcs: &[FnDef]) -> Vec<Vec<usize>> {
+    // Name -> the first function declared with it; `same_name[j]` chains to the next one,
+    // so a name declared twice is an edge to both, as the pairwise question answered.
+    // Sized for a program of a dozen functions as much as for one of hundreds: one table and
+    // one scratch list per graph, nothing allocated per body beyond its edge list.
+    const NONE: usize = usize::MAX;
+    let mut first: rustc_hash::FxHashMap<&str, usize> = Default::default();
+    first.reserve(funcs.len());
+    let mut same_name = vec![NONE; funcs.len()];
+    for (j, f) in funcs.iter().enumerate().rev() {
+        if let Some(later) = first.insert(f.name, j) {
+            same_name[j] = later;
+        }
+    }
+    let mut called: Vec<&str> = Vec::new();
+    funcs
+        .iter()
+        .map(|f| {
+            called.clear();
+            callees(f.body, &mut called);
+            let mut to: Vec<usize> = Vec::new();
+            for name in &called {
+                let mut j = first.get(name).copied().unwrap_or(NONE);
+                while j != NONE {
+                    to.push(j);
+                    j = same_name[j];
+                }
+            }
+            to.sort_unstable();
+            to.dedup();
+            to
+        })
+        .collect()
+}
+
+/// True if `e` contains a call to function `name`. The per-edge primitive of the call
+/// graph ([`call_graph`] answers it for every name at once). Only the node kinds that can
+/// appear in an eligible body need traversal; anything else means the function is
+/// ineligible anyway.
 fn body_calls(e: &Expr, name: &str) -> bool {
     match e {
         Expr::Call { name: callee, args, .. } => {
@@ -2945,6 +2984,106 @@ fn body_calls(e: &Expr, name: &str) -> bool {
     }
 }
 
+/// Every name `e` calls, once per call: the `name`s for which [`body_calls`]`(e, name)` is
+/// true, from one walk. The two must visit the same nodes —
+/// `callees_agree_with_body_calls` holds them to it.
+fn callees<'e>(e: &'e Expr, out: &mut Vec<&'e str>) {
+    match e {
+        Expr::Call { name: callee, args, .. } => {
+            out.push(callee.as_str());
+            args.iter().for_each(|a| callees(a, out));
+        }
+        Expr::Binary { left, right, .. } => {
+            callees(left, out);
+            callees(right, out);
+        }
+        Expr::Unary { expr, .. } => callees(expr, out),
+        Expr::If { cond, then_branch, else_branch, .. } => {
+            callees(cond, out);
+            callees(then_branch, out);
+            callees(else_branch, out);
+        }
+        Expr::Let { bindings, body, .. } => {
+            bindings.iter().for_each(|(_, v)| callees(v, out));
+            callees(body, out);
+        }
+        Expr::Match { scrutinee, arms, .. } => {
+            callees(scrutinee, out);
+            for a in arms {
+                if let Some(g) = &a.guard {
+                    callees(g, out);
+                }
+                callees(&a.body, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod callees_tests {
+    use super::*;
+
+    fn fns_of(program: &[Stmt]) -> Vec<(&str, &Expr)> {
+        program
+            .iter()
+            .filter_map(|s| match s {
+                Stmt::Func { name, body, .. } => Some((name.as_str(), body)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `callees` is `body_calls` for every name at once, and `call_graph` is the graph the
+    /// pairwise question gives. Checked on real programs — the UI library and examples
+    /// that between them use every form the two walk.
+    #[test]
+    fn callees_agree_with_body_calls() {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let p: Vec<(String, Option<TypeAnn>)> = Vec::new();
+        let (mut bodies, mut edges) = (0, 0);
+        for rel in [
+            "std/ui.helix",
+            "std/model.helix",
+            "examples/rules/freezer.helix",
+            "examples/language/match.helix",
+            "examples/language/recursion.helix",
+        ] {
+            let src = std::fs::read_to_string(format!("{root}/{rel}")).unwrap();
+            let program = crate::parser::parse(crate::lexer::lex(&src).unwrap()).unwrap();
+            let fns = fns_of(&program);
+            assert!(!fns.is_empty(), "{rel} declares no functions");
+            let mut names: Vec<&str> = fns.iter().map(|(n, _)| *n).collect();
+            names.extend(["print", "range", "no_such_function"]);
+            for (_, body) in &fns {
+                let mut called = Vec::new();
+                callees(body, &mut called);
+                for name in &names {
+                    assert_eq!(called.contains(name), body_calls(body, name), "{rel}: `{name}`");
+                    edges += usize::from(called.contains(name));
+                }
+                bodies += 1;
+            }
+            let defs: Vec<FnDef> =
+                fns.iter().map(|(name, body)| FnDef { name, params: &p, body }).collect();
+            let pairwise: Vec<Vec<usize>> = defs
+                .iter()
+                .map(|f| (0..defs.len()).filter(|&j| body_calls(f.body, defs[j].name)).collect())
+                .collect();
+            assert_eq!(call_graph(&defs), pairwise, "{rel}");
+        }
+        // The comparison is only worth something if it saw calls.
+        assert!(bodies > 200 && edges > 100, "{bodies} bodies, {edges} edges");
+
+        // A name declared twice is an edge to both declarations.
+        let src = "fn a(x) = b(x)\nfn b(x) = x\nfn b(x) = a(x)";
+        let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
+        let defs: Vec<FnDef> =
+            fns_of(&program).iter().map(|(name, body)| FnDef { name, params: &p, body }).collect();
+        assert_eq!(call_graph(&defs), vec![vec![1, 2], vec![], vec![0]]);
+    }
+}
+
 /// True iff every call to `self_name` in `e` sits in **tail position** — reachable from
 /// the function root only through `if` branches and `let` bodies — and passes exactly
 /// `arity` arguments. Such a call is a loop back-edge, not real recursion: the JIT lowers
@@ -2976,19 +3115,17 @@ fn self_calls_tail_only(e: &Expr, self_name: &str, arity: usize) -> bool {
 /// still recurse natively through its partner, so it must stay excluded. (Mutual
 /// recursion is unrepresentable under today's define-before-use rule; like
 /// `recursive_funcs`, this check refuses to depend on that front-end policy.)
-fn on_mutual_cycle(i: usize, funcs: &[FnDef]) -> bool {
-    let n = funcs.len();
-    let mut seen = vec![false; n];
+fn on_mutual_cycle(i: usize, adj: &[Vec<usize>]) -> bool {
+    let mut seen = vec![false; adj.len()];
     // First hop: every callee EXCEPT the direct self-edge.
-    let mut stack: Vec<usize> =
-        (0..n).filter(|&j| j != i && body_calls(funcs[i].body, funcs[j].name)).collect();
+    let mut stack: Vec<usize> = adj[i].iter().copied().filter(|&j| j != i).collect();
     while let Some(u) = stack.pop() {
         if u == i {
             return true;
         }
         if !seen[u] {
             seen[u] = true;
-            stack.extend((0..n).filter(|&j| body_calls(funcs[u].body, funcs[j].name)));
+            stack.extend_from_slice(&adj[u]);
         }
     }
     false
@@ -3130,11 +3267,12 @@ pub(crate) fn tail_loop_captures<'a>(
 }
 
 pub(crate) fn tail_loopable_set<'a>(funcs: &[FnDef<'a>]) -> HashSet<&'a str> {
+    let adj = call_graph(funcs);
     funcs
         .iter()
         .enumerate()
         .filter(|(_, f)| body_calls(f.body, f.name))
-        .filter(|(i, _)| !on_mutual_cycle(*i, funcs))
+        .filter(|(i, _)| !on_mutual_cycle(*i, &adj))
         .filter(|(_, f)| self_calls_tail_only(f.body, f.name, f.params.len()))
         .map(|(_, f)| f.name)
         .collect()

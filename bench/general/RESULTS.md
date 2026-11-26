@@ -121,3 +121,33 @@ the smallest programs (3 M instructions, all start-up) is ±0.5%: the largest pl
 Per op, the loop's own cost went from 65 instructions to about 35 (measured on a
 record-building loop: fetch the frame, bounds-check the function and the instruction
 pointer, load the instruction and its source position, store the advanced pointer, jump).
+
+### 2. The JIT's call graph is built in one walk per function (`src/jit/analysis.rs`)
+
+Not a VM change: this is start-up, and it is here because the profile put it first for
+every app. `recursive_funcs` and `on_mutual_cycle` asked `body_calls(body, name)` of every
+pair of functions — each body walked once per function in the program — and the graph is
+wanted seven times per compile, plus once per self-recursive function. A program that
+imports `std.ui` has some 300 functions. `call_graph` now walks each body once, collecting
+the names it calls (`callees`, the same node kinds `body_calls` visits), and reads the edges
+off a name index. The graph is the same graph: a test builds it both ways for `std/ui.helix`
+and four examples and compares, and `helix jit-explain` prints the same decisions for 61
+programs (examples, kernels, apps, `std/ui.helix`) before and after.
+
+| workload | before | after | |
+|---|--:|--:|--:|
+| app | 777,411,410 | 584,425,752 | −24.8% |
+| gallery | 1,963,081,740 | 1,632,419,562 | −16.8% |
+| orbit | 857,433,041 | 592,608,289 | −30.9% |
+| lockout_model | 465,716,782 | 463,417,315 | −0.5% |
+| freezer_model | 769,213,464 | 766,842,820 | −0.3% |
+| the other nine | | | −0.1% to 0.0% |
+
+Suite: 6,196,177,775 → 6,188,976,380, −0.12%; `rules/freezer_test` −13.7%. The examples are
+small programs, where the graph was never expensive, so what matters there is that it did
+not get dearer: a first version that kept a hash set of names per body made the programs
+with a handful of functions 2% slower (`rules/lockout` 3,487 k → 3,567 k, repeatably) and
+was replaced by one table and one scratch list per graph (`rules/lockout` 3,446 k). The
+largest plus signs left — `dataframes/io` +1.2%, `bio/annotations` +0.6% — are programs of
+2–3 M instructions that measure 3,404–3,442 k and 2,463–2,516 k on EITHER build across
+three runs each: start-up noise, about ±1% at that size.

@@ -72,6 +72,13 @@
   model tests −24% to −27%, record, closure, `match` and call-heavy programs −25% to −31%,
   string and dict programs −18%. Output and errors are unchanged on all three engines. The
   programs and the numbers are in `bench/general/`.
+- **An app starts sooner.** Before running anything, the JIT asks which functions can reach
+  themselves through calls, and it answered by checking every pair of functions — every body
+  walked once per function in the program, seven times over. A program that imports `std.ui`
+  has some 300 functions, and this was a fifth of an app's whole run. Each body is now walked
+  once. Instructions executed for a scripted session: `examples/apps/orbit.helix --replay`
+  −30%, `gallery.helix --replay` −16%, a 210-event todo app −24%. The JIT's decisions are the
+  same (`helix jit-explain` prints the same for every example).
 - **`to_json` writes JSON directly.** It used to build a `serde_json` tree and serialize that;
   it now writes straight into one buffer, byte-for-byte what the old route wrote (checked
   against it on 20,000 random values), without the intermediate tree. One visible difference:
