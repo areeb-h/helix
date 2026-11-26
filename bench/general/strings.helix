@@ -1,0 +1,20 @@
+# Strings: interpolation, splitting, joining, searching and case — the work of any program
+# that reads or writes text.
+N = 20000
+
+lines = range(0, N).map((i) => "user{i},{i % 90},team-{i % 7},{if i % 3 == 0 then "admin" else "member"}")
+rows = lines.map((l) => l.split(","))
+names = rows.map((r) => r[0].upper())
+admins = rows.filter((r) => r[3] == "admin").map((r) => "{r[0]} <{r[2]}>")
+csv = rows.map((r) => r.join(";")).join("\n")
+padded = range(0, N).map((i) => "{i:>6}|{i % 90:03}|")
+words = "the quick brown fox jumps over the lazy dog".split(" ")
+sentence = range(0, N).map((i) => words[i % 9]).join(" ")
+
+print(names[N - 1])
+print(admins.count())
+print(csv.length())
+print(padded[N - 1])
+print(sentence.replace("the", "a").length())
+print(lines.filter((l) => l.contains("team-3") and l.ends_with("member")).count())
+print(lines.map((l) => l.length()).sum())
