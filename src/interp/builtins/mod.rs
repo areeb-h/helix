@@ -850,7 +850,12 @@ fn float_predicate(
             let out: Result<Vec<Value>, HelixError> = items
                 .to_values()
                 .iter()
-                .map(|e| crate::deep::nested(|| float_predicate(e, name, f, on_exact, line, col)))
+                // One result per distinct element, as `broadcast_unary` (`deep::mapped`).
+                .map(|e| {
+                    crate::deep::mapped(crate::deep::REL_PREDICATE, e, (f as usize) << 1 | on_exact as usize, || {
+                        crate::deep::nested(|| float_predicate(e, name, f, on_exact, line, col))
+                    })
+                })
                 .collect();
             Ok(Value::array(out?))
         }

@@ -90,6 +90,29 @@ pub(crate) fn float_pow(a: f64, b: f64) -> f64 {
     }
 }
 
+/// One element of an elementwise operation: `x op y`, one level down.
+///
+/// When an operand is a nested array the result is computed once per distinct pair of
+/// operands (`deep::once`) and shared: `v + 1`, for a `v` that holds one sub-array many
+/// times, is an array that shares in the same places. Built as a tree it would be as large
+/// as the paths through `v` — 2^40 arrays for forty levels of `[x, x]` — and the process
+/// died of it. Two scalars have nothing to share and go straight through.
+fn broadcast_step(op: &BinOp, x: Value, y: Value, line: usize, col: usize) -> Result<Value, HelixError> {
+    use crate::deep::{REL_BINARY, ident, nested, once};
+    let nests = |v: &Value| matches!(v, Value::Array(_));
+    if !(nests(&x) || nests(&y)) {
+        return eval_binary(op, x, y, line, col);
+    }
+    let (Some(a), Some(b)) = (ident(&x), ident(&y)) else {
+        return nested(|| eval_binary(op, x, y, line, col));
+    };
+    let key = (a.key, b.key, REL_BINARY | (*op as u32) << 8 | a.kind << 4 | b.kind);
+    let (held_x, held_y) = (x.clone(), y.clone());
+    once(key, true, &held_x, &held_y, |out| out.as_ref().ok().cloned(), Ok, || {
+        nested(|| eval_binary(op, x, y, line, col))
+    })
+}
+
 pub(crate) fn eval_binary(
     op: &BinOp,
     mut l: Value,
@@ -158,21 +181,21 @@ pub(crate) fn eval_binary(
                 }
                 let mut out = Vec::with_capacity(a.len());
                 for (x, y) in a.iter_values().zip(b.iter_values()) {
-                    out.push(crate::deep::nested(|| eval_binary(op, x, y, line, col))?);
+                    out.push(broadcast_step(op, x, y, line, col)?);
                 }
                 return Ok(Value::array_sniff(out));
             }
             (Value::Array(a), scalar) => {
                 let mut out = Vec::with_capacity(a.len());
                 for x in a.iter_values() {
-                    out.push(crate::deep::nested(|| eval_binary(op, x, scalar.clone(), line, col))?);
+                    out.push(broadcast_step(op, x, scalar.clone(), line, col)?);
                 }
                 return Ok(Value::array_sniff(out));
             }
             (scalar, Value::Array(b)) => {
                 let mut out = Vec::with_capacity(b.len());
                 for y in b.iter_values() {
-                    out.push(crate::deep::nested(|| eval_binary(op, scalar.clone(), y, line, col))?);
+                    out.push(broadcast_step(op, scalar.clone(), y, line, col)?);
                 }
                 return Ok(Value::array_sniff(out));
             }
@@ -787,6 +810,27 @@ fn num_operand(op: &BinOp, v: &Value, line: usize, col: usize) -> Result<f64, He
 /// `None`; all-equal is `Some(true)`. Cross-type pairs stay definite `false`
 /// (they can never be equal, missing or not).
 pub(crate) fn eq3(l: &Value, r: &Value) -> Option<bool> {
+    // Once per distinct pair of containers: a value that holds one sub-value many times is
+    // compared in proportion to what it IS, not to the paths through it (`deep::pair`).
+    crate::deep::pair(
+        crate::deep::REL_EQ3,
+        l,
+        r,
+        |out| Some(match out {
+            Some(false) => 0,
+            Some(true) => 1,
+            None => 2,
+        }),
+        |code| match code {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        },
+        || eq3_walk(l, r),
+    )
+}
+
+fn eq3_walk(l: &Value, r: &Value) -> Option<bool> {
     match (l, r) {
         (Value::Missing, _) | (_, Value::Missing) => None,
         (Value::Array(a), Value::Array(b)) => {
@@ -870,6 +914,11 @@ fn eq3_all(pairs: impl Iterator<Item = Option<bool>>) -> Option<bool> {
 }
 
 pub(crate) fn values_equal(l: &Value, r: &Value) -> bool {
+    // Once per distinct pair of containers, as `eq3` (`deep::pair`).
+    crate::deep::pair(crate::deep::REL_SAME, l, r, |out| Some(*out as u8), |code| code == 1, || values_equal_walk(l, r))
+}
+
+fn values_equal_walk(l: &Value, r: &Value) -> bool {
     match (l, r) {
         // IDENTITY equality: `missing` matches `missing` and every NaN matches every
         // NaN, so the set-like operations built on this (`unique`, `frequencies`,
@@ -1008,7 +1057,18 @@ enum TupleOrder {
 fn tuple_order(op: &BinOp, a: &[Value], b: &[Value], line: usize, col: usize) -> Result<TupleOrder, HelixError> {
     for (x, y) in a.iter().zip(b.iter()) {
         if let (Value::Tuple(xa), Value::Tuple(ya)) = (x, y) {
-            match crate::deep::nested(|| tuple_order(op, xa, ya, line, col))? {
+            // An all-equal pair is remembered (`deep::pair`): tuples that share a part
+            // are ordered in proportion to their distinct parts. A pair that decides, or
+            // errors, ends the whole walk, so there is nothing to reuse there.
+            let sub = crate::deep::pair(
+                crate::deep::REL_ORDER,
+                x,
+                y,
+                |out| matches!(out, Ok(TupleOrder::Equal)).then_some(0),
+                |_| Ok(TupleOrder::Equal),
+                || crate::deep::nested(|| tuple_order(op, xa, ya, line, col)),
+            )?;
+            match sub {
                 TupleOrder::Equal => continue,
                 decided => return Ok(decided),
             }

@@ -28,7 +28,11 @@
 //!   contents are parked on a per-thread list, and the outermost free lets go of them once
 //!   it is back at the top of the stack. Freeing any value therefore uses bounded stack.
 //!
-//! Both are pay-as-you-go. `nested` is a stack-pointer comparison. A free costs nothing at
+//! A third tool, [`pair`], is for the other way a value outgrows a naive walk: SHARING. A
+//! value that holds one sub-value many times is small in memory and astronomically large as a
+//! tree, so comparisons remember what they have decided about each pair of containers.
+//!
+//! All are pay-as-you-go. `nested` is a stack-pointer comparison. A free costs nothing at
 //! all for a scalar or for a reference to a container something else still holds — the hook
 //! is on the payload, so it never runs for those — and a small payload of leaves returns
 //! after looking at its few children; anything larger pays two thread-local counter updates
@@ -181,6 +185,206 @@ pub(crate) fn free_source(rc: &mut Rc<ArrayData>) {
     {
         free(Garbage::Array(std::mem::replace(data, ArrayData::Ints(Vec::new()))));
     }
+}
+
+// ---- Sharing: walks that decide each distinct container once ----
+//
+// Depth is one way a value outgrows a naive walk; SHARING is the other. `[x, x]` wrapped
+// forty times is forty-one allocations and 2^40 leaves. A walk that treats it as a tree never
+// finishes, and one that BUILDS a tree from it (`v + 1`) runs the machine out of memory. A
+// value is a DAG, so these walks remember what they have decided about each container: a
+// comparison answers once per distinct pair, and a map returns one result per distinct input
+// — its output shares exactly where its input did.
+
+/// What a memo entry answers, as the tag in its key.
+pub(crate) const REL_EQ3: u32 = 1;
+pub(crate) const REL_SAME: u32 = 2;
+pub(crate) const REL_ORDER: u32 = 3;
+pub(crate) const REL_KEY: u32 = 4;
+pub(crate) const REL_SHAPE: u32 = 5;
+pub(crate) const REL_UNARY: u32 = 6;
+pub(crate) const REL_PREDICATE: u32 = 7;
+/// Elementwise arithmetic: the caller adds the operator and each operand's [`Ident`] kind.
+pub(crate) const REL_BINARY: u32 = 8 << 16;
+
+/// An answer is worth remembering once reaching it took this many container steps. Below it,
+/// deciding again is cheaper than the bookkeeping; so ordinary data — rows, small records,
+/// anything a few thousand containers across — never enters the memo at all.
+const MEMO_COST: u64 = 4096;
+
+/// `(left, right, relation)` → the answer, with both operands held so that neither address
+/// can be freed and reused while the entry lives.
+type Memo = rustc_hash::FxHashMap<(usize, usize, u32), (Value, Value, Value)>;
+
+thread_local! {
+    /// Container steps taken by the walk in progress on this thread.
+    static WALK_STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Memoized walks in progress, outermost first: the memo belongs to the outermost.
+    static WALK_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static HAS_MEMO: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static MEMO: std::cell::RefCell<Option<Memo>> = const { std::cell::RefCell::new(None) };
+}
+
+/// What identifies a value for the length of one walk.
+#[derive(Clone, Copy)]
+pub(crate) struct Ident {
+    /// A container's or boxed scalar's address; an unboxed scalar's own bits.
+    pub key: usize,
+    /// Which of those `key` is — part of the memo key, so bits never pass for an address.
+    pub kind: u32,
+    /// A container that something besides its parent holds too.
+    pub shared: bool,
+}
+
+/// A container's identity: its address, and whether anything else holds it.
+#[inline]
+pub(crate) fn node(v: &Value) -> Option<Ident> {
+    #[inline(always)]
+    fn of<T: ?Sized>(rc: &Rc<T>) -> Option<Ident> {
+        Some(Ident { key: Rc::as_ptr(rc) as *const u8 as usize, kind: 0, shared: Rc::strong_count(rc) > 1 })
+    }
+    match v {
+        Value::Array(rc) => of(rc),
+        Value::Tuple(rc) => of(rc),
+        Value::Record(rc) => of(rc),
+        Value::Dict(rc) => of(rc),
+        Value::Closure(rc) => of(rc),
+        Value::Function(rc) => of(rc),
+        _ => None,
+    }
+}
+
+/// [`node`], extended to the scalars an elementwise operation pairs a container with: a
+/// number is its bits, a boxed scalar its address. `None` for anything else — such an
+/// operand is simply not remembered.
+#[inline]
+pub(crate) fn ident(v: &Value) -> Option<Ident> {
+    #[inline(always)]
+    fn boxed<T: ?Sized>(rc: &Rc<T>) -> Option<Ident> {
+        Some(Ident { key: Rc::as_ptr(rc) as *const u8 as usize, kind: 3, shared: false })
+    }
+    match v {
+        Value::Int(i) => Some(Ident { key: *i as usize, kind: 1, shared: false }),
+        Value::Float(f) => Some(Ident { key: f.to_bits() as usize, kind: 2, shared: false }),
+        Value::Str(rc) | Value::Dna(rc) => boxed(rc),
+        Value::Rational(rc) => boxed(rc),
+        Value::Tensor(rc) => boxed(rc),
+        other => node(other),
+    }
+}
+
+/// One walk's bookkeeping, ended when its outermost step returns — on every path out, so
+/// nothing is left held.
+struct WalkScope;
+
+impl WalkScope {
+    #[inline]
+    fn enter() -> WalkScope {
+        WALK_DEPTH.set(WALK_DEPTH.get() + 1);
+        WalkScope
+    }
+}
+
+impl Drop for WalkScope {
+    #[inline]
+    fn drop(&mut self) {
+        let depth = WALK_DEPTH.get() - 1;
+        WALK_DEPTH.set(depth);
+        if depth == 0 {
+            WALK_STEPS.set(0);
+            if HAS_MEMO.replace(false) {
+                forget();
+            }
+        }
+    }
+}
+
+#[cold]
+fn forget() {
+    // Taken out before it is dropped: freeing the held values must not happen under the borrow.
+    let memo = MEMO.try_with(|m| m.borrow_mut().take()).ok().flatten();
+    drop(memo);
+}
+
+#[cold]
+fn remember(key: (usize, usize, u32), answer: Value, l: &Value, r: &Value) {
+    MEMO.with(|m| m.borrow_mut().get_or_insert_with(Memo::default).insert(key, (answer, l.clone(), r.clone())));
+    HAS_MEMO.set(true);
+}
+
+/// Run `f` — one step of a walk, answering for the operands `l` and `r` under `key` — once
+/// per distinct key, however many paths lead to it.
+///
+/// The answer is remembered when reaching it was expensive ([`MEMO_COST`]) and `encode` says
+/// it can be reused; a later step with the same key gets `decode` of it instead of the walk.
+/// So a walk costs in proportion to the DISTINCT containers it meets, not to the paths
+/// through them.
+///
+/// Data without sharing pays two counter updates per container step and nothing else. A step
+/// is looked up or remembered only when `shared` — something besides its parent holds one of
+/// its containers — because only such a step can be the first one a walk meets twice: a step
+/// over solely-owned containers recurs only beneath a recurring ancestor, and that ancestor,
+/// at least as expensive, is the entry.
+#[inline]
+pub(crate) fn once<R>(
+    key: (usize, usize, u32),
+    shared: bool,
+    l: &Value,
+    r: &Value,
+    encode: impl FnOnce(&R) -> Option<Value>,
+    decode: impl FnOnce(Value) -> R,
+    f: impl FnOnce() -> R,
+) -> R {
+    let _scope = WalkScope::enter();
+    let start = WALK_STEPS.get();
+    WALK_STEPS.set(start.wrapping_add(1));
+    if !shared {
+        return f();
+    }
+    if HAS_MEMO.get()
+        && let Some(hit) = MEMO.with(|m| m.borrow().as_ref().and_then(|m| m.get(&key).map(|e| e.0.clone())))
+    {
+        return decode(hit);
+    }
+    let out = f();
+    if WALK_STEPS.get().wrapping_sub(start) >= MEMO_COST
+        && let Some(answer) = encode(&out)
+    {
+        remember(key, answer, l, r);
+    }
+    out
+}
+
+/// [`once`] for a relation between two values: decided once per distinct pair of containers.
+/// A pair with a scalar in it costs one branch.
+#[inline]
+pub(crate) fn pair<R>(
+    rel: u32,
+    l: &Value,
+    r: &Value,
+    encode: impl FnOnce(&R) -> Option<u8>,
+    decode: impl FnOnce(u8) -> R,
+    f: impl FnOnce() -> R,
+) -> R {
+    let (Some(a), Some(b)) = (node(l), node(r)) else { return f() };
+    once(
+        (a.key, b.key, rel),
+        a.shared || b.shared,
+        l,
+        r,
+        |out| encode(out).map(|c| Value::Int(c as i64)),
+        |v| decode(if let Value::Int(c) = v { c as u8 } else { 0 }),
+        f,
+    )
+}
+
+/// [`once`] for a walk that maps one value to another: one result per distinct container, so
+/// the output shares wherever the input did. `tag` is whatever else the result depends on
+/// (the function being applied, as an address).
+#[inline]
+pub(crate) fn mapped<E>(rel: u32, v: &Value, tag: usize, f: impl FnOnce() -> Result<Value, E>) -> Result<Value, E> {
+    let Some(a) = node(v) else { return f() };
+    once((a.key, tag, rel), true, v, v, |out| out.as_ref().ok().cloned(), Ok, f)
 }
 
 #[cfg(test)]

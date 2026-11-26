@@ -2010,7 +2010,14 @@ pub(crate) fn list_key_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
         _ => {
             let (x, y) = (list_parts(a).unwrap_or_default(), list_parts(b).unwrap_or_default());
             for (p, q) in x.iter().zip(y.iter()) {
-                let o = crate::deep::nested(|| list_key_cmp(p, q));
+                let o = crate::deep::pair(
+                    crate::deep::REL_KEY,
+                    p,
+                    q,
+                    |o| (*o == Equal).then_some(0),
+                    |_| Equal,
+                    || crate::deep::nested(|| list_key_cmp(p, q)),
+                );
                 if o != Equal {
                     return o;
                 }
