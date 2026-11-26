@@ -4,6 +4,22 @@
 
 ### Fixed
 
+- **A value that holds one part many times hung, or killed the process.** `[x, x]` wrapped
+  sixty times is sixty-one arrays and 2^60 leaves — small in memory, astronomically large as
+  a tree — and nearly every operation treated it as the tree. `==`, `!=`, `unique`,
+  `contains`, `frequencies`, `assert_eq` and tuple `<` never finished. Worse, anything that
+  BUILT a tree from one ran the machine out of memory and died, on all three engines:
+  `v + 1` and the other elementwise operations, `abs`/`sqrt`/`is_nan`, sorting such tuples
+  (the check that keys agree position by position), `tensor(v)` (whose element count
+  overflowed), printing a dict, and a `to_table`/`to_markdown`/`to_html`/`write_csv` cell.
+  Each walk now answers once per distinct container (`deep::once`): a comparison costs the
+  containers it meets, and elementwise arithmetic returns a result that shares wherever its
+  input did. Text that would pass the one-string cap is refused in about a second (it took
+  twenty to thirty to fill the cap one leaf at a time, where it did not crash first); a
+  table or CSV cell that long shows its opening and an ellipsis; `tensor` past a billion
+  elements is refused in `zeros`' own words. Values that do not share pay two counter
+  updates per container compared: +0.1–0.6% on record, dict and string workloads, +0.75% on
+  one made only of comparisons, sorting and printing.
 - **A deeply nested value killed the process.** A program can nest a value as deep as its
   memory allows — a tail-recursive loop wrapping an accumulator, `build(n - 1, [acc])` or
   `{next: acc}`, makes a million levels in under a second — but almost everything the runtime
@@ -62,17 +78,20 @@
 
 ### Changed
 
+- **One renderer for a value's text.** `print`, interpolation, `Display` and every table or
+  CSV cell now go through the same writer (`write_text` in `src/value.rs`), so they cannot
+  disagree about how a value is written; the printed form of every value is unchanged.
 - **`to_json` writes JSON directly.** It used to build a `serde_json` tree and serialize that;
   it now writes straight into one buffer, byte-for-byte what the old route wrote (checked
   against it on 20,000 random values), without the intermediate tree. One visible difference:
   when a record holds more than one value JSON cannot represent, the error names the first in
   key order rather than in declaration order.
-- **`scripts/deepvalues.py` in CI.** 175 programs build a value 100,000 deep of each container
-  kind and apply every operation that takes one, on all three engines with a 4 MB evaluator
-  stack. Four hard oracles: no abort, engines agree, no run past its time limit (a walk that is
+- **`scripts/deepvalues.py` in CI.** 281 programs build a value 100,000 deep of each container
+  kind — and of each kind holding the level below TWICE, which is 2^100000 leaves — and apply
+  every operation that takes one, on all three engines with a 4 MB evaluator stack. Four hard oracles: no abort, engines agree, no run past its time limit (a walk that is
   quadratic in depth takes hours at this depth), and each operation does what it must — deep
   values are supported, so a change that refused them with an error fails too. On the
-  previous release it reports 489 aborts.
+  previous release it reports 489 aborts on the deep shapes alone.
 - **One pinned Rust version.** `rust-toolchain.toml` pins Rust 1.100.0 for local builds, CI and
   the release builds, so a tag always builds with the same compiler. A weekly job
   (`stable-canary.yml`) tries the newest stable, and the MSRV job still checks 1.96.

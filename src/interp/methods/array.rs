@@ -1960,9 +1960,11 @@ impl KeyShapes {
             Value::Tuple(t) => t,
             _ => return None,
         };
-        // Only a tuple something else holds too can be met twice.
-        let shared = (std::rc::Rc::strong_count(t) > 1).then(|| std::rc::Rc::as_ptr(t) as *const u8 as usize);
+        // Only a tuple something else holds too can be met twice — and only one that holds
+        // tuples is worth remembering (below): a flat key is measured faster than looked up.
+        let shared = (std::rc::Rc::strong_count(t) > 1).then_some(std::rc::Rc::as_ptr(t) as *const u8 as usize);
         if let Some(addr) = shared
+            && !self.of_tuple.is_empty()
             && let Some(&known) = self.of_tuple.get(&addr)
         {
             return known;
@@ -1970,9 +1972,13 @@ impl KeyShapes {
         let base = self.scratch.len();
         let mut shape = None;
         let mut ok = true;
+        let mut nests = false;
         for part in t.iter() {
             match crate::deep::nested(|| self.of(part)) {
-                Some(id) => self.scratch.push(id),
+                Some(id) => {
+                    nests |= id >= LEAVES;
+                    self.scratch.push(id)
+                }
                 None => {
                     ok = false;
                     break;
@@ -1986,7 +1992,9 @@ impl KeyShapes {
             self.scratch = scratch;
         }
         self.scratch.truncate(base);
-        if let Some(addr) = shared {
+        if let Some(addr) = shared
+            && (nests || !ok)
+        {
             self.of_tuple.insert(addr, shape);
         }
         shape

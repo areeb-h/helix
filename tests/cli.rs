@@ -18888,3 +18888,52 @@ fn values_nested_100k_deep_print_compare_serialize_and_free() {
     assert_eq!(code, Some(1), "stderr:\n{err}");
     assert!(err.contains("`print` would exceed 1073741824 bytes"), "{err}");
 }
+
+/// A value that holds one sub-value twice at each of sixty levels: sixty-one containers,
+/// 2^60 leaves. Walks that followed paths (`==`, `unique`, `contains`, sorting) never
+/// finished; walks that built a tree from it (`v + 1`, the sort-key check, a table cell)
+/// ran out of memory and killed the process. Every walk now answers once per distinct
+/// container (`deep::once`), and text past the one-string cap is refused.
+/// `scripts/deepvalues.py` holds every operation to this at 100,000 levels in CI.
+#[test]
+fn values_that_share_a_part_cost_what_they_are_not_the_paths_through_them() {
+    let src = r#"fn arr(x, n) = if n == 0 then x else arr([x, x], n - 1)
+fn tup(x, n) = if n == 0 then x else tup((x, x), n - 1)
+fn rec(x, n) = if n == 0 then x else rec({a: x, b: x}, n - 1)
+v = arr(1, 60)
+w = arr(1, 60)
+print(v == w, v != w, v == arr(2, 60), [v, w].unique().count(), [v].contains(w), [v, w].frequencies().count())
+print((v + 1) == arr(2, 60), (v * 2) == arr(2, 60), abs(arr(-1, 60)) == v, is_nan(v) == arr(false, 60))
+print(rec(1, 60) == rec(1, 60), {k: rec(1, 60)} == {k: rec(2, 60)})
+a = tup(1, 60)
+b = tup(2, 60)
+print(a < b, a >= b, [b, a].sort()[0] == a, [a, b].min() == a, [b, a].sort_by((t) => t)[1] == b)
+r = try "{v}"
+print(r.ok, r.error)
+j = try v.to_json()
+print(j.ok, j.error)
+t = try tensor(v)
+print(t.ok, t.error)
+print([{c: v}].to_table().length() < 1000, [{c: rec(1, 60)}].to_markdown().length() < 1000)
+print(arr(1, 3), tup(1, 2), rec(1, 1))
+"#;
+    let want = "true false false 1 true 1\n\
+                true true true true\n\
+                true false\n\
+                true false true true true\n\
+                false `interpolation` would exceed 1073741824 bytes\n\
+                false `to_json` would exceed 1073741824 bytes\n";
+    let mut outs = Vec::new();
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run_source(src, env, "shared_values");
+        assert_eq!(code, Some(0), "on {env:?}; stderr:\n{err}");
+        assert!(out.starts_with(want), "on {env:?}:\n{out}");
+        outs.push(out);
+    }
+    assert!(outs.windows(2).all(|w| w[0] == w[1]), "engines disagree: {outs:?}");
+    let lines: Vec<&str> = outs[0].lines().collect();
+    assert!(lines[6].starts_with("false tensor shape ") && lines[6].ends_with(" is too large to allocate"), "{}", lines[6]);
+    assert_eq!(lines[7], "true true");
+    // A shallow value that shares still prints as the tree it describes.
+    assert_eq!(lines[8], "[[[1, 1], [1, 1]], [[1, 1], [1, 1]]] ((1, 1), (1, 1)) {a: 1, b: 1}");
+}

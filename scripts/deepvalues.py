@@ -80,6 +80,10 @@ SHAPES = {
     "shared-dict": 'dict().insert("a", acc).insert("b", acc)',
 }
 SHARED = {s for s in SHAPES if s.startswith("shared-")}
+# A dict insert checks that the value going in does not already reach the dict (a budgeted
+# scan), so BUILDING 100,000 levels of dict-in-dict costs seconds before any operation runs.
+# 5,000 levels is still 2^5000 leaves: nothing that follows paths survives it.
+DEPTH_SCALE = {"shared-dict": 0.05}
 # What a shared value's TEXT must do: it is longer than any string may be, so writing it is
 # the one-string cap's clean error (in about the time the cap takes to fill), never a hang.
 SHARED_EXPECT = {"print": "error", "interpolate": "error", "to-json": "error", "write-json": "error"}
@@ -139,7 +143,8 @@ def programs(depth):
         for name, tail, shapes, expect in OPS:
             if shape not in shapes:
                 continue
-            src = build + "v = build(%d, 1)\nw = build(%d, 1)\n%s\n" % (depth, depth, tail)
+            d = max(64, int(depth * DEPTH_SCALE.get(shape, 1)))
+            src = build + "v = build(%d, 1)\nw = build(%d, 1)\n%s\n" % (d, d, tail)
             if shape in SHARED:
                 expect = SHARED_EXPECT.get(name, expect)
             out.append(("%s/%s" % (shape, name), src, expect))

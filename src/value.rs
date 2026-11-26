@@ -1835,7 +1835,9 @@ pub fn with_article(type_name: &str) -> String {
 pub fn write_value(buf: &mut String, v: &Value, line: usize, col: usize) -> Result<(), HelixError> {
     use std::fmt::Write as _;
     match v {
-        Value::Array(_) | Value::Tuple(_) | Value::Record(_) | Value::DataFrame(_) => {
+        // A dict is here with the other containers so that one whose text would pass the
+        // one-string cap is refused, as they are; through `Display` it would be cut short.
+        Value::Array(_) | Value::Tuple(_) | Value::Record(_) | Value::Dict(_) | Value::DataFrame(_) => {
             write_text(buf, v, "interpolation", false, line, col)?;
         }
         // The shapes that dominate interpolation, appended DIRECTLY. `write!(buf, "{}",
