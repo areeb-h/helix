@@ -62,6 +62,16 @@
 
 ### Changed
 
+- **Code the JIT does not compile runs about a quarter faster.** Records, strings, closures,
+  `match`, dicts, method calls — everything that is not a numeric kernel — runs on the
+  bytecode VM, and a third of what the VM executed was its own dispatch loop: each
+  instruction was run through a closure that the compiler was assumed to inline and did not,
+  so every instruction paid for a call that wrote eighteen references to the stack first. The
+  loop now runs inside that closure, entered once. Measured in instructions executed
+  (callgrind): the 56 runnable examples together 8.15 → 6.20 billion (−23.9%), the three rule
+  model tests −24% to −27%, record, closure, `match` and call-heavy programs −25% to −31%,
+  string and dict programs −18%. Output and errors are unchanged on all three engines. The
+  programs and the numbers are in `bench/general/`.
 - **`to_json` writes JSON directly.** It used to build a `serde_json` tree and serialize that;
   it now writes straight into one buffer, byte-for-byte what the old route wrote (checked
   against it on 20,000 random values), without the intermediate tree. One visible difference:

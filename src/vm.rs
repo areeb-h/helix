@@ -862,13 +862,31 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
     frames.push(Frame { func: 0, ip: 0, base: 0, memo_key: None, upvalues: no_upvalues.clone() });
 
     loop {
+        // Run ops inside a closure so an error can be CAUGHT (routed to the nearest `try`
+        // handler) instead of propagating straight out of `exec`: a `return Err(..)` or a
+        // `?` in any arm ends the closure with the error, and the handler code below it
+        // decides whether a `try` takes it.
+        //
+        // THE CLOSURE HOLDS THE DISPATCH LOOP, NOT ONE OP. It used to be entered once per
+        // instruction, on the assumption that LLVM inlines a closure with a single call
+        // site. It does not inline this one — the body is every opcode — so each
+        // instruction paid for a real call: the eighteen captured references written to the
+        // stack to build the closure's environment, then the callee's register saves and
+        // restores. Measured with callgrind on a record-building loop, that was 65 of the
+        // ~200 instructions an average op cost, a third of everything a general program
+        // executed (`bench/general/RESULTS.md`). Entering once and looping inside costs that
+        // once per program — or once more per caught error, since a `try` re-enters here
+        // after its unwind. An arm that is done with its op says `continue 'ops`; the end
+        // of the program is the closure's `Ok`.
+        let step: Result<(), HelixError> = (|| {
+        'ops: loop {
         let fi = frames.len() - 1;
         let func = frames[fi].func;
         let chunk = &program.funcs[func];
         let ip = frames[fi].ip;
         if ip >= chunk.code.len() {
             // Only `main` runs off the end (functions terminate with `Return`).
-            break;
+            return Ok(());
         }
         // Borrow the instruction rather than cloning it — this loop runs once
         // per executed op (tens of millions of times in a hot recursion), so a
@@ -880,12 +898,6 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
         };
         frames[fi].ip = ip + 1; // default advance; control-flow ops overwrite it
 
-        // Run the op inside a closure so an error can be CAUGHT (routed to the
-        // nearest `try` handler) instead of propagating straight out of `exec`. An
-        // in-arm `continue` becomes `return Ok(())` (nothing runs after the match, so
-        // they're equivalent); a `return Err(..)` becomes the closure's error. LLVM
-        // inlines this single-call closure, so the dispatch loop stays zero-overhead.
-        let step: Result<(), HelixError> = (|| {
         // ONE ENTRY FOR A CALL TO A DECLARED FUNCTION, shared by `Op::CallFn` and the
         // receiver-decided UFCS route in `Op::Method`. A macro rather than a function
         // because the entry IS the loop's state — stack, locals, frames, memo, the JIT
@@ -897,7 +909,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
         //
         // `$name` is what an arity error calls the function: its declared name for a
         // direct call, the SOURCE spelling for a method-position call (`where`, never
-        // `m0$where`). Branches that finish the call `return Ok(())`; the plain frame push
+        // `m0$where`). Branches that finish the call `continue 'ops`; the plain frame push
         // falls through, exactly as the arm this body came from did.
         macro_rules! enter_call {
             ($idx:expr, $nargs:expr, $name:expr) => {{
@@ -926,7 +938,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         let cached = cached.clone();
                         stack.truncate(start);
                         stack.push(cached);
-                        return Ok(());
+                        continue 'ops;
                     }
                     let callee = &program.funcs[idx];
                     if frames.len() > VM_MAX_DEPTH {
@@ -942,7 +954,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         memo_key: Some(Box::new(key)),
                         upvalues: no_upvalues.clone(),
                     });
-                    return Ok(());
+                    continue 'ops;
                 }
 
                 // Native fast path: dispatch to the specialization matching the
@@ -976,7 +988,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         // `nargs == nf.arity` values, checked above.
                         let r = unsafe { crate::jit::call_i64(ptr, &iargs) };
                         stack.push(Value::Int(r));
-                        return Ok(());
+                        continue 'ops;
                     }
                     if all_float && let Some(ptr) = nf.f64_ptr {
                         let fargs: Vec<f64> = tail.iter().map(|v| v.as_f64().unwrap()).collect();
@@ -985,7 +997,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         // specialization, and `fargs` holds exactly `nargs == nf.arity` values.
                         let r = unsafe { crate::jit::call_f64(ptr, &fargs) };
                         stack.push(Value::Float(r));
-                        return Ok(());
+                        continue 'ops;
                     }
                     // MIXED per-parameter specialization (annotation-typed tail-loop
                     // fns): taken only when every argument's RUNTIME type matches the
@@ -1030,7 +1042,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             } else {
                                 Value::Int(r)
                             });
-                            return Ok(());
+                            continue 'ops;
                         }
                     }
                 }
@@ -1070,7 +1082,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             // global set `all_int_caps` false and skipped the call).
                             let r = unsafe { crate::jit::call_i64(*ptr, &iargs) };
                             stack.push(Value::Int(r));
-                            return Ok(());
+                            continue 'ops;
                         }
                     }
                 }
@@ -1584,7 +1596,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         let frame = frames.pop().unwrap();
                         locals.truncate(frame.base);
                         stack.push(ret);
-                        return Ok(());
+                        continue 'ops;
                     }
                 }
                 // Reuse the CURRENT frame (`fi`) rather than pushing a new one — the call is
@@ -1901,10 +1913,10 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         locals.extend(args);
                         locals.resize(base + callee.n_locals as usize, Value::Unit);
                         frames.push(Frame { func: idx, ip: 0, base, memo_key: None, upvalues: ups });
-                        return Ok(());
+                        continue 'ops;
                     }
                     enter_call!(fidx as usize, *nargs as usize + 1, name);
-                    return Ok(());
+                    continue 'ops;
                 }
                 let args: Vec<Value> = stack.split_off(split);
                 let recv = stack.pop().unwrap();
@@ -1975,7 +1987,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                     });
                                     // The callee's `Return` pushes where this method's
                                     // result would have gone.
-                                    return Ok(());
+                                    continue 'ops;
                                 }
                                 if *d
                                     .ufcs_name
@@ -3645,10 +3657,12 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 stack.pop();
             }
         }
-        Ok(())
+        }
         })();
-        if let Err(e) = step {
-            match handlers.pop() {
+        match step {
+            // The program ran off the end of `main`.
+            Ok(()) => break,
+            Err(e) => match handlers.pop() {
                 // Caught by the nearest active `try`: unwind every VM stack to the
                 // depths recorded at `TryBegin`, resume at its catch handler with the
                 // error message on the operand stack (consumed by `Op::TryErr`).
@@ -3667,7 +3681,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 }
                 // No active `try`: propagate out of the VM as a real error.
                 None => return Err(e),
-            }
+            },
         }
     }
 

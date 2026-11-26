@@ -80,3 +80,44 @@ bytecode ops in 797 M instructions. Where they go:
 
 `gallery` (3.17 M ops) is the same picture with more rendering: 37% before the VM starts,
 `view::get` 9%, `recursive_funcs` 15%.
+
+## What landed
+
+Each change is one commit. Ir before and after is against the commit before it, so the
+columns chain.
+
+### 1. The dispatch loop runs inside the error-catching closure (`src/vm.rs`, `exec`)
+
+The closure that catches an op's error now contains the loop instead of being called from
+it: it is entered once per program, and once more after each error a `try` catches. An arm
+that has finished its op says `continue 'ops` where it said `return Ok(())`. Nothing else
+moved — the same arms, the same order of effects, the same handler code after the closure
+returns.
+
+| workload | before | after | |
+|---|--:|--:|--:|
+| records | 915,916,770 | 675,010,312 | −26.3% |
+| nested | 966,257,794 | 724,170,153 | −25.1% |
+| strings | 438,411,182 | 360,570,135 | −17.8% |
+| closures | 839,913,592 | 582,900,737 | −30.6% |
+| match | 1,207,515,087 | 849,779,962 | −29.6% |
+| dicts | 585,376,475 | 479,890,145 | −18.0% |
+| methods | 1,036,999,312 | 835,859,956 | −19.4% |
+| calls | 1,098,008,673 | 775,959,868 | −29.3% |
+| app | 796,794,811 | 777,411,410 | −2.4% |
+| gallery | 2,153,461,600 | 1,963,081,740 | −8.8% |
+| orbit | 904,344,434 | 857,433,041 | −5.2% |
+| freezer_model | 1,045,952,647 | 769,213,464 | −26.5% |
+| updates_model | 1,408,729,403 | 1,027,906,964 | −27.0% |
+| lockout_model | 613,204,382 | 465,716,782 | −24.1% |
+
+Suite (56 programs): 8,145,977,315 → 6,196,177,775, **−23.9%**. The largest:
+`statistics/simulation` −29.2%, `language/recursion` −27.9%, the three rule model tests −24%
+to −27%, `statistics/nist` −13.8%. No program got slower beyond run-to-run noise, which for
+the smallest programs (3 M instructions, all start-up) is ±0.5%: the largest plus sign,
+`bio/alignments` at +0.7%, measures 3,357,290–3,380,215 on this build and
+3,362,374–3,369,590 on the one before across three runs each.
+
+Per op, the loop's own cost went from 65 instructions to about 35 (measured on a
+record-building loop: fetch the frame, bounds-check the function and the instruction
+pointer, load the instruction and its source position, store the advanced pointer, jump).
