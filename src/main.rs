@@ -2088,7 +2088,8 @@ fn print_help() {
          helix verify             check the project matches helix.lock (no build)\n    \
          helix test [path]        run *_test.helix files (`--engines` cross-checks all 3)\n    \
          helix replay <log> <app> replay a recorded session and check every screen\n    \
-         \x20                        (`--view out.html` writes a viewer to step through)\n    \
+         \x20                        (`--view out.html` writes a viewer to step through;\n    \
+         \x20                        a folder of sessions is a CI gate; `--accept` updates)\n    \
          helix doc [Type]         list a type's methods (Array/String/Dna/…) or `builtins`\n    \
          helix search <term>      find a capability by what it does (names, docs, notes)\n    \
          helix describe [what]    the API as JSON — a name, a Type, or everything\n    \
@@ -2181,18 +2182,29 @@ fn run_watch(path: &str, argv: &[String]) -> ExitCode {
     devwatch::run_watch(&script, argv, &check)
 }
 
-/// `helix replay <session.jsonl> <app.helix> [--view <out.html>] [-- <args>…]` — replay a
-/// recorded session (`HELIX_RECORD`) and check every screen, as `HELIX_REPLAY` does, but
-/// with the command line `main` was given ON THE DEVICE, which the session's header keeps:
-/// a session sent from a phone replays with one command. `-- <args>` replaces them.
-/// `--view` also writes a self-contained HTML file that steps through the rounds.
+/// `helix replay <session>… <app.helix> [--view <out>] [--accept] [-- <args>…]` — replay
+/// recorded sessions (`HELIX_RECORD`) against an app and check every screen.
+///
+/// - **One session file:** replayed in this process, as `HELIX_REPLAY` does, but with the
+///   command line `main` was given ON THE DEVICE, which the session's header keeps, so a
+///   session sent from a phone replays with one command. `-- <args>` replaces it. `--view`
+///   names the viewer file to write.
+/// - **A corpus** (several sessions, or a folder searched for `*.jsonl`): the gate a CI runs
+///   on every change. Each session replays in its own child process — a replay is a whole
+///   program run, with process-wide state, so isolation is what makes N replays mean what one
+///   does — in parallel. One line per session, then a verdict; exit 1 if any differs. `--view`
+///   names a FOLDER, and a viewer is written there for each session that failed.
+/// - `--accept`: the screens changed on purpose; rewrite each session's recorded screens with
+///   the replayed ones (events and recorded inputs are kept). Refused for a session whose
+///   inputs diverged: that one must be recorded again.
 fn cli_replay(args: &[String]) -> ExitCode {
-    const USAGE: &str = "usage: helix replay <session.jsonl> <app.helix> [--view <out.html>] [-- <args>…]";
+    const USAGE: &str = "usage: helix replay <session.jsonl | folder>… <app.helix> [--view <file | folder>] [--accept] [-- <args>…]";
     let (ours, theirs) = match args.iter().position(|a| a == "--") {
         Some(i) => (&args[..i], Some(&args[i + 1..])),
         None => (args, None),
     };
     let mut view = None;
+    let mut accept = false;
     let mut pos = Vec::new();
     let mut it = ours.iter();
     while let Some(a) = it.next() {
@@ -2200,10 +2212,11 @@ fn cli_replay(args: &[String]) -> ExitCode {
             "--view" => match it.next() {
                 Some(p) => view = Some(p.clone()),
                 None => {
-                    eprintln!("error: `--view` needs a file to write, e.g. `--view session.html`\n{USAGE}");
+                    eprintln!("error: `--view` needs a file (or, for several sessions, a folder) to write\n{USAGE}");
                     return ExitCode::FAILURE;
                 }
             },
+            "--accept" => accept = true,
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return ExitCode::SUCCESS;
@@ -2211,10 +2224,49 @@ fn cli_replay(args: &[String]) -> ExitCode {
             _ => pos.push(a.clone()),
         }
     }
-    let [session, app] = pos.as_slice() else {
-        eprintln!("error: `helix replay` takes a session and the app it is a session of\n{USAGE}");
+    let Some((app, sources)) = pos.split_last().filter(|(_, s)| !s.is_empty()) else {
+        eprintln!("error: `helix replay` takes one or more sessions and the app they are sessions of\n{USAGE}");
         return ExitCode::FAILURE;
     };
+    let single = sources.len() == 1 && !std::path::Path::new(&sources[0]).is_dir();
+    if single {
+        return replay_one(&sources[0], app, view, accept, theirs);
+    }
+    let mut sessions = Vec::new();
+    for s in sources {
+        let p = std::path::Path::new(s);
+        if p.is_dir() {
+            if let Err(e) = sessions_under(p, &mut sessions) {
+                eprintln!("error: could not read the folder `{s}`: {e}");
+                return ExitCode::FAILURE;
+            }
+        } else {
+            sessions.push(p.to_path_buf());
+        }
+    }
+    sessions.sort();
+    sessions.dedup();
+    if sessions.is_empty() {
+        eprintln!("error: no sessions (`*.jsonl`) under {}", sources.join(", "));
+        return ExitCode::FAILURE;
+    }
+    replay_corpus(&sessions, app, view.as_deref(), accept, theirs)
+}
+
+/// Every `*.jsonl` under `dir`, recursively: a corpus can be organised in folders.
+fn sessions_under(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
+    for e in std::fs::read_dir(dir)? {
+        let p = e?.path();
+        if p.is_dir() {
+            sessions_under(&p, out)?;
+        } else if p.extension().is_some_and(|x| x == "jsonl") {
+            out.push(p);
+        }
+    }
+    Ok(())
+}
+
+fn replay_one(session: &str, app: &str, view: Option<String>, accept: bool, theirs: Option<&[String]>) -> ExitCode {
     let head = match std::fs::read_to_string(session) {
         Ok(s) => s.lines().next().and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok()),
         Err(e) => {
@@ -2231,8 +2283,110 @@ fn cli_replay(args: &[String]) -> ExitCode {
         .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
         .unwrap_or_default();
     let argv = theirs.map(<[String]>::to_vec).unwrap_or(recorded);
-    devwatch::replay_instead(session.clone(), view);
+    devwatch::replay_instead(session.to_string(), view, accept);
     run_file_with_args(app, &argv)
+}
+
+/// The corpus gate: every session in a child `helix replay`, a few at a time.
+fn replay_corpus(sessions: &[std::path::PathBuf], app: &str, view_dir: Option<&str>, accept: bool, theirs: Option<&[String]>) -> ExitCode {
+    let Ok(exe) = std::env::current_exe() else {
+        eprintln!("error: cannot find this helix executable to run the replays");
+        return ExitCode::FAILURE;
+    };
+    if let Some(d) = view_dir
+        && let Err(e) = std::fs::create_dir_all(d)
+    {
+        eprintln!("error: cannot create the viewer folder `{d}`: {e}");
+        return ExitCode::FAILURE;
+    }
+    // A viewer per session, named after it; only failures keep theirs (below).
+    let viewer = |s: &std::path::Path| {
+        view_dir.map(|d| std::path::Path::new(d).join(s.file_stem().unwrap_or_default()).with_extension("html"))
+    };
+    let run = |s: &std::path::Path| -> (bool, String) {
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg("replay").arg(s).arg(app);
+        if let Some(v) = viewer(s) {
+            cmd.arg("--view").arg(v);
+        }
+        if accept {
+            cmd.arg("--accept");
+        }
+        if let Some(t) = theirs {
+            cmd.arg("--").args(t);
+        }
+        // A child must not inherit a replay or a recording from this environment: its
+        // session is the one on its command line.
+        for v in ["HELIX_REPLAY", "HELIX_RECORD", "HELIX_REPLAY_VIEW", "HELIX_REPLAY_ACCEPT"] {
+            cmd.env_remove(v);
+        }
+        match cmd.output() {
+            Ok(o) => {
+                let text = String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr);
+                (o.status.success(), text)
+            }
+            Err(e) => (false, format!("could not run the replay: {e}")),
+        }
+    };
+    let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2).min(sessions.len()).max(1);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let results: std::sync::Mutex<Vec<Option<(bool, String)>>> = std::sync::Mutex::new(vec![None; sessions.len()]);
+    std::thread::scope(|sc| {
+        for _ in 0..workers {
+            sc.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(s) = sessions.get(i) else { break };
+                let r = run(s);
+                if let Ok(mut all) = results.lock() {
+                    all[i] = Some(r);
+                }
+            });
+        }
+    });
+    let results = results.into_inner().unwrap_or_default();
+    let (mut failed, mut rounds) = (0usize, 0usize);
+    for (s, r) in sessions.iter().zip(results) {
+        let (ok, text) = r.unwrap_or((false, "the replay did not run".to_string()));
+        let name = s.display();
+        if ok {
+            // `replay ok: N rounds, …` / `accepted: …` / `accept: …`: the one line that says it.
+            let line = text.lines().find(|l| l.starts_with("replay ok:") || l.starts_with("accept")).unwrap_or("ok");
+            rounds += line.split_whitespace().find_map(|w| w.parse::<usize>().ok()).filter(|_| line.starts_with("replay ok:")).unwrap_or(0);
+            println!("ok    {name}  ({})", line.trim_start_matches("replay ok: "));
+            if let Some(v) = viewer(s) {
+                let _ = std::fs::remove_file(v);
+            }
+        } else {
+            failed += 1;
+            println!("FAIL  {name}");
+            // The verdict and the rounds that differ. The source pointer under the error is
+            // into std.ui's replay, not the app, so it says nothing about this session.
+            let pointer = |l: &str| {
+                let t = l.trim_start();
+                t.starts_with("-->") || t.starts_with('|') || t.split_once('|').is_some_and(|(n, _)| !n.trim().is_empty() && n.trim().chars().all(|c| c.is_ascii_digit()))
+            };
+            for l in text.lines().filter(|l| !l.trim().is_empty() && !l.starts_with("wrote the session viewer") && !pointer(l)).take(8) {
+                println!("      {l}");
+            }
+            if let Some(v) = viewer(s).filter(|v| v.exists()) {
+                println!("      viewer: {}", v.display());
+            }
+        }
+    }
+    let n = sessions.len();
+    if failed == 0 && accept {
+        println!("\n{n} session(s): each now records this program's screens (see above for which changed)");
+        ExitCode::SUCCESS
+    } else if failed == 0 {
+        println!("\n{n} session(s) replayed{}: every screen identical to the recording", if rounds > 0 { format!(", {rounds} rounds") } else { String::new() });
+        ExitCode::SUCCESS
+    } else {
+        println!("\n{failed} of {n} session(s) differ from their recording");
+        if !accept {
+            println!("if the change is intended: `helix replay <sessions> {app} --accept`; a session whose inputs diverged must be recorded again");
+        }
+        ExitCode::FAILURE
+    }
 }
 
 /// `helix run <script> [args…]` — the script's own command line is `argv` (ADR 0037 D1).

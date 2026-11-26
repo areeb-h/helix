@@ -51,7 +51,7 @@ fn untaped(name: &str) -> bool {
         "raise" | "assert" | "assert_eq" | "assert_error" | "assert_close"
             | "print" | "emit" | "write" | "elog"
             | "tape_begin" | "tape_end" | "session_record_path" | "session_replay_path"
-            | "session_view_path" | "session_program"
+            | "session_view_path" | "session_program" | "session_accept"
             | "dev_generation"
     )
 }

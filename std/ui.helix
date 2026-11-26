@@ -3526,10 +3526,11 @@ export fn replay_check(spec, path, startup = missing) = do {
     which = same_program(head.get("program"), session_program())
     said = if which.note == "" then false else print(which.note)
     view = session_view_path()
+    accept = session_accept()
     why_startup = startup.get("diverged") ?? ""
     bad0 = if why_startup == "" then [] else [{round: "startup", events: [], why: "before ui.app: {why_startup}"}]
     blank = {model: spec.init, tree: missing, theme: "light", design: missing}
-    out = lines.drop(1).reduce({s: blank, n: 0, events: 0, bad: bad0, shots: [], styles: []}, (acc, x) => do {
+    out = lines.drop(1).reduce({s: blank, n: 0, events: 0, bad: bad0, shots: [], styles: [], kept: [], diverged: why_startup != ""}, (acc, x) => do {
       sess = {mode: "replay", calls: x.calls, diverged: ""}
       r = if acc.n == 0 then draw(spec, acc.s, spec.init, sess) else play_round(spec, acc.s, x.events, sess)
       left = if r.sess.calls.count() == 0 then "" else "the recording has {r.sess.calls.count()} more call(s) in this round, starting with `{r.sess.calls[0].call}`, that the app did not make"
@@ -3539,7 +3540,10 @@ export fn replay_check(spec, path, startup = missing) = do {
       problem = if why != "" then "inputs diverged — {why}" else if not same_screen then "screen differs (recorded {(x.screen ?? "none").take(12)}, replayed {(got ?? "none").take(12)})" else ""
       bad = if problem == "" then acc.bad else acc.bad.concat([{round: acc.n, events: x.events, why: problem}])
       shot = if view.is_missing() then {shots: acc.shots, styles: acc.styles} else shot_of(spec, r, x, problem, acc)
-      {s: r.s, n: acc.n + 1, events: acc.events + x.events.count(), bad: bad, shots: shot.shots, styles: shot.styles}
+      # Accepting keeps what the device did (events, and what each call read) and takes the
+      # screens this program draws from them.
+      kept = if accept then acc.kept.concat([{events: x.events, calls: x.calls, screen: got, undone: r.undone}]) else acc.kept
+      {s: r.s, n: acc.n + 1, events: acc.events + x.events.count(), bad: bad, shots: shot.shots, styles: shot.styles, kept: kept, diverged: acc.diverged or why != ""}
     })
     shown = out.bad.take(5).map((b) => print("round {b.round} ({b.events.map((e) => e.get("msg") ?? "?").join(", ")}): {b.why}"))
     summary = if out.bad.count() == 0 then "replay ok: {out.n} rounds, {out.events} events, every screen identical to the recording" else "replay FAILED: {out.bad.count()} of {out.n} rounds differ from the recording"
@@ -3548,7 +3552,23 @@ export fn replay_check(spec, path, startup = missing) = do {
       w = page.write_to(view)
       print("wrote the session viewer: {view}")
     }
-    if out.bad.count() == 0 then print(summary) else raise(summary, "the first differing rounds are listed above")
+    if accept then accept_screens(path, head, out) else if out.bad.count() == 0 then print(summary) else raise(summary, "the first differing rounds are listed above")
+  }
+}
+
+# `helix replay --accept`: the screens changed ON PURPOSE, so make this program's screens the
+# recorded ones, as a snapshot test is updated. Only the screens: the events are what the user
+# did and the calls are what the device read, and neither is this program's to rewrite. So a
+# session whose inputs diverged cannot be accepted (the recording lacks what the app now
+# reads); it has to be recorded again.
+fn accept_screens(path, head, out) = if out.diverged then raise("cannot accept `{path}`: the app no longer reads what the device read, so this recording cannot describe it", "record the session again with HELIX_RECORD") else do {
+  changed = out.bad.count()
+  if changed == 0 then print("accept: nothing to change, every screen already matches ({out.n} rounds)") else do {
+    lines = [{...head, program: session_program()}].concat(out.kept).map((x) => x.to_json())
+    tmp = "{path}.accepting"
+    w = "{lines.join("\n")}\n".write_to(tmp)
+    moved = rename(tmp, path)
+    print("accepted: {changed} of {out.n} rounds now record this program's screens ({path})")
   }
 }
 

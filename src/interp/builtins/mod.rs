@@ -165,6 +165,7 @@ impl super::Interp {
             "session_replay_path" => return crate::devwatch::session_replay_path(&args, line, col),
             "session_view_path" => return crate::devwatch::session_view_path(&args, line, col),
             "session_program" => return crate::tape::session_program(&args, line, col),
+            "session_accept" => return crate::devwatch::session_accept(&args, line, col),
             "tape_begin" => return crate::tape::tape_begin(&args, line, col),
             "tape_end" => return crate::tape::tape_end(&args, line, col),
             "open_window" => return crate::desktop::open_window(&args, line, col),

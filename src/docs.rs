@@ -1232,6 +1232,14 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         notes: "SEND-SESSION. The viewer is one self-contained HTML file: every round's screen as replayed (in a sandboxed frame), the events that caused it, what the app read from the world, and whether it matched the recording. It needs no Helix, server or network, so it is what a bug report links to; `#round=N` opens a round. Keywords: replay, viewer, bug report, session, timeline.",
     },
     DocEntry {
+        name: "session_accept",
+        sig: "session_accept()",
+        doc: "Whether this replay accepts its screens as the recorded ones (`helix replay --accept`, or `HELIX_REPLAY_ACCEPT=1` while replaying).",
+        example: "session_accept()",
+        example_out: "false",
+        notes: "REPLAY-GATED CI. When a change to the screens is intended, accepting rewrites a session's recorded screens with this program's, like updating a snapshot test. Events and what each call read are kept: they are what the user did and what the device read. A session whose inputs diverged cannot be accepted and has to be recorded again. Keywords: accept, snapshot, update, baseline, replay.",
+    },
+    DocEntry {
         name: "session_program",
         sig: "session_program()",
         doc: "In a recorded or replayed run, `{sha256, modules, args, helix}`: a fingerprint of every module the program loaded, the command line `main` was given, and this Helix's version; otherwise missing.",

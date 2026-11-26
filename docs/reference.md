@@ -1600,6 +1600,17 @@ Show this app's own page in a native window; true if one opened, false where non
 >>> open_window("http://127.0.0.1:8080/", "My app", 1100, 760)
 ```
 
+### `session_accept()`
+
+Whether this replay accepts its screens as the recorded ones (`helix replay --accept`, or `HELIX_REPLAY_ACCEPT=1` while replaying).
+
+**Note:** REPLAY-GATED CI. When a change to the screens is intended, accepting rewrites a session's recorded screens with this program's, like updating a snapshot test. Events and what each call read are kept: they are what the user did and what the device read. A session whose inputs diverged cannot be accepted and has to be recorded again. Keywords: accept, snapshot, update, baseline, replay.
+
+```
+>>> session_accept()
+false
+```
+
 ### `session_program()`
 
 In a recorded or replayed run, `{sha256, modules, args, helix}`: a fingerprint of every module the program loaded, the command line `main` was given, and this Helix's version; otherwise missing.
@@ -1835,6 +1846,15 @@ Session replay: replay and verify this recorded session instead of serving.
 - **Unset:** unset — the app serves as usual
 
 **Note:** Read by `session_replay_path()`. Exits 0 when every round replays to the screen recorded; 1, naming the rounds, when a screen differs or the app's calls differ from the device's. A file of another session format is refused. Keywords: replay, verify, regression.
+
+### `HELIX_REPLAY_ACCEPT`
+
+Session replay: rewrite the session's recorded screens with the replayed ones (an intended change).
+
+- **Values:** 1
+- **Unset:** unset — a replay checks and changes nothing
+
+**Note:** Read by `session_accept()`, only while replaying. `helix replay --accept` sets it for one run. Refused when the app's inputs diverged from the recording: such a session must be recorded again. Keywords: accept, snapshot, baseline.
 
 ### `HELIX_REPLAY_VIEW`
 

@@ -141,6 +141,13 @@ pub static ENV: &[EnvDoc] = &[
         notes: "Read by `session_replay_path()`. Exits 0 when every round replays to the screen recorded; 1, naming the rounds, when a screen differs or the app's calls differ from the device's. A file of another session format is refused. Keywords: replay, verify, regression.",
     },
     EnvDoc {
+        name: "HELIX_REPLAY_ACCEPT",
+        values: "1",
+        default: "unset — a replay checks and changes nothing",
+        doc: "Session replay: rewrite the session's recorded screens with the replayed ones (an intended change).",
+        notes: "Read by `session_accept()`, only while replaying. `helix replay --accept` sets it for one run. Refused when the app's inputs diverged from the recording: such a session must be recorded again. Keywords: accept, snapshot, baseline.",
+    },
+    EnvDoc {
         name: "HELIX_REPLAY_VIEW",
         values: "a file path ending in .html",
         default: "unset — no viewer is written",

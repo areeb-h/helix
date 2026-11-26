@@ -407,6 +407,12 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Unknown)
         }
+        "session_accept" => {
+            if !args.is_empty() {
+                return Err(arity_err(name, 0, 0, args.len(), line, col));
+            }
+            Ok(Type::Bool)
+        }
         "session_record_path" | "session_replay_path" | "session_view_path" | "session_program" => {
             if !args.is_empty() {
                 return Err(arity_err(name, 0, 0, args.len(), line, col));

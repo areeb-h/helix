@@ -18597,6 +18597,84 @@ fn session_record_then_replay_the_file_manager_without_its_folder() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// REPLAY-GATED CI: `helix replay <folder> <app>` replays every session under the folder, each
+/// in its own process, and gives one verdict. A change shows up only in the sessions that
+/// reach it; a viewer is written for each failing session and only for those. `--accept`
+/// makes the changed screens the recorded ones, keeping what the user did and what the
+/// device read; a session whose inputs diverged cannot be accepted.
+#[test]
+fn session_corpus_gates_a_change_and_accepts_it_on_purpose() {
+    let base = std::env::temp_dir().join(format!("helix_corpus_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let corpus = base.join("sessions");
+    std::fs::create_dir_all(corpus.join("android")).unwrap();
+    let root = env!("CARGO_MANIFEST_DIR");
+    let full = std::fs::read_to_string(format!("{root}/tests/ui/sessions/stopwatch-android.jsonl")).unwrap();
+    // The whole session (it laps), and its first 20 lines (before the first lap).
+    std::fs::write(corpus.join("android/laps.jsonl"), &full).unwrap();
+    let short: String = full.lines().take(20).map(|l| format!("{l}\n")).collect();
+    std::fs::write(corpus.join("start-stop.jsonl"), &short).unwrap();
+    // A change only a lap shows: "Lap 1" becomes "Split 1".
+    let src = std::fs::read_to_string(format!("{root}/examples/apps/stopwatch.helix")).unwrap();
+    let changed = base.join("stopwatch-split.helix");
+    let edited = src.replacen("ui.text(\"Lap {n - i}\")", "ui.text(\"Split {n - i}\")", 1);
+    assert_ne!(edited, src, "the stopwatch labels its laps");
+    std::fs::write(&changed, edited).unwrap();
+    let original = format!("{root}/examples/apps/stopwatch.helix");
+    let helix = |args: &[&str]| {
+        let o = Command::new(env!("CARGO_BIN_EXE_helix")).current_dir(root).args(args).output().unwrap();
+        (String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr), o.status.code())
+    };
+    let c = corpus.to_str().unwrap();
+    let report = base.join("report");
+
+    let (out, code) = helix(&["replay", c, &original]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.contains("2 session(s) replayed, 172 rounds: every screen identical"), "{out}");
+
+    let (out, code) = helix(&["replay", c, changed.to_str().unwrap(), "--view", report.to_str().unwrap()]);
+    assert_eq!(code, Some(1), "{out}");
+    assert!(out.contains("FAIL  ") && out.contains("laps.jsonl") && out.contains("round 28 (lap): screen differs"), "{out}");
+    assert!(out.contains("ok    ") && out.contains("start-stop.jsonl"), "a session that never laps passes: {out}");
+    assert!(out.contains("1 of 2 session(s) differ"), "{out}");
+    assert!(!out.contains("-->"), "no pointer into std.ui in the report: {out}");
+    assert!(report.join("laps.html").exists(), "the failing session's viewer is written");
+    assert!(!report.join("start-stop.html").exists(), "a passing session leaves no viewer");
+
+    // Accepting: the change is intended.
+    let before = std::fs::read_to_string(corpus.join("android/laps.jsonl")).unwrap();
+    let (out, code) = helix(&["replay", c, changed.to_str().unwrap(), "--accept"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.contains("accepted: ") && out.contains("accept: nothing to change"), "{out}");
+    let after = std::fs::read_to_string(corpus.join("android/laps.jsonl")).unwrap();
+    let rounds = |log: &str| -> Vec<serde_json::Value> { log.lines().skip(1).map(|l| serde_json::from_str(l).unwrap()).collect() };
+    let (b, a) = (rounds(&before), rounds(&after));
+    assert_eq!(b.len(), a.len());
+    for (x, y) in b.iter().zip(&a) {
+        assert_eq!(x["events"], y["events"], "accepting keeps what the user did");
+        assert_eq!(x["calls"], y["calls"], "accepting keeps what the device read");
+    }
+    assert_ne!(b[28]["screen"], a[28]["screen"], "the lap round records the new screen");
+    assert_eq!(b[27]["screen"], a[27]["screen"], "rounds before it are unchanged");
+    let (out, code) = helix(&["replay", c, changed.to_str().unwrap()]);
+    assert_eq!(code, Some(0), "the accepted change passes: {out}");
+    let (out, code) = helix(&["replay", c, &original]);
+    assert_eq!(code, Some(1), "and the old screens no longer do: {out}");
+
+    // Inputs that diverged cannot be accepted, and the session is left as it was.
+    let inputs = base.join("inputs.jsonl");
+    std::fs::copy(format!("{root}/tests/ui/sessions/inputs-android.jsonl"), &inputs).unwrap();
+    let app = std::fs::read_to_string(format!("{root}/tests/ui/sessions/inputs.helix")).unwrap();
+    let reads_another = base.join("inputs-notes.helix");
+    std::fs::write(&reads_another, app.replacen("read_text(\"{m.dir}/note.txt\")", "read_text(\"{m.dir}/notes.txt\")", 1)).unwrap();
+    let kept = std::fs::read(&inputs).unwrap();
+    let (out, code) = helix(&["replay", inputs.to_str().unwrap(), reads_another.to_str().unwrap(), "--accept"]);
+    assert_eq!(code, Some(1), "{out}");
+    assert!(out.contains("cannot accept"), "{out}");
+    assert_eq!(std::fs::read(&inputs).unwrap(), kept, "a refused accept changes nothing");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// The viewer embeds what the session recorded (events, screens) in a page. Recorded text is
 /// data: nothing in it can end the script it sits in or add markup, and screens are shown in
 /// sandboxed frames.

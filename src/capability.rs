@@ -508,6 +508,8 @@ mod tests {
             "session_view_path",
             // The program's own identity (a hash of its sources, its argv): reaches nothing.
             "session_program",
+            // A flag `helix replay --accept` sets; the rewrite itself spends `fs-write`.
+            "session_accept",
             // The input tape opens and closes a thread-local recording; it reaches nothing.
             // What runs under it is gated as usual (and, replaying, does not run at all).
             "tape_begin",

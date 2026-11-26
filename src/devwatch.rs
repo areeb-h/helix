@@ -73,6 +73,8 @@ const ENV_REPLAY: &str = "HELIX_REPLAY";
 /// Where a replay writes its viewer: one self-contained HTML file that steps through the
 /// session's rounds. Only read while replaying.
 const ENV_VIEW: &str = "HELIX_REPLAY_VIEW";
+/// `1`: the replay's screens changed on purpose; rewrite the session's recorded screens.
+const ENV_ACCEPT: &str = "HELIX_REPLAY_ACCEPT";
 
 /// `helix replay` sets the replay and view paths for THIS process, without touching the
 /// environment: a child the app starts must not inherit "you are a replay", and mutating
@@ -80,10 +82,13 @@ const ENV_VIEW: &str = "HELIX_REPLAY_VIEW";
 static OVERRIDES: std::sync::OnceLock<Vec<(&'static str, String)>> = std::sync::OnceLock::new();
 
 /// Make this process a replay of `session`, writing the viewer to `view` if given.
-pub fn replay_instead(session: String, view: Option<String>) {
+pub fn replay_instead(session: String, view: Option<String>, accept: bool) {
     let mut v = vec![(ENV_REPLAY, session)];
     if let Some(view) = view {
         v.push((ENV_VIEW, view));
+    }
+    if accept {
+        v.push((ENV_ACCEPT, "1".to_string()));
     }
     let _ = OVERRIDES.set(v);
 }
@@ -126,6 +131,15 @@ pub fn session_record_path(args: &[Value], line: usize, col: usize) -> Result<Va
 /// `session_replay_path()` — the file `HELIX_REPLAY` names, or `missing`.
 pub fn session_replay_path(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
     env_path(ENV_REPLAY, "session_replay_path", args, line, col)
+}
+
+/// `session_accept()` — whether this replay accepts its screens as the recorded ones
+/// (`helix replay --accept`, or `HELIX_REPLAY_ACCEPT=1`).
+pub fn session_accept(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
+    if !args.is_empty() {
+        return Err(HelixError::new(format!("`session_accept` takes no arguments, got {}", args.len()), line, col));
+    }
+    Ok(Value::Bool(session_var(ENV_REPLAY).is_some() && session_var(ENV_ACCEPT).as_deref() == Some("1")))
 }
 
 /// `session_view_path()` — where a replay writes its viewer (`HELIX_REPLAY_VIEW`, or
