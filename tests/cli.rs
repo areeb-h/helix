@@ -18413,7 +18413,9 @@ fn session_replay_catches_a_changed_screen_at_its_round() {
     let (out, err, code) = replay(app.to_str().unwrap(), "tests/ui/sessions/stopwatch-android.jsonl", &[], &[]);
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(code, Some(1), "{out}{err}");
-    let first = out.lines().next().unwrap_or("");
+    // The fixture carries the program it was recorded with, so an edited copy is named as such.
+    assert!(out.starts_with("note: this is not the program that was recorded"), "{out}");
+    let first = out.lines().find(|l| l.starts_with("round ")).unwrap_or("");
     assert!(first.starts_with("round 48 (lap): screen differs"), "{out}");
 }
 
