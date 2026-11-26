@@ -151,3 +151,25 @@ was replaced by one table and one scratch list per graph (`rules/lockout` 3,446 
 largest plus signs left — `dataframes/io` +1.2%, `bio/annotations` +0.6% — are programs of
 2–3 M instructions that measure 3,404–3,442 k and 2,463–2,516 k on EITHER build across
 three runs each: start-up noise, about ±1% at that size.
+
+### 3. A view node's props are named once, not once per prop (`src/view.rs`, `parse`)
+
+`view_html` looks for each of the forty props it knows on every node, and each look
+(`view::get`) compared the name with every field's name as text — which means asking the
+symbol table for the text, a lock taken and released per field per prop. `Props` asks once
+per field per node and keeps the names. Dict props and anything else go through `get` as
+before; a test asks both the same questions of a record (with a `missing` field and a
+repeated name), a dict, and two non-containers. The five example apps replay to the same
+bytes on all three engines.
+
+| workload | before | after | |
+|---|--:|--:|--:|
+| app | 584,425,752 | 545,347,349 | −6.7% |
+| gallery | 1,632,419,562 | 1,542,424,901 | −5.5% |
+| orbit | 592,608,289 | 582,982,608 | −1.6% |
+| the other eleven | | | 0.0% |
+
+**Tried first and not kept:** resolving the prop's name to its symbol (`Symbol::lookup`) and
+comparing symbols. One lookup — lock, hash the name, compare the text — costs more than the
+two or three per-field lock-and-compares it replaces on a typical props record: app +3.2%,
+gallery +5.0%, orbit +1.3%.

@@ -79,6 +79,10 @@
   once. Instructions executed for a scripted session: `examples/apps/orbit.helix --replay`
   −30%, `gallery.helix --replay` −16%, a 210-event todo app −24%. The JIT's decisions are the
   same (`helix jit-explain` prints the same for every example).
+- **Rendering a view reads each node's props once.** Turning a view into HTML looked up every
+  prop the runtime knows on every node, and each lookup asked the symbol table for the name
+  of every field. The names are now fetched once per node: a 210-event todo app −6.7% of
+  instructions, `gallery.helix --replay` −5.5%. The HTML is byte-identical.
 - **`to_json` writes JSON directly.** It used to build a `serde_json` tree and serialize that;
   it now writes straight into one buffer, byte-for-byte what the old route wrote (checked
   against it on 20,000 random values), without the intermediate tree. One visible difference:
