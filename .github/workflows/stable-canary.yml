@@ -17,13 +17,16 @@ env:
   # Ahead of rust-toolchain.toml: this job is about the newest stable, whatever is pinned.
   RUSTUP_TOOLCHAIN: stable
 
+# Actions are pinned to the commit of a release (Node 24 runtime), not a movable tag, so a
+# retagged or compromised release cannot change what runs here. The version is in the comment.
+
 jobs:
   canary:
     name: newest stable Rust (clippy + tests)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install the newest stable Rust
         run: rustup toolchain install stable --profile minimal --component clippy && rustc --version
       - name: clippy

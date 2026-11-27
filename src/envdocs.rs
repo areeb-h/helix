@@ -145,7 +145,7 @@ pub static ENV: &[EnvDoc] = &[
         values: "a file path",
         default: "unset",
         doc: "Record an app session to this file (JSON Lines), to replay with `helix replay`.",
-        notes: "ADR 0063's black box. Each event that reaches `update` is written as it happens, with what `update` and `view` read from the world while handling it (the clock, files, responses — each impure builtin's result or error) and a hash of every screen. The file is the bug report: `helix replay app.helix session.jsonl` reproduces it exactly, on any machine and engine. A program cannot choose this path; only the person running it can. Keywords: record, session, black box, bug report, reproduce.",
+        notes: "ADR 0063's black box. The tape starts with the program: what `main` reads and writes before `ui.app` is the first entry, with a fingerprint of the program and its command line. Then each event that reaches `update` is written as it happens, with what `update` and `view` read from the world while handling it (the clock, files, responses — each impure builtin's or write method's result or error, with a fingerprint of its arguments) and a hash of every screen as it looked. The file is the bug report: `helix replay app.helix session.jsonl` reproduces it exactly, on any machine and engine. A program cannot choose this path; only the person running it can. Keywords: record, session, black box, bug report, reproduce.",
     },
     EnvDoc {
         name: "HELIX_REPLAY",
@@ -153,6 +153,20 @@ pub static ENV: &[EnvDoc] = &[
         default: "unset",
         doc: "Replay this recorded session instead of serving the app.",
         notes: "Set by `helix replay app.helix session.jsonl`; nothing else needs to. `ui.app` plays the session through the app's `update` and `view` with the tape answering every impure builtin, prints how many screens came out identical, and fails if any differ. Keywords: replay, session, reproduce.",
+    },
+    EnvDoc {
+        name: "HELIX_REPLAY_VIEW",
+        values: "a file path, set by `helix replay --view`",
+        default: "unset",
+        doc: "While replaying, also write the session viewer to this file.",
+        notes: "Set by `helix replay app.helix session.jsonl --view page.html`; nothing else needs to. The viewer is one self-contained page: every screen as replayed, the events before it, what they read, and whether it matched. Keywords: replay, viewer, bug report.",
+    },
+    EnvDoc {
+        name: "HELIX_REPLAY_ACCEPT",
+        values: "set by `helix replay --accept`",
+        default: "unset",
+        doc: "While replaying, record this program's screens in the session.",
+        notes: "Set by `helix replay app.helix session.jsonl --accept`; nothing else needs to. Only the screens and the program fingerprint are rewritten; events and what the world answered are kept byte for byte, and a session whose app now reads something else is refused. Keywords: replay, accept, snapshot, intended change.",
     },
     EnvDoc {
         name: "HELIX_THREADS",

@@ -1911,29 +1911,130 @@ const SEVERAL_KEYS_HINT: &str = "to sort by several keys return a TUPLE, compare
 /// hold the same kind in every item, which is what makes `list_key_cmp` a total order:
 /// Rust's sort may panic on a comparator that is not one (ADR 0024). `missing` and Bool
 /// are refused inside a key, as they are outside one.
-#[derive(PartialEq)]
-enum KeyShape {
-    Num,
-    Str,
-    Dna,
-    Bytes,
-    List(Vec<KeyShape>),
+///
+/// SHAPES ARE INTERNED: every distinct shape is stored once and named by a number, a tuple
+/// is measured once however many keys hold it, and two shapes are merged once. The check
+/// used to build one tree per key, merged in place — as large as the PATHS through the key,
+/// so a key that holds one part many times (`(x, x)` wrapped forty deep) ran the process
+/// out of memory. Now it costs what the key is.
+#[derive(Default)]
+struct KeyShapes {
+    /// A list shape's columns; shape `LEAVES + i` is `lists[i]`.
+    lists: Vec<Vec<u32>>,
+    by_columns: rustc_hash::FxHashMap<Vec<u32>, u32>,
+    /// A shared tuple's address → its shape (`None`: it holds something that is not a key).
+    /// The tuples are borrowed from the array being sorted, so no address is reused.
+    of_tuple: rustc_hash::FxHashMap<usize, Option<u32>>,
+    merges: rustc_hash::FxHashMap<(u32, u32), Option<u32>>,
+    /// Columns of the tuples being measured, innermost last: no allocation per key.
+    scratch: Vec<u32>,
 }
 
-/// A tuple key's shape is as deep as the key, so freeing it must not recurse (see
-/// [`crate::deep`]): nested lists are flattened onto a worklist and freed one by one.
-impl Drop for KeyShape {
-    fn drop(&mut self) {
-        if let KeyShape::List(cols) = self
-            && cols.iter().any(|c| matches!(c, KeyShape::List(_)))
+const NUM: u32 = 0;
+const STR: u32 = 1;
+const DNA: u32 = 2;
+const BYTES: u32 = 3;
+/// The first shape number that names a list.
+const LEAVES: u32 = 4;
+
+impl KeyShapes {
+    fn list(&mut self, columns: &[u32]) -> u32 {
+        if let Some(&id) = self.by_columns.get(columns) {
+            return id;
+        }
+        let id = LEAVES + self.lists.len() as u32;
+        self.lists.push(columns.to_vec());
+        self.by_columns.insert(columns.to_vec(), id);
+        id
+    }
+
+    /// The shape of one key part; `None` when it, or something inside it, is not a key.
+    fn of(&mut self, v: &Value) -> Option<u32> {
+        if v.as_f64().is_some() {
+            return Some(NUM);
+        }
+        let t = match v {
+            Value::Str(_) => return Some(STR),
+            Value::Dna(_) => return Some(DNA),
+            Value::Bytes(_) => return Some(BYTES),
+            Value::Tuple(t) => t,
+            _ => return None,
+        };
+        // Only a tuple something else holds too can be met twice — and only one that holds
+        // tuples is worth remembering (below): a flat key is measured faster than looked up.
+        let shared = (std::rc::Rc::strong_count(t) > 1).then_some(std::rc::Rc::as_ptr(t) as *const u8 as usize);
+        if let Some(addr) = shared
+            && !self.of_tuple.is_empty()
+            && let Some(&known) = self.of_tuple.get(&addr)
         {
-            let mut stack = std::mem::take(cols);
-            while let Some(mut c) = stack.pop() {
-                if let KeyShape::List(inner) = &mut c {
-                    stack.append(inner);
+            return known;
+        }
+        let base = self.scratch.len();
+        let mut shape = None;
+        let mut ok = true;
+        let mut nests = false;
+        for part in t.iter() {
+            match crate::deep::nested(|| self.of(part)) {
+                Some(id) => {
+                    nests |= id >= LEAVES;
+                    self.scratch.push(id)
+                }
+                None => {
+                    ok = false;
+                    break;
                 }
             }
         }
+        if ok {
+            // The buffer is lent out for the lookup and handed straight back.
+            let scratch = std::mem::take(&mut self.scratch);
+            shape = Some(self.list(&scratch[base..]));
+            self.scratch = scratch;
+        }
+        self.scratch.truncate(base);
+        if let Some(addr) = shared
+            && (nests || !ok)
+        {
+            self.of_tuple.insert(addr, shape);
+        }
+        shape
+    }
+
+    /// The shape both `a` and `b` fit: equal kinds position by position, the longer list's
+    /// tail kept (a shorter key is a prefix). `None` when some position holds two kinds.
+    fn merge(&mut self, a: u32, b: u32) -> Option<u32> {
+        if a == b {
+            return Some(a);
+        }
+        if a < LEAVES || b < LEAVES {
+            return None;
+        }
+        if let Some(&known) = self.merges.get(&(a, b)) {
+            return known;
+        }
+        let (ca, cb) = (self.lists[(a - LEAVES) as usize].clone(), self.lists[(b - LEAVES) as usize].clone());
+        let mut columns = Vec::with_capacity(ca.len().max(cb.len()));
+        let mut merged = None;
+        let mut ok = true;
+        for i in 0..ca.len().max(cb.len()) {
+            let column = match (ca.get(i), cb.get(i)) {
+                (Some(&x), Some(&y)) => crate::deep::nested(|| self.merge(x, y)),
+                (Some(&x), None) | (None, Some(&x)) => Some(x),
+                (None, None) => None,
+            };
+            match column {
+                Some(c) => columns.push(c),
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok {
+            merged = Some(self.list(&columns));
+        }
+        self.merges.insert((a, b), merged);
+        merged
     }
 }
 
@@ -1944,59 +2045,24 @@ fn list_parts(v: &Value) -> Option<Vec<Value>> {
     }
 }
 
-/// Fold `v` into `shape`; false when it holds a different kind at some position.
-fn fits_shape(shape: &mut Option<KeyShape>, v: &Value) -> bool {
-    let leaf = if v.as_f64().is_some() {
-        Some(KeyShape::Num)
-    } else {
-        match v {
-            Value::Str(_) => Some(KeyShape::Str),
-            Value::Dna(_) => Some(KeyShape::Dna),
-            Value::Bytes(_) => Some(KeyShape::Bytes),
-            Value::Tuple(_) => None,
-            _ => return false,
-        }
-    };
-    match (leaf, shape) {
-        (Some(l), slot @ None) => {
-            *slot = Some(l);
-            true
-        }
-        (Some(l), Some(have)) => *have == l,
-        (None, slot) => {
-            let parts = list_parts(v).unwrap_or_default();
-            if slot.is_none() {
-                *slot = Some(KeyShape::List(Vec::new()));
-            }
-            let Some(KeyShape::List(cols)) = slot else { return false };
-            for (i, p) in parts.iter().enumerate() {
-                if i == cols.len() {
-                    let mut fresh = None;
-                    match (crate::deep::nested(|| fits_shape(&mut fresh, p)), fresh) {
-                        (true, Some(f)) => cols.push(f),
-                        _ => return false,
-                    }
-                } else {
-                    let mut have = Some(std::mem::replace(&mut cols[i], KeyShape::Num));
-                    let ok = crate::deep::nested(|| fits_shape(&mut have, p));
-                    match (ok, have) {
-                        (true, Some(h)) => cols[i] = h,
-                        _ => return false,
-                    }
-                }
-            }
-            true
-        }
-    }
-}
-
 /// True when every item is a tuple key and they agree position by position.
 pub(crate) fn all_list_keys(items: &[Value]) -> bool {
     if items.is_empty() || !items.iter().all(|v| matches!(v, Value::Tuple(_))) {
         return false;
     }
-    let mut shape = None;
-    items.iter().all(|v| fits_shape(&mut shape, v))
+    let mut shapes = KeyShapes::default();
+    let mut all: Option<u32> = None;
+    for v in items {
+        let Some(shape) = shapes.of(v) else { return false };
+        all = match all {
+            None => Some(shape),
+            Some(so_far) => match shapes.merge(so_far, shape) {
+                Some(m) => Some(m),
+                None => return false,
+            },
+        };
+    }
+    true
 }
 
 /// Lexicographic order on tuple keys that passed `all_list_keys`; a shorter prefix first.
@@ -2010,7 +2076,14 @@ pub(crate) fn list_key_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
         _ => {
             let (x, y) = (list_parts(a).unwrap_or_default(), list_parts(b).unwrap_or_default());
             for (p, q) in x.iter().zip(y.iter()) {
-                let o = crate::deep::nested(|| list_key_cmp(p, q));
+                let o = crate::deep::pair(
+                    crate::deep::REL_KEY,
+                    p,
+                    q,
+                    |o| (*o == Equal).then_some(0),
+                    |_| Equal,
+                    || crate::deep::nested(|| list_key_cmp(p, q)),
+                );
                 if o != Equal {
                     return o;
                 }

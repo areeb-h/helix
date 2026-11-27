@@ -436,7 +436,17 @@ pub fn contains_tracked(v: &Value) -> bool {
         Value::Node(_) => true,
         Value::Array(items) => match &**items {
             // Only a boxed element list can hold one.
-            ArrayData::Values(vs) => vs.iter().any(contains_tracked),
+            // Guarded for depth, and asked once per distinct sub-array (`deep::pair`): an
+            // array that holds one row many times is searched in proportion to what it is.
+            // Only "no" is worth remembering — a "yes" ends the search.
+            ArrayData::Values(vs) => crate::deep::pair(
+                crate::deep::REL_TRACKED,
+                v,
+                v,
+                |found: &bool| (!*found).then_some(0),
+                |_| false,
+                || vs.iter().any(|e| crate::deep::nested(|| contains_tracked(e))),
+            ),
             // `Ints`/`Floats`/`Range` are numbers by construction. `Enumerate` and
             // `Zip` are NOT — they can wrap a boxed buffer — but every element they
             // yield is a TUPLE, which no tensor build accepts, tracked or plain. So

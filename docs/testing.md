@@ -245,7 +245,7 @@ needs the binary that job just built.
 ### `scripts/deepvalues.py` — every operation on a value nested 100k deep
 
 ```
-python3 scripts/deepvalues.py                # 175 programs x 3 engines, ~90 s
+python3 scripts/deepvalues.py                # 281 programs x 3 engines, ~3 min
 python3 scripts/deepvalues.py --selftest     # prove each oracle can still fail
 python3 scripts/deepvalues.py --list         # print the programs without running them
 ```
@@ -253,8 +253,9 @@ python3 scripts/deepvalues.py --list         # print the programs without runnin
 Every other generator here nests a VALUE a few levels at most, so none of them could see that
 87 operations — and freeing — recursed once per level of a value and killed the process (see
 memory-safety.md, "value depth"). This one builds a value 100,000 deep of each container kind
-(array, pair, record, tuple, dict, closure, and a mix) and applies each operation that takes
-one, on all three engines with the evaluator stack cut to 4 MB, so a per-level recursion
+(array, pair, record, tuple, dict, closure, and a mix; and array, record, tuple and dict
+holding the level below TWICE — 2^100000 leaves in 100,001 containers) and applies each
+operation that takes one, on all three engines with the evaluator stack cut to 4 MB, so a per-level recursion
 overflows at a depth that is quick to build. Four hard oracles: NEVER-ABORT, ENGINES-AGREE,
 IN-TIME (a walk quadratic in depth takes hours at this depth, so a timeout is an algorithm)
 and AS-EXPECTED (deep values must WORK — exit 0 — except where an error is the design, such as

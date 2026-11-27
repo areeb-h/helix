@@ -148,7 +148,7 @@ million levels in under a second, on every engine, without a single deep call. U
 native stack: printing it, `==`, `to_json`, `unique`, sorting tuples, arithmetic over nested
 arrays, rendering a table — 87 operations by the first count — and, last, **freeing** it,
 which is compiler-generated drop glue. All of them aborted the process (`fatal runtime
-error: stack overflow`), on all three engines. `src/deep.rs` holds the two measures:
+error: stack overflow`), on all three engines. `src/deep.rs` holds the three measures:
 
 1. **Walks borrow stack as they deepen.** Every recursive walk over a value (display,
    `eq3`/`values_equal`, tuple order, sort keys, JSON, broadcasting, table rendering, the
@@ -172,10 +172,28 @@ have traded a crash for a hang: printing copied each level's text into the level
 (O(2^d); now once, and at most 64 axes). Tuple `<` compared each pair in full before
 descending into it (O(d²); now one pass).
 
-**Known limit:** a value that holds one sub-value many times — `[x, x]` wrapped forty deep —
-has 2^40 leaves however little memory it takes. Printing or serializing it stops at the
-one-string cap with a clean error; comparing two such values walks every leaf, which is
-exponential time (like any runaway loop, a CPU cost, not a crash).
+3. **Walks answer once per distinct container.** Depth is one way a value outgrows a naive
+   walk; SHARING is the other. `[x, x]` wrapped sixty times is sixty-one arrays and 2^60
+   leaves, and a value is a DAG, not a tree. Until 2026-11-26 comparisons of such values
+   never finished and anything that built a tree from one — `v + 1`, the sort-key shape
+   check, a table cell's text, `tensor` — ran out of memory and killed the process.
+   `deep::once` remembers what a walk has decided about each container (keyed by address,
+   with the operands held so no address is reused): equality and order answer once per
+   distinct PAIR, elementwise arithmetic returns one result per distinct operand (so its
+   output shares wherever its input did), sort-key shapes are interned, and the text and
+   JSON writers copy a container's text from where it already lies in the buffer. An answer
+   is remembered only when reaching it took 4,096 container steps, and only for a container
+   something besides its parent holds — the only kind a walk can meet twice — so data that
+   does not share never enters the memo. `remembering_shared_containers_changes_no_answer`
+   (src/deep.rs) runs every memoized walk over 600 randomly shared values with the memo
+   forced on and forced off, and requires identical answers.
 
-`values_nested_100k_deep_print_compare_serialize_and_free` (tests/cli.rs) and the unit tests
-in `src/deep.rs` pin this; `scripts/deepvalues.py` (docs/testing.md) runs the full matrix in CI.
+**What is still proportional to the tree:** only output that IS the tree. A shared value's
+text is as long as its leaves, so printing or serializing one past 1 GiB is the one-string
+cap's error (in about a second); `tensor` of one past a billion elements is refused. A dict
+insert's cycle check is budgeted per insert, which makes BUILDING a hundred thousand levels
+of dict-in-dict take seconds — slow, and bounded.
+
+`values_nested_100k_deep_print_compare_serialize_and_free` and
+`values_that_share_a_part_cost_what_they_are_not_the_paths_through_them` (tests/cli.rs) and the
+unit tests in `src/deep.rs` pin this; `scripts/deepvalues.py` (docs/testing.md) runs the full matrix in CI.

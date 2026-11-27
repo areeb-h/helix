@@ -26,12 +26,9 @@ impl super::Interp {
         // result goes on the tape; while it replays, the tape answers and the builtin does not
         // run at all — so a replay reads, writes and sends nothing, and needs no authority.
         if crate::tape::wants(name) {
-            if let Some(r) = crate::tape::replayed(name, line, col) {
-                return r;
-            }
-            let out = self.call_builtin_arm(name, args, line, col);
-            crate::tape::record(name, &out);
-            return out;
+            let taped = args.clone();
+            let c = crate::tape::Call { label: name, recv: None, args: &taped };
+            return crate::tape::through(c, line, col, || self.call_builtin_arm(name, args, line, col));
         }
         let out = self.call_builtin_arm(name, args, line, col)?;
         // The folding sandbox pays for what a builtin PRODUCES as well as what it is
@@ -850,7 +847,12 @@ fn float_predicate(
             let out: Result<Vec<Value>, HelixError> = items
                 .to_values()
                 .iter()
-                .map(|e| crate::deep::nested(|| float_predicate(e, name, f, on_exact, line, col)))
+                // One result per distinct element, as `broadcast_unary` (`deep::mapped`).
+                .map(|e| {
+                    crate::deep::mapped(crate::deep::REL_PREDICATE, e, (f as usize) << 1 | on_exact as usize, || {
+                        crate::deep::nested(|| float_predicate(e, name, f, on_exact, line, col))
+                    })
+                })
                 .collect();
             Ok(Value::array(out?))
         }

@@ -1972,7 +1972,16 @@ fn broadcast_unary(
         Value::Array(items) => {
             let out: Result<Vec<Value>, HelixError> = items
                 .iter_values()
-                .map(|e| crate::deep::nested(|| broadcast_unary(&e, scalar)))
+                // One result per distinct element (`deep::mapped`): an array that holds one
+                // sub-array many times maps to an array that shares in the same places,
+                // where a tree-shaped result would not fit in memory. The function being
+                // applied is one closure for the whole walk; its address names it.
+                .map(|e| {
+                    let applying = scalar as *const dyn Fn(&Value) -> Result<Value, HelixError> as *const u8 as usize;
+                    crate::deep::mapped(crate::deep::REL_UNARY, &e, applying, || {
+                        crate::deep::nested(|| broadcast_unary(&e, scalar))
+                    })
+                })
                 .collect();
             Ok(Value::array(out?))
         }

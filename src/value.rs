@@ -1609,90 +1609,26 @@ impl fmt::Display for Value {
             Value::PyObject(h) => write!(f, "{}", h.repr()),
             // A tracked value prints as its forward value (the graph stays hidden).
             Value::Node(n) => write!(f, "{}", crate::autodiff::node_value(n)),
-            Value::Array(items) => {
-                write!(f, "[")?;
-                for (i, v) in items.to_values().iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    // Strings inside arrays are quoted for clarity.
-                    match v {
-                        Value::Str(s) => write!(f, "\"{}\"", s)?,
-                        other => crate::deep::nested(|| write!(f, "{}", other))?,
-                    }
-                }
-                write!(f, "]")
-            }
-            Value::Tuple(items) => {
-                write!(f, "(")?;
-                for (i, v) in items.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    match v {
-                        Value::Str(s) => write!(f, "\"{}\"", s)?,
-                        other => crate::deep::nested(|| write!(f, "{}", other))?,
+            // Containers have ONE renderer, `write_text`: guarded for depth, aware of
+            // sharing, held to the one-string cap. Here it runs lossy (a frame that cannot
+            // be drawn prints its placeholder, as this impl always did) and cannot fail: a
+            // value whose text would pass the cap prints its opening and an ellipsis. Until
+            // this, such a value — one that holds a sub-value many times — printed until
+            // the allocator gave up, and took the process with it (tables and CSV cells
+            // come through here).
+            Value::Array(_) | Value::Tuple(_) | Value::Record(_) | Value::Dict(_) => {
+                let mut text = String::new();
+                match write_text(&mut text, self, "print", true, 0, 0) {
+                    Ok(()) => f.write_str(&text),
+                    Err(_) => {
+                        let mut end = text.len().min(256);
+                        while !text.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        f.write_str(&text[..end])?;
+                        f.write_str("…")
                     }
                 }
-                // a 1-tuple prints as `(x,)` to disambiguate from grouping
-                if items.len() == 1 {
-                    write!(f, ",")?;
-                }
-                write!(f, ")")
-            }
-            Value::Record(fields) => {
-                // CANONICAL field order (sorted by name, decided 2026-08-24):
-                // `==` always ignored order and `to_json` always sorted, so the
-                // printer was the one place a record's CONSTRUCTION ROUTE showed
-                // — a doc example would document one code path and fail on the
-                // other (field review §1.5). Sorting prints the VALUE.
-                //
-                // Perf shape: `as_str` takes the interner lock, so resolve each
-                // name ONCE (n locks, not n·log n·2), and an already-sorted
-                // record — the common case once writers adopt the canon — skips
-                // the index sort entirely.
-                let names: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
-                let mut order: Vec<usize> = (0..fields.len()).collect();
-                if !names.windows(2).all(|w| w[0] <= w[1]) {
-                    order.sort_unstable_by(|&a, &b| names[a].cmp(names[b]));
-                }
-                write!(f, "{{")?;
-                for (i, &fi) in order.iter().enumerate() {
-                    let (k, v) = &fields[fi];
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    let key = field_key_display(k.as_str());
-                    match v {
-                        Value::Str(s) => write!(f, "{}: \"{}\"", key, s)?,
-                        other => crate::deep::nested(|| write!(f, "{}: {}", key, other))?,
-                    }
-                }
-                write!(f, "}}")
-            }
-            // `{k => v}` arrow notation (sorted by key) — visually distinct from a
-            // record's bare-identifier `{field: v}`; string keys and values are quoted.
-            Value::Dict(map) => {
-                // Each side is written straight into the formatter: formatting an entry
-                // into its own `String` first copied every nested level once per level
-                // above it, which made a deep dict quadratic to print.
-                fn quoted(f: &mut fmt::Formatter, v: &Value) -> fmt::Result {
-                    match v {
-                        Value::Str(s) => write!(f, "\"{}\"", s),
-                        other => crate::deep::nested(|| write!(f, "{}", other)),
-                    }
-                }
-                write!(f, "{{")?;
-                let map = map.map();
-                for (i, (k, v)) in map.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    quoted(f, &k.to_value())?;
-                    write!(f, " => ")?;
-                    quoted(f, v)?;
-                }
-                write!(f, "}}")
             }
             // Headers print in WIRE ORDER with names as they arrived — the same
             // arrow notation as a Dict, so the two read alike, but unsorted,
@@ -1719,79 +1655,157 @@ impl fmt::Display for Value {
 /// other (leaf) value can't fail and delegates to `Display`.
 pub fn display_value(v: &Value, line: usize, col: usize) -> Result<String, HelixError> {
     let mut s = String::new();
-    write_display(&mut s, v, "print", line, col)?;
+    write_text(&mut s, v, "print", false, line, col)?;
     Ok(s)
 }
 
-/// [`display_value`], appended to `s`. ONE buffer for the whole value: building each
-/// level's text as its own `String` and copying it into the level above made printing a
-/// value nested `d` deep cost O(d²) — a million-level list never finished. Every append
-/// goes through [`crate::interp::growth::push`], held to the one-string cap: a value that
-/// holds one sub-value many times (`[x, x]` wrapped forty deep) prints to more text than
-/// any memory, and that is the cap's clean error, not an abort (ADR 0024).
-fn write_display(s: &mut String, v: &Value, op: &str, line: usize, col: usize) -> Result<(), HelixError> {
+/// One value's text being written: the buffer, and what every level of the walk needs.
+struct Text<'a> {
+    s: &'a mut String,
+    /// The operation named when the text passes the one-string cap.
+    op: &'a str,
+    line: usize,
+    col: usize,
+    /// A frame that cannot be drawn prints its placeholder instead of failing.
+    lossy: bool,
+    /// This walk's number: a remembered span is an offset into THIS buffer.
+    walk: usize,
+}
+
+/// Append `v`'s text to `s` — the one renderer behind `print`, interpolation, `Display` and
+/// every cell.
+///
+/// ONE buffer for the whole value: building each level's text as its own `String` and
+/// copying it into the level above made printing a value nested `d` deep cost O(d²). Every
+/// append is held to the one-string cap, and a container met again is COPIED from where its
+/// text already lies in the buffer rather than walked again — so a value that holds one
+/// sub-value many times (`[x, x]` wrapped forty deep) is refused as soon as its text would
+/// pass the cap, in about the time it takes to write that much text, instead of after a walk
+/// of its 2^40 leaves (ADR 0024).
+fn write_text(s: &mut String, v: &Value, op: &str, lossy: bool, line: usize, col: usize) -> Result<(), HelixError> {
+    let _walk = crate::deep::scope();
+    write_display(&mut Text { s, op, line, col, lossy, walk: crate::deep::walk_id() }, v)
+}
+
+fn write_display(t: &mut Text, v: &Value) -> Result<(), HelixError> {
     use crate::interp::growth::push;
+    let (op, line, col) = (t.op, t.line, t.col);
     match v {
-        Value::DataFrame(df) => push(op, s, &crate::framefmt::frame_text(&***df, line, col)?, line, col)?,
+        Value::DataFrame(df) => {
+            let frame = if t.lossy {
+                crate::framefmt::frame_text_lossy(&***df)
+            } else {
+                crate::framefmt::frame_text(&***df, line, col)?
+            };
+            push(op, t.s, &frame, line, col)?;
+        }
         Value::Array(items) => {
-            push(op, s, "[", line, col)?;
+            push(op, t.s, "[", line, col)?;
             for (i, it) in items.to_values().iter().enumerate() {
                 if i > 0 {
-                    push(op, s, ", ", line, col)?;
+                    push(op, t.s, ", ", line, col)?;
                 }
-                write_elem(s, it, op, line, col)?;
+                write_elem(t, it)?;
             }
-            push(op, s, "]", line, col)?;
+            push(op, t.s, "]", line, col)?;
         }
         Value::Tuple(items) => {
-            push(op, s, "(", line, col)?;
+            push(op, t.s, "(", line, col)?;
             for (i, it) in items.iter().enumerate() {
                 if i > 0 {
-                    push(op, s, ", ", line, col)?;
+                    push(op, t.s, ", ", line, col)?;
                 }
-                write_elem(s, it, op, line, col)?;
+                write_elem(t, it)?;
             }
             // a 1-tuple prints as `(x,)` to disambiguate from grouping
-            push(op, s, if items.len() == 1 { ",)" } else { ")" }, line, col)?;
+            push(op, t.s, if items.len() == 1 { ",)" } else { ")" }, line, col)?;
         }
         Value::Record(fields) => {
-            // Canonical sorted field order — the same rule (and the same perf
-            // shape: one interner resolve per name) `Display` applies.
+            // CANONICAL field order (sorted by name, decided 2026-08-24): `==` always
+            // ignored order and `to_json` always sorted, so the printer was the one place a
+            // record's CONSTRUCTION ROUTE showed — a doc example would document one code
+            // path and fail on the other (field review §1.5). Sorting prints the VALUE.
+            //
+            // Perf shape: `as_str` takes the interner lock, so resolve each name ONCE (n
+            // locks, not n·log n·2), and an already-sorted record — the common case once
+            // writers adopt the canon — skips the index sort entirely.
             let names: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
             let mut order: Vec<usize> = (0..fields.len()).collect();
             if !names.windows(2).all(|w| w[0] <= w[1]) {
                 order.sort_unstable_by(|&a, &b| names[a].cmp(names[b]));
             }
-            push(op, s, "{", line, col)?;
+            push(op, t.s, "{", line, col)?;
             for (i, &fi) in order.iter().enumerate() {
                 let (k, val) = &fields[fi];
                 if i > 0 {
-                    push(op, s, ", ", line, col)?;
+                    push(op, t.s, ", ", line, col)?;
                 }
-                push(op, s, &field_key_display(k.as_str()), line, col)?;
-                push(op, s, ": ", line, col)?;
-                write_elem(s, val, op, line, col)?;
+                push(op, t.s, &field_key_display(k.as_str()), line, col)?;
+                push(op, t.s, ": ", line, col)?;
+                write_elem(t, val)?;
             }
-            push(op, s, "}", line, col)?;
+            push(op, t.s, "}", line, col)?;
+        }
+        // `{k => v}` arrow notation (sorted by key) — visually distinct from a record's
+        // bare-identifier `{field: v}`; string keys and values are quoted. A frame inside a
+        // dict has always printed its placeholder when it cannot be drawn, so the dict's
+        // contents are written lossy whatever the caller asked.
+        Value::Dict(map) => {
+            let was_lossy = std::mem::replace(&mut t.lossy, true);
+            let map = map.map();
+            let mut out = push(op, t.s, "{", line, col);
+            for (i, (k, val)) in map.iter().enumerate() {
+                if out.is_err() {
+                    break;
+                }
+                out = (|| {
+                    if i > 0 {
+                        push(op, t.s, ", ", line, col)?;
+                    }
+                    write_elem(t, &k.to_value())?;
+                    push(op, t.s, " => ", line, col)?;
+                    write_elem(t, val)
+                })();
+            }
+            t.lossy = was_lossy;
+            out?;
+            push(op, t.s, "}", line, col)?;
         }
         // Scalars and other leaf values can't fail to render.
-        other => push(op, s, &other.to_string(), line, col)?,
+        other => push(op, t.s, &other.to_string(), line, col)?,
     }
     Ok(())
 }
 
-/// One element of a container: strings quoted, anything else rendered in place — one
-/// level deeper, on stack that [`crate::deep::nested`] guarantees.
-fn write_elem(s: &mut String, v: &Value, op: &str, line: usize, col: usize) -> Result<(), HelixError> {
+/// One element of a container: a string quoted, a scalar written, a container rendered in
+/// place — one level deeper, on stack that [`crate::deep::nested`] guarantees — or, when
+/// this walk has already written that very container, copied from where its text lies.
+fn write_elem(t: &mut Text, v: &Value) -> Result<(), HelixError> {
     use crate::interp::growth::push;
-    match v {
-        Value::Str(x) => {
-            push(op, s, "\"", line, col)?;
-            push(op, s, x, line, col)?;
-            push(op, s, "\"", line, col)
-        }
-        other => crate::deep::nested(|| write_display(s, other, op, line, col)),
+    let (op, line, col) = (t.op, t.line, t.col);
+    if let Value::Str(x) = v {
+        push(op, t.s, "\"", line, col)?;
+        push(op, t.s, x, line, col)?;
+        return push(op, t.s, "\"", line, col);
     }
+    let Some(node) = crate::deep::node(v) else { return write_display(t, v) };
+    // A frame's text depends on `lossy`, so it is part of what a remembered span answers.
+    let key = (node.key, t.walk, crate::deep::REL_TEXT | (t.lossy as u32) << 8);
+    let (step, hit) = crate::deep::step(key, node.shared);
+    if let Some(Value::Int(span)) = hit {
+        let (start, len) = ((span >> 32) as usize, (span & 0xffff_ffff) as usize);
+        if t.s.len().saturating_add(len) > crate::interp::MAX_STRING_LEN {
+            return Err(crate::interp::growth::text_too_long(op, line, col));
+        }
+        t.s.try_reserve(len).map_err(|_| crate::interp::growth::no_memory_for(op, t.s.len() + len, line, col))?;
+        t.s.extend_from_within(start..start + len);
+        return Ok(());
+    }
+    let start = t.s.len();
+    crate::deep::nested(|| write_display(t, v))?;
+    let len = t.s.len() - start;
+    step.done(|| Some(Value::Int((start as i64) << 32 | len as i64)), v, v);
+    Ok(())
 }
 
 /// Append `v`'s display form straight into `buf` — the allocation-free counterpart
@@ -1821,8 +1835,10 @@ pub fn with_article(type_name: &str) -> String {
 pub fn write_value(buf: &mut String, v: &Value, line: usize, col: usize) -> Result<(), HelixError> {
     use std::fmt::Write as _;
     match v {
-        Value::Array(_) | Value::Tuple(_) | Value::Record(_) | Value::DataFrame(_) => {
-            write_display(buf, v, "interpolation", line, col)?;
+        // A dict is here with the other containers so that one whose text would pass the
+        // one-string cap is refused, as they are; through `Display` it would be cut short.
+        Value::Array(_) | Value::Tuple(_) | Value::Record(_) | Value::Dict(_) | Value::DataFrame(_) => {
+            write_text(buf, v, "interpolation", false, line, col)?;
         }
         // The shapes that dominate interpolation, appended DIRECTLY. `write!(buf, "{}",
         // value)` costs two nested `fmt::Arguments` dispatches — one to reach

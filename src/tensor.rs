@@ -68,6 +68,17 @@ pub(crate) fn index_bounds_err(i: i64, len: i64, line: usize, col: usize) -> Hel
 /// walk below linear, since each level copies the shape beneath it.
 const MAX_DIMS: usize = 64;
 
+fn too_many_axes(line: usize, col: usize) -> HelixError {
+    HelixError::new(format!("this array is nested more than {MAX_DIMS} deep, so it has no tensor shape"), line, col)
+        .hint(format!("a tensor has at most {MAX_DIMS} axes (NumPy's limit too)."))
+}
+
+/// The most elements a tensor built from nested arrays may hold — the limit `zeros`, `ones`
+/// and `eye` already state. Nested arrays reach it only by SHARING (an array that holds one
+/// row many times is small; the dense tensor it describes is not), and past it the buffer's
+/// size overflowed and the process died.
+const MAX_ELEMS: usize = 1_000_000_000;
+
 /// Infer the (rectangular) shape of a nested Helix value.
 fn shape_of(v: &Value, line: usize, col: usize) -> Result<Vec<usize>, HelixError> {
     shape_at(v, 0, line, col)
@@ -75,12 +86,7 @@ fn shape_of(v: &Value, line: usize, col: usize) -> Result<Vec<usize>, HelixError
 
 fn shape_at(v: &Value, depth: usize, line: usize, col: usize) -> Result<Vec<usize>, HelixError> {
     if depth > MAX_DIMS {
-        return Err(HelixError::new(
-            format!("this array is nested more than {MAX_DIMS} deep, so it has no tensor shape"),
-            line,
-            col,
-        )
-        .hint(format!("a tensor has at most {MAX_DIMS} axes (NumPy's limit too).")));
+        return Err(too_many_axes(line, col));
     }
     match v {
         Value::Int(_) | Value::Float(_) => Ok(vec![]),
@@ -105,9 +111,33 @@ fn shape_at(v: &Value, depth: usize, line: usize, col: usize) -> Result<Vec<usiz
             // again, which doubled the work at every level: `tensor` of a single-element
             // array nested 40 deep took minutes, and 60 deep would not have finished.
             let vals = items.to_values();
-            let sub = crate::deep::nested(|| shape_at(&vals[0], depth + 1, line, col))?;
+            // One shape per distinct nested array (`deep::once`): an array that holds one
+            // sub-array many times is measured in proportion to what it is. A remembered
+            // shape was measured at some depth; here it must still fit under this one.
+            let child = |it: &Value| -> Result<Vec<usize>, HelixError> {
+                let Some(node) = crate::deep::node(it) else { return shape_at(it, depth + 1, line, col) };
+                let sub = crate::deep::once(
+                    (node.key, 0, crate::deep::REL_SHAPE),
+                    true,
+                    it,
+                    it,
+                    |out: &Result<Vec<usize>, HelixError>| {
+                        out.as_ref().ok().map(|s| Value::int_array(s.iter().map(|&d| d as i64).collect()))
+                    },
+                    |v| match &v {
+                        Value::Array(a) => Ok(a.to_ints().map(|ds| ds.iter().map(|&d| d as usize).collect()).unwrap_or_default()),
+                        _ => Ok(Vec::new()),
+                    },
+                    || crate::deep::nested(|| shape_at(it, depth + 1, line, col)),
+                )?;
+                if depth + 1 + sub.len() > MAX_DIMS {
+                    return Err(too_many_axes(line, col));
+                }
+                Ok(sub)
+            };
+            let sub = child(&vals[0])?;
             for it in vals.iter().skip(1) {
-                if crate::deep::nested(|| shape_at(it, depth + 1, line, col))? != sub {
+                if child(it)? != sub {
                     return Err(ragged_err(line, col));
                 }
             }
@@ -158,8 +188,17 @@ pub fn from_value(v: &Value, line: usize, col: usize) -> Result<Tensor, HelixErr
     // The shape is already known, so the buffer can be sized once instead of doubling its way
     // to 8 MB. `checked_mul` because a bogus shape must not wrap into a small capacity; on
     // overflow we simply do not preallocate and `from_shape_vec` reports the real error.
-    let count = shape.iter().try_fold(1usize, |a, &d| a.checked_mul(d)).unwrap_or(0);
-    let mut data = Vec::with_capacity(count);
+    let count = shape.iter().try_fold(1usize, |a, &d| a.checked_mul(d));
+    if !matches!(count, Some(c) if c <= MAX_ELEMS) {
+        // `zeros`' own sentence for the same refusal.
+        return Err(HelixError::new(format!("tensor shape {:?} is too large to allocate", shape), line, col)
+            .hint("the total element count must stay under 1 billion."));
+    }
+    let mut data = Vec::new();
+    data.try_reserve_exact(count.unwrap_or(0)).map_err(|_| {
+        HelixError::new("there is not enough memory to hold this tensor", line, col)
+            .hint("build it in smaller pieces, or reduce its shape.")
+    })?;
     flatten_into(v, &mut data, line, col)?;
     ArrayD::from_shape_vec(IxDyn(&shape), data)
         .map_err(|e| HelixError::new(format!("could not build tensor: {}", e), line, col))
