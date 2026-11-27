@@ -1,8 +1,8 @@
 {
  "_comment": "Oracle-4 (help-quality) ratchet for scripts/stranger.py. See the module docstring: this is a backlog, not a target. It may only go DOWN. Regenerate with --bless.",
- "help_failures": 264,
+ "help_failures": 261,
  "corpus_size": 1438,
- "blessed_against_sha256": "76bc54bd84c930b247a9f1001759d4bb6a7cd9c04b6894a757a89d9c883f61e8",
+ "blessed_against_sha256": "48c8e768f35416fd7173a2c2022b0ba2deef7ba34d2003c59d4bc9683e9b316d",
  "programs": [
   "bytes/bad-name/bad-utf8",
   "bytes/bad-name/bom",
@@ -224,9 +224,6 @@
   "habit/r/stmt/assign-arrow/after",
   "habit/r/stmt/assign-arrow/bare",
   "habit/r/stmt/assign-arrow/before",
-  "habit/r/stmt/for/after",
-  "habit/r/stmt/for/bare",
-  "habit/r/stmt/for/before",
   "habit/r/stmt/function/after",
   "habit/r/stmt/function/bare",
   "habit/r/stmt/function/before",
