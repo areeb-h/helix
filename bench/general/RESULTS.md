@@ -274,3 +274,119 @@ unchanged, a caught and an uncaught refused spread) on three engines.
 | freezer_model | 678,472,990 | 675,486,039 | −0.4% |
 | orbit | 572,548,893 | 570,837,780 | −0.3% |
 | strings, methods | | | 0.0% |
+
+Suite for this step was not measured on its own; it is in the whole-branch figure below.
+
+## All six together, against `main`
+
+The branch was then merged with `main` (`b3f898d`, which had gained the shared-part walks
+and the session tape since the branch point), and both were built the same way and
+measured again. This is the comparison that counts.
+
+| workload | `main` b3f898d | this branch | |
+|---|--:|--:|--:|
+| records | 914,501,379 | 550,831,421 | −39.8% |
+| nested | 968,175,068 | 583,244,939 | −39.8% |
+| strings | 446,521,126 | 344,841,616 | −22.8% |
+| closures | 842,120,515 | 496,107,298 | −41.1% |
+| match | 1,211,215,761 | 741,858,000 | −38.8% |
+| dicts | 594,208,417 | 450,594,963 | −24.2% |
+| methods | 1,072,946,733 | 811,165,726 | −24.4% |
+| calls | 1,108,607,747 | 660,919,518 | −40.4% |
+| app | 822,356,978 | 546,473,777 | −33.5% |
+| gallery | 2,192,485,875 | 1,495,388,132 | −31.8% |
+| orbit | 938,379,286 | 585,829,034 | −37.6% |
+| freezer_model | 1,067,605,336 | 678,123,920 | −36.5% |
+| updates_model | 1,434,725,621 | 867,216,768 | −39.6% |
+| lockout_model | 622,249,054 | 404,323,084 | −35.0% |
+
+Suite (56 programs): 8,225,972,580 → 5,541,871,954, **−32.6%**. `rules/updates_model_test`
+−39.6%, `statistics/simulation` −38.2%, `rules/freezer_model_test` −36.5%,
+`language/recursion` −36.3%, `rules/lockout_model_test` −35.0%, `statistics/nist` −17.1%,
+`rules/freezer_test` −13.9%; eight more between −1% and −3%; the other 41, small programs
+that are mostly start-up, between −0.6% and +0.3% — except one.
+
+**One program is over the +1% line: `numerics/lattice`, +1.15%** (8,423 k → 8,521 k,
+repeatable). None of it is in the VM, whose dispatch loop costs that program 8 k
+instructions on either build. It is all inside the `lll_exact` builtin (`helix::lattice::lll_exact`, 1,002 k →
+1,106 k), whose big-rational arithmetic is `num-bigint` code instantiated in this crate:
+on `main`'s build `BigInt::from_biguint` is inlined there, on this build it is a separate
+function (115 k). No source this branch touches is involved — the
+`gate` profile splits the crate into 16 codegen units, and adding code moved a boundary.
+It should not survive the release profile (one unit, fat LTO), which was not built here.
+
+## How these were measured
+
+Every binary was built by `cargo build --profile gate` in this worktree with the crate
+roots touched first (the target directory is shared between worktrees, and cargo will
+otherwise hand back another worktree's binary), and each build is deterministic: rebuilding
+the branch point gives the byte-identical binary the "before" numbers of change 1 came
+from, and rebuilding change 1 reproduces its numbers to 0.01%. Changes 1–6 were measured
+before the merge with `main`, each against the commit before it; the table above was
+measured after it.
+
+## Tried and not kept
+
+- **Comparing symbols in `view::get`** (`Symbol::lookup` on the wanted name): app +3.2%,
+  gallery +5.0%. See change 3.
+- **A hash set of callee names per function body** in the call graph: programs with a
+  handful of functions +2%. See change 2.
+- **Moving a call's arguments into the callee's locals by `pop` instead of `drain`**
+  (`resize` the locals first, then pop each argument into its slot — the `drain` shows as
+  2–5% of call-heavy programs): closures −1.0%, and everything else slower — match +2.2%,
+  updates_model +2.5%, freezer_model +2.0%, dicts +1.1%, methods +1.0%; +1.0% over the
+  fourteen. Reverted.
+
+## Considered and not attempted, with the reason
+
+- **Record shapes and per-site inline caches.** `eval_field`'s search is 3–5% of the
+  record workloads after everything above, on records of two to five fields; a cached
+  index would save part of that and cost a shape check. The traffic around the search was
+  the cost, and change 5 removed it for locals.
+- **Updating a record in place when it is uniquely held** (`{...m, k: v}`, as
+  `ConcatIntoLocal` does for arrays). The base of an update is never uniquely held as the
+  VM compiles it today: it reaches the stack through `LoadLocal`, which clones it. It
+  could be taken out of the slot only where the compiler can see that nothing reads the
+  slot again — a fold whose body is literally the update, the shape `ConcatIntoLocal`
+  recognises. In the code measured here that is one line of `records.helix`; the rule
+  tests and the apps update inside `if`/`match`/`do`, and an app's `update(m, e)` is
+  called with a model the runtime still holds. It needs the last-use analysis this
+  project has so far declined to write, not another opcode.
+- **A `CompMapPush`+`Jump` or `Jump`+`CompNext` superinstruction.** The pair is 9–14% of
+  ops in comprehension-heavy code, but a dispatch is now about 16 instructions: under 1%.
+
+## What is left
+
+Per op executed (counting ops as the first table did) the VM-bound workloads now cost
+110–140 instructions on records, closures, `match`, calls and the rule tests (190–240
+before) and 245–265 on strings, dicts and methods, where the work is in the Rust the ops
+call (310–335 before). Where they are, on the final build:
+
+| | records | calls | updates_model |
+|---|--:|--:|--:|
+| the dispatch function itself: fetch (16 per op) and the opcodes' inline code | 48% | 55% | 41% |
+| `Value::clone` + dropping a `Value` | 12% | 10% | 12% |
+| allocator | 8% | 3% | 4% |
+| `eval_field` (the search) | 5% | 4% | 3% |
+| moving arguments into locals (`drain`, `resize`) | 2% | 7% | 2% |
+| `eval_binary`, `eq3`, `values_equal` (mostly `==`) | — | — | 10% |
+
+Nothing left is a single thing a third the size of what change 1 removed. In rough order
+of what the numbers support:
+
+1. **The clone and the drop.** A `Value` is 16 bytes with a derived `Clone` and drop glue
+   that are both real calls, made once or twice per op (`LoadLocal` clones; nearly every
+   op drops). 10–12% everywhere. A smaller or `Copy` scalar representation attacks this
+   directly; so would letting `LoadLocal` of a slot that is dead afterwards move instead
+   of clone, which is the same last-use analysis as the record update above — that
+   analysis is the piece worth building, because it pays twice.
+2. **Opcode bodies.** A call and return is ~180 instructions inline, `LoadLocalConstBinary`
+   ~100. A baseline JIT for general code would remove the fetch and specialise these, but
+   the fetch is now 16 instructions of 110–140 and the rest is `Value` traffic a JIT that
+   keeps `Value` would still do.
+3. **An app's start-up**, which is most of an app's cost and not the VM at all. On
+   `app.helix` after the two fixes here: the parser copying its function-signature table
+   once per interpolation hole (`parse_expression_at`, 17% of the whole run), "did you
+   mean" hints computed for errors the constant folder discards (`suggest::hint` under
+   `fold`, 10%), `fold_program` as a whole 21%, and `view_html` 26%. The first two are
+   each a small change in files this work was asked to leave alone (parser, checker).

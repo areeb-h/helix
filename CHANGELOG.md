@@ -87,7 +87,10 @@
   (callgrind): the 56 runnable examples together 8.15 → 6.20 billion (−23.9%), the three rule
   model tests −24% to −27%, record, closure, `match` and call-heavy programs −25% to −31%,
   string and dict programs −18%. Output and errors are unchanged on all three engines. The
-  programs and the numbers are in `bench/general/`.
+  programs and the numbers are in `bench/general/`. With the four VM and two start-up
+  changes that follow, measured against `main`: the examples 8.23 → 5.54 billion (−32.6%),
+  record, closure, `match` and call-heavy programs −39% to −41%, the rule model tests −35%
+  to −40%, string and dict programs −23% to −24%, app replays −32% to −38%.
 - **The VM keeps the running function's position in registers.** Between a call and a return
   the VM re-read the current frame for every instruction — which function, where in it, where
   its locals start — and wrote the position back. Those are now locals of the loop, reloaded
