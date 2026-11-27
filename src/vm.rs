@@ -1788,25 +1788,29 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
             }
             Op::MakeRecord(names) => {
                 let start = stack.len() - names.len();
-                let vals: Vec<Value> = stack.split_off(start);
-                // `names.iter().copied()` copies the interned `Symbol`s (a `u32`
-                // each) — no per-record key allocation.
+                // The values move STRAIGHT from the stack into the record's fields.
+                // `split_off` first minted a `Vec<Value>` that lived only until the next
+                // line zipped it away — an allocation and a free per record built.
+                // `names.iter().copied()` copies the interned `Symbol`s (a `u32` each) — no
+                // per-record key allocation.
                 let fields: Vec<(crate::symbol::Symbol, Value)> =
-                    names.iter().copied().zip(vals).collect();
+                    names.iter().copied().zip(stack.drain(start..)).collect();
                 stack.push(Value::record(fields));
             }
             Op::UpdateRecord(names) => {
-                let start = stack.len() - names.len();
-                let vals: Vec<Value> = stack.split_off(start);
-                let base = stack.pop().unwrap();
+                // Stack: the base, then one value per name. The base is READ where it sits
+                // and the values are moved out from above it, so nothing is copied into a
+                // temporary first; a refused spread leaves them all on the stack, which the
+                // unwind truncates (the same argument as `Op::Interp`'s operands).
+                let base_at = stack.len() - names.len() - 1;
                 // The walker's own fold: the base's fields (a record's, or a dict's), then
                 // each named field set (override) or appended, in order.
                 let mut out: Vec<(crate::symbol::Symbol, Value)> = Vec::new();
-                crate::interp::spread_into(&mut out, &base, line, col)?;
-                for (name, val) in names.iter().copied().zip(vals) {
+                crate::interp::spread_into(&mut out, &stack[base_at], line, col)?;
+                for (name, val) in names.iter().copied().zip(stack.drain(base_at + 1..)) {
                     crate::interp::set_field(&mut out, name, val);
                 }
-                stack.push(Value::record(out));
+                stack[base_at] = Value::record(out);
             }
             Op::SpreadRecord => {
                 let (Some(extra), Some(acc)) = (stack.pop(), stack.pop()) else {

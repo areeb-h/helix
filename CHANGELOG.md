@@ -83,6 +83,9 @@
   again. It is now one that reads the field where the record sits. −5% to −7% of instructions
   on record-heavy programs, −2.5% to −4.9% on the rule model tests; values and error
   messages are the same.
+- **Building a record allocates once less.** `{a: x, b: y}` and `{...m, k: v}` copied their
+  values into a temporary list before moving them into the record. They now move straight
+  from the VM's stack: −4% to −6% of instructions on programs that build many records.
 - **An app starts sooner.** Before running anything, the JIT asks which functions can reach
   themselves through calls, and it answered by checking every pair of functions — every body
   walked once per function in the program, seven times over. A program that imports `std.ui`

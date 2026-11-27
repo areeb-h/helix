@@ -247,3 +247,30 @@ whose run-to-run range is 2,463–2,516 k on any build.
 This is what "field access" was worth, and it needed no shapes and no cache: the cost was
 never the search (a record here has two to five fields) but the two dispatches and the
 record's reference count going up and down around it.
+
+### 6. A record is built straight from the stack (`Op::MakeRecord`, `Op::UpdateRecord`)
+
+Both first copied their operands off the stack into a temporary `Vec` (`split_off`) and
+then moved them again into the record's fields: an allocation and a free per record, on
+top of the two the record needs. `MakeRecord` now zips the names with a `drain` of the
+stack; `UpdateRecord` reads the base where it sits and drains the values above it. A
+refused spread now leaves its operands on the stack for the unwind to truncate rather than
+dropping them first — `Op::Interp` already works that way.
+`tests/corpus/record_build_update.helix` pins what comes out (which part wins, the base
+unchanged, a caught and an uncaught refused spread) on three engines.
+
+| workload | before | after | |
+|---|--:|--:|--:|
+| records | 586,171,763 | 561,294,646 | −4.2% |
+| nested | 627,945,719 | 593,041,358 | −5.6% |
+| closures | 516,308,278 | 504,958,161 | −2.2% |
+| updates_model | 876,058,050 | 864,887,694 | −1.3% |
+| calls | 673,945,671 | 665,917,447 | −1.2% |
+| gallery | 1,499,133,365 | 1,482,962,087 | −1.1% |
+| lockout_model | 407,870,112 | 403,991,099 | −1.0% |
+| app | 539,609,805 | 534,930,911 | −0.9% |
+| dicts | 451,328,841 | 447,557,036 | −0.8% |
+| match | 756,556,909 | 750,727,711 | −0.8% |
+| freezer_model | 678,472,990 | 675,486,039 | −0.4% |
+| orbit | 572,548,893 | 570,837,780 | −0.3% |
+| strings, methods | | | 0.0% |
