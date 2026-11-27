@@ -977,7 +977,11 @@ pub fn parse_after(tokens: Vec<Token>, bound: &[String]) -> Result<Vec<Stmt>, He
     reject_do_binding_over_mut_global(&program, &p.do_bindings)?;
     // What the checker may need to explain an unknown name (ADR 0066), now that the
     // file has parsed and it is the checker's turn.
-    GONE_USES.with(|t| t.borrow_mut().extend(p.gone_uses.into_iter().map(|(n, l, c, why)| ((n, l, c), why))));
+    GONE_USES.with(|t| {
+        let mut noted = t.take();
+        noted.extend(p.gone_uses);
+        t.set(noted);
+    });
     Ok(program)
 }
 
@@ -4615,14 +4619,21 @@ thread_local! {
     /// Written as the parser passes each such use, read by the checker when — and only when —
     /// it is already refusing that name as not defined, and emptied when a check ends, so an
     /// entry never outlives the program it was read from.
-    static GONE_USES: std::cell::RefCell<HashMap<(String, usize, usize), Gone>> =
-        std::cell::RefCell::new(HashMap::new());
+    ///
+    /// A `Cell` that is taken and put back, not a `RefCell`: nothing here can be borrowed
+    /// twice, so nothing here can panic.
+    static GONE_USES: std::cell::Cell<Vec<GoneUse>> = const { std::cell::Cell::new(Vec::new()) };
 }
 
 /// The hint for an unknown name that a `for` loop had bound (ADR 0066), if this use of it —
 /// by name and position — is one.
 pub(crate) fn loop_local_hint(name: &str, line: usize, col: usize) -> Option<&'static str> {
-    let why = GONE_USES.with(|t| t.borrow().get(&(name.to_string(), line, col)).copied())?;
+    let why = GONE_USES.with(|t| {
+        let noted = t.take();
+        let why = noted.iter().find(|(n, l, c, _)| n == name && *l == line && *c == col).map(|u| u.3);
+        t.set(noted);
+        why
+    })?;
     Some(gone_hint(why))
 }
 
@@ -4635,7 +4646,7 @@ fn gone_hint(why: Gone) -> &'static str {
 
 /// Forget every use [`loop_local_hint`] knows: the check they were recorded for is over.
 pub(crate) fn forget_loop_locals() {
-    GONE_USES.with(|t| t.borrow_mut().clear());
+    GONE_USES.with(|t| t.set(Vec::new()));
 }
 
 /// The start of the sentence a `for` over something that is not an array is refused with.

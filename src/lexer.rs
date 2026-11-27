@@ -609,13 +609,13 @@ fn single(
     *c += 1;
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Whether the operator at `i` is the first half of a compound assignment: an `=` directly
 /// after it that is not the start of `==` or `=>`.
 fn compound_eq(chars: &[char], i: usize) -> bool {
     chars.get(i + 1) == Some(&'=') && !matches!(chars.get(i + 2), Some('=') | Some('>'))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn two_or_one(
     chars: &[char],
     i: usize,
