@@ -281,39 +281,73 @@ Suite for this step was not measured on its own; it is in the whole-branch figur
 
 The branch was then merged with `main` (`b3f898d`, which had gained the shared-part walks
 and the session tape since the branch point), and both were built the same way and
-measured again. This is the comparison that counts.
+measured again. This is the comparison that counts; the branch side is the final commit,
+with the fix described below.
 
 | workload | `main` b3f898d | this branch | |
 |---|--:|--:|--:|
-| records | 914,501,379 | 550,831,421 | −39.8% |
-| nested | 968,175,068 | 583,244,939 | −39.8% |
-| strings | 446,521,126 | 344,841,616 | −22.8% |
-| closures | 842,120,515 | 496,107,298 | −41.1% |
-| match | 1,211,215,761 | 741,858,000 | −38.8% |
-| dicts | 594,208,417 | 450,594,963 | −24.2% |
-| methods | 1,072,946,733 | 811,165,726 | −24.4% |
-| calls | 1,108,607,747 | 660,919,518 | −40.4% |
-| app | 822,356,978 | 546,473,777 | −33.5% |
-| gallery | 2,192,485,875 | 1,495,388,132 | −31.8% |
-| orbit | 938,379,286 | 585,829,034 | −37.6% |
-| freezer_model | 1,067,605,336 | 678,123,920 | −36.5% |
-| updates_model | 1,434,725,621 | 867,216,768 | −39.6% |
-| lockout_model | 622,249,054 | 404,323,084 | −35.0% |
+| records | 914,501,379 | 562,837,039 | −38.5% |
+| nested | 968,175,068 | 596,884,097 | −38.3% |
+| strings | 446,521,126 | 351,872,585 | −21.2% |
+| closures | 842,120,515 | 509,155,512 | −39.5% |
+| match | 1,211,215,761 | 771,425,753 | −36.3% |
+| dicts | 594,208,417 | 458,362,493 | −22.9% |
+| methods | 1,072,946,733 | 829,011,152 | −22.7% |
+| calls | 1,108,607,747 | 677,681,247 | −38.9% |
+| app | 822,356,978 | 547,841,146 | −33.4% |
+| gallery | 2,192,485,875 | 1,508,009,200 | −31.2% |
+| orbit | 938,379,286 | 588,845,372 | −37.2% |
+| freezer_model | 1,067,605,336 | 701,022,807 | −34.3% |
+| updates_model | 1,434,725,621 | 897,158,128 | −37.5% |
+| lockout_model | 622,249,054 | 414,121,166 | −33.4% |
 
-Suite (56 programs): 8,225,972,580 → 5,541,871,954, **−32.6%**. `rules/updates_model_test`
-−39.6%, `statistics/simulation` −38.2%, `rules/freezer_model_test` −36.5%,
-`language/recursion` −36.3%, `rules/lockout_model_test` −35.0%, `statistics/nist` −17.1%,
+Suite (56 programs): 8,225,972,580 → 5,692,774,926, **−30.8%**. `rules/updates_model_test`
+−37.5%, `statistics/simulation` −36.0%, `rules/freezer_model_test` −34.4%,
+`language/recursion` −33.6%, `rules/lockout_model_test` −33.4%, `statistics/nist` −15.9%,
 `rules/freezer_test` −13.9%; eight more between −1% and −3%; the other 41, small programs
 that are mostly start-up, between −0.6% and +0.3% — except one.
 
-**One program is over the +1% line: `numerics/lattice`, +1.15%** (8,423 k → 8,521 k,
+**One program is over the +1% line: `numerics/lattice`, +1.1%** (8,423 k → 8,518 k,
 repeatable). None of it is in the VM, whose dispatch loop costs that program 8 k
-instructions on either build. It is all inside the `lll_exact` builtin (`helix::lattice::lll_exact`, 1,002 k →
-1,106 k), whose big-rational arithmetic is `num-bigint` code instantiated in this crate:
-on `main`'s build `BigInt::from_biguint` is inlined there, on this build it is a separate
-function (115 k). No source this branch touches is involved — the
-`gate` profile splits the crate into 16 codegen units, and adding code moved a boundary.
-It should not survive the release profile (one unit, fat LTO), which was not built here.
+instructions on either build. It is all inside the `lll_exact` builtin
+(`helix::lattice::lll_exact`, 1,002 k → 1,106 k), whose big-rational arithmetic is
+`num-bigint` code instantiated in this crate: on `main`'s build `BigInt::from_biguint` is
+inlined there, on this build it is a separate function (115 k). No source this branch
+touches is involved — the `gate` profile splits the crate into 16 codegen units, and adding
+code moved a boundary. It should not survive the release profile (one unit, fat LTO), which
+was not built here.
+
+### A bug in change 4, found by the full CLI suite and fixed
+
+Change 4 named the cached locals base `base` and deleted the per-arm
+`let base = frames[fi].base`. Two arms (`AppendStrIntoLocal`, `AppendStrFromLocalField`)
+already had a `base` of their own — a stack depth — declared above the line that addresses
+the slot, so in those two the slot was addressed from the stack depth. The two numbers are
+equal at top level and in a function called with nothing else on the operand stack, which
+is why the unit tests, `vmparity`, `opfuzz`, `deepvalues` and `stranger` all passed on it;
+`tests/cli.rs` did not (`a_string_built_in_a_record_field_is_linear`, and ten app tests —
+`std.ui` builds strings in functions). The cached base is now `frame_base`, which no arm
+reuses, and the uses of the frame's base are again exactly the eighteen the code had
+before, by diff. `tests/corpus/string_append_in_function.helix` fails on the build before
+the fix and passes on `main` and after it. Numbers recorded for changes 4–6 above are from
+builds that had the bug; it changed which slot two opcodes touched, not how much work
+anything did, and all fourteen workloads print the same on `main`, on the build with the
+bug and on the final one.
+
+### How much of a number is the compiler's mood
+
+The fix changed two address computations in opcodes the benchmarks barely execute, and the
+fourteen workloads moved by **+2.1%** between the build before it and the build after it
+(match +4.0%, updates_model +3.5%, freezer_model +3.4%, closures +2.6%). The per-op fetch is
+the same 15–16 instructions in both; what moved is the code LLVM generated for unrelated
+arms — `LoadLocal` is about 20 instructions in one build and about 31 in the other. The
+dispatch loop is one 2,800-line function, and its register allocation is not stable under
+edits anywhere in it. So: differences of a few percent between two builds of that function
+are not evidence either way (the rejected argument-move experiment, at +1.0%, is inside
+this band and should be read as "no gain shown", not as "slower"); changes 1, 4, 5 and 6
+are each well outside it on the workloads they target and each has a mechanism that
+accounts for the instructions removed. The table above is the build as it is, on the
+unlucky side of that band.
 
 ## How these were measured
 
@@ -323,7 +357,7 @@ otherwise hand back another worktree's binary), and each build is deterministic:
 the branch point gives the byte-identical binary the "before" numbers of change 1 came
 from, and rebuilding change 1 reproduces its numbers to 0.01%. Changes 1–6 were measured
 before the merge with `main`, each against the commit before it; the table above was
-measured after it.
+measured after it, on the final commit.
 
 ## Tried and not kept
 
@@ -333,9 +367,8 @@ measured after it.
   handful of functions +2%. See change 2.
 - **Moving a call's arguments into the callee's locals by `pop` instead of `drain`**
   (`resize` the locals first, then pop each argument into its slot — the `drain` shows as
-  2–5% of call-heavy programs): closures −1.0%, and everything else slower — match +2.2%,
-  updates_model +2.5%, freezer_model +2.0%, dicts +1.1%, methods +1.0%; +1.0% over the
-  fourteen. Reverted.
+  2–5% of call-heavy programs): closures −1.0%, everything else +0.1% to +2.5%; +1.0% over
+  the fourteen. No gain shown (see the note on build-to-build variation above). Reverted.
 
 ## Considered and not attempted, with the reason
 
@@ -358,9 +391,9 @@ measured after it.
 ## What is left
 
 Per op executed (counting ops as the first table did) the VM-bound workloads now cost
-110–140 instructions on records, closures, `match`, calls and the rule tests (190–240
-before) and 245–265 on strings, dicts and methods, where the work is in the Rust the ops
-call (310–335 before). Where they are, on the final build:
+115–160 instructions on records, closures, `match`, calls and the rule tests (190–240
+before) and 250–270 on strings, dicts and methods, where the work is in the Rust the ops
+call (310–335 before). Where they are (profiled on the build before the fix):
 
 | | records | calls | updates_model |
 |---|--:|--:|--:|
@@ -382,7 +415,7 @@ of what the numbers support:
    analysis is the piece worth building, because it pays twice.
 2. **Opcode bodies.** A call and return is ~180 instructions inline, `LoadLocalConstBinary`
    ~100. A baseline JIT for general code would remove the fetch and specialise these, but
-   the fetch is now 16 instructions of 110–140 and the rest is `Value` traffic a JIT that
+   the fetch is now 16 instructions of 115–160 and the rest is `Value` traffic a JIT that
    keeps `Value` would still do.
 3. **An app's start-up**, which is most of an app's cost and not the VM at all. On
    `app.helix` after the two fixes here: the parser copying its function-signature table
