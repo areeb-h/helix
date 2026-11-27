@@ -1,0 +1,5 @@
+## A mutant: no length limit
+export fn slugify(title) = do {
+  s = title.lower().re_replace("""[^a-z0-9]+""", "-").re_replace("""^-+|-+$""", "")
+  s
+}

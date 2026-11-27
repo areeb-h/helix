@@ -1,0 +1,9 @@
+## Plausible wrong draft: refills from the time of the last call, so partial time is lost.
+export fn new(capacity, refill_ms) = {capacity: capacity, refill_ms: refill_ms, tokens: capacity, last: missing}
+
+export fn allow(l, now_ms) = do {
+  last = l.last ?? now_ms
+  t = min(l.capacity, l.tokens + (now_ms - last) // l.refill_ms)
+  ok = t > 0
+  ({capacity: l.capacity, refill_ms: l.refill_ms, tokens: if ok then t - 1 else t, last: now_ms}, ok)
+}

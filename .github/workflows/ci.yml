@@ -215,6 +215,13 @@ jobs:
           python3 scripts/deepvalues.py --bin ./target/gate/helix --selftest
           python3 scripts/deepvalues.py --bin ./target/gate/helix
 
+      # The agent benchmark's acceptance checks (ADR 0068 Part 0) run here without an agent:
+      # each must pass on its reference solution and fail on its broken one and on the
+      # untouched files, so a language change that breaks a task, or a check that can no
+      # longer say no, is caught on the PR rather than in the next paid run.
+      - name: Agent benchmark checks (selftest, no agent)
+        run: python3 scripts/agentbench.py --bin ./target/gate/helix --selftest
+
   # The project's stated minimum supported Rust version must actually compile, or the
   # claim in Cargo.toml is decoration. Check only — the suite runs on stable above.
   #

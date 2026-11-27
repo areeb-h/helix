@@ -1,6 +1,8 @@
 # ADR 0068 — Written by agents, verified by people
 
 - **Status:** Proposed — a programme of work, in six parts, each to be accepted or cut on its own.
+  Part 0 is implemented: `scripts/agentbench.py`, `bench/agents/` (eight tasks), the
+  `--selftest` step in CI and `.github/workflows/agentbench.yml`; the baseline waits for a key.
 - **Date:** 2026-11-27
 - **Deciders:** Areeb + Claude
 - **Related:**

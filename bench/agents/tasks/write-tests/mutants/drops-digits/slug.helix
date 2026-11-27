@@ -1,0 +1,5 @@
+## A mutant: treats digits as separators
+export fn slugify(title) = do {
+  s = title.lower().re_replace("""[^a-z]+""", "-").re_replace("""^-+|-+$""", "")
+  s.take(40).re_replace("""-+$""", "")
+}

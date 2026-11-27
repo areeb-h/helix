@@ -1,0 +1,15 @@
+## Least-squares line through points.csv.
+df = read_csv("points.csv")
+xs = df.column(@x)
+ys = df.column(@y)
+mx = xs.mean()
+my = ys.mean()
+sxy = xs.zip(ys).map((p) => (p[0] - mx) * (p[1] - my)).sum()
+sxx = xs.map((x) => (x - mx) * (x - mx)).sum()
+slope = sxy / sxx
+intercept = my - slope * mx
+ss_res = xs.zip(ys).map((p) => (p[1] - (slope * p[0] + intercept)) ** 2).sum()
+ss_tot = ys.map((y) => (y - my) ** 2).sum()
+print("slope: {slope:.4f}")
+print("intercept: {intercept:.4f}")
+print("r2: {1 - ss_res / ss_tot:.4f}")
