@@ -1821,6 +1821,10 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let recv = stack.pop().unwrap();
                 stack.push(crate::interp::eval_field(&recv, *name, line, col)?);
             }
+            Op::LoadLocalField(slot, name) => {
+                let v = crate::interp::eval_field(&locals[base + *slot as usize], *name, line, col)?;
+                stack.push(v);
+            }
             Op::GetFieldOrMissing(name) => {
                 // Cannot panic: the compiler emits the receiver immediately before this
                 // op — the stack-shape invariant `GetField` relies on. Counted in the

@@ -118,6 +118,16 @@ pub enum Op {
     /// Pop a receiver; push `recv.<name>` (record field access). The field name is
     /// an interned `Symbol`, so the lookup compares a `u32` against the record keys.
     GetField(crate::symbol::Symbol),
+    /// Superinstruction: push `locals[slot].<name>` (fuses `LoadLocal slot; GetField name`).
+    ///
+    /// `p.f` on a local is the commonest pair in code that reads records — 9–15% of all
+    /// instructions executed by the rule model tests and the record benchmarks
+    /// (`bench/general/RESULTS.md`). As two instructions it pushed a clone of the whole
+    /// record (a reference count up), searched it, cloned the field, and dropped the record
+    /// (the count down again). This reads the field through a borrow of the slot: the same
+    /// search, the same clone of the field, the same errors at the same position — it calls
+    /// the same `eval_field` — and no traffic on the record's count.
+    LoadLocalField(u32, crate::symbol::Symbol),
     /// A destructured field: the value, or `missing` for a field the record does not have.
     GetFieldOrMissing(crate::symbol::Symbol),
     /// Slice a receiver. The bitmask says which of start/stop/step were supplied

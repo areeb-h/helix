@@ -185,7 +185,7 @@ the position table, store the advanced pointer back. The loop is now two loops: 
 loads `ip`, the code slice and the locals base into locals; `'ops` runs instructions against
 them; an arm that pushes, pops or re-points a frame says `continue 'frame`. A jump is an
 assignment to a local. The one obligation it creates — an arm that PUSHES a frame must
-write `ip` back first, because that is where its `Return` resumes — is at six places
+write `ip` back first, because that is where its `Return` resumes — is at five places
 (the two pushes in `enter_call!`, `CallValue`, the two function-valued-field calls in
 `Method`), and `tests/corpus/vm_frames_resume.helix` runs every way into and out of a
 frame, each followed by more work in the caller, on all three engines against a golden
@@ -211,3 +211,39 @@ taken from the tree-walker of the branch point.
 Suite: 6,188,703,266 → 5,692,717,479, **−8.0%** (`statistics/simulation` −10.3%, the rule
 model tests −7.5% to −10.2%, `language/recursion` −9.7%); the largest plus sign is
 `numerics/tensors` +0.85%, a 3.2 M-instruction program inside the ±1% start-up noise.
+
+### 5. `p.f` on a local is one instruction that reads the field in place (`Op::LoadLocalField`)
+
+`LoadLocal; GetField` was the commonest pair of instructions wherever records are read. The
+pair pushed a clone of the record, searched it, cloned the field and dropped the record;
+the fused instruction borrows the slot and calls the same `eval_field`, so the value, the
+`missing` pass-through and both errors (with their hints and the field's position) are the
+walker's own. The compiler fuses only what it emitted as exactly `LoadLocal` for a bare
+identifier — an upvalue or a global keeps the two-instruction form.
+`tests/corpus/local_field_read.helix` pins all of it on three engines, golden from the
+branch point's tree-walker.
+
+| workload | before | after | |
+|---|--:|--:|--:|
+| records | 621,669,816 | 586,171,763 | −5.7% |
+| nested | 673,158,053 | 627,945,719 | −6.7% |
+| strings | 340,386,190 | 340,376,898 | 0.0% |
+| closures | 535,084,964 | 516,308,278 | −3.5% |
+| match | 758,735,263 | 756,556,909 | −0.3% |
+| dicts | 451,172,704 | 451,328,841 | 0.0% |
+| methods | 788,575,844 | 788,641,809 | 0.0% |
+| calls | 714,413,679 | 673,945,671 | −5.7% |
+| app | 542,505,454 | 539,609,805 | −0.5% |
+| gallery | 1,506,669,535 | 1,499,133,365 | −0.5% |
+| orbit | 574,595,513 | 572,548,893 | −0.4% |
+| freezer_model | 695,592,299 | 678,472,990 | −2.5% |
+| updates_model | 921,398,363 | 876,058,050 | −4.9% |
+| lockout_model | 428,832,332 | 407,870,112 | −4.9% |
+
+Suite: 5,692,717,479 → 5,608,709,090, **−1.5%** — the rule model tests (−2.5% to −4.9%) and
+nothing else of size; the largest plus sign is `bio/annotations` +1.5%, the 2.5 M program
+whose run-to-run range is 2,463–2,516 k on any build.
+
+This is what "field access" was worth, and it needed no shapes and no cache: the cost was
+never the search (a record here has two to five fields) but the two dispatches and the
+record's reference count going up and down around it.

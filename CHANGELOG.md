@@ -78,6 +78,11 @@
   only when a call, a return or a caught error changes the frame. A further −8.0% of
   instructions across the 56 examples (5.69 billion, from 8.15 at the start of this work),
   −7% to −11% on record, closure, `match` and rule code.
+- **Reading a field of a local record does not copy the record's handle.** `p.f` was two VM
+  instructions: push `p` (a reference-count increment), then find the field and drop `p`
+  again. It is now one that reads the field where the record sits. −5% to −7% of instructions
+  on record-heavy programs, −2.5% to −4.9% on the rule model tests; values and error
+  messages are the same.
 - **An app starts sooner.** Before running anything, the JIT asks which functions can reach
   themselves through calls, and it answered by checking every pair of functions — every body
   walked once per function in the program, seven times over. A program that imports `std.ui`

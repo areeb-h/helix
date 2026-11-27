@@ -1,0 +1,26 @@
+exit: 1
+--- stdout ---
+12
+("a", "b")
+6
+([1, 2], {a: [1, 2]}, [1, 2])
+missing
+([1, 2, 3], [1, 2, 3, 4], [1, 2, 3], {items: [1, 2, 3]})
+[10, 20]
+[["x"]]
+{ids: [1, 2], n: 2}
+["x"]
+42
+10
+(false, "record has no field `nmae`")
+(false, "record has no field `zzz`")
+(false, "a value of type Int has no field `w`")
+(false, "a value of type Int has no field `w`")
+made
+--- stderr ---
+error: record has no field `nmae`
+  --> <src>:11:15
+   |
+11 | fn typo(r) = r.nmae
+   |               ^
+help: did you mean `name`?
