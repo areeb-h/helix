@@ -4569,12 +4569,19 @@ impl Parser {
 //
 // `for x in xs { total += x }` is notation. The parser writes the fold it stands for —
 //
-//     total = xs.reduce(total, ($st, $it) => do {
-//       total = $st
-//       x = $it
+//     total = xs.reduce(total, (total, x) => total + x)
+//
+// and, for a body that assigns several names bound before the loop,
+//
+//     $forout = xs.reduce((total, n), ($st, x) => do {
+//       total = $st[0]
+//       n = $st[1]
 //       total = total + x
-//       total
+//       n = n + 1
+//       (total, n)
 //     })
+//     total = $forout[0]
+//     n = $forout[1]
 //
 // — so the checker, the three engines and the JIT see a `reduce`, a lambda and a `do` block,
 // which they already agree about. What the parser has to know, and nothing else does, is
@@ -4658,10 +4665,7 @@ pub(crate) fn is_loop_source(recv: &Expr) -> bool {
 pub(crate) fn is_loop_fold(e: &Expr) -> bool {
     match e {
         Expr::Let { bindings, .. } => bindings.first().is_some_and(|(n, _)| n.starts_with(LOOP_SOURCE)),
-        Expr::Method { name, args, .. } => {
-            name == "reduce"
-                && matches!(args.get(1), Some(Expr::Lambda { params, .. }) if params.first().is_some_and(|p| p == "$st"))
-        }
+        Expr::Method { name, ufcs, .. } => name == "reduce" && ufcs.as_deref() == Some(LOOP_FOLD),
         _ => false,
     }
 }
@@ -4682,6 +4686,11 @@ pub(crate) fn loop_refusal(e: &Expr) -> Option<&Expr> {
 }
 
 const LOOP_SOURCE: &str = "$forin";
+/// What a loop's `reduce` carries where a method call names the free function it falls
+/// back to (`Expr::Method::ufcs`). No function has this name, so the fold falls back to
+/// nothing — a `fn reduce` the file declares is not a loop's — and the call is known for a
+/// loop's by anything that reads the tree ([`is_loop_fold`]).
+const LOOP_FOLD: &str = "$for";
 const LOOP_RESULT: &str = "$forout";
 
 /// `break` and `continue`, which a fold has no place for.
@@ -5275,10 +5284,10 @@ impl Parser {
         Ok((name, Expr::Binary { op, left: Box::new(left), right: Box::new(value), line: ol, col: oc }))
     }
 
-    /// The fold a loop stands for: `source.reduce(state, ($st, $it) => do { … })`, where the
-    /// state is the carried names — the one name itself, a tuple of several, `()` for none —
-    /// and the block reads them out of `$st`, binds the pattern from `$it`, runs the body's
-    /// lines and answers the state again.
+    /// The fold a loop stands for: `source.reduce(state, (state, item) => do { … })`, where
+    /// the state is the carried names — the one name itself, a tuple of several, `()` for
+    /// none — and the block reads several out of `$st`, binds a positional pattern from
+    /// `$it`, runs the body's lines and answers the state again.
     ///
     /// A source that is not an array is refused in the loop's words rather than `reduce`'s,
     /// by an ordinary `if` around the fold — the only way a message reaches all three
@@ -5309,26 +5318,47 @@ impl Parser {
             [(one, ..)] => ident(one),
             many => Expr::Tuple(many.iter().map(|(n, ..)| ident(n)).collect()),
         };
+        // The lambda's own parameters do the unpacking where they can: one carried name IS
+        // the state, so it is the first parameter, and a pattern that is a name is the
+        // second. `for x in xs { total += x }` is then `xs.reduce(total, (total, x) => total
+        // + x)` to the letter — the fold a person writes, and the one the JIT compiles.
+        let state_param = match carried {
+            [(one, ..)] => one.clone(),
+            _ => "$st".to_string(),
+        };
+        let item_param = match &pattern {
+            LoopPattern::Name(name) if name != "_" => name.clone(),
+            _ => "$it".to_string(),
+        };
         let mut block: Vec<(String, Expr)> = Vec::with_capacity(carried.len() + lines.len() + 2);
-        for (i, (name, ..)) in carried.iter().enumerate() {
-            let read = if carried.len() == 1 {
-                ident("$st")
-            } else {
-                Expr::Index { recv: Box::new(ident("$st")), index: Box::new(Expr::Int(i as i64)), line: l, col: c }
-            };
-            block.push((name.clone(), read));
-        }
-        match pattern {
-            LoopPattern::Name(name) => block.push((name, ident("$it"))),
-            LoopPattern::Positions { names, rest } => {
-                // `$it` is a name, so the pattern reads it in place and binds no temp.
-                Self::push_positions(&mut block, "$it".to_string(), names, rest, ident("$it"));
+        if carried.len() > 1 {
+            for (i, (name, ..)) in carried.iter().enumerate() {
+                let read =
+                    Expr::Index { recv: Box::new(ident("$st")), index: Box::new(Expr::Int(i as i64)), line: l, col: c };
+                block.push((name.clone(), read));
             }
         }
+        if let LoopPattern::Positions { names, rest } = pattern {
+            // `$it` is a name, so the pattern reads it in place and binds no temp.
+            Self::push_positions(&mut block, "$it".to_string(), names, rest, ident("$it"));
+        }
         block.extend(lines);
-        let body = Expr::Let { bindings: block, body: Box::new(state(carried)), from_do: true };
+        // A block that ends by binding its one carried name answers that value: `do { …
+        // total = e \n total }` is `do { … e }`, and with nothing before it, `e`.
+        let mut result = state(carried);
+        if let ([(one, ..)], Some((last, _))) = (carried, block.last())
+            && last == one
+            && let Some((_, value)) = block.pop()
+        {
+            result = value;
+        }
+        let body = if block.is_empty() {
+            result
+        } else {
+            Expr::Let { bindings: block, body: Box::new(result), from_do: true }
+        };
         let step = Expr::Lambda {
-            params: vec!["$st".to_string(), "$it".to_string()],
+            params: vec![state_param, item_param],
             anns: Vec::new(),
             defaults: Vec::new(),
             bound: None,
@@ -5339,7 +5369,7 @@ impl Parser {
             name: "reduce".to_string(),
             args: vec![state(carried), step],
             named: vec![],
-            ufcs: None,
+            ufcs: Some(LOOP_FOLD.to_string()),
             line: sl,
             col: sc,
         };

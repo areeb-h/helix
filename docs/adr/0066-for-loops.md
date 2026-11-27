@@ -175,6 +175,13 @@ What writing it settled, where the text above left a choice or could not be foll
   type. A source that is an array on its face (a literal, `range(…)`, `a..b`) is folded
   directly. A file that binds `type_of` or `raise` to something of its own gets no guard,
   and a non-sequence there is refused in `reduce`'s words.
+- **The fold is written as a person would write it.** One carried name and a pattern that
+  is a name are the lambda's own parameters, and a body whose last line assigns the carried
+  name answers that value: `for x in xs { total += x }` is `xs.reduce(total, (total, x) =>
+  total + x)` to the letter, which is also the shape the JIT compiles (the `$st`/`$it` form
+  above measured 600 times slower there on a counting loop). Several carried names are read
+  out of `$st` as shown above. The `reduce` carries an inert mark (its fallback-function
+  slot names a function that cannot exist), which is how `helix emit rust` knows a loop.
 - **`missing` is not a sequence.** `missing.reduce(…)` answers `missing`, which would have
   left one carried name `missing` and several an indexing error; the guard refuses it:
   "… and this is `missing`".
