@@ -112,6 +112,23 @@ pub(crate) fn call_method(
     line: usize,
     col: usize,
 ) -> Result<Value, HelixError> {
+    // The black box (ADR 0063 D2): a method that writes is taped like an impure builtin.
+    // Replaying, it writes nothing and returns what it returned when recorded.
+    if crate::tape::wants_method(name) {
+        let label = format!(".{name}");
+        let c = crate::tape::Call { label: &label, recv: Some(recv), args };
+        return crate::tape::through(c, line, col, || call_method_untaped(recv, name, args, line, col));
+    }
+    call_method_untaped(recv, name, args, line, col)
+}
+
+fn call_method_untaped(
+    recv: &Value,
+    name: &str,
+    args: &[Value],
+    line: usize,
+    col: usize,
+) -> Result<Value, HelixError> {
     // `is_missing` is universal: true only for the `missing` value itself.
     if name == "is_missing" {
         if !args.is_empty() {

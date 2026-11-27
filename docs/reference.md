@@ -1625,7 +1625,7 @@ Show this app's own page in a native window; true if one opened, false where non
 
 The black box's controls, used by `std.ui` to record and replay an app session.
 
-**Note:** ADR 0063 D2. Apps do not call this; `ui.app` does. `HELIX_RECORD=s.jsonl helix run app.helix` records every event, what `update` and `view` read from the world (the result of every impure builtin they called, or the error it raised), and a hash of each screen. `helix replay app.helix s.jsonl` plays it back: impure builtins do NOT run — the tape answers — so a replay touches no file, network or clock, and reports whether every screen came out identical. Operations: mode, start, begin, event, view, entries, play, done. Keywords: record, replay, session, black box, bug report, reproduce, time travel, deterministic.
+**Note:** ADR 0063 D2. Apps do not call this; `ui.app` does. `HELIX_RECORD=s.jsonl helix run app.helix` records what the program's startup read (before `ui.app`), every event, what `update` and `view` read from the world (the result of every impure builtin or write method they called, with a fingerprint of its arguments, or the error it raised), a fingerprint of the program, and a hash of each screen as it looked (tree, theme and stylesheet). `helix replay app.helix s.jsonl` plays it back: impure builtins do NOT run — the tape answers — so a replay touches no file, network or clock, stops at the first call made with other arguments, and reports whether every screen came out identical. Operations: mode, start, started, program, diverged, begin, event, view, entries, play, done. Keywords: record, replay, session, black box, bug report, reproduce, time travel, deterministic.
 
 ```
 >>> session_tape("mode")

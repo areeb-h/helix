@@ -3364,17 +3364,34 @@ fn step(spec, model, ev) = do {
 # the tape answers instead — so the session reproduces exactly, on any machine and engine, and
 # the replay says whether every screen came out the same.
 
-# One screen as a hash, the way it is recorded and compared.
-fn screen_hash(tree) = sha256(render(tree))
+# One screen as a hash, the way it is recorded and compared: what the person SAW, so the tree
+# and the look it was drawn with, its theme and its stylesheet. A change to std.ui's CSS or an
+# app's design is a different screen, and a replay says so (`helix replay --accept` takes it).
+fn screen_of(spec, tree, model, last_design) = sha256("{render(tree)}\n{theme_of(spec, model)}\n{css_with(spec, design_of(spec, model, last_design))}")
+
+# Whether this run is the program that was recorded: the same sources (std.ui included) and
+# command line. The same program is a reproduction, and every screen must match. Another one
+# is a test of that change against a real session; both are legitimate, and the replay says
+# which it is.
+fn same_program(recorded, now) = if recorded.is_missing() or now.is_missing() then "" else if recorded.get("sha256") == now.get("sha256") and recorded.get("args") == now.get("args") then "this is the program that was recorded" else do {
+  helix = if recorded.get("helix") == now.get("helix") then "" else "; Helix {recorded.get("helix")} recorded it and this is Helix {now.get("helix")}"
+  args = if recorded.get("args") == now.get("args") then "" else "; it was recorded with the arguments {recorded.get("args").to_json()}"
+  "this is not the program that was recorded, so the session tests the change{helix}{args}"
+}
 
 # Play a recorded session through this app's `update` and `view`, and report.
 fn replay_session(spec) = do {
+  # The app's startup (its `main`, before `ui.app`) was answered from the tape; end it here.
+  started = session_tape("started")
   entries = session_tape("entries")
   starts = entries.filter((e) => e.kind == "start")
   first = if starts.count() == 0 then missing else starts[0]
   recorded_init = if first.is_missing() then missing else first.get("init")
   init = recorded_init ?? spec.init
-  out = range(0, entries.count()).reduce({model: init, events: 0, screens: 0, same: 0, diverged: missing, errors: 0, reproduced: 0}, (st, i) => do {
+  which = same_program(if first.is_missing() then missing else first.get("program"), session_tape("program"))
+  noted = if which == "" then false else print("note: {which}")
+  before = if started then missing else "the app's startup, before `ui.app` ({session_tape("diverged")})"
+  out = range(0, entries.count()).reduce({model: init, design: missing, events: 0, screens: 0, same: 0, diverged: before, errors: 0, reproduced: 0}, (st, i) => do {
     e = entries[i]
     match e.kind {
       "event" => do {
@@ -3390,17 +3407,21 @@ fn replay_session(spec) = do {
         played = session_tape("play", i)
         t = try (spec.view)(st.model)
         clean = session_tape("done")
-        h = if t.ok then screen_hash(t.value) else "view failed: {t.error}"
+        h = if t.ok then screen_of(spec, t.value, st.model, st.design) else "view failed: {t.error}"
         same = h == e.screen and clean
         k = st.screens + 1
-        {...st, screens: k, same: st.same + (if same then 1 else 0), diverged: if st.diverged.is_missing() and not same then "screen #{k} (after event #{st.events})" else st.diverged}
+        {...st, design: design_of(spec, st.model, st.design), screens: k, same: st.same + (if same then 1 else 0), diverged: if st.diverged.is_missing() and not same then "screen #{k} (after event #{st.events})" else st.diverged}
       },
       _ => st,
     }
   })
   errors = if out.errors == 0 then "" else ", update raised {out.errors} time{if out.errors == 1 then "" else "s"} ({out.reproduced} as recorded)"
   print("replayed {out.events} event{if out.events == 1 then "" else "s"}: {out.same} of {out.screens} screens identical{errors}")
-  if out.diverged.is_missing() then out else raise("the replay differs from the recording, first at {out.diverged}", "the app's code changed since the session was recorded, or it reads something the tape does not hold: a method on a handle (`db.query`), or a value computed at the top level from a file.")
+  # The first call the tape could not answer, when that is why: the app read something
+  # (another file, another URL) that was never read when it was recorded.
+  why = session_tape("diverged")
+  cause = if why.is_missing() then "" else ": {why}"
+  if out.diverged.is_missing() then out else raise("the replay differs from the recording, first at {out.diverged}{cause}", "the app's code changed since the session was recorded, or it reads something the tape does not hold.")
 }
 
 # A frame is the patch operations that bring a client's page up to date, and the theme.
@@ -3446,7 +3467,7 @@ fn serve(l, spec, rt, model, tree, conns, streams, timers) = do {
   # consistent with the model, and the next event starts from there.
   began = if changed_now and TAPE == "record" then session_tape("begin") else ()
   drawn = if changed_now then try (spec.view)(ticked) else {ok: true, value: tree}
-  taped = if changed_now and TAPE == "record" then session_tape("view", if drawn.ok then screen_hash(drawn.value) else "view failed: {drawn.error}") else ()
+  taped = if changed_now and TAPE == "record" then session_tape("view", if drawn.ok then screen_of(spec, drawn.value, ticked, st.rt.design) else "view failed: {drawn.error}") else ()
   logged_view = if drawn.ok then false else elog("view failed: {drawn.error}; the events that led to it were undone")
   ticked = if drawn.ok then ticked else model
   changed = changed_now and drawn.ok

@@ -26,12 +26,9 @@ impl super::Interp {
         // result goes on the tape; while it replays, the tape answers and the builtin does not
         // run at all — so a replay reads, writes and sends nothing, and needs no authority.
         if crate::tape::wants(name) {
-            if let Some(r) = crate::tape::replayed(name, line, col) {
-                return r;
-            }
-            let out = self.call_builtin_arm(name, args, line, col);
-            crate::tape::record(name, &out);
-            return out;
+            let taped = args.clone();
+            let c = crate::tape::Call { label: name, recv: None, args: &taped };
+            return crate::tape::through(c, line, col, || self.call_builtin_arm(name, args, line, col));
         }
         let out = self.call_builtin_arm(name, args, line, col)?;
         // The folding sandbox pays for what a builtin PRODUCES as well as what it is

@@ -2757,9 +2757,22 @@ fn run_file_capture_args(
     if let Some(call) = appended {
         stmts.push(call);
     }
+    // The black box (ADR 0063 D2) tapes the whole program, not only an app's `update` and
+    // `view`: `main`'s own setup reads and writes too (src/tape.rs).
+    tape::begin_program(&loaded.spans, argv);
     // Errors render against the spans the loader produced, so a cross-module error
     // points at the dependency's own source and line (not the entry file).
-    run_program(&mut stmts, &loaded.spans, loaded.multi_module)
+    run_program(&mut stmts, &loaded.spans, loaded.multi_module).map_err(|e| match tape::divergence() {
+        // The replay left the recording before the app was running: the app's own error is a
+        // consequence of reading something that was never read when it was recorded.
+        Some(why) => format!(
+            "error: the replay went another way before the app started: {why}\n\
+             help: replay with the command line the session was recorded with (`helix replay` \
+             uses it), or record the session again\n\
+             then the app failed:\n{e}"
+        ),
+        None => e,
+    })
 }
 
 /// Load, namespace-resolve and type-check a file WITHOUT running it, returning the

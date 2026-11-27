@@ -40,7 +40,7 @@ use crate::value::{DictKey, Value};
 /// What the tape is doing on this thread.
 enum Mode {
     Off,
-    /// Capturing the impure results of the current step.
+    /// Capturing the impure results of the current step (or of the program's startup).
     Record(Vec<J>),
     /// Handing back a recorded step's results, in order.
     Replay(VecDeque<J>),
@@ -50,6 +50,9 @@ thread_local! {
     static MODE: RefCell<Mode> = const { RefCell::new(Mode::Off) };
     static FILE: RefCell<Option<std::fs::File>> = const { RefCell::new(None) };
     static ENTRIES: RefCell<Option<Vec<J>>> = const { RefCell::new(None) };
+    /// The first call a replay could not answer, and why. Kept once set: a diverged call
+    /// fails, and the app may catch that and raise its own error, which would hide the cause.
+    static DIVERGED: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// Builtins that are not inputs: they run on a replay as they did when recording.
@@ -62,67 +65,199 @@ fn passes_through(name: &str) -> bool {
     )
 }
 
+fn running() -> bool {
+    // Constant folding (ADR 0050) tries calls while the program loads and drops any that turn
+    // out impure. Those attempts are the compiler's, not the program's: they never reach the
+    // world, and taping them would make a recording depend on what the folder tried.
+    !crate::fold::sandbox_active() && MODE.with(|m| !matches!(*m.borrow(), Mode::Off))
+}
+
 /// Whether a builtin call must go through the tape — cheap when no tape is running.
 pub fn wants(name: &str) -> bool {
-    MODE.with(|m| !matches!(*m.borrow(), Mode::Off)) && crate::registry::is_impure_builtin(name) && !passes_through(name)
+    running() && crate::registry::is_impure_builtin(name) && !passes_through(name)
 }
 
-/// On a replay, the recorded result of this call — the builtin is not run.
-pub fn replayed(name: &str, line: usize, col: usize) -> Option<Result<Value, HelixError>> {
-    MODE.with(|m| match &mut *m.borrow_mut() {
-        Mode::Replay(q) => Some(match q.pop_front() {
-            Some(entry) => {
-                let recorded = entry.get("fn").and_then(J::as_str).unwrap_or("");
-                if recorded != name {
-                    Err(HelixError::new(
-                        format!("the replay went another way: this step called `{name}` where the recording called `{recorded}`"),
-                        line,
-                        col,
-                    )
-                    .hint("the app's code changed since the session was recorded, or it depends on something the tape does not hold (a method on a handle, a value read at the top level)."))
-                } else if let Some(msg) = entry.get("error").and_then(J::as_str) {
-                    // It failed when recorded, so it fails now, the same way.
-                    let e = HelixError::new(msg, line, col);
-                    Err(match entry.get("hint").and_then(J::as_str) {
-                        Some(h) => e.hint(h),
-                        None => e,
-                    })
-                } else {
-                    match entry.get("value") {
-                        Some(v) => decode(v).map_err(|why| HelixError::new(format!("`{name}` returned {why} when this session was recorded, so this step cannot be replayed"), line, col)),
-                        None => Err(HelixError::new(format!("the recording of `{name}` has no value"), line, col)),
-                    }
-                }
+/// Whether a method call must go through the tape: one that writes (a file, a database). A
+/// replay must not write, and returns what the write returned when the session was recorded.
+/// The runtime's own socket methods (`accept`, `respond`, …) are outside the tape: they are
+/// how the app is served, not what it reads.
+pub fn wants_method(name: &str) -> bool {
+    use crate::capability::Effect;
+    running() && matches!(crate::capability::method_effect_of(name), Effect::FsWrite | Effect::DbWrite)
+}
+
+/// One call, as the tape identifies it: its name, and everything it was handed (the receiver
+/// too, for a method).
+pub struct Call<'a> {
+    pub label: &'a str,
+    pub recv: Option<&'a Value>,
+    pub args: &'a [Value],
+}
+
+impl Call<'_> {
+    /// SHA-256 (128 bits, hex) of the arguments, written down exactly. A replay that makes the
+    /// same call with other arguments (another file, another URL) has gone another way AT that
+    /// call, and is stopped there rather than handed the answer to a different question.
+    fn fingerprint(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let all = json!([self.recv.map(encode), self.args.iter().map(encode).collect::<Vec<_>>()]);
+        let digest = Sha256::digest(all.to_string().as_bytes());
+        digest[..16].iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// How the call reads in a message: `name(arg, …)`, each argument shortened at its middle
+    /// (a path differs in its last part, a URL in its tail).
+    fn shown(&self) -> String {
+        let short = |v: &Value| {
+            let t = crate::value::display_value(v, 0, 0).unwrap_or_else(|_| v.type_name().to_string());
+            let n = t.chars().count();
+            if n <= 60 {
+                return t;
             }
-            None => Err(HelixError::new(
-                format!("the replay went another way: this step called `{name}`, and the recording has no more calls for it"),
-                line,
-                col,
-            )
-            .hint("the app's code changed since the session was recorded.")),
-        }),
-        _ => None,
-    })
+            let head: String = t.chars().take(20).collect();
+            let tail: String = t.chars().skip(n - 36).collect();
+            format!("{head}…{tail}")
+        };
+        let args: Vec<String> = self.recv.into_iter().chain(self.args.iter()).map(short).collect();
+        format!("{}({})", self.label, args.join(", "))
+    }
 }
 
-/// While recording, note what a builtin returned — or the error it raised, which a replay
-/// raises again.
-pub fn record(name: &str, out: &Result<Value, HelixError>) {
-    MODE.with(|m| {
-        if let Mode::Record(t) = &mut *m.borrow_mut() {
-            t.push(match out {
-                Ok(v) => json!({"fn": name, "value": encode(v)}),
-                Err(e) => json!({"fn": name, "error": e.message, "hint": e.hint}),
-            });
-        }
+/// Run `call` through the tape: while recording, run it and note what it returned (or the
+/// error it raised, which a replay raises again); while replaying, do NOT run it and return
+/// what was recorded.
+pub fn through(c: Call<'_>, line: usize, col: usize, call: impl FnOnce() -> Result<Value, HelixError>) -> Result<Value, HelixError> {
+    let replaying = MODE.with(|m| matches!(*m.borrow(), Mode::Replay(_)));
+    if !replaying {
+        let out = call();
+        let fp = c.fingerprint();
+        MODE.with(|m| {
+            if let Mode::Record(t) = &mut *m.borrow_mut() {
+                t.push(match &out {
+                    Ok(v) => json!({"fn": c.label, "args": fp, "value": encode(v)}),
+                    Err(e) => json!({"fn": c.label, "args": fp, "error": e.message, "hint": e.hint}),
+                });
+            }
+        });
+        return out;
+    }
+    let went_another_way = |why: String| {
+        DIVERGED.with(|d| {
+            let mut d = d.borrow_mut();
+            if d.is_none() {
+                *d = Some(why.clone());
+            }
+        });
+        HelixError::new(format!("the replay went another way: {why}"), line, col)
+            .hint("the app's code or its arguments changed since the session was recorded, or it depends on something the tape does not hold.")
+    };
+    // After a divergence nothing more is answered: every later call says why.
+    if let Some(why) = DIVERGED.with(|d| d.borrow().clone()) {
+        return Err(went_another_way(why));
+    }
+    let entry = MODE.with(|m| match &mut *m.borrow_mut() {
+        Mode::Replay(q) => q.pop_front(),
+        _ => None,
     });
+    let Some(entry) = entry else {
+        return Err(went_another_way(format!("the app called `{}`, and the recording has no more calls here", c.shown())));
+    };
+    let recorded = entry.get("fn").and_then(J::as_str).unwrap_or("");
+    if recorded != c.label {
+        return Err(went_another_way(format!("the app called `{}` where the recording called `{recorded}`", c.shown())));
+    }
+    // Recordings made before calls were fingerprinted have no `args`; their names still match.
+    if let Some(fp) = entry.get("args").and_then(J::as_str)
+        && fp != c.fingerprint()
+    {
+        return Err(went_another_way(format!("the app called `{}`, but when recorded `{}` was called with other arguments", c.shown(), c.label)));
+    }
+    if let Some(msg) = entry.get("error").and_then(J::as_str) {
+        // It failed when recorded, so it fails now, the same way.
+        let e = HelixError::new(msg, line, col);
+        return Err(match entry.get("hint").and_then(J::as_str) {
+            Some(h) => e.hint(h),
+            None => e,
+        });
+    }
+    match entry.get("value") {
+        Some(v) => decode(v).map_err(|why| HelixError::new(format!("`{}` returned {why} when this session was recorded, so this step cannot be replayed", c.label), line, col)),
+        None => Err(HelixError::new(format!("the recording of `{}` has no value", c.label), line, col)),
+    }
+}
+
+/// Why the replay went another way, if it did.
+pub fn divergence() -> Option<String> {
+    DIVERGED.with(|d| d.borrow().clone())
+}
+
+// --- The whole program: startup and identity. ---------------------------------------------
+
+/// The running program's identity in a recorded or replayed run: a fingerprint of every
+/// module it loaded, its command line, and this Helix. A `RwLock`, not a thread-local: it
+/// describes the process.
+static PROGRAM: std::sync::RwLock<Option<J>> = std::sync::RwLock::new(None);
+
+/// Start the tape with the program, before any of it runs, when a session is recorded or
+/// replayed. Without this, what an app does before `ui.app` (`main` reading a folder, a
+/// first-run migration) reads and writes the replaying machine's world. Recording, those calls
+/// go on the session's `start` entry as its `effects`; replaying, they are answered from it.
+///
+/// Called by `helix run` on the evaluating thread (the tape is thread-local).
+pub fn begin_program(spans: &[crate::module::Span], argv: &[String]) {
+    let replay = std::env::var_os("HELIX_REPLAY");
+    if replay.is_none() && std::env::var_os("HELIX_RECORD").is_none() {
+        return;
+    }
+    // Which program this is, so a replay can say whether it reproduces the recorded program
+    // or tests a changed one. The sources in load order, std.ui included (it is part of what
+    // ran), but not their file names: a session sent as `stopwatch-0611.helix` that ran as
+    // `app.helix` is the same program.
+    let program = {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        for s in spans {
+            h.update((s.source.len() as u64).to_le_bytes());
+            h.update(s.source.as_bytes());
+        }
+        let sha: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        json!({"sha256": sha, "modules": spans.len(), "args": argv, "helix": env!("CARGO_PKG_VERSION")})
+    };
+    if let Ok(mut p) = PROGRAM.write() {
+        *p = Some(program);
+    }
+    let mode = match replay {
+        // A session that cannot be read here replays an empty startup; `session_tape("entries")`
+        // then refuses the file with the reason.
+        Some(path) => Mode::Replay(
+            std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|t| t.lines().find(|l| !l.trim().is_empty()).map(str::to_string))
+                .and_then(|l| serde_json::from_str::<J>(&l).ok())
+                .filter(|j| j.get("kind").and_then(J::as_str) == Some("start"))
+                .and_then(|j| j.get("effects").and_then(J::as_array).cloned())
+                .unwrap_or_default()
+                .into(),
+        ),
+        None => Mode::Record(Vec::new()),
+    };
+    MODE.with(|m| *m.borrow_mut() = mode);
+}
+
+fn program() -> Option<J> {
+    PROGRAM.read().ok().and_then(|p| p.clone())
 }
 
 // --- The program's side: `session_tape(op, arg?)`, used only by `std/ui.helix`. -------------
 
 /// `session_tape("mode")` — `"record"`, `"replay"`, or `missing`, from `HELIX_RECORD` /
 /// `HELIX_REPLAY` (`helix replay` sets the second).
-/// `session_tape("start", info)` — open the recording and write its first entry.
+/// `session_tape("start", info)` — open the recording and write its first entry, with what
+/// the program's startup read (`effects`) and which program it is (`program`).
+/// `session_tape("started")` — on a replay, end the startup: `true` if it made exactly the
+/// recorded calls.
+/// `session_tape("program")` — this run's `{sha256, modules, args, helix}`, or `missing`.
+/// `session_tape("diverged")` — why the replay went another way, or `missing`.
 /// `session_tape("begin")` — start capturing one step.
 /// `session_tape("event", ev)` / `session_tape("view", screen)` — write the step.
 /// `session_tape("entries")` — on a replay, every entry, as values (effects left out).
@@ -142,6 +277,11 @@ pub fn session_tape(args: &[Value], line: usize, col: usize) -> Result<Value, He
             _ => Value::Missing,
         }),
         "start" => {
+            // The startup is over: what it read goes on this entry.
+            let startup = MODE.with(|m| match std::mem::replace(&mut *m.borrow_mut(), Mode::Off) {
+                Mode::Record(t) => t,
+                _ => Vec::new(),
+            });
             let Some(path) = std::env::var_os("HELIX_RECORD") else { return Ok(Value::Bool(false)) };
             let f = std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&path).map_err(io)?;
             FILE.with(|c| *c.borrow_mut() = Some(f));
@@ -153,9 +293,31 @@ pub fn session_tape(args: &[Value], line: usize, col: usize) -> Result<Value, He
                     entry.insert(k.as_str().to_string(), encode(v));
                 }
             }
+            if let Some(p) = program() {
+                entry.insert("program".into(), p);
+            }
+            entry.insert("effects".into(), J::Array(startup));
             write_line(&J::Object(entry)).map_err(io)?;
             Ok(Value::Bool(true))
         }
+        "started" => {
+            let left = MODE.with(|m| match std::mem::replace(&mut *m.borrow_mut(), Mode::Off) {
+                Mode::Replay(q) => q.len(),
+                _ => 0,
+            });
+            if left > 0 && divergence().is_none() {
+                DIVERGED.with(|d| *d.borrow_mut() = Some(format!("the app made fewer calls before it started than when recorded ({left} left unanswered)")));
+            }
+            Ok(Value::Bool(divergence().is_none()))
+        }
+        "program" => Ok(match program() {
+            Some(p) => decode_plain(&p),
+            None => Value::Missing,
+        }),
+        "diverged" => Ok(match divergence() {
+            Some(w) => Value::Str(Rc::new(w)),
+            None => Value::Missing,
+        }),
         "begin" => {
             MODE.with(|m| {
                 let mut m = m.borrow_mut();
@@ -199,6 +361,8 @@ pub fn session_tape(args: &[Value], line: usize, col: usize) -> Result<Value, He
                         for (k, v) in o {
                             if k == "effects" {
                                 out.push((Symbol::intern("calls"), Value::Int(v.as_array().map_or(0, |a| a.len()) as i64)));
+                            } else if k == "program" {
+                                out.push((Symbol::intern(k), decode_plain(v)));
                             } else {
                                 out.push((Symbol::intern(k), decode(v).unwrap_or(Value::Missing)));
                             }
@@ -227,6 +391,12 @@ pub fn session_tape(args: &[Value], line: usize, col: usize) -> Result<Value, He
         }))),
         other => Err(HelixError::new(format!("`session_tape` has no operation `{other}`"), line, col)),
     }
+}
+
+/// Plain JSON (not the tape's tagged form) as a Helix value: the program fingerprint is
+/// written as ordinary JSON so a person reading the session file can read it.
+fn decode_plain(j: &J) -> Value {
+    crate::json::parse(&j.to_string()).unwrap_or(Value::Missing)
 }
 
 fn write_line(j: &J) -> std::io::Result<()> {
