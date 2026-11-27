@@ -4167,7 +4167,9 @@ fn eval_repl_line(interp: &mut Interp, checker: &mut types::Checker, src: &str) 
             return;
         }
     };
-    let program = match parser::parse(tokens) {
+    // Parsed AFTER the session so far: a `for` loop and `n += 1` ask which names are bound
+    // (ADR 0066), and here the earlier lines bound them.
+    let program = match parser::parse_after(tokens, &checker.bound_names()) {
         Ok(p) => p,
         Err(e) => {
             eprint!("{}", e.render(src, "<repl>"));
@@ -4179,6 +4181,7 @@ fn eval_repl_line(interp: &mut Interp, checker: &mut types::Checker, src: &str) 
         // and skip execution (mirrors the parse-error early return).
         if let Err(e) = checker.exec_stmt(stmt) {
             eprint!("{}", e.render(src, "<repl>"));
+            parser::forget_loop_locals();
             break;
         }
         match interp.exec(stmt) {

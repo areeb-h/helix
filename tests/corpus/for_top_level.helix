@@ -1,0 +1,66 @@
+# ADR 0066: a loop as a top-level statement. The names it carries are the top-level
+# names its body assigns, and they must be `mut`.
+
+# One.
+mut total = 0
+for x in [1, 2, 3] {
+  total += x
+}
+print(total)
+
+# Several, with a name of the body's own beside them.
+mut lo = 100
+mut hi = -100
+mut log = []
+for x in [5, -3, 12] {
+  lo = if x < lo then x else lo
+  hi = if x > hi then x else hi
+  note = "saw {x}"
+  log = log.concat([note])
+}
+print(lo, hi, log)
+
+# None: run for its effects.
+for (i, name) in ["a", "b"].enumerate() {
+  print("{i}: {name}")
+}
+
+# Nested, the inner loop updating a global.
+mut cells = 0
+mut rows = 0
+for row in [[1, 2], [3, 4, 5]] {
+  rows += 1
+  for cell in row {
+    cells += 1
+  }
+}
+print(rows, cells)
+
+# A function called from the body reads the global as it was BEFORE the loop: a
+# top-level loop is one statement, and globals change between statements.
+mut seen = 0
+fn peek() = seen
+mut peeks = []
+for x in [1, 2, 3] {
+  seen += x
+  peeks = peeks.concat([peek()])
+}
+print(seen, peeks, peek())
+
+# Compound assignment on a `mut` name, outside any loop.
+mut n = 10
+n += 5
+n -= 3
+n *= 4
+n /= 8
+print(n)
+
+# A loop again over the same names: each is one statement after the last.
+for x in [10, 20] {
+  total += x
+}
+for x in [1] {
+  lo -= x
+  hi += x
+}
+print(total, lo, hi)

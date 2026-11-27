@@ -575,6 +575,20 @@ impl<'a> Tx<'a> {
 
     fn expr(&mut self, e: &Expr, env: &Env, want: Option<&Ty>) -> Result<(String, Ty), EmitError> {
         let line = line_of(e);
+        // A `for` loop reaches here as the fold the parser wrote for it (ADR 0066): a
+        // `reduce` over a block that reads a tuple by position, behind a check of the
+        // sequence. That shape is not translated, and the refusal is about the loop.
+        if crate::parser::is_loop_fold(e) {
+            let at = match e {
+                Expr::Let { body, .. } => line_of(body),
+                _ => line,
+            };
+            return err(
+                at,
+                "a `for` loop is not translated by `helix emit rust` yet: write the fold it stands for, \
+                 `xs.reduce(init, (acc, x) => …)`, with the state in one value",
+            );
+        }
         match e {
             Expr::Int(n) => Ok((if *n < 0 { format!("({n})") } else { n.to_string() }, Ty::Int)),
             Expr::Bool(b) => Ok((b.to_string(), Ty::Bool)),

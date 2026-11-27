@@ -382,10 +382,24 @@ fn lex_trivia_from(src: &str, line0: usize, col0: usize) -> Result<Vec<Token>, H
                     two_or_one(&chars, i, '=', Tok::Ge, Tok::Gt, &mut raw, line, start_col, &mut i, &mut col);
                 }
             }
+            // `+=`, `-=`, `*=`, `/=` (ADR 0066) are one token each, read only when the `=`
+            // follows its operator DIRECTLY and is not itself the start of `==` or `=>`. An
+            // operator directly followed by `=` parsed nowhere before (`a +=b` was "expected a
+            // value"), so no program that worked changes; and `a +== b`, `a -=> b` keep the
+            // tokens — and so the errors — they had.
+            '+' if compound_eq(&chars, i) => {
+                push!(Tok::PlusEq, start_col);
+                i += 2;
+                col += 2;
+            }
             '+' => single(Tok::Plus, &mut raw, line, start_col, &mut i, &mut col),
             '-' => {
                 if i + 1 < n && chars[i + 1] == '>' {
                     push!(Tok::Arrow, start_col);
+                    i += 2;
+                    col += 2;
+                } else if compound_eq(&chars, i) {
+                    push!(Tok::MinusEq, start_col);
                     i += 2;
                     col += 2;
                 } else {
@@ -399,6 +413,10 @@ fn lex_trivia_from(src: &str, line0: usize, col0: usize) -> Result<Vec<Token>, H
                     push!(Tok::StarStar, start_col);
                     i += 2;
                     col += 2;
+                } else if compound_eq(&chars, i) {
+                    push!(Tok::StarEq, start_col);
+                    i += 2;
+                    col += 2;
                 } else {
                     push!(Tok::Star, start_col);
                     i += 1;
@@ -408,6 +426,10 @@ fn lex_trivia_from(src: &str, line0: usize, col0: usize) -> Result<Vec<Token>, H
             '/' => {
                 if i + 1 < n && chars[i + 1] == '/' {
                     push!(Tok::SlashSlash, start_col);
+                    i += 2;
+                    col += 2;
+                } else if compound_eq(&chars, i) {
+                    push!(Tok::SlashEq, start_col);
                     i += 2;
                     col += 2;
                 } else {
@@ -474,8 +496,21 @@ fn lex_trivia_from(src: &str, line0: usize, col0: usize) -> Result<Vec<Token>, H
             ';' => {
                 // The parser's statement-boundary error carries this hint, but a
                 // typed `;` dies here at lex time and never reaches it.
-                return Err(HelixError::new("unexpected character `;`", line, col)
-                    .hint("each statement goes on its own line; Helix has no `;`."));
+                //
+                // `for (i = 0; i < n; i++)` is where most of them come from, and there the
+                // semicolon is not the thing to fix (ADR 0066).
+                let on_line: Vec<&Tok> = raw.iter().filter(|t| t.line == line).map(|t| &t.tok).collect();
+                let c_style_loop = matches!(on_line.first(), Some(Tok::Ident(w)) if w == "for")
+                    && matches!(on_line.get(1), Some(Tok::LParen));
+                let e = HelixError::new("unexpected character `;`", line, col);
+                return Err(if c_style_loop {
+                    e.hint(
+                        "a loop walks a sequence instead of counting by hand: `for i in range(n) { … }` runs \
+                         `i` from 0 to n - 1, with no parentheses and no `;`.",
+                    )
+                } else {
+                    e.hint("each statement goes on its own line; Helix has no `;`.")
+                });
             }
             other => {
                 let mut err =
@@ -575,6 +610,12 @@ fn single(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Whether the operator at `i` is the first half of a compound assignment: an `=` directly
+/// after it that is not the start of `==` or `=>`.
+fn compound_eq(chars: &[char], i: usize) -> bool {
+    chars.get(i + 1) == Some(&'=') && !matches!(chars.get(i + 2), Some('=') | Some('>'))
+}
+
 fn two_or_one(
     chars: &[char],
     i: usize,
@@ -957,6 +998,7 @@ fn cook_newlines(raw: Vec<Token>) -> Vec<Token> {
         matches!(
             t,
             Tok::Eq | Tok::EqEq | Tok::Ne | Tok::Lt | Tok::Gt | Tok::Le | Tok::Ge
+                | Tok::PlusEq | Tok::MinusEq | Tok::StarEq | Tok::SlashEq
                 | Tok::Plus | Tok::Minus | Tok::Star | Tok::StarStar | Tok::Slash | Tok::SlashSlash | Tok::Percent
                 | Tok::And | Tok::Or | Tok::Not | Tok::Comma | Tok::Dot
                 | Tok::LParen | Tok::LBracket | Tok::LBrace | Tok::Mut | Tok::FatArrow

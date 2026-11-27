@@ -1,0 +1,114 @@
+# ADR 0066: what a loop iterates, and how each element is named.
+
+# A name.
+fn joined(xs) = do {
+  s = ""
+  for x in xs {
+    s = "{s}{x}"
+  }
+  s
+}
+print(joined(["a", "b", "c"]))
+
+# `(a, b)` — positions, as a lambda's parameters are written — over a dict's items.
+fn invert(d) = do {
+  out = []
+  for (k, v) in d.items() {
+    out = out.concat([(v, k)])
+  }
+  out
+}
+print(invert({"x": 1, "y": 2}))
+
+# `[a, b]` — positions, as a block's pattern is written — over arrays AND tuples.
+fn dots(pairs) = do {
+  t = 0
+  for [a, b] in pairs {
+    t += a * b
+  }
+  t
+}
+print(dots([[1, 2], [3, 4]]))
+print(dots([(1, 2), (3, 4)]))
+
+# A rest, in brackets.
+fn heads(rows) = do {
+  hs = []
+  ns = []
+  for [h, ...rest] in rows {
+    hs = hs.concat([h])
+    ns = ns.concat([rest.count()])
+  }
+  (hs, ns)
+}
+print(heads([[1, 2, 3], [4], [5, 6]]))
+
+# `(x)` is `x`.
+fn count_up(xs) = do {
+  n = 0
+  for (x) in xs {
+    n += 1
+  }
+  n
+}
+print(count_up([7, 7, 7]))
+
+# A range, in both spellings; `_` for a variable nobody reads.
+fn tri(n) = do {
+  t = 0
+  for i in range(n + 1) {
+    t += i
+  }
+  t
+}
+fn tri2(n) = do {
+  t = 0
+  for i in 1..n + 1 {
+    t += i
+  }
+  t
+}
+fn pow2(n) = do {
+  p = 1
+  for _ in range(n) {
+    p *= 2
+  }
+  p
+}
+print(tri(4), tri2(4), pow2(10))
+
+# Anything that answers an array: a chain, a record's items, a string's characters.
+fn evens_sum(xs) = do {
+  t = 0
+  for x in xs.filter(x => x % 2 == 0).map(x => x * 10) {
+    t += x
+  }
+  t
+}
+print(evens_sum([1, 2, 3, 4]))
+fn fields(r) = do {
+  names = []
+  for (k, v) in r.items() {
+    names = names.concat(["{k}={v}"])
+  }
+  names.join(",")
+}
+print(fields({a: 1, b: true}))
+fn spell(s) = do {
+  out = []
+  for ch in s.chars() {
+    out = out.concat([ch.upper()])
+  }
+  out
+}
+print(spell("hey"))
+
+# An element that does not fit the pattern is the destructuring error it always was.
+fn bad(xs) = do {
+  n = 0
+  for (a, b) in xs {
+    n += a
+  }
+  n
+}
+print((try bad([1, 2])).error)
