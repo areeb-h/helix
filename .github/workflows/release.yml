@@ -51,6 +51,9 @@ env:
 permissions:
   contents: read
 
+# Actions are pinned to the commit of a release (Node 24 runtime), not a movable tag, so a
+# retagged or compromised release cannot change what runs here. The version is in the comment.
+
 jobs:
   # ONE writer creates the release, before any build starts. This is the whole fix for
   # the v0.1.0 race: `action-gh-release` creates-if-missing, so N jobs starting at once
@@ -67,7 +70,7 @@ jobs:
       # `-dev` marker — publishes six green platform assets that all report
       # `helix 0.6.1-dev`. The only existing check that would notice is
       # `scripts/release-smoke.sh`, which runs at ritual step 6, AFTER the publish.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: The tag must match Cargo.toml, with no `-dev` marker
         if: startsWith(github.ref, 'refs/tags/')
         run: |
@@ -88,7 +91,7 @@ jobs:
       - name: Dry run — nothing is created
         if: env.DRY_RUN == 'true'
         run: echo "dry run - skipping release creation"
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         if: env.DRY_RUN != 'true'
         with:
           draft: true
@@ -116,7 +119,7 @@ jobs:
           - { os: macos-latest,   target: aarch64-apple-darwin, smoke: true }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, smoke: true }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust (the version in rust-toolchain.toml)
         shell: bash
         run: rustup toolchain install && rustup target add ${{ matrix.target }}
@@ -150,7 +153,7 @@ jobs:
         run: |
           Compress-Archive -Path "target/${{ matrix.target }}/release/helix.exe" -DestinationPath "helix-${{ matrix.target }}.zip"
       - name: Upload to the draft release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         if: env.DRY_RUN != 'true'
         with:
           draft: true   # must stay set, or this upload would publish a half-built release
@@ -181,7 +184,7 @@ jobs:
     permissions:
       contents: write   # uploads release assets
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust (the version in rust-toolchain.toml)
         shell: bash
         run: rustup toolchain install && rustup component add llvm-tools-preview
@@ -227,7 +230,7 @@ jobs:
       - name: Package
         run: tar -czf "helix-x86_64-unknown-linux-gnu.tar.gz" -C "target/x86_64-unknown-linux-gnu/release" helix
       - name: Upload to the draft release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         if: env.DRY_RUN != 'true'
         with:
           draft: true
@@ -242,7 +245,7 @@ jobs:
     permissions:
       contents: write   # uploads release assets
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust (the version in rust-toolchain.toml)
         shell: bash
         run: rustup toolchain install && rustup target add x86_64-unknown-linux-musl
@@ -270,7 +273,7 @@ jobs:
       - name: Package
         run: tar -czf "helix-x86_64-unknown-linux-musl.tar.gz" -C "target/x86_64-unknown-linux-musl/release" helix
       - name: Upload to the draft release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         if: env.DRY_RUN != 'true'
         with:
           draft: true
@@ -330,7 +333,7 @@ jobs:
       # at the same moment the file the installers need becomes available, so there is no
       # window in which someone can fetch a release that `install.sh` would then refuse.
       - name: Publish (upload SHA256SUMS and undraft)
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           draft: false
           make_latest: true

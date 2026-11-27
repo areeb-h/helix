@@ -1911,7 +1911,8 @@ select.input { appearance: none; padding-right: 32px; background-image: linear-g
 .palette-opt { display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 0 10px; border-radius: max(4px, calc(var(--r-sheet) - var(--pad-overlay))); cursor: pointer; transition: background-color var(--fx-fast); }
 .palette-opt:hover { background: var(--hover); }
 .palette-opt.on { background: var(--accent); color: var(--accent-fg); }
-.palette-opt.on .meta, .palette-opt.on .palette-ic { color: inherit; opacity: .85; }
+.palette-opt.on .meta { color: inherit; }
+.palette-opt.on .palette-ic { color: inherit; opacity: .85; }
 .palette-ic { color: var(--muted); display: grid; place-items: center; }
 .palette-empty { padding: var(--s-4); margin: 0; text-align: center; }
 
