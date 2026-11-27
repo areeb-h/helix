@@ -511,9 +511,10 @@ mod tests {
             // through a private URL scheme and the web view's message channel. Showing your
             // own window needs no `net`.
             "app_window",
-            // The black box (ADR 0063). It reads two variables and writes ONE file: the path
-            // in `HELIX_RECORD`, which the person running the program chose — the program
-            // cannot name it. Replaying reads the file `helix replay` was given. Nothing else.
+            // The black box (ADR 0063). It writes only files the person running the program
+            // named, never one the program can: the recording (`HELIX_RECORD`); on a replay,
+            // the viewer (`helix replay --view`) and the session itself (`--accept`). Replaying
+            // reads the file `helix replay` was given. Nothing else.
             "session_tape",
             // Reads one flag the executable's own bundle set at start-up.
             "built_app",

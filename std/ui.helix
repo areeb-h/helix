@@ -1911,7 +1911,8 @@ select.input { appearance: none; padding-right: 32px; background-image: linear-g
 .palette-opt { display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 0 10px; border-radius: max(4px, calc(var(--r-sheet) - var(--pad-overlay))); cursor: pointer; transition: background-color var(--fx-fast); }
 .palette-opt:hover { background: var(--hover); }
 .palette-opt.on { background: var(--accent); color: var(--accent-fg); }
-.palette-opt.on .meta, .palette-opt.on .palette-ic { color: inherit; opacity: .85; }
+.palette-opt.on .meta { color: inherit; }
+.palette-opt.on .palette-ic { color: inherit; opacity: .85; }
 .palette-ic { color: var(--muted); display: grid; place-items: center; }
 .palette-empty { padding: var(--s-4); margin: 0; text-align: center; }
 
@@ -3354,6 +3355,158 @@ fn step(spec, model, ev) = do {
   }
 }
 
+# The session viewer's page: its look, and the script that draws the steps from the data.
+VIEWER_CSS = """
+:root { color-scheme: light dark; --bg: #f6f6f4; --panel: #fff; --ink: #1b1b1a; --muted: #6b6b66; --line: #e3e3de; --ok: #1f7a44; --ok-bg: #e5f4ea; --bad: #b4232c; --bad-bg: #fbe9ea; --warn: #8a5a00; --warn-bg: #fdf1d8; --ev: #3b5bdb; --focus: #3b5bdb; }
+@media (prefers-color-scheme: dark) { :root { --bg: #121211; --panel: #1c1c1b; --ink: #ececea; --muted: #9a9a94; --line: #2e2e2c; --ok: #5cc98a; --ok-bg: #16301f; --bad: #f2777d; --bad-bg: #3a1a1c; --warn: #f0c060; --warn-bg: #33280f; --ev: #8ea4ff; } }
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--ink); height: 100vh; display: grid; grid-template-rows: auto 1fr auto; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; padding: 14px 20px 10px; border-bottom: 1px solid var(--line); }
+h1 { font-size: 17px; margin: 0; font-weight: 650; }
+.pill { font-size: 12.5px; font-weight: 600; padding: 2px 10px; border-radius: 999px; }
+.pill.ok { color: var(--ok); background: var(--ok-bg); } .pill.bad { color: var(--bad); background: var(--bad-bg); }
+.meta { color: var(--muted); font-size: 12.5px; }
+.body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 380px); min-height: 0; }
+.stage { display: grid; place-items: center; padding: 18px; min-height: 0; }
+.phone { height: 100%; max-height: 900px; aspect-ratio: 412 / 892; border: 10px solid #111; border-radius: 34px; overflow: hidden; background: #fff; box-shadow: 0 10px 30px rgb(0 0 0 / .18); box-sizing: content-box; }
+.phone iframe { width: 412px; height: 892px; border: 0; display: block; background: #fff; transform-origin: 0 0; }
+aside { border-left: 1px solid var(--line); background: var(--panel); padding: 16px 18px; overflow: auto; }
+h2 { font-size: 15px; margin: 0 0 10px; } h3 { font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 18px 0 6px; font-weight: 600; }
+.verdict { padding: 8px 10px; border-radius: 8px; font-size: 13px; }
+.verdict.ok { color: var(--ok); background: var(--ok-bg); } .verdict.bad { color: var(--bad); background: var(--bad-bg); } .verdict.warn { color: var(--warn); background: var(--warn-bg); }
+ul { list-style: none; margin: 0; padding: 0; } li { padding: 4px 0; border-bottom: 1px solid var(--line); } li:last-child { border-bottom: 0; }
+code { font: 12.5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+.none { color: var(--muted); font-style: italic; }
+.call { color: var(--muted); font-size: 12px; } .err { color: var(--bad); }
+footer { border-top: 1px solid var(--line); padding: 10px 20px 14px; display: grid; gap: 8px; background: var(--panel); }
+.controls { display: flex; gap: 6px; align-items: center; }
+button { font: inherit; font-size: 13px; padding: 5px 11px; border-radius: 7px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); cursor: pointer; }
+button:hover { border-color: var(--muted); } button:disabled { opacity: .45; cursor: default; }
+button:focus-visible, .ticks button:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.where { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12.5px; }
+.ticks { display: flex; height: 26px; gap: 1px; align-items: stretch; }
+.ticks button { flex: 1 1 0; min-width: 0; padding: 0; border: 0; border-radius: 2px; background: var(--line); }
+.ticks button.ev { background: color-mix(in srgb, var(--ev) 45%, var(--line)); }
+.ticks button.bad { background: var(--bad); }
+.ticks button.here { background: var(--ink); }
+@media (max-width: 760px) { .body { grid-template-columns: 1fr; grid-template-rows: 60vh auto; } aside { border-left: 0; border-top: 1px solid var(--line); } }
+"""
+
+VIEWER_JS = """
+(() => {
+  const D = JSON.parse(document.getElementById('session').textContent);
+  const R = D.rounds;
+  const el = (tag, attrs = {}, ...kids) => {
+    const e = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs)) if (k === 'class') e.className = v; else if (k === 'text') e.textContent = v; else e.setAttribute(k, v);
+    e.append(...kids);
+    return e;
+  };
+  const short = (v) => { const s = JSON.stringify(v); return s === undefined ? '' : s.length > 120 ? s.slice(0, 117) + '…' : s; };
+
+  // Header: what this is, and whether it matched.
+  const bad = R.filter((r) => r.problem).length;
+  const prog = D.same === true ? 'the same program as recorded' : D.same === false ? 'a different program from the recording: this replay tests the change' : '';
+  const args = D.recorded && D.recorded.args && D.recorded.args.length ? 'arguments: ' + D.recorded.args.join(' ') : '';
+  const helix = D.recorded ? 'recorded with Helix ' + D.recorded.helix : '';
+  document.body.append(
+    el('header', {}, el('h1', {text: D.app}), el('span', {class: 'pill ' + (D.ok ? 'ok' : 'bad'), text: D.summary}),
+      el('span', {class: 'meta', text: [prog, args, helix].filter(Boolean).join(' · ')})));
+
+  const frame = el('iframe', {sandbox: '', title: 'This screen'});
+  const side = el('aside', {'aria-live': 'polite'});
+  const phone = el('div', {class: 'phone'}, frame);
+  document.body.append(el('div', {class: 'body'}, el('section', {class: 'stage'}, phone), side));
+  // The screen is laid out at a phone's width (412 CSS px, a typical Android phone) and
+  // scaled to fit, so it wraps as it did on the device instead of at the viewer's size.
+  const fit = () => { frame.style.transform = 'scale(' + (phone.clientWidth / 412) + ')'; };
+  new ResizeObserver(fit).observe(phone);
+
+  const prev = el('button', {text: '← Prev', title: 'Previous screen (←)'});
+  const play = el('button', {text: 'Play', title: 'Play (space)'});
+  const next = el('button', {text: 'Next →', title: 'Next screen (→)'});
+  const nextEv = el('button', {text: 'Next event', title: 'Next screen after an event (E)'});
+  const nextBad = el('button', {text: 'Next difference', title: 'Next screen that differs (D)'});
+  const where = el('span', {class: 'where'});
+  const ticks = el('div', {class: 'ticks', role: 'group', 'aria-label': 'Screens'});
+  const tick = R.map((r, n) => {
+    const b = el('button', {class: (r.problem ? 'bad' : r.events.length ? 'ev' : ''), title: label(n), 'aria-label': label(n)});
+    b.onclick = () => go(n);
+    ticks.append(b);
+    return b;
+  });
+  if (!bad) nextBad.disabled = true;
+  document.body.append(el('footer', {}, el('div', {class: 'controls'}, prev, play, next, nextEv, nextBad, where), ticks));
+
+  function label(n) {
+    const r = R[n];
+    const what = r.events.length ? r.events.map((e) => e.msg ?? '?').join(', ') : 'no events before it';
+    return 'Screen ' + (n + 1) + (what ? ': ' + what : '') + (r.problem ? ' (differs)' : '');
+  }
+  function doc(r) {
+    const theme = String(r.theme).replace(/[^a-z-]/gi, '');
+    return '<!doctype html><html data-theme="' + theme + '"><head><meta charset="utf-8"><style>' + D.styles[r.style] + '</style></head><body><main id="root">' + r.html + '</main></body></html>';
+  }
+  function list(items, empty) {
+    return items.length ? el('ul', {}, ...items) : el('p', {class: 'none', text: empty});
+  }
+  let i = 0, timer = null, shown = -1;
+  function go(n) {
+    i = Math.max(0, Math.min(R.length - 1, n));
+    const r = R[i];
+    if (shown < 0 || R[shown].html !== r.html || R[shown].style !== r.style || R[shown].theme !== r.theme) frame.srcdoc = doc(r);
+    if (shown >= 0) tick[shown].classList.remove('here');
+    tick[i].classList.add('here');
+    shown = i;
+    const verdict = r.problem ? el('div', {class: 'verdict bad', text: r.problem})
+      : r.undone ? el('div', {class: 'verdict warn', text: 'The view failed here, so the events before it were undone (as when recorded).'})
+      : el('div', {class: 'verdict ok', text: 'Matches the recording.'});
+    const events = r.events.map((e) => el('li', {}, el('code', {text: (e.msg ?? '?') + (e.value === undefined || e.value === null ? '' : ' ' + short(e.value))})));
+    const reads = r.calls.flatMap((c) => c.reads.map((t) => el('li', {}, el('code', {class: t.ok ? '' : 'err', text: t.fn + (t.ok ? '' : ' (failed)')}), ' ', el('span', {class: 'call', text: 'in ' + c.call}))));
+    side.replaceChildren(
+      el('h2', {text: 'Screen ' + (i + 1) + ' of ' + R.length}), verdict,
+      el('h3', {text: 'Events'}), list(events, 'None since the screen before.'),
+      el('h3', {text: 'Read from the world'}), list(reads, 'Nothing: these steps used no clock, file, network or process.'),
+      ...(i === 0 && D.startup.length ? [el('h3', {text: 'Before the app started'}), el('div', {class: 'verdict bad', text: D.startup.join('; ')})] : []));
+    where.textContent = (i + 1) + ' / ' + R.length;
+    prev.disabled = i === 0;
+    next.disabled = i === R.length - 1;
+    history.replaceState(null, '', '#screen=' + (i + 1));
+  }
+  const seek = (from, test) => { for (let n = from + 1; n < R.length; n++) if (test(R[n])) return go(n); };
+  const stop = () => { clearInterval(timer); timer = null; play.textContent = 'Play'; };
+  const toggle = () => {
+    if (timer) return stop();
+    if (i === R.length - 1) go(0);
+    play.textContent = 'Pause';
+    timer = setInterval(() => (i === R.length - 1 ? stop() : go(i + 1)), 250);
+  };
+  prev.onclick = () => { stop(); go(i - 1); };
+  next.onclick = () => { stop(); go(i + 1); };
+  nextEv.onclick = () => { stop(); seek(i, (r) => r.events.length > 0); };
+  nextBad.onclick = () => { stop(); seek(i, (r) => r.problem); };
+  play.onclick = toggle;
+  addEventListener('keydown', (e) => {
+    if (e.target.closest && e.target.closest('input, textarea')) return;
+    const k = e.key;
+    if (k === 'ArrowLeft') { stop(); go(i - 1); }
+    else if (k === 'ArrowRight') { stop(); go(i + 1); }
+    else if (k === 'Home') { stop(); go(0); }
+    else if (k === 'End') { stop(); go(R.length - 1); }
+    else if (k === ' ' && e.target === document.body) toggle();
+    else if (k === 'e' || k === 'E') { stop(); seek(i, (r) => r.events.length > 0); }
+    else if (k === 'd' || k === 'D') { stop(); seek(i, (r) => r.problem); }
+    else return;
+    e.preventDefault();
+  });
+  // A link can point at a screen, numbered as the replay names it (`#screen=40` is "screen #40");
+  // otherwise the page opens at the first difference, if any.
+  const m = /screen=(\d+)/.exec(location.hash);
+  const first = R.findIndex((r) => r.problem);
+  go(m ? Number(m[1]) - 1 : first >= 0 ? first : 0);
+})();
+"""
+
 # --- The black box (ADR 0063 D2). ------------------------------------------------------------
 #
 # `HELIX_RECORD=session.jsonl helix run app.helix` records the session: every event that reaches
@@ -3363,17 +3516,43 @@ fn step(spec, model, ev) = do {
 # the tape answers instead — so the session reproduces exactly, on any machine and engine, and
 # the replay says whether every screen came out the same.
 
-# One screen as a hash, the way it is recorded and compared.
-fn screen_hash(tree) = sha256(render(tree))
+# One screen as a hash, the way it is recorded and compared: what the person SAW, so the tree
+# and the look it was drawn with, its theme and its stylesheet. A change to std.ui's CSS or an
+# app's design is a different screen, and a replay says so (`helix replay --accept` takes it).
+fn screen_of(spec, tree, model, last_design) = sha256("{render(tree)}\n{theme_of(spec, model)}\n{css_with(spec, design_of(spec, model, last_design))}")
+
+# Whether this run is the program that was recorded: the same sources (std.ui included) and
+# command line. The same program is a reproduction, and every screen must match. Another one
+# is a test of that change against a real session; both are legitimate, and the replay says
+# which it is.
+fn same_program(recorded, now) = if recorded.is_missing() or now.is_missing() then "" else if recorded.get("sha256") == now.get("sha256") and recorded.get("args") == now.get("args") then "this is the program that was recorded" else do {
+  helix = if recorded.get("helix") == now.get("helix") then "" else "; Helix {recorded.get("helix")} recorded it and this is Helix {now.get("helix")}"
+  args = if recorded.get("args") == now.get("args") then "" else "; it was recorded with the arguments {recorded.get("args").to_json()}"
+  "this is not the program that was recorded, so the session tests the change{helix}{args}"
+}
 
 # Play a recorded session through this app's `update` and `view`, and report.
+#
+# `helix replay … --view page.html` also writes the session viewer: one self-contained file
+# with every screen as replayed, the events before it, what they read, and whether it matched.
+# `helix replay … --accept` makes this program's screens the recorded ones (see `accepted`).
 fn replay_session(spec) = do {
+  # The app's startup (its `main`, before `ui.app`) was answered from the tape; end it here.
+  started = session_tape("started")
+  options = session_tape("options")
   entries = session_tape("entries")
   starts = entries.filter((e) => e.kind == "start")
   first = if starts.count() == 0 then missing else starts[0]
   recorded_init = if first.is_missing() then missing else first.get("init")
   init = recorded_init ?? spec.init
-  out = range(0, entries.count()).reduce({model: init, events: 0, screens: 0, same: 0, diverged: missing, errors: 0, reproduced: 0}, (st, i) => do {
+  recorded_program = if first.is_missing() then missing else first.get("program")
+  replayed_program = session_tape("program")
+  which = same_program(recorded_program, replayed_program)
+  noted = if which == "" then false else print("note: {which}")
+  before = if started then missing else "the app's startup, before `ui.app` ({session_tape("diverged")})"
+  viewing = options.view
+  blank = {model: init, design: missing, events: 0, screens: 0, same: 0, diverged: before, fits: before.is_missing(), errors: 0, reproduced: 0, pending: [], reads: [], shots: [], styles: [], hashes: []}
+  out = range(0, entries.count()).reduce(blank, (st, i) => do {
     e = entries[i]
     match e.kind {
       "event" => do {
@@ -3383,23 +3562,76 @@ fn replay_session(spec) = do {
         n = st.events + 1
         was = e.get("error")
         logged = if r.ok then false else elog("event #{n} {e.event.to_json()}: update raised: {r.error}")
-        {...st, model: if r.ok then r.value else st.model, events: n, errors: st.errors + (if r.ok then 0 else 1), reproduced: st.reproduced + (if not r.ok and not was.is_missing() then 1 else 0), diverged: if st.diverged.is_missing() and (r.ok != was.is_missing() or not clean) then "event #{n} {e.event.to_json()}" else st.diverged}
+        {...st, model: if r.ok then r.value else st.model, events: n, errors: st.errors + (if r.ok then 0 else 1), reproduced: st.reproduced + (if not r.ok and not was.is_missing() then 1 else 0), diverged: if st.diverged.is_missing() and (r.ok != was.is_missing() or not clean) then "event #{n} {e.event.to_json()}" else st.diverged, fits: st.fits and clean and r.ok == was.is_missing(), pending: st.pending.concat([e.event]), reads: st.reads.concat([{call: "update", reads: e.reads}])}
       },
       "view" => do {
         played = session_tape("play", i)
         t = try (spec.view)(st.model)
         clean = session_tape("done")
-        h = if t.ok then screen_hash(t.value) else "view failed: {t.error}"
+        h = if t.ok then screen_of(spec, t.value, st.model, st.design) else "view failed: {t.error}"
         same = h == e.screen and clean
         k = st.screens + 1
-        {...st, screens: k, same: st.same + (if same then 1 else 0), diverged: if st.diverged.is_missing() and not same then "screen #{k} (after event #{st.events})" else st.diverged}
+        problem = if not clean then "it read something it did not read when recorded" else if same then "" else "this screen differs from the recorded one"
+        shot = if viewing and t.ok then shot_of(spec, t.value, st, e, problem) else {shots: st.shots, styles: st.styles}
+        {...st, design: design_of(spec, st.model, st.design), screens: k, same: st.same + (if same then 1 else 0), diverged: if st.diverged.is_missing() and not same then "screen #{k} (after event #{st.events})" else st.diverged, fits: st.fits and clean, hashes: st.hashes.concat([h]), pending: [], reads: [], shots: shot.shots, styles: shot.styles}
       },
       _ => st,
     }
   })
   errors = if out.errors == 0 then "" else ", update raised {out.errors} time{if out.errors == 1 then "" else "s"} ({out.reproduced} as recorded)"
-  print("replayed {out.events} event{if out.events == 1 then "" else "s"}: {out.same} of {out.screens} screens identical{errors}")
-  if out.diverged.is_missing() then out else raise("the replay differs from the recording, first at {out.diverged}", "the app's code changed since the session was recorded, or it reads something the tape does not hold: a method on a handle (`db.query`), or a value computed at the top level from a file.")
+  summary = "replayed {out.events} event{if out.events == 1 then "" else "s"}: {out.same} of {out.screens} screens identical{errors}"
+  print(summary)
+  # The first call the tape could not answer, when that is why: the app read something
+  # (another file, another URL) that was never read when it was recorded.
+  why = session_tape("diverged")
+  cause = if why.is_missing() then "" else ": {why}"
+  # The page is handed to the black box, which writes it where `--view` said: std.ui never
+  # writes a file, so no app is inferred to need permission to (ADR 0063 D3).
+  wrote = if viewing then do {
+    page = viewer_page(spec, which, recorded_program, replayed_program, summary, out, if before.is_missing() then [] else [before])
+    path = session_tape("viewer", page)
+    print("wrote the session viewer: {path}")
+  } else false
+  if options.accept then accepted(out, why) else if out.diverged.is_missing() then out else raise("the replay differs from the recording, first at {out.diverged}{cause}", "the app's code changed since the session was recorded, or it reads something the tape does not hold. If the new screens are intended, `helix replay … --accept` records them.")
+}
+
+# `helix replay … --accept`: the screens changed ON PURPOSE, so make this program's screens the
+# recorded ones, as a snapshot test is updated. Only the screens (and which program drew them):
+# the events are what the person did and the tape is what the world answered, and neither is
+# this program's to rewrite. So a session whose inputs went another way, or whose `update` now
+# fails where it did not (or the reverse), cannot be accepted: it has to be recorded again.
+fn accepted(out, why) = if not out.fits or not why.is_missing() then raise("cannot accept this session: the app no longer reads what it read when recorded, or `update` now fails differently{if why.is_missing() then "" else " ({why})"}", "record the session again with HELIX_RECORD") else if out.same == out.screens then do {
+  said = print("accept: nothing to change, every screen already matches ({out.screens} screens)")
+  out
+} else do {
+  written = session_tape("accept", out.hashes)
+  said = print("accepted: {out.screens - out.same} of {out.screens} screens now record this program's")
+  out
+}
+
+# --- The session viewer ----------------------------------------------------------------------
+#
+# ONE self-contained file: every screen as replayed, the events before it, what they read from
+# the world, and whether it matched. It is what a bug report links to: open it anywhere, with
+# no Helix, server or network. Screens are shown in sandboxed frames (no scripts run), so an
+# app's content cannot act; stylesheets are stored once each and referenced by index.
+
+fn shot_of(spec, tree, st, e, problem) = do {
+  css = "{css_with(spec, design_of(spec, st.model, st.design))}{utility_css(view_classes(tree))}"
+  at = st.styles.index_of(css)
+  styles = if at.is_missing() then st.styles.concat([css]) else st.styles
+  reads = st.reads.concat([{call: "view", reads: e.reads}])
+  shot = {events: st.pending, calls: reads, problem: problem, undone: false, drew: true, html: render(tree), style: at ?? (styles.count() - 1), theme: theme_of(spec, st.model)}
+  {shots: st.shots.concat([shot]), styles: styles}
+}
+
+fn viewer_page(spec, which, recorded, replayed, summary, out, startup) = do {
+  same = if recorded.is_missing() or replayed.is_missing() then missing else recorded.get("sha256") == replayed.get("sha256")
+  data = {app: "{spec.title}", summary: summary, ok: out.diverged.is_missing(), startup: startup, same: same, recorded: recorded, replayed: replayed, styles: out.styles, rounds: out.shots}
+  # `<` never appears raw inside the script, so no string in the data can close it.
+  json = data.to_json().replace("<", "\\u003c")
+  title = html_escape("{spec.title} · session")
+  "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{title}</title><style>{VIEWER_CSS}</style></head><body><script id=\"session\" type=\"application/json\">{json}</script><script>{VIEWER_JS}</script></body></html>"
 }
 
 # A frame is the patch operations that bring a client's page up to date, and the theme.
@@ -3445,7 +3677,7 @@ fn serve(l, spec, rt, model, tree, conns, streams, timers) = do {
   # consistent with the model, and the next event starts from there.
   began = if changed_now and TAPE == "record" then session_tape("begin") else ()
   drawn = if changed_now then try (spec.view)(ticked) else {ok: true, value: tree}
-  taped = if changed_now and TAPE == "record" then session_tape("view", if drawn.ok then screen_hash(drawn.value) else "view failed: {drawn.error}") else ()
+  taped = if changed_now and TAPE == "record" then session_tape("view", if drawn.ok then screen_of(spec, drawn.value, ticked, st.rt.design) else "view failed: {drawn.error}") else ()
   logged_view = if drawn.ok then false else elog("view failed: {drawn.error}; the events that led to it were undone")
   ticked = if drawn.ok then ticked else model
   changed = changed_now and drawn.ok

@@ -1625,7 +1625,7 @@ Show this app's own page in a native window; true if one opened, false where non
 
 The black box's controls, used by `std.ui` to record and replay an app session.
 
-**Note:** ADR 0063 D2. Apps do not call this; `ui.app` does. `HELIX_RECORD=s.jsonl helix run app.helix` records every event, what `update` and `view` read from the world (the result of every impure builtin they called, or the error it raised), and a hash of each screen. `helix replay app.helix s.jsonl` plays it back: impure builtins do NOT run — the tape answers — so a replay touches no file, network or clock, and reports whether every screen came out identical. Operations: mode, start, begin, event, view, entries, play, done. Keywords: record, replay, session, black box, bug report, reproduce, time travel, deterministic.
+**Note:** ADR 0063 D2. Apps do not call this; `ui.app` does. `HELIX_RECORD=s.jsonl helix run app.helix` records what the program's startup read (before `ui.app`), every event, what `update` and `view` read from the world (the result of every impure builtin or write method they called, with a fingerprint of its arguments, or the error it raised), a fingerprint of the program, and a hash of each screen as it looked (tree, theme and stylesheet). `helix replay app.helix s.jsonl` plays it back: impure builtins do NOT run — the tape answers — so a replay touches no file, network or clock, stops at the first call made with other arguments, and reports whether every screen came out identical. `helix replay app.helix folder/` replays a corpus of sessions as a CI gate; `--view` writes a self-contained viewer of every screen; `--accept` records this program's screens when a change is intended (refused if the app now reads something else). Operations: mode, start, started, program, diverged, options, viewer, accept, begin, event, view, entries, play, done. Keywords: record, replay, session, black box, bug report, reproduce, time travel, deterministic.
 
 ```
 >>> session_tape("mode")
@@ -1810,7 +1810,7 @@ Record an app session to this file (JSON Lines), to replay with `helix replay`.
 - **Values:** a file path
 - **Unset:** unset
 
-**Note:** ADR 0063's black box. Each event that reaches `update` is written as it happens, with what `update` and `view` read from the world while handling it (the clock, files, responses — each impure builtin's result or error) and a hash of every screen. The file is the bug report: `helix replay app.helix session.jsonl` reproduces it exactly, on any machine and engine. A program cannot choose this path; only the person running it can. Keywords: record, session, black box, bug report, reproduce.
+**Note:** ADR 0063's black box. The tape starts with the program: what `main` reads and writes before `ui.app` is the first entry, with a fingerprint of the program and its command line. Then each event that reaches `update` is written as it happens, with what `update` and `view` read from the world while handling it (the clock, files, responses — each impure builtin's or write method's result or error, with a fingerprint of its arguments) and a hash of every screen as it looked. The file is the bug report: `helix replay app.helix session.jsonl` reproduces it exactly, on any machine and engine. A program cannot choose this path; only the person running it can. Keywords: record, session, black box, bug report, reproduce.
 
 ### `HELIX_REPLAY`
 
@@ -1820,6 +1820,24 @@ Replay this recorded session instead of serving the app.
 - **Unset:** unset
 
 **Note:** Set by `helix replay app.helix session.jsonl`; nothing else needs to. `ui.app` plays the session through the app's `update` and `view` with the tape answering every impure builtin, prints how many screens came out identical, and fails if any differ. Keywords: replay, session, reproduce.
+
+### `HELIX_REPLAY_VIEW`
+
+While replaying, also write the session viewer to this file.
+
+- **Values:** a file path, set by `helix replay --view`
+- **Unset:** unset
+
+**Note:** Set by `helix replay app.helix session.jsonl --view page.html`; nothing else needs to. The viewer is one self-contained page: every screen as replayed, the events before it, what they read, and whether it matched. Keywords: replay, viewer, bug report.
+
+### `HELIX_REPLAY_ACCEPT`
+
+While replaying, record this program's screens in the session.
+
+- **Values:** set by `helix replay --accept`
+- **Unset:** unset
+
+**Note:** Set by `helix replay app.helix session.jsonl --accept`; nothing else needs to. Only the screens and the program fingerprint are rewritten; events and what the world answered are kept byte for byte, and a session whose app now reads something else is refused. Keywords: replay, accept, snapshot, intended change.
 
 ### `HELIX_THREADS`
 
