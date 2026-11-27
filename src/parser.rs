@@ -79,7 +79,7 @@ fn parse_expression(src: &str, outer: &Parser) -> Result<Hole, HelixError> {
 /// What a hole's own parser hands back to the one that holds the string: the expression,
 /// the `do {}` binding names in it, and how many `for` loops it held (ADR 0066: a function
 /// with a `where` clause reads its body again if the body has a loop).
-type Hole = (Expr, Vec<DoBinding>, usize);
+type Hole = (Expr, Vec<DoBinding>, usize, Vec<GoneUse>);
 
 /// [`parse_expression`] for source that starts at `at` (line, column) of the file: a hole in
 /// markup, whose positions are then the ones the person sees. The third field says whether it
@@ -107,6 +107,7 @@ fn parse_expression_at(src: &str, at: (usize, usize, bool), outer: &Parser) -> R
         loops: outer.loops,
         loop_depth: outer.loop_depth,
         rebound: outer.rebound.clone(),
+        gone_uses: Vec::new(),
     };
     let loops_before = p.loops;
     p.skip_newlines();
@@ -129,7 +130,7 @@ fn parse_expression_at(src: &str, at: (usize, usize, bool), outer: &Parser) -> R
         ));
     }
     let loops = p.loops - loops_before;
-    Ok((e, p.do_bindings, loops))
+    Ok((e, p.do_bindings, loops, p.gone_uses))
 }
 
 /// `recv.sort_by(key)` - sort `recv` ascending by `key(element)`. Desugars to
@@ -964,6 +965,7 @@ pub fn parse_after(tokens: Vec<Token>, bound: &[String]) -> Result<Vec<Stmt>, He
         loops: 0,
         loop_depth: 0,
         rebound,
+        gone_uses: Vec::new(),
     };
     // EVERY SIGNATURE BEFORE THE FIRST CALL IS PARSED — a function may be called above
     // its definition, and its defaults and parameter names must be known there too.
@@ -973,6 +975,9 @@ pub fn parse_after(tokens: Vec<Token>, bound: &[String]) -> Result<Vec<Stmt>, He
     // describes it (ADR 0052) — the last pass over the finished tree.
     crate::predicate::desugar_program(&mut program)?;
     reject_do_binding_over_mut_global(&program, &p.do_bindings)?;
+    // What the checker may need to explain an unknown name (ADR 0066), now that the
+    // file has parsed and it is the checker's turn.
+    GONE_USES.with(|t| t.borrow_mut().extend(p.gone_uses.into_iter().map(|(n, l, c, why)| ((n, l, c), why))));
     Ok(program)
 }
 
@@ -1205,6 +1210,9 @@ struct Parser {
     /// Which of the builtins a loop's fold is written with — `type_of`, `raise`, `range` —
     /// this file may have bound to something else ([`rebound_names`]).
     rebound: std::collections::HashSet<&'static str>,
+    /// Every read of a name that only a finished loop had bound, for the checker's hint
+    /// ([`loop_local_hint`]): handed over when the file has parsed.
+    gone_uses: Vec<GoneUse>,
 }
 
 impl Parser {
@@ -3783,9 +3791,10 @@ impl Parser {
 
     /// A hole's expression, parsed where it was written.
     fn markup_src(&mut self, s: &crate::markup::Src) -> Result<Expr, HelixError> {
-        let (e, binds, loops) = parse_expression_at(&s.text, (s.line, s.col, true), self)?;
+        let (e, binds, loops, gone) = parse_expression_at(&s.text, (s.line, s.col, true), self)?;
         self.do_bindings.extend(binds);
         self.loops += loops;
+        self.gone_uses.extend(gone);
         Ok(e)
     }
 
@@ -4058,9 +4067,12 @@ impl Parser {
                             // error inside it carries snippet-relative positions (line 1).
                             // Relocate it to the interpolated string's real position so
                             // the caret points at the user's actual source, not line 1.
-                            let (mut e, hole_do_bindings, hole_loops) = parse_expression(&src, self)
+                            let (mut e, hole_do_bindings, hole_loops, hole_gone) = parse_expression(&src, self)
                                 .map_err(|err| HelixError { line: l, col: c, ..err })?;
                             self.loops += hole_loops;
+                            // Where the checker will report them: at the string, as the
+                            // relocation below puts every name in the hole.
+                            self.gone_uses.extend(hole_gone.into_iter().map(|(n, _, _, why)| (n, l, c, why)));
                             // Fold the hole's `do {}` bindings into this parser's list, at
                             // the string's real position for the same reason the error and
                             // the AST below are relocated: the snippet's own positions are
@@ -4125,7 +4137,12 @@ impl Parser {
                     ));
                 }
                 self.advance();
-                if self.loop_depth > 0 && matches!(name.as_str(), "break" | "continue") && !self.is_known(&name) {
+                if self.loop_depth > 0
+                    && matches!(name.as_str(), "break" | "continue")
+                    && !self.is_bound(&name)
+                    && !self.fn_sigs.contains_key(&name)
+                    && !self.selected_imports.contains(&name)
+                {
                     return Err(no_loop_exit(&name, l, c));
                 }
                 self.note_use(&name, l, c);
@@ -4574,6 +4591,9 @@ struct Scope {
     gone: HashMap<String, Gone>,
 }
 
+/// A read of a name a finished loop had bound: the name, where, and why it is gone.
+type GoneUse = (String, usize, usize, Gone);
+
 /// Why a name a loop bound does not exist after it.
 #[derive(Clone, Copy, PartialEq)]
 enum Gone {
@@ -4601,8 +4621,8 @@ pub(crate) fn loop_local_hint(name: &str, line: usize, col: usize) -> Option<&'s
 
 fn gone_hint(why: Gone) -> &'static str {
     match why {
-        Gone::Body => "it was first bound inside the `for` body, so it does not outlive an iteration; bind it before the loop to carry it out",
-        Gone::Variable => "it is the `for` loop's own variable, so it does not outlive an iteration; bind a name before the loop and assign to it in the body to carry a value out",
+        Gone::Body => "it was first bound inside the `for` body, so it does not outlive an iteration; bind it before the loop to carry it out.",
+        Gone::Variable => "it is the `for` loop's own variable, so it does not outlive an iteration; bind a name before the loop and assign to it in the body to carry a value out.",
     }
 }
 
@@ -4620,8 +4640,12 @@ const FOR_NEEDS: &str = "`for` needs something to iterate — an Array, a `range
 /// loop over a value whose type is known and is not an array.
 pub(crate) fn for_needs_iterable(type_name: &str, line: usize, col: usize) -> HelixError {
     let what = if type_name == "Missing" { "`missing`".to_string() } else { crate::value::with_article(type_name) };
-    HelixError::new(format!("{FOR_NEEDS}{what}"), line, col)
+    HelixError::new(format!("{FOR_NEEDS}{what}"), line, col).hint(FOR_NEEDS_HELP)
 }
+
+/// The help under that sentence, from the checker and from the fold alike.
+const FOR_NEEDS_HELP: &str = "a loop walks a sequence. To count, write `for i in range(n) { … }`; a dict's or a record's \
+     entries are `for (k, v) in d.items() { … }`, and a string's characters `for ch in s.chars() { … }`.";
 
 /// Whether a `reduce`'s receiver is the sequence of a `for` loop: the name the parser binds
 /// it to. No source can spell it.
@@ -4639,6 +4663,21 @@ pub(crate) fn is_loop_fold(e: &Expr) -> bool {
                 && matches!(args.get(1), Some(Expr::Lambda { params, .. }) if params.first().is_some_and(|p| p == "$st"))
         }
         _ => false,
+    }
+}
+
+/// The branch of a loop's fold that refuses a sequence that is not one — the parser's own
+/// `raise`, which is not something the function the loop is in does. `helix effects` reads
+/// past it: a function is not less reproducible for holding a loop.
+pub(crate) fn loop_refusal(e: &Expr) -> Option<&Expr> {
+    match e {
+        Expr::Let { bindings, body, .. } if bindings.first().is_some_and(|(n, _)| n.starts_with(LOOP_SOURCE)) => {
+            match &**body {
+                Expr::If { else_branch, .. } => Some(else_branch),
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }
 
@@ -4688,7 +4727,7 @@ fn pattern_names(p: &crate::ast::Pattern, out: &mut Vec<String>) {
 
 /// A loop's pattern: `x`, or the positions `[a, b]` / `(a, b)` of each element.
 enum LoopPattern {
-    Name(String, usize, usize),
+    Name(String),
     Positions { names: Vec<(String, usize, usize)>, rest: Option<(String, usize, usize)> },
 }
 
@@ -4760,41 +4799,105 @@ impl Parser {
     }
 
     /// A read of `name` at this position: remembered if only a finished loop had bound it.
-    fn note_use(&self, name: &str, line: usize, col: usize) {
+    fn note_use(&mut self, name: &str, line: usize, col: usize) {
         if let Some(why) = self.gone(name) {
-            GONE_USES.with(|t| t.borrow_mut().insert((name.to_string(), line, col), why));
+            self.gone_uses.push((name.to_string(), line, col, why));
         }
     }
 
     /// A function's body and its `where` clause (ADR 0035), in the function's scope.
     ///
-    /// A `where` binding is written AFTER the body it is bound for, so a loop in the body
-    /// that assigns one has been read before the parser knew the name was bound — and would
-    /// treat it as local to an iteration. Such a body is read a second time, with the
-    /// clause's names in scope. Only a function with both a loop and a `where` pays for it.
+    /// A `where` binding is written AFTER the body it is bound for, and a loop in the body
+    /// that assigns one must know the name is bound — or it would treat it as local to an
+    /// iteration. So the clause's names are read ahead ([`Parser::where_names_ahead`]) and
+    /// are in scope before the body is parsed.
     fn fn_body(&mut self) -> Result<Expr, HelixError> {
-        let start = (self.pos, self.depth, self.do_bindings.len(), self.loops);
-        let params = self.scopes.last().map(|s| s.names.len()).unwrap_or(0);
+        for name in self.where_names_ahead() {
+            self.bind(&name);
+        }
         let body = self.expr()?;
-        let had_loop = self.loops > start.3;
         // ADR 0035: an optional `where` clause — the scaffolding AFTER the point, scoped
         // to this function. `where` stays an ordinary identifier everywhere else (frames
         // own a `.where(...)` verb), so the gate is the exact shape `where <name> =` after
         // the body, optionally across newlines — no legal program parses that today.
         // Desugars to the `let … in` the body could have written: zero new engine
         // surface, parity by construction.
-        let body = self.maybe_where_clause(body)?;
-        let bound_by_where = self.scopes.last().map(|s| s.names.len()).unwrap_or(0) > params;
-        if !(had_loop && bound_by_where) {
-            return Ok(body);
-        }
-        (self.pos, self.depth) = (start.0, start.1);
-        self.do_bindings.truncate(start.2);
-        if let Some(scope) = self.scopes.last_mut() {
-            scope.gone.clear();
-        }
-        let body = self.expr()?;
         self.maybe_where_clause(body)
+    }
+
+    /// The names the `where` clause of the function whose body starts at the cursor binds,
+    /// found by looking: the clause opens at the first `where NAME =` (or `where {…} =`,
+    /// `where [… ] =`) outside every bracket — on the body's last line or after it — which
+    /// is the shape [`Parser::maybe_where_clause`] gates on and nothing inside an
+    /// expression can have, `=` not being an operator.
+    fn where_names_ahead(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut depth = 0usize;
+        let mut k = self.pos;
+        // To the clause, or to the end of the statement.
+        loop {
+            match self.tok(k) {
+                Tok::Eof => return names,
+                Tok::LParen | Tok::LBracket | Tok::LBrace => depth += 1,
+                Tok::RParen | Tok::RBracket | Tok::RBrace => depth = depth.saturating_sub(1),
+                Tok::Newline if depth == 0 => {
+                    let mut n = k;
+                    while matches!(self.tok(n), Tok::Newline) {
+                        n += 1;
+                    }
+                    if !self.where_opens_at(n) {
+                        return names;
+                    }
+                    k = n;
+                    break;
+                }
+                Tok::Ident(_) if depth == 0 && self.where_opens_at(k) => break,
+                _ => {}
+            }
+            k += 1;
+        }
+        // The bindings: a name before each `=` outside brackets, or a binder's names.
+        k += 1;
+        let mut at_binding = true;
+        loop {
+            match self.tok(k) {
+                Tok::Eof => break,
+                Tok::Newline if depth == 0 => break,
+                Tok::Ident(n) if depth == 0 && at_binding && matches!(self.tok(k + 1), Tok::Eq) => {
+                    names.push(n.clone());
+                    at_binding = false;
+                }
+                Tok::LBrace | Tok::LBracket if depth == 0 && at_binding => {
+                    // `{field, field: binder}` / `[a, b, ...rest]`: the binder is the name
+                    // not followed by a colon.
+                    let mut j = k + 1;
+                    while !matches!(self.tok(j), Tok::RBrace | Tok::RBracket | Tok::Eof) {
+                        if let Tok::Ident(n) = self.tok(j)
+                            && !matches!(self.tok(j + 1), Tok::Colon)
+                        {
+                            names.push(n.clone());
+                        }
+                        j += 1;
+                    }
+                    k = j;
+                    at_binding = false;
+                }
+                Tok::LParen | Tok::LBracket | Tok::LBrace => depth += 1,
+                Tok::RParen | Tok::RBracket | Tok::RBrace => depth = depth.saturating_sub(1),
+                Tok::Comma if depth == 0 => at_binding = true,
+                _ => {}
+            }
+            k += 1;
+        }
+        names
+    }
+
+    /// Whether a `where` clause opens at token `k`.
+    fn where_opens_at(&self, k: usize) -> bool {
+        matches!(self.tok(k), Tok::Ident(w) if w == "where")
+            && ((matches!(self.tok(k + 1), Tok::Ident(_)) && matches!(self.tok(k + 2), Tok::Eq))
+                || (matches!(self.tok(k + 1), Tok::LBrace) && self.record_binder_from(k + 1))
+                || (matches!(self.tok(k + 1), Tok::LBracket) && self.array_binder_from(k + 1)))
     }
 
     /// Whether the cursor is at `for PATTERN in` — a loop. `for` is a name everywhere else
@@ -4864,6 +4967,13 @@ impl Parser {
     /// ([`reject_do_binding_over_mut_global`]). Everywhere else they are.
     fn for_loop(&mut self, top: bool) -> Result<LoopOut, HelixError> {
         let (fl, fc) = self.pos();
+        // A loop in a loop does not pass through `unary`, where nesting is counted, and
+        // each one is several levels of the tree that is built: count it as that many, so
+        // what bounds the parser still bounds every pass that walks its output.
+        let saved = self.depth;
+        for _ in 0..8 {
+            self.deepen()?;
+        }
         self.advance(); // `for`
         let pattern = self.loop_pattern()?;
         self.eat(&Tok::In, "after the loop's pattern")?;
@@ -4886,7 +4996,7 @@ impl Parser {
         self.loops += 1;
         let number = self.loops;
         let variable: Vec<String> = match &pattern {
-            LoopPattern::Name(n, ..) => vec![n.clone()],
+            LoopPattern::Name(n) => vec![n.clone()],
             LoopPattern::Positions { names, rest } => names.iter().chain(rest).map(|(n, ..)| n.clone()).collect(),
         };
         self.push_scope(variable.iter().cloned());
@@ -4928,6 +5038,7 @@ impl Parser {
                 out
             }
         };
+        self.depth = saved;
         Ok(LoopOut { bindings, carried })
     }
 
@@ -4976,7 +5087,7 @@ impl Parser {
         let close = match self.peek() {
             Tok::LBracket => Tok::RBracket,
             Tok::LParen => Tok::RParen,
-            _ => return Ok(LoopPattern::Name(self.ident_name("as the loop's variable")?, l, c)),
+            _ => return Ok(LoopPattern::Name(self.ident_name("as the loop's variable")?)),
         };
         let shape = "a loop's pattern is a name, or the positions of each element: `for (k, v) in d.items() { … }`, `for [first, ...rest] in rows { … }`.";
         let bracketed = close == Tok::RBracket;
@@ -5014,8 +5125,7 @@ impl Parser {
         Self::refuse_twice(names.iter().chain(&rest))?;
         // `for (x) in xs` is `for x in xs`, as `(x) => …` is `x => …`.
         if !bracketed && names.len() == 1 && commas == 0 {
-            let (name, nl, nc) = names.remove(0);
-            return Ok(LoopPattern::Name(name, nl, nc));
+            return Ok(LoopPattern::Name(names.remove(0).0));
         }
         Ok(LoopPattern::Positions { names, rest })
     }
@@ -5127,7 +5237,7 @@ impl Parser {
             other => {
                 let (l, c) = self.pos();
                 Err(HelixError::new(format!("expected end of line after {what}, found {}", other.describe()), l, c)
-                    .hint("each statement goes on its own line; Helix has no `;`."))
+                    .hint("a block has one statement per line: start the next one on a line of its own."))
             }
         }
     }
@@ -5153,7 +5263,7 @@ impl Parser {
         if !self.is_known(&name) {
             let e = HelixError::new(format!("`{name}` is not bound, so `{sign}=` has nothing to update"), nl, nc);
             return Err(match self.gone(&name) {
-                Some(why) => e.hint(format!("{}.", gone_hint(why))),
+                Some(why) => e.hint(gone_hint(why)),
                 None => e.hint(format!(
                     "`{name} {sign}= value` is `{name} = {name} {sign} value`, so `{name}` needs a value first — \
                      bind it with a plain `{name} = …` above this line."
@@ -5209,7 +5319,7 @@ impl Parser {
             block.push((name.clone(), read));
         }
         match pattern {
-            LoopPattern::Name(name, ..) => block.push((name, ident("$it"))),
+            LoopPattern::Name(name) => block.push((name, ident("$it"))),
             LoopPattern::Positions { names, rest } => {
                 // `$it` is a name, so the pattern reads it in place and binds no temp.
                 Self::push_positions(&mut block, "$it".to_string(), names, rest, ident("$it"));
@@ -5284,11 +5394,12 @@ impl Parser {
         let message = Expr::Interp(vec![InterpPart::Lit(FOR_NEEDS.to_string()), InterpPart::Expr(Box::new(named), None)]);
         let refusal = Expr::Let {
             bindings: vec![(kind.to_string(), call("type_of", vec![at_source(&held)]))],
-            body: Box::new(call("raise", vec![message])),
-            from_do: false,
+            body: Box::new(call("raise", vec![message, Expr::Str(FOR_NEEDS_HELP.to_string())])),
+            from_do: true,
         };
         let guarded = when(is(call("type_of", vec![at_source(&held)]), "Array"), reduce(at_source(&held)), refusal);
-        Expr::Let { bindings: vec![(held, source)], body: Box::new(guarded), from_do: false }
+        // (`from_do`, so the lint that advises a `do` block over nested `let`s reads it as one.)
+        Expr::Let { bindings: vec![(held, source)], body: Box::new(guarded), from_do: true }
     }
 }
 

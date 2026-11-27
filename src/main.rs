@@ -4181,7 +4181,6 @@ fn eval_repl_line(interp: &mut Interp, checker: &mut types::Checker, src: &str) 
         // and skip execution (mirrors the parse-error early return).
         if let Err(e) = checker.exec_stmt(stmt) {
             eprint!("{}", e.render(src, "<repl>"));
-            parser::forget_loop_locals();
             break;
         }
         match interp.exec(stmt) {
@@ -4198,4 +4197,6 @@ fn eval_repl_line(interp: &mut Interp, checker: &mut types::Checker, src: &str) 
             }
         }
     }
+    // What the parser noted for this line's errors is this line's (ADR 0066).
+    parser::forget_loop_locals();
 }

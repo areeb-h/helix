@@ -1,7 +1,10 @@
 # ADR 0066 — `for` loops, as notation for a fold
 
-- **Status:** Proposed — phase 1 (`for`, compound assignment) is specified here to be
-  implemented behind this ADR's review; phases 2 and 3 are designs, not commitments.
+- **Status:** Accepted — phase 1 (`for`, compound assignment) is implemented: `src/parser.rs`
+  (the scope stack, the fold, every refusal), `src/lexer.rs` and `src/token.rs` (`+=` `-=` `*=`
+  `/=`), `src/types.rs` and `src/types/synth.rs` (the two sentences the checker says for a
+  loop), `src/fmt.rs`, `src/syntaxdocs.rs`, `src/emit_rust.rs` (the refusal). Phases 2 and 3
+  are designs, not commitments. What the implementation settled is under "As implemented".
 - **Date:** 2026-11-26
 - **Deciders:** Areeb + Claude
 - **Related:** [ADR 0004](0004-functions-errors-mutability.md) (immutable values, `mut` at the
@@ -154,6 +157,40 @@ adds no new evaluation path at all; until it lands, `while` keeps its hint.
 `if c { total += x }` — an `if` whose branches are bodies and whose carried names are the
 state — is the same idea applied to a conditional. Considered separately, because it puts a
 second meaning on `if`.
+
+### As implemented (phase 1)
+
+What writing it settled, where the text above left a choice or could not be followed:
+
+- **The refusal of a non-sequence is written into the fold.** The engines' "has no method"
+  sentence is built from the receiver, the method's name and a position, so a marker on the
+  call cannot reach it without a change in each engine. The parser instead guards the fold —
+
+  ```helix
+  let $forin = EXPR in
+    if type_of($forin) == "Array" then $forin.reduce(…) else raise("`for` needs something to iterate — …")
+  ```
+
+  — and the checker says the same sentence, with the same help line, when it knows the
+  type. A source that is an array on its face (a literal, `range(…)`, `a..b`) is folded
+  directly. A file that binds `type_of` or `raise` to something of its own gets no guard,
+  and a non-sequence there is refused in `reduce`'s words.
+- **`missing` is not a sequence.** `missing.reduce(…)` answers `missing`, which would have
+  left one carried name `missing` and several an indexing error; the guard refuses it:
+  "… and this is `missing`".
+- **"Bound where the loop starts" includes a global read from a function.** A loop in a
+  function that assigns an immutable global's name carries it, as a local — what a `do`
+  line rebinding it makes — rather than treating it as new in every iteration, which would
+  have been a silent wrong answer. A `mut` global assigned from a function's loop is the
+  existing refusal ("would shadow it, not update it"); only a top-level loop updates one.
+- **The loop's variable** read after the loop gets its own hint beside the body-local one.
+- **A `where` binding is bound for the body** although it is written after it: the clause's
+  names are read ahead.
+- **Patterns:** `(x)` is `x`; a bracketed pattern takes a `...rest`, as `[a, ...rest] = v` does.
+- **A body's lines end at the end of the line** (a `do` block does not check this).
+- **A session (the REPL)** parses each line after the names the earlier lines bound.
+- **A body-local name's hint** is carried from the parser to the checker by the position of
+  the read, since the checker is what knows the name is unknown.
 
 ## Alternatives considered
 

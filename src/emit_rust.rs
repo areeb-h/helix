@@ -487,6 +487,19 @@ fn line_of(e: &Expr) -> usize {
     e.position().0
 }
 
+/// What a `for` loop in a rule is told (ADR 0066).
+const LOOP_IN_A_RULE: &str = "a `for` loop is not translated by `helix emit rust` yet: write the fold it stands for, \
+     `xs.reduce(init, (acc, x) => …)`, with the state in one value";
+
+/// The line of the loop a fold was written for: the fold's own, which is where its
+/// sequence is, behind the `let` that holds the sequence when there is one.
+fn loop_line(fold: &Expr) -> usize {
+    match fold {
+        Expr::Let { body, .. } => line_of(body),
+        other => line_of(other),
+    }
+}
+
 impl<'a> Tx<'a> {
     fn struct_fields(&self, name: &str) -> Option<&Vec<(String, Ty)>> {
         self.c.decls.iter().find_map(|d| match d {
@@ -579,15 +592,7 @@ impl<'a> Tx<'a> {
         // `reduce` over a block that reads a tuple by position, behind a check of the
         // sequence. That shape is not translated, and the refusal is about the loop.
         if crate::parser::is_loop_fold(e) {
-            let at = match e {
-                Expr::Let { body, .. } => line_of(body),
-                _ => line,
-            };
-            return err(
-                at,
-                "a `for` loop is not translated by `helix emit rust` yet: write the fold it stands for, \
-                 `xs.reduce(init, (acc, x) => …)`, with the state in one value",
-            );
+            return err(loop_line(e), LOOP_IN_A_RULE);
         }
         match e {
             Expr::Int(n) => Ok((if *n < 0 { format!("({n})") } else { n.to_string() }, Ty::Int)),
@@ -1209,6 +1214,26 @@ pub fn emit(src: &str, source_name: &str, traces_json: Option<&str>) -> Result<S
     let c = parse_contract(src)?;
     let toks = crate::lexer::lex(src).map_err(|e| EmitError { line: e.line, message: e.message })?;
     let stmts = crate::parser::parse(toks).map_err(|e| EmitError { line: e.line, message: e.message })?;
+    // A `for` loop in a rule (ADR 0066) is refused before anything else looks at the fold
+    // it was written as — so the refusal is about the loop, whatever the fold would have
+    // tripped first.
+    for stmt in &stmts {
+        let body = match stmt {
+            Stmt::Func { body, .. } => body,
+            Stmt::Assign { value, .. } => value,
+            Stmt::Expr(e) => e,
+            Stmt::Import { .. } => continue,
+        };
+        let mut found: Option<usize> = None;
+        crate::visit::walk_expr(body, &mut |x| {
+            if found.is_none() && crate::parser::is_loop_fold(x) {
+                found = Some(loop_line(x));
+            }
+        });
+        if let Some(line) = found {
+            return err(line, LOOP_IN_A_RULE);
+        }
+    }
     crate::types::check(&stmts).map_err(|e| EmitError { line: e.line, message: format!("the rule does not type-check: {}", e.message) })?;
     let effects = effects_line(&stmts).map_err(|m| EmitError { line: 0, message: m })?;
 
