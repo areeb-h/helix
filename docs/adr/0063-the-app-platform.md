@@ -66,14 +66,34 @@ records its session, and the recording reproduces the bug on any machine and any
   `random()`, a file read, an HTTP response). That second part is the difference from Redux
   DevTools or Elm's debugger: an app that reads the clock or a file in `update` still replays
   exactly. The recording replays those answers instead of asking the world again.
-- **Proved, not hoped.** Each step also records a hash of the screen it produced. Replay
-  compares them and either says "12 of 12 screens identical" or names the first event whose
-  screen differs. It runs on any of the three engines.
+- **The whole program.** The tape starts with the program, not with `ui.app`: what `main`
+  reads and writes before the app starts (a folder listed, a first-run migration) is the
+  session's `start` entry, and a replay answers it too. Methods that write (`write_to`, a
+  database `execute`) are taped like builtins, so a replay writes nothing.
+- **Stopped at the call.** Every taped call is fingerprinted with its arguments. A replay that
+  makes the same call with others (another file, another URL) has gone another way at that
+  call, and says so, naming it, rather than being handed the answer to a different question.
+- **Proved, not hoped.** Each step also records a hash of the screen it produced: the tree,
+  its theme and its stylesheet, because that is what the person saw. Replay compares them and
+  either says "12 of 12 screens identical" or names the first event whose screen differs. It
+  runs on any of the three engines.
+- **Which program.** The session records a fingerprint of every module the app loaded and its
+  command line. Replaying the same program is a reproduction; replaying a changed one tests
+  the change against a real session, and the replay says which it is.
 - **One command.** `helix replay app.helix session.jsonl` reproduces the session, including
-  the error `update` raised and the event that caused it.
+  the error `update` raised and the event that caused it, with the command line it was
+  recorded with. `--view page.html` writes one self-contained page of every screen as
+  replayed, what led to it, what it read and whether it matched: the thing a bug report links
+  to.
+- **A corpus is a CI gate.** `helix replay app.helix sessions/` replays every session in the
+  folder, a few at a time, one line each, and fails if any screen differs; real sessions become
+  regression tests that need no test code. A change made on purpose is taken with `--accept`,
+  which rewrites only the screens (and which program drew them): the events and everything the
+  world answered are kept byte for byte, and a session whose app now reads something else is
+  refused, to be recorded again.
 - **Limits, stated.** A value that cannot be written down (a database connection, a
   DataFrame) is recorded as opaque, and a session that needs one says it cannot replay that
-  step. Methods on handles (`db.query`) are not on the tape yet.
+  step. Methods that only READ through a handle (`db.query`) are not on the tape yet.
 
 ### D3 — Permissions are inferred from the code and enforced *(done)*
 
