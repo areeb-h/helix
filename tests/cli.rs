@@ -5490,6 +5490,19 @@ fn a_corpus_of_sessions_gates_a_change_and_takes_it_on_purpose() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Replaying must not cost an app a permission. `helix build --app` infers what an app needs
+/// from everything `ui.app` can reach, std.ui's replay included; the replay hands the viewer
+/// page and the accepted session to the black box, which writes only where the person running
+/// `helix replay` said. So an app that writes nothing is inferred to write nothing.
+#[test]
+fn replaying_costs_an_app_no_permission() {
+    let (out, err, code) = run_cmd(&["effects", "tests/ui/window_app.helix"]);
+    assert_eq!(code, Some(0), "out:\n{out}\nerr:\n{err}");
+    let app = out.lines().skip_while(|l| !l.starts_with("app:")).take(2).collect::<Vec<_>>().join("\n");
+    assert!(app.starts_with("app:"), "no `app` in:\n{out}");
+    assert!(!app.contains("fs-write") && !app.contains("fs-read"), "std.ui's `app` reaches the file system:\n{app}");
+}
+
 /// `helix <args>` with no stdin and no extra environment.
 fn run_cmd(args: &[&str]) -> (String, String, Option<i32>) {
     run(args, &[], "")

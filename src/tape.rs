@@ -257,7 +257,8 @@ fn program() -> Option<J> {
 /// `session_tape("started")` — on a replay, end the startup: `true` if it made exactly the
 /// recorded calls.
 /// `session_tape("program")` — this run's `{sha256, modules, args, helix}`, or `missing`.
-/// `session_tape("options")` — `{view, accept}`: what `helix replay --view/--accept` asked for.
+/// `session_tape("options")` — `{view, accept}`: whether `helix replay --view/--accept` asked.
+/// `session_tape("viewer", page)` — write the viewer page to the `--view` path; its path.
 /// `session_tape("accept", screens)` — rewrite the session with these screens and this program.
 /// `session_tape("diverged")` — why the replay went another way, or `missing`.
 /// `session_tape("begin")` — start capturing one step.
@@ -314,11 +315,22 @@ pub fn session_tape(args: &[Value], line: usize, col: usize) -> Result<Value, He
         }
         // `--view` and `--accept`, which `helix replay` passes to the replaying run.
         "options" => {
-            let view = std::env::var("HELIX_REPLAY_VIEW").ok().filter(|v| !v.is_empty());
+            let view = std::env::var_os("HELIX_REPLAY_VIEW").is_some_and(|v| !v.is_empty());
             Ok(Value::Record(Rc::new(vec![
-                (Symbol::intern("view"), view.map_or(Value::Missing, |v| Value::Str(Rc::new(v)))),
+                (Symbol::intern("view"), Value::Bool(view)),
                 (Symbol::intern("accept"), Value::Bool(std::env::var_os("HELIX_REPLAY_ACCEPT").is_some())),
             ])))
+        }
+        // `--view`: write the viewer page where the person running `helix replay` asked. The
+        // program hands over the page and never names the file: an app that is replayed must
+        // not need, or be inferred to need, permission to write files.
+        "viewer" => {
+            let Value::Str(page) = &arg else {
+                return Err(HelixError::new("`session_tape(\"viewer\", page)` takes the page as a string", line, col));
+            };
+            let path = std::env::var_os("HELIX_REPLAY_VIEW").filter(|v| !v.is_empty()).ok_or_else(|| HelixError::new("no viewer was asked for (`helix replay --view`)", line, col))?;
+            std::fs::write(&path, page.as_bytes()).map_err(io)?;
+            Ok(Value::Str(Rc::new(std::path::Path::new(&path).display().to_string())))
         }
         // `--accept`: this program's screens become the recorded ones. Only the screens and
         // the program: events and effects are what happened, and are kept byte for byte.

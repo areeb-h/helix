@@ -3550,7 +3550,7 @@ fn replay_session(spec) = do {
   which = same_program(recorded_program, replayed_program)
   noted = if which == "" then false else print("note: {which}")
   before = if started then missing else "the app's startup, before `ui.app` ({session_tape("diverged")})"
-  viewing = not options.view.is_missing()
+  viewing = options.view
   blank = {model: init, design: missing, events: 0, screens: 0, same: 0, diverged: before, fits: before.is_missing(), errors: 0, reproduced: 0, pending: [], reads: [], shots: [], styles: [], hashes: []}
   out = range(0, entries.count()).reduce(blank, (st, i) => do {
     e = entries[i]
@@ -3585,10 +3585,12 @@ fn replay_session(spec) = do {
   # (another file, another URL) that was never read when it was recorded.
   why = session_tape("diverged")
   cause = if why.is_missing() then "" else ": {why}"
+  # The page is handed to the black box, which writes it where `--view` said: std.ui never
+  # writes a file, so no app is inferred to need permission to (ADR 0063 D3).
   wrote = if viewing then do {
     page = viewer_page(spec, which, recorded_program, replayed_program, summary, out, if before.is_missing() then [] else [before])
-    w = page.write_to(options.view)
-    print("wrote the session viewer: {options.view}")
+    path = session_tape("viewer", page)
+    print("wrote the session viewer: {path}")
   } else false
   if options.accept then accepted(out, why) else if out.diverged.is_missing() then out else raise("the replay differs from the recording, first at {out.diverged}{cause}", "the app's code changed since the session was recorded, or it reads something the tape does not hold. If the new screens are intended, `helix replay … --accept` records them.")
 }
