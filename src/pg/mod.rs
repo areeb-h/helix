@@ -1018,10 +1018,10 @@ fn frame_of(cols: Vec<ColBuf>, line: usize, col: usize) -> Result<Df, HelixError
 #[cfg(feature = "postgres")]
 fn outcome_value(out: Outcome, line: usize, col: usize) -> Result<Value, HelixError> {
     let rows = frame_of(out.cols, line, col)?;
-    Ok(Value::Record(std::rc::Rc::new(vec![
+    Ok(Value::record(vec![
         (crate::symbol::Symbol::intern("affected"), Value::Int(out.affected)),
         (crate::symbol::Symbol::intern("rows"), Value::DataFrame(std::rc::Rc::new(rows))),
-    ])))
+    ]))
 }
 
 /// `postgres_execute(url, sql, params?)` — run one statement that may WRITE, answering

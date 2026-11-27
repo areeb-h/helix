@@ -425,7 +425,7 @@ fn path_value(path: &[usize]) -> Value {
     Value::int_array(path.iter().map(|&i| i as i64).collect())
 }
 fn op(fields: Vec<(&str, Value)>) -> Value {
-    Value::Record(Rc::new(fields.into_iter().map(|(k, v)| (Symbol::intern(k), v)).collect()))
+    Value::record(fields.into_iter().map(|(k, v)| (Symbol::intern(k), v)).collect())
 }
 
 /// The compact form the client builds a DOM from: a string for text, `[tag, [[name,

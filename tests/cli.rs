@@ -7616,6 +7616,164 @@ fn oversized_materialization_is_an_error_not_an_abort() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// Run each `(label, program, expected error)` on all three engines under a 4 GB address-space
+/// cap, and require a clean refusal: exit 1, the expected words, no raw allocator abort,
+/// nothing printed first, and the SAME error text from every engine (ADR 0024: a limit is an
+/// error, never a signal). Shared by the two growth-limit tests below.
+#[cfg(unix)]
+fn assert_refused_on_every_engine(cases: &[(&str, &str, &str)]) {
+    for (label, src, want) in cases {
+        let path = std::env::temp_dir().join(format!("helix_it_growth_{label}.helix"));
+        std::fs::write(&path, src).unwrap();
+        let mut texts = Vec::new();
+        for (engine, extra) in
+            [("jit", ""), ("vm", "export HELIX_NOJIT=1; "), ("walker", "export HELIX_NOVM=1; ")]
+        {
+            // As in the B3 test: the switch is EXPORTED before `exec`, and `HELIX_STACK_MB` is
+            // unset because a CI stack reservation would not fit under the cap.
+            let script = format!(
+                "ulimit -v 4194304; unset HELIX_STACK_MB; {}exec {} {} < /dev/null",
+                extra,
+                env!("CARGO_BIN_EXE_helix"),
+                path.display()
+            );
+            let out = Command::new("sh")
+                .arg("-c")
+                .arg(&script)
+                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                .output()
+                .expect("failed to spawn sh");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            assert!(
+                !stderr.contains("memory allocation of"),
+                "{label} ({engine}): the allocator aborted the process:\n{stderr}"
+            );
+            assert_eq!(out.status.code(), Some(1), "{label} ({engine}): stdout {stdout:?}\n{stderr}");
+            assert!(stdout.is_empty(), "{label} ({engine}) printed an answer: {stdout:?}");
+            assert!(stderr.contains(want), "{label} ({engine}) must say {want:?}:\n{stderr}");
+            assert!(stderr.contains("help:"), "{label} ({engine}) gave no hint:\n{stderr}");
+            texts.push(stderr);
+        }
+        assert_eq!(texts[0], texts[1], "{label}: jit and vm disagree on the error text");
+        assert_eq!(texts[0], texts[2], "{label}: jit and tree-walker disagree on the error text");
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// An operation that GROWS a value refuses, before allocating, a result past the caps the
+/// language already has — `MAX_STRING_LEN` (1 GiB) for one string, `MATERIALIZE_BUDGET`
+/// (1 GiB of element slots) for one array — instead of growing until the allocator kills the
+/// process. Before: `fn g(s, n) = if n == 0 then s else g(s.replace("a", "aa"), n - 1)` and
+/// its siblings (`re_replace`, `join`, `concat`, `flatten`, `[...xs, ...xs]`, `windows`,
+/// `to_json`, …) died with `memory allocation of N bytes failed` (SIGABRT) on all three
+/// engines, and `try` could not catch it.
+///
+/// Every input here is SMALL (lazy ranges, a few MB of text, at most ~220 MB for the two
+/// escapes) while the result it asks for is far past 1 GiB — so the check, not the memory,
+/// is what is tested. Every program aborted on the unfixed binary under this cap, except
+/// `html_escape`, which printed a length over the cap. The size is decided up front, so
+/// nothing near the result's size is ever allocated.
+#[test]
+#[cfg(unix)]
+fn growing_a_value_past_the_size_caps_is_an_error_not_an_abort() {
+    const TEXT: &str = "would exceed 1073741824 bytes";
+    const ARRAY: &str = "would build an array of more than 1024 MB, which is too large";
+    assert_refused_on_every_engine(&[
+        // Strings: 1000 matches of a 2 MB replacement is 2 GB.
+        ("replace", "print(\"a\".repeat(1000).replace(\"a\", \"a\".repeat(2000000)).length())\n", TEXT),
+        ("re_replace", "print(\"a\".repeat(1000).re_replace(\"a\", \"a\".repeat(2000000)).length())\n", TEXT),
+        ("join", "print(range(0, 3000).join(\"b\".repeat(2000000)).length())\n", TEXT),
+        // `\u0001` is six bytes of JSON for one; `"` is six bytes of HTML.
+        ("to_json", "print(chr(1).repeat(180000000).to_json().length())\n", TEXT),
+        ("html_escape", "print(html_escape(\"\\\"\".repeat(220000000)).length())\n", TEXT),
+        // Arrays: two lazy 100M ranges are 1.6 GB packed; five are 4 GB.
+        ("concat", "r = range(0, 100000000)\nprint(r.concat(r, r, r, r).count())\n", ARRAY),
+        ("concat_boxed", "print([\"x\"].concat(range(0, 100000000)).count())\n", ARRAY),
+        (
+            "concat_fold",
+            "xs = range(0, 100000000)\nprint([1, 2].reduce([\"x\"], (acc, i) => acc.concat(xs)).count())\n",
+            ARRAY,
+        ),
+        ("spread", "print([\"x\", ...range(0, 100000000), ...range(0, 100000000)].count())\n", ARRAY),
+        ("flatten", "r = range(0, 100000000)\nprint([r, r, r, r, r].flatten().count())\n", ARRAY),
+        ("windows", "print(range(0, 100000).to_array().windows(50000).count())\n", ARRAY),
+        (
+            "windows_map",
+            "print(range(0, 1000000).to_array().windows(500000).map((w) => w.sum()).count())\n",
+            ARRAY,
+        ),
+        ("chunks", "print(range(0, 50000000).chunks(1).count())\n", ARRAY),
+        // One fresh string per piece: ~50 bytes of slot and allocation for each.
+        ("chars", "print(\"x\".repeat(100000000).chars().count())\n", ARRAY),
+        ("split", "print(\",\".repeat(90000000).split(\",\").count())\n", ARRAY),
+        ("re_split", "print(\",\".repeat(60000000).re_split(\",\").count())\n", ARRAY),
+        ("dna_windows", "print(dna(\"A\".repeat(200000)).windows(100000).count())\n", ARRAY),
+        ("dna_kmers", "print(dna(\"A\".repeat(200000)).kmers(100000).count())\n", ARRAY),
+    ]);
+
+    // Caught, the program carries on — and the error is the one a user can read.
+    let src = "r = try (\"a\".repeat(1000).replace(\"a\", \"a\".repeat(2000000)))\n\
+               print(r.ok, r.error)\nprint(\"alive\")\n";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run_source(src, env, "growth_caught");
+        assert_eq!(code, Some(0), "stderr:\n{err}");
+        assert_eq!(out, "false `replace` would exceed 1073741824 bytes\nalive\n");
+    }
+
+    // POSITIVE CONTROL — the same operations on ordinary inputs answer exactly as before.
+    let src = r##"print("abcabc".replace("b", "XYZ"), "abc".replace("", "-"), "aaa".replace("aa", "b"))
+print("abcabc".replace_first("b", "XYZ"), "abc".replace_first("q", "z"))
+print("a1b22c".re_replace("[0-9]+", "#"), "John Smith".re_replace("(\\w+) (\\w+)", "$2, $1"), "abc".re_replace("", "-"))
+print([1, 2, 3].join("-"), [1.5, "x", [1, 2]].join("|"), "ab".concat("cd"))
+print([1, 2].concat([3]), ["a"].concat([1], [2.5]), [...range(0, 2), 9, ...["z"]], [[1], 2, ["a"]].flatten())
+print("straße".upper(), "ﷺ".normalize("nfkd").length(), html_escape("<a href='x'>&</a>"), url_encode("a b/c?"))
+print(hex_encode("hi"), base64_encode("hello"), "hi".to_bytes().to_hex(), "a\"b".to_json())
+print("héllo".chars(), [1, 2, 3, 4].windows(2), [1, 2, 3, 4, 5].chunks(2), dna("ACGNTA").kmers(2))
+print(["a", "b"].reduce([], (acc, x) => acc.concat([x])))
+"##;
+    let want = "aXYZcaXYZc -a-b-c- ba\naXYZcabc abc\na#b#c Smith, John -a-b-c-\n1-2-3 1.5|x|[1, 2] abcd\n\
+                [1, 2, 3] [\"a\", 1, 2.5] [0, 1, 9, \"z\"] [1, 2, \"a\"]\n\
+                STRASSE 18 &lt;a href=&#39;x&#39;&gt;&amp;&lt;/a&gt; a%20b%2Fc%3F\n\
+                6869 aGVsbG8= 6869 \"a\\\"b\"\n\
+                [\"h\", \"é\", \"l\", \"l\", \"o\"] [[1, 2], [2, 3], [3, 4]] [[1, 2], [3, 4], [5]] [\"AC\", \"CG\", \"TA\"]\n\
+                [\"a\", \"b\"]\n";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run_source(src, env, "growth_ok");
+        assert_eq!(code, Some(0), "stderr:\n{err}");
+        assert_eq!(out, want);
+    }
+}
+
+/// The growth limits whose inputs cannot be small: the result is at most a few times the
+/// input (`concat` and `replace_first` add one string to another, `hex_encode` doubles,
+/// `base64_encode` is 4/3, `upper` at most triples, `normalize` at most elevenfold), so
+/// passing 1 GiB takes hundreds of megabytes of input. IGNORED for the time and memory that
+/// costs on every gate run; the refusals themselves are the same code the test above runs.
+///
+///     cargo test --profile gate --test cli -- --ignored growing_large_inputs
+#[test]
+#[cfg(unix)]
+#[ignore = "builds 0.2-0.8 GB inputs per engine to reach the 1 GB string cap"]
+fn growing_large_inputs_past_the_string_cap_is_an_error_not_an_abort() {
+    const TEXT: &str = "would exceed 1073741824 bytes";
+    assert_refused_on_every_engine(&[
+        ("concat_str", "s = \"a\".repeat(540000000)\nprint(s.concat(s).length())\n", TEXT),
+        ("replace_first", "s = \"a\".repeat(540000000)\nprint(s.replace_first(\"a\", s).length())\n", TEXT),
+        ("bytes_concat", "b = \"a\".repeat(540000000).to_bytes()\nprint(b.concat(b).length())\n", TEXT),
+        ("hex_encode", "print(hex_encode(\"a\".repeat(540000000)).length())\n", TEXT),
+        ("base64_encode", "print(base64_encode(\"a\".repeat(810000000)).length())\n", TEXT),
+        ("url_encode", "print(url_encode(\" \".repeat(360000000)).length())\n", TEXT),
+        ("upper", "print(\"ΐ\".repeat(180000000).upper().length())\n", TEXT),
+        ("normalize", "print(\"ﷺ\".repeat(100000000).normalize(\"nfkd\").length())\n", TEXT),
+        (
+            "re_find_all",
+            "print(\"x\".repeat(30000000).re_find_all(\"\").count())\n",
+            "would build an array of more than 1024 MB, which is too large",
+        ),
+    ]);
+}
+
 /// C1. IUPAC ambiguity codes participate in `gc_content`/`at_content` by what they
 /// actually assert, not by accident of spelling.
 ///
@@ -18676,4 +18834,106 @@ fn agent_study_round_two_hints() {
     assert!(out.contains("fn test_") && out.contains(">>>"), "out:\n{out}");
     let (out, _, _) = run(&["search", "doctest"], &[], "");
     assert!(out.contains("[syntax]"), "out:\n{out}");
+}
+
+/// A value nested 100,000 deep, of each container kind, through every operation that walked
+/// it one native frame per level — and then out of scope. Before `src/deep.rs` each of these
+/// died with `fatal runtime error: stack overflow` on all three engines (printing at ~1M
+/// levels on the default stack, freeing at a few million, a chain of dicts far sooner); here
+/// the evaluator stack is cut to 4 MB so 100k levels is already far past what recursion
+/// could hold. `scripts/deepvalues.py` runs the full matrix (175 programs) in CI; this is the
+/// part of it that pins exact answers.
+#[test]
+fn values_nested_100k_deep_print_compare_serialize_and_free() {
+    let shapes = [
+        ("array", "[acc]", "[[[[[1]]]]]"),
+        ("record", "{next: acc}", "{next: {next: {next: {next: {next: 1}}}}}"),
+        ("tuple", "(acc, 1)", "(((((1, 1), 1), 1), 1), 1)"),
+        ("dict", "dict().insert(\"k\", acc)", "{\"k\" => {\"k\" => {\"k\" => {\"k\" => {\"k\" => 1}}}}}"),
+    ];
+    for (shape, wrap, five) in shapes {
+        let src = format!(
+            "fn build(n, acc) = if n == 0 then acc else build(n - 1, {wrap})\n\
+             v = build(100000, 1)\nw = build(100000, 1)\n\
+             print(\"{{v}}\".length(), v == w, v != w, [v, w].unique().count(), [v].contains(w))\n\
+             print(v.to_json().length(), [v, w].frequencies().count(), {{a: v}}.a == w)\n\
+             print(build(5, 1))\n"
+        );
+        let mut outs = Vec::new();
+        for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+            let env: Vec<(&str, &str)> = env.iter().copied().chain([("HELIX_STACK_MB", "4")]).collect();
+            let (out, err, code) = run_source(&src, &env, &format!("deep_{shape}"));
+            assert_eq!(code, Some(0), "{shape} on {env:?} exited {code:?}; stderr:\n{err}");
+            assert!(!err.contains("overflow"), "{shape}: {err}");
+            outs.push(out);
+        }
+        assert!(outs.windows(2).all(|w| w[0] == w[1]), "{shape}: engines disagree: {outs:?}");
+        let lines: Vec<&str> = outs[0].lines().collect();
+        assert!(lines[0].ends_with(" true false 1 true"), "{shape}: {}", lines[0]);
+        assert!(lines[1].ends_with(" 1 true"), "{shape}: {}", lines[1]);
+        assert_eq!(lines[2], five, "{shape}: the printed form of a shallow value is unchanged");
+    }
+
+    // A tuple compares in one pass however deep: a pair at every level used to be compared
+    // in full and then descended into — quadratic, so this never finished.
+    let src = "fn build(n, acc) = if n == 0 then acc else build(n - 1, (acc, 1))\n\
+               print(build(100000, 1) < build(100000, 2), [build(100000, 2), build(100000, 1)].sort().count())\n";
+    let (out, err, code) = run_source(src, &[("HELIX_STACK_MB", "4")], "deep_tuple_order");
+    assert_eq!((code, out.as_str()), (Some(0), "true 2\n"), "stderr:\n{err}");
+
+    // A value that holds one sub-value 2^40 times prints to more text than any memory: the
+    // one-string cap's clean error, not an allocator abort.
+    let src = "fn g(x, n) = if n == 0 then x else g([x, x], n - 1)\nprint(g(1, 40))\n";
+    let (_, err, code) = run_source(src, &[], "deep_shared_print");
+    assert_eq!(code, Some(1), "stderr:\n{err}");
+    assert!(err.contains("`print` would exceed 1073741824 bytes"), "{err}");
+}
+
+/// A value that holds one sub-value twice at each of sixty levels: sixty-one containers,
+/// 2^60 leaves. Walks that followed paths (`==`, `unique`, `contains`, sorting) never
+/// finished; walks that built a tree from it (`v + 1`, the sort-key check, a table cell)
+/// ran out of memory and killed the process. Every walk now answers once per distinct
+/// container (`deep::once`), and text past the one-string cap is refused.
+/// `scripts/deepvalues.py` holds every operation to this at 100,000 levels in CI.
+#[test]
+fn values_that_share_a_part_cost_what_they_are_not_the_paths_through_them() {
+    let src = r#"fn arr(x, n) = if n == 0 then x else arr([x, x], n - 1)
+fn tup(x, n) = if n == 0 then x else tup((x, x), n - 1)
+fn rec(x, n) = if n == 0 then x else rec({a: x, b: x}, n - 1)
+v = arr(1, 60)
+w = arr(1, 60)
+print(v == w, v != w, v == arr(2, 60), [v, w].unique().count(), [v].contains(w), [v, w].frequencies().count())
+print((v + 1) == arr(2, 60), (v * 2) == arr(2, 60), abs(arr(-1, 60)) == v, is_nan(v) == arr(false, 60))
+print(rec(1, 60) == rec(1, 60), {k: rec(1, 60)} == {k: rec(2, 60)})
+a = tup(1, 60)
+b = tup(2, 60)
+print(a < b, a >= b, [b, a].sort()[0] == a, [a, b].min() == a, [b, a].sort_by((t) => t)[1] == b)
+r = try "{v}"
+print(r.ok, r.error)
+j = try v.to_json()
+print(j.ok, j.error)
+t = try tensor(v)
+print(t.ok, t.error)
+print([{c: v}].to_table().length() < 1000, [{c: rec(1, 60)}].to_markdown().length() < 1000)
+print(arr(1, 3), tup(1, 2), rec(1, 1))
+"#;
+    let want = "true false false 1 true 1\n\
+                true true true true\n\
+                true false\n\
+                true false true true true\n\
+                false `interpolation` would exceed 1073741824 bytes\n\
+                false `to_json` would exceed 1073741824 bytes\n";
+    let mut outs = Vec::new();
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run_source(src, env, "shared_values");
+        assert_eq!(code, Some(0), "on {env:?}; stderr:\n{err}");
+        assert!(out.starts_with(want), "on {env:?}:\n{out}");
+        outs.push(out);
+    }
+    assert!(outs.windows(2).all(|w| w[0] == w[1]), "engines disagree: {outs:?}");
+    let lines: Vec<&str> = outs[0].lines().collect();
+    assert!(lines[6].starts_with("false tensor shape ") && lines[6].ends_with(" is too large to allocate"), "{}", lines[6]);
+    assert_eq!(lines[7], "true true");
+    // A shallow value that shares still prints as the tree it describes.
+    assert_eq!(lines[8], "[[[1, 1], [1, 1]], [[1, 1], [1, 1]]] ((1, 1), (1, 1)) {a: 1, b: 1}");
 }

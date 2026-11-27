@@ -645,10 +645,10 @@ fn peer_value(addr: &std::net::SocketAddr) -> Value {
     use std::sync::OnceLock;
     static KEYS: OnceLock<(Symbol, Symbol)> = OnceLock::new();
     let k = *KEYS.get_or_init(|| (Symbol::intern("address"), Symbol::intern("port")));
-    Value::Record(Rc::new(vec![
+    Value::record(vec![
         (k.0, Value::Str(Rc::new(addr.ip().to_string()))),
         (k.1, Value::Int(addr.port() as i64)),
-    ]))
+    ])
 }
 
 /// The protocol version from a request line's third token: `HTTP/1.1` -> `"1.1"`.
@@ -818,7 +818,7 @@ fn parse_request(
         (k.5, peer.clone()),
         (k.6, Value::Str(version)),
     ];
-    Ok(Value::Record(Rc::new(record)))
+    Ok(Value::record(record))
 }
 
 /// `connection.respond(value)` — write the HTTP reply and close the connection.
@@ -1009,7 +1009,7 @@ fn parse_request_buf(buf: &[u8], peer: &Value) -> BufParse {
         (k.5, peer.clone()),
         (k.6, Value::Str(version)),
     ];
-    BufParse::Complete(Box::new(Value::Record(Rc::new(record))), total)
+    BufParse::Complete(Box::new(Value::record(record)), total)
 }
 
 /// `listener.accept_poll()` — the cooperative event loop's non-blocking accept: return a

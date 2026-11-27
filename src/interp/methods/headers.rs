@@ -71,10 +71,10 @@ pub(crate) fn headers_method(
                 pairs
                     .iter()
                     .map(|(n, v)| {
-                        Value::Tuple(Rc::new(vec![
+                        Value::tuple(vec![
                             Value::Str(Rc::new(n.clone())),
                             Value::Str(Rc::new(v.clone())),
-                        ]))
+                        ])
                     })
                     .collect(),
             ))

@@ -69,6 +69,7 @@ mod regexes;
 mod climain;
 mod subprocess;
 mod db;
+mod deep;
 mod pg;
 mod jitexplain;
 mod json;

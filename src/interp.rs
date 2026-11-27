@@ -37,8 +37,8 @@ pub(crate) const MAX_CALL_DEPTH: usize = 20_000;
 /// left, and below this red zone continues on a fresh segment of `STACK_SEGMENT` bytes
 /// (`stacker::maybe_grow`). The red zone is what ONE call may use before the next check:
 /// a body's own expression nesting, between two calls.
-const STACK_RED_ZONE: usize = if cfg!(debug_assertions) { 16 << 20 } else { 1 << 20 };
-const STACK_SEGMENT: usize = if cfg!(debug_assertions) { 256 << 20 } else { 32 << 20 };
+pub(crate) const STACK_RED_ZONE: usize = if cfg!(debug_assertions) { 16 << 20 } else { 1 << 20 };
+pub(crate) const STACK_SEGMENT: usize = if cfg!(debug_assertions) { 256 << 20 } else { 32 << 20 };
 
 /// Ceiling on a single interpolated string's byte length. Interpolation nests, so
 /// a doubling loop could otherwise grow a string until the allocator aborts; 1 GiB
@@ -127,11 +127,11 @@ pub(crate) fn spread_fields(
     v: &Value,
     line: usize,
     col: usize,
-) -> Result<Rc<Vec<(Symbol, Value)>>, HelixError> {
+) -> Result<Rc<crate::value::Fields>, HelixError> {
     match v {
         Value::Record(f) => Ok(f.clone()),
         Value::Dict(map) => Ok(Rc::new(
-            crate::value::dict_as_record_fields(map).map_err(|m| HelixError::new(m, line, col))?,
+            crate::value::dict_as_record_fields(map).map_err(|m| HelixError::new(m, line, col))?.into(),
         )),
         other => Err(HelixError::new(
             format!(
@@ -199,15 +199,15 @@ pub(crate) fn const_default_value(e: &Expr) -> Option<Value> {
         Expr::Array(items) => {
             Value::array(items.iter().map(const_default_value).collect::<Option<Vec<_>>>()?)
         }
-        Expr::Tuple(items) => Value::Tuple(Rc::new(
+        Expr::Tuple(items) => Value::tuple(
             items.iter().map(const_default_value).collect::<Option<Vec<_>>>()?,
-        )),
-        Expr::Record(fields) => Value::Record(Rc::new(
+        ),
+        Expr::Record(fields) => Value::record(
             fields
                 .iter()
                 .map(|(k, v)| Some((Symbol::intern(k), const_default_value(v)?)))
                 .collect::<Option<Vec<_>>>()?,
-        )),
+        ),
         _ => return None,
     })
 }
@@ -672,7 +672,7 @@ impl Interp {
                 for it in items {
                     vals.push(self.eval(it)?);
                 }
-                Ok(Value::Tuple(Rc::new(vals)))
+                Ok(Value::tuple(vals))
             }
             Expr::Record(fields) => {
                 if let Some(e) = dataframe_ops::pinned_key_outside_frame(fields) {
@@ -682,7 +682,7 @@ impl Interp {
                 for (k, v) in fields {
                     vals.push((Symbol::intern(k), self.eval(v)?));
                 }
-                Ok(Value::Record(Rc::new(vals)))
+                Ok(Value::record(vals))
             }
             Expr::RecordUpdate { parts, line, col } => {
                 // The parts in written order, a later one winning: each spread's fields (a
@@ -701,7 +701,7 @@ impl Interp {
                         }
                     }
                 }
-                Ok(Value::Record(Rc::new(out)))
+                Ok(Value::record(out))
             }
             Expr::Field {
                 recv,
@@ -1938,12 +1938,12 @@ static TRY_KEYS: std::sync::LazyLock<TryKeys> = std::sync::LazyLock::new(|| TryK
 /// Shared by both engines so the record shape is identical.
 pub(crate) fn try_ok(v: Value) -> Value {
     let k = &*TRY_KEYS;
-    Value::Record(Rc::new(vec![
+    Value::record(vec![
         (k.ok, Value::Bool(true)),
         (k.value, v),
         (k.error, Value::Missing),
         (k.help, Value::Missing),
-    ]))
+    ])
 }
 
 /// The result record of `try EXPR` on a runtime error:
@@ -1953,12 +1953,12 @@ pub(crate) fn try_ok(v: Value) -> Value {
 /// guidance exists (field build); now it can.
 pub(crate) fn try_err(message: String, help: Option<String>) -> Value {
     let k = &*TRY_KEYS;
-    Value::Record(Rc::new(vec![
+    Value::record(vec![
         (k.ok, Value::Bool(false)),
         (k.value, Value::Missing),
         (k.error, Value::Str(Rc::new(message))),
         (k.help, help.map(|h| Value::Str(Rc::new(h))).unwrap_or(Value::Missing)),
-    ]))
+    ])
 }
 
 
@@ -1972,7 +1972,16 @@ fn broadcast_unary(
         Value::Array(items) => {
             let out: Result<Vec<Value>, HelixError> = items
                 .iter_values()
-                .map(|e| broadcast_unary(&e, scalar))
+                // One result per distinct element (`deep::mapped`): an array that holds one
+                // sub-array many times maps to an array that shares in the same places,
+                // where a tree-shaped result would not fit in memory. The function being
+                // applied is one closure for the whole walk; its address names it.
+                .map(|e| {
+                    let applying = scalar as *const dyn Fn(&Value) -> Result<Value, HelixError> as *const u8 as usize;
+                    crate::deep::mapped(crate::deep::REL_UNARY, &e, applying, || {
+                        crate::deep::nested(|| broadcast_unary(&e, scalar))
+                    })
+                })
                 .collect();
             Ok(Value::array(out?))
         }
@@ -2434,4 +2443,6 @@ pub(crate) use builtins::ASSERTIONS_RUN;
 pub(crate) use builtins::{capture_begin, capture_take};
 
 mod comprehensions;
+
+pub(crate) mod growth;
 pub(crate) use comprehensions::{map_values_elements, map_values_rebuild, map_values_shape, not_an_array};

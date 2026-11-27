@@ -4,6 +4,7 @@
 use super::super::*;
 #[allow(unused_imports)]
 use super::*;
+use crate::interp::growth::check_array;
 #[allow(unused_imports)]
 use std::rc::Rc;
 
@@ -763,7 +764,7 @@ pub(crate) fn array_method(
                 (Symbol::intern("median"), Value::Float(crate::stats::quantile_sorted(&xs, 0.5))),
                 (Symbol::intern("max"), Value::Float(xs[xs.len() - 1])),
             ];
-            Ok(Value::Record(Rc::new(fields)))
+            Ok(Value::record(fields))
         }
         "sum" => {
             no_args(name)?;
@@ -1007,8 +1008,31 @@ pub(crate) fn array_method(
             let sep = str_arg(args, 0, "join", line, col)?;
             // Each element is rendered with its normal display (a string element is
             // its raw text, not a quoted form), then joined: `[1,2,3].join("-")`.
-            let joined = items.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(sep);
-            Ok(Value::Str(Rc::new(joined)))
+            //
+            // The result's length is known before it is allocated — a string element
+            // is borrowed rather than copied, and only the others are rendered — so a
+            // join past the string cap is refused instead of built.
+            let parts: Vec<std::borrow::Cow<'_, str>> = items
+                .iter()
+                .map(|v| match v {
+                    Value::Str(t) => std::borrow::Cow::Borrowed(t.as_str()),
+                    other => std::borrow::Cow::Owned(other.to_string()),
+                })
+                .collect();
+            let total = parts
+                .iter()
+                .fold(sep.len().saturating_mul(parts.len().saturating_sub(1)), |n, p| {
+                    n.saturating_add(p.len())
+                });
+            crate::interp::growth::check_text("join", total, line, col)?;
+            let mut out = crate::interp::growth::text_buffer("join", total, line, col)?;
+            for (i, p) in parts.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(sep);
+                }
+                out.push_str(p);
+            }
+            Ok(Value::Str(Rc::new(out)))
         }
         "reverse" => {
             no_args(name)?;
@@ -1061,7 +1085,7 @@ pub(crate) fn array_method(
             };
             let n = items.len().min(other.len());
             let out: Vec<Value> = (0..n)
-                .map(|i| Value::Tuple(Rc::new(vec![items[i].clone(), other[i].clone()])))
+                .map(|i| Value::tuple(vec![items[i].clone(), other[i].clone()]))
                 .collect();
             Ok(Value::array(out))
         }
@@ -1070,7 +1094,7 @@ pub(crate) fn array_method(
             let out: Vec<Value> = items
                 .iter()
                 .enumerate()
-                .map(|(i, v)| Value::Tuple(Rc::new(vec![Value::Int(i as i64), v.clone()])))
+                .map(|(i, v)| Value::tuple(vec![Value::Int(i as i64), v.clone()]))
                 .collect();
             Ok(Value::array(out))
         }
@@ -1080,7 +1104,7 @@ pub(crate) fn array_method(
             let out: Vec<Value> = value_histogram(items)
                 .into_iter()
                 .take(n)
-                .map(|(v, c)| Value::Tuple(Rc::new(vec![v, Value::Int(c)])))
+                .map(|(v, c)| Value::tuple(vec![v, Value::Int(c)]))
                 .collect();
             Ok(Value::array(out))
         }
@@ -1090,7 +1114,7 @@ pub(crate) fn array_method(
             no_args(name)?;
             let out: Vec<Value> = value_histogram(items)
                 .into_iter()
-                .map(|(v, c)| Value::Tuple(Rc::new(vec![v, Value::Int(c)])))
+                .map(|(v, c)| Value::tuple(vec![v, Value::Int(c)]))
                 .collect();
             Ok(Value::array(out))
         }
@@ -1181,7 +1205,16 @@ pub(crate) fn array_method(
         // `xs.concat(a, b, …)` — append the elements of each array argument. The
         // result is re-sniffed so a numeric concat stays a packed (fast) array.
         "concat" => {
-            let mut out = items.to_vec();
+            // Sized up front and reserved fallibly: the size guard already ran in
+            // `call_method`, and a result under the budget can still be refused memory.
+            let total = args.iter().fold(items.len(), |n, a| match a {
+                Value::Array(arr) => n.saturating_add(arr.len()),
+                _ => n,
+            });
+            let mut out: Vec<Value> = Vec::new();
+            crate::value::reserve_more(&mut out, total)
+                .map_err(|lim| crate::vm::materialize_refused(lim, line, col))?;
+            out.extend_from_slice(items);
             for (k, a) in args.iter().enumerate() {
                 match a {
                     Value::Array(arr) => out.extend(arr.to_values().iter().cloned()),
@@ -1229,6 +1262,15 @@ pub(crate) fn array_method(
                 if n <= items.len() {
                     let count = items.len() - n + 1;
                     window_count_guard("windows", count, line, col)?;
+                    // Overlapping windows copy each element up to `n` times: 100k
+                    // elements in windows of 50k is 2.5 BILLION slots. Each window is a
+                    // boxed array of `n` plus its slot in the result.
+                    check_array(
+                        "windows",
+                        count.saturating_mul(n + 1).saturating_mul(crate::interp::growth::SLOT),
+                        line,
+                        col,
+                    )?;
                     out.reserve(count);
                     for w in items.windows(n) {
                         out.push(Value::array(w.to_vec()));
@@ -1239,7 +1281,15 @@ pub(crate) fn array_method(
                 // the last group is short when the length does not divide evenly —
                 // dropping it would silently lose data, which is worse than a ragged
                 // tail the caller can see and handle.
-                window_count_guard("chunks", items.len().div_ceil(n), line, col)?;
+                let count = items.len().div_ceil(n);
+                window_count_guard("chunks", count, line, col)?;
+                // Every element once, plus one slot per chunk — `chunks(1)` doubles it.
+                check_array(
+                    "chunks",
+                    (items.len() + count).saturating_mul(crate::interp::growth::SLOT),
+                    line,
+                    col,
+                )?;
                 for c in items.chunks(n) {
                     out.push(Value::array(c.to_vec()));
                 }
@@ -1252,6 +1302,7 @@ pub(crate) fn array_method(
             if !args.is_empty() {
                 return Err(HelixError::new("`flatten` takes no arguments", line, col));
             }
+            crate::interp::growth::flatten_guard(items, line, col)?;
             // Concatenating packed columns needs no boxing at all. The general path below
             // boxes every inner element twice — once when `to_values()` materializes the
             // inner array, again into `out` — before `array_sniff` unpacks the lot again:
@@ -1274,8 +1325,10 @@ pub(crate) fn array_method(
                 !items.is_empty() && items.iter().all(|v| inner(v).is_some_and(f))
             };
             let width = || items.iter().filter_map(inner).map(|a| a.len()).sum();
+            let refused = |lim| crate::vm::materialize_refused(lim, line, col);
             if all(|a| matches!(a, ArrayData::Ints(_) | ArrayData::Range { .. })) {
-                let mut out: Vec<i64> = Vec::with_capacity(width());
+                let mut out: Vec<i64> = Vec::new();
+                crate::value::reserve_more(&mut out, width()).map_err(refused)?;
                 for a in items.iter().filter_map(inner) {
                     if let Some(xs) = a.to_ints() {
                         out.extend_from_slice(&xs);
@@ -1284,7 +1337,8 @@ pub(crate) fn array_method(
                 return Ok(Value::int_array(out));
             }
             if all(|a| matches!(a, ArrayData::Floats(_))) {
-                let mut out: Vec<f64> = Vec::with_capacity(width());
+                let mut out: Vec<f64> = Vec::new();
+                crate::value::reserve_more(&mut out, width()).map_err(refused)?;
                 for a in items.iter().filter_map(inner) {
                     if let ArrayData::Floats(xs) = a {
                         out.extend_from_slice(xs);
@@ -1292,10 +1346,15 @@ pub(crate) fn array_method(
                 }
                 return Ok(Value::float_array(out));
             }
-            let mut out: Vec<Value> = Vec::with_capacity(items.len());
+            let total = items.iter().fold(0usize, |n, v| match v {
+                Value::Array(a) => n.saturating_add(a.len()),
+                _ => n.saturating_add(1),
+            });
+            let mut out: Vec<Value> = Vec::new();
+            crate::value::reserve_more(&mut out, total).map_err(refused)?;
             for v in items {
                 match v {
-                    Value::Array(a) => out.extend(a.to_values().iter().cloned()),
+                    Value::Array(a) => out.extend(a.iter_values()),
                     other => out.push(other.clone()),
                 }
             }
@@ -1852,65 +1911,137 @@ const SEVERAL_KEYS_HINT: &str = "to sort by several keys return a TUPLE, compare
 /// hold the same kind in every item, which is what makes `list_key_cmp` a total order:
 /// Rust's sort may panic on a comparator that is not one (ADR 0024). `missing` and Bool
 /// are refused inside a key, as they are outside one.
-#[derive(PartialEq)]
-enum KeyShape {
-    Num,
-    Str,
-    Dna,
-    Bytes,
-    List(Vec<KeyShape>),
+///
+/// SHAPES ARE INTERNED: every distinct shape is stored once and named by a number, a tuple
+/// is measured once however many keys hold it, and two shapes are merged once. The check
+/// used to build one tree per key, merged in place — as large as the PATHS through the key,
+/// so a key that holds one part many times (`(x, x)` wrapped forty deep) ran the process
+/// out of memory. Now it costs what the key is.
+#[derive(Default)]
+struct KeyShapes {
+    /// A list shape's columns; shape `LEAVES + i` is `lists[i]`.
+    lists: Vec<Vec<u32>>,
+    by_columns: rustc_hash::FxHashMap<Vec<u32>, u32>,
+    /// A shared tuple's address → its shape (`None`: it holds something that is not a key).
+    /// The tuples are borrowed from the array being sorted, so no address is reused.
+    of_tuple: rustc_hash::FxHashMap<usize, Option<u32>>,
+    merges: rustc_hash::FxHashMap<(u32, u32), Option<u32>>,
+    /// Columns of the tuples being measured, innermost last: no allocation per key.
+    scratch: Vec<u32>,
+}
+
+const NUM: u32 = 0;
+const STR: u32 = 1;
+const DNA: u32 = 2;
+const BYTES: u32 = 3;
+/// The first shape number that names a list.
+const LEAVES: u32 = 4;
+
+impl KeyShapes {
+    fn list(&mut self, columns: &[u32]) -> u32 {
+        if let Some(&id) = self.by_columns.get(columns) {
+            return id;
+        }
+        let id = LEAVES + self.lists.len() as u32;
+        self.lists.push(columns.to_vec());
+        self.by_columns.insert(columns.to_vec(), id);
+        id
+    }
+
+    /// The shape of one key part; `None` when it, or something inside it, is not a key.
+    fn of(&mut self, v: &Value) -> Option<u32> {
+        if v.as_f64().is_some() {
+            return Some(NUM);
+        }
+        let t = match v {
+            Value::Str(_) => return Some(STR),
+            Value::Dna(_) => return Some(DNA),
+            Value::Bytes(_) => return Some(BYTES),
+            Value::Tuple(t) => t,
+            _ => return None,
+        };
+        // Only a tuple something else holds too can be met twice — and only one that holds
+        // tuples is worth remembering (below): a flat key is measured faster than looked up.
+        let shared = (std::rc::Rc::strong_count(t) > 1).then_some(std::rc::Rc::as_ptr(t) as *const u8 as usize);
+        if let Some(addr) = shared
+            && !self.of_tuple.is_empty()
+            && let Some(&known) = self.of_tuple.get(&addr)
+        {
+            return known;
+        }
+        let base = self.scratch.len();
+        let mut shape = None;
+        let mut ok = true;
+        let mut nests = false;
+        for part in t.iter() {
+            match crate::deep::nested(|| self.of(part)) {
+                Some(id) => {
+                    nests |= id >= LEAVES;
+                    self.scratch.push(id)
+                }
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok {
+            // The buffer is lent out for the lookup and handed straight back.
+            let scratch = std::mem::take(&mut self.scratch);
+            shape = Some(self.list(&scratch[base..]));
+            self.scratch = scratch;
+        }
+        self.scratch.truncate(base);
+        if let Some(addr) = shared
+            && (nests || !ok)
+        {
+            self.of_tuple.insert(addr, shape);
+        }
+        shape
+    }
+
+    /// The shape both `a` and `b` fit: equal kinds position by position, the longer list's
+    /// tail kept (a shorter key is a prefix). `None` when some position holds two kinds.
+    fn merge(&mut self, a: u32, b: u32) -> Option<u32> {
+        if a == b {
+            return Some(a);
+        }
+        if a < LEAVES || b < LEAVES {
+            return None;
+        }
+        if let Some(&known) = self.merges.get(&(a, b)) {
+            return known;
+        }
+        let (ca, cb) = (self.lists[(a - LEAVES) as usize].clone(), self.lists[(b - LEAVES) as usize].clone());
+        let mut columns = Vec::with_capacity(ca.len().max(cb.len()));
+        let mut merged = None;
+        let mut ok = true;
+        for i in 0..ca.len().max(cb.len()) {
+            let column = match (ca.get(i), cb.get(i)) {
+                (Some(&x), Some(&y)) => crate::deep::nested(|| self.merge(x, y)),
+                (Some(&x), None) | (None, Some(&x)) => Some(x),
+                (None, None) => None,
+            };
+            match column {
+                Some(c) => columns.push(c),
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok {
+            merged = Some(self.list(&columns));
+        }
+        self.merges.insert((a, b), merged);
+        merged
+    }
 }
 
 fn list_parts(v: &Value) -> Option<Vec<Value>> {
     match v {
-        Value::Tuple(t) => Some(t.as_ref().clone()),
+        Value::Tuple(t) => Some(t.to_vec()),
         _ => None,
-    }
-}
-
-/// Fold `v` into `shape`; false when it holds a different kind at some position.
-fn fits_shape(shape: &mut Option<KeyShape>, v: &Value) -> bool {
-    let leaf = if v.as_f64().is_some() {
-        Some(KeyShape::Num)
-    } else {
-        match v {
-            Value::Str(_) => Some(KeyShape::Str),
-            Value::Dna(_) => Some(KeyShape::Dna),
-            Value::Bytes(_) => Some(KeyShape::Bytes),
-            Value::Tuple(_) => None,
-            _ => return false,
-        }
-    };
-    match (leaf, shape) {
-        (Some(l), slot @ None) => {
-            *slot = Some(l);
-            true
-        }
-        (Some(l), Some(have)) => *have == l,
-        (None, slot) => {
-            let parts = list_parts(v).unwrap_or_default();
-            if slot.is_none() {
-                *slot = Some(KeyShape::List(Vec::new()));
-            }
-            let Some(KeyShape::List(cols)) = slot else { return false };
-            for (i, p) in parts.iter().enumerate() {
-                if i == cols.len() {
-                    let mut fresh = None;
-                    match (fits_shape(&mut fresh, p), fresh) {
-                        (true, Some(f)) => cols.push(f),
-                        _ => return false,
-                    }
-                } else {
-                    let mut have = Some(std::mem::replace(&mut cols[i], KeyShape::Num));
-                    let ok = fits_shape(&mut have, p);
-                    match (ok, have) {
-                        (true, Some(h)) => cols[i] = h,
-                        _ => return false,
-                    }
-                }
-            }
-            true
-        }
     }
 }
 
@@ -1919,8 +2050,19 @@ pub(crate) fn all_list_keys(items: &[Value]) -> bool {
     if items.is_empty() || !items.iter().all(|v| matches!(v, Value::Tuple(_))) {
         return false;
     }
-    let mut shape = None;
-    items.iter().all(|v| fits_shape(&mut shape, v))
+    let mut shapes = KeyShapes::default();
+    let mut all: Option<u32> = None;
+    for v in items {
+        let Some(shape) = shapes.of(v) else { return false };
+        all = match all {
+            None => Some(shape),
+            Some(so_far) => match shapes.merge(so_far, shape) {
+                Some(m) => Some(m),
+                None => return false,
+            },
+        };
+    }
+    true
 }
 
 /// Lexicographic order on tuple keys that passed `all_list_keys`; a shorter prefix first.
@@ -1934,7 +2076,14 @@ pub(crate) fn list_key_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
         _ => {
             let (x, y) = (list_parts(a).unwrap_or_default(), list_parts(b).unwrap_or_default());
             for (p, q) in x.iter().zip(y.iter()) {
-                let o = list_key_cmp(p, q);
+                let o = crate::deep::pair(
+                    crate::deep::REL_KEY,
+                    p,
+                    q,
+                    |o| (*o == Equal).then_some(0),
+                    |_| Equal,
+                    || crate::deep::nested(|| list_key_cmp(p, q)),
+                );
                 if o != Equal {
                     return o;
                 }

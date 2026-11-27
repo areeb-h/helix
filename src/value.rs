@@ -16,8 +16,167 @@ use crate::backend::Df;
 use crate::error::HelixError;
 use crate::symbol::Symbol;
 
+macro_rules! payload_vec {
+    ($(#[$doc:meta])* $name:ident, $elem:ty) => {
+        $(#[$doc])*
+        #[derive(Clone, Default)]
+        pub struct $name(pub Vec<$elem>);
+        impl std::ops::Deref for $name {
+            type Target = Vec<$elem>;
+            #[inline]
+            fn deref(&self) -> &Vec<$elem> {
+                &self.0
+            }
+        }
+        impl std::ops::DerefMut for $name {
+            #[inline]
+            fn deref_mut(&mut self) -> &mut Vec<$elem> {
+                &mut self.0
+            }
+        }
+        impl From<Vec<$elem>> for $name {
+            #[inline]
+            fn from(v: Vec<$elem>) -> Self {
+                $name(v)
+            }
+        }
+        impl FromIterator<$elem> for $name {
+            #[inline]
+            fn from_iter<I: IntoIterator<Item = $elem>>(it: I) -> Self {
+                $name(it.into_iter().collect())
+            }
+        }
+    };
+}
+payload_vec!(
+    /// A tuple's elements. Its own type, not a bare `Vec`, so that freeing it can be
+    /// counted: see [`crate::deep`].
+    Items, Value
+);
+payload_vec!(
+    /// A record's fields, in declaration order. Its own type for the same reason as
+    /// [`Items`].
+    Fields, (Symbol, Value)
+);
+
+// Freeing a container's payload — which happens only when its LAST reference goes — frees
+// its contents on bounded native stack, so a value of any depth can go out of scope
+// (`crate::deep`). Without these the compiler's drop glue recursed once per level, and a
+// deep enough value (a few million levels; a chain of dicts far fewer) killed the process.
+impl Drop for Items {
+    fn drop(&mut self) {
+        crate::deep::free_values(&mut self.0);
+    }
+}
+
+impl Drop for Fields {
+    fn drop(&mut self) {
+        crate::deep::free_fields(&mut self.0);
+    }
+}
+
+impl Drop for ArrayData {
+    fn drop(&mut self) {
+        match self {
+            ArrayData::Values(v) => crate::deep::free_values(v),
+            ArrayData::Enumerate { inner } => crate::deep::free_source(inner),
+            ArrayData::Zip { a, b, .. } => {
+                crate::deep::free_source(a);
+                crate::deep::free_source(b);
+            }
+            ArrayData::Shared { buf, .. } => {
+                if let Some(cell) = Rc::get_mut(buf) {
+                    crate::deep::free_values(cell.get_mut());
+                }
+            }
+            ArrayData::Ints(_) | ArrayData::Floats(_) | ArrayData::Range { .. } => {}
+        }
+    }
+}
+
+impl Drop for Dict {
+    fn drop(&mut self) {
+        // Each part is the dict's to free only if no other dict of its chain still shares it,
+        // and worth counting only if it could nest.
+        if let Some(m) = Rc::get_mut(&mut self.base)
+            && crate::deep::map_nests(m)
+        {
+            crate::deep::free_map(std::mem::take(m));
+        }
+        if let Some(l) = Rc::get_mut(&mut self.adds)
+            && crate::deep::log_nests(l.get_mut())
+        {
+            crate::deep::free_log(std::mem::take(l.get_mut()));
+        }
+        if let Some(c) = Rc::get_mut(&mut self.cache)
+            && let Some((_, m)) = c.get_mut().as_mut()
+            && let Some(m) = Rc::get_mut(m)
+            && crate::deep::map_nests(m)
+        {
+            crate::deep::free_map(std::mem::take(m));
+        }
+    }
+}
+
+impl Drop for ClosureData {
+    fn drop(&mut self) {
+        if let Some(ups) = Rc::get_mut(&mut self.upvalues) {
+            crate::deep::free_values(ups);
+        }
+    }
+}
+
+impl Drop for FuncVal {
+    fn drop(&mut self) {
+        if let Some(c) = Rc::get_mut(&mut self.captured) {
+            crate::deep::free_named(c);
+        }
+        if let Some(d) = Rc::get_mut(&mut self.defaults) {
+            crate::deep::free_values(d);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub enum Value {
+    // The containers that can hold further values come FIRST, together: `Drop`
+    // (`crate::deep::release`) tests "is this a container I own alone?" on every value
+    // it frees, and with the six adjacent that test compiles to a range check and one
+    // load instead of a branch per variant. Nothing else depends on the order.
+    /// An immutable array. Held behind [`ArrayData`], which stores a homogeneous
+    /// numeric array as a packed `Vec<i64>`/`Vec<f64>` (half the memory of boxed
+    /// `Value`s, and cache/SIMD-friendly) and falls back to `Vec<Value>` for
+    /// heterogeneous/nested data — a scientific language's central data structure.
+    Array(Rc<ArrayData>),
+    /// A fixed-size, heterogeneous tuple: `(1, "a", true)`.
+    Tuple(Rc<Items>),
+    /// An ordered record with identifier keys: `{name: "Ada", age: 41}`. Keys are
+    /// interned [`Symbol`]s, so field lookup and dispatch compare a single `u32`
+    /// (not a heap string), the names cost no per-record allocation, and equal
+    /// field names across the whole program share one entry. The text is recovered
+    /// only on cold paths (display, errors, JSON) via [`Symbol::as_str`].
+    Record(Rc<Fields>),
+    /// A keyed map with O(log n) lookup (ADR 0020) — the escape from O(n) `.where`/
+    /// `.contains` scans for counting, vocabularies, bigram tables, etc. A `BTreeMap`
+    /// (not a hash map) so iteration order is **deterministic** (sorted by key),
+    /// matching Helix's reproducibility guarantee. Keys are hashable scalars
+    /// ([`DictKey`]: int, string, bool, or DNA); values are any `Value`. Immutable —
+    /// `insert`/`remove` return a new dict. Backed by [`Dict`]: a settled map plus
+    /// a shared append-only log, so an insert costs O(1) whether or not the value
+    /// is uniquely owned.
+    Dict(Rc<Dict>),
+    /// A VM **closure**: a compiled chunk plus the values it captured from its
+    /// enclosing scope (upvalues). `VmFunc` covers a non-capturing lambda; this
+    /// variant carries the captured environment for one that closes over enclosing
+    /// locals. Boxed behind an `Rc` so `Value` stays 16 bytes; renders identically
+    /// to any other function.
+    Closure(Rc<ClosureData>),
+    /// A function value — from `fn name(p) = expr` or an anonymous `p => expr`.
+    /// Used by the tree-walker (which evaluates `body` directly). The two `Rc`s are
+    /// collapsed behind one (`Rc<FuncVal>`) so this variant is one word, keeping
+    /// `Value` at 16 bytes; the VM uses the inline `VmFunc` instead, so this never
+    /// touches the bytecode hot path.
+    Function(Rc<FuncVal>),
     Int(i64),
     Float(f64),
     /// An exact arbitrary-precision rational (numerator/denominator, always in
@@ -40,13 +199,6 @@ pub enum Value {
     /// preserves that same ordering.
     Bytes(Rc<Vec<u8>>),
     Bool(bool),
-    /// An immutable array. Held behind [`ArrayData`], which stores a homogeneous
-    /// numeric array as a packed `Vec<i64>`/`Vec<f64>` (half the memory of boxed
-    /// `Value`s, and cache/SIMD-friendly) and falls back to `Vec<Value>` for
-    /// heterogeneous/nested data — a scientific language's central data structure.
-    Array(Rc<ArrayData>),
-    /// A fixed-size, heterogeneous tuple: `(1, "a", true)`.
-    Tuple(Rc<Vec<Value>>),
     /// HTTP headers — ordered `(name, value)` pairs whose LOOKUP is case-insensitive
     /// (RFC 9110 §5.1: field names are case-insensitive, and HTTP/2 lowercases them
     /// on the wire, so one program sees both spellings from different servers).
@@ -55,12 +207,6 @@ pub enum Value {
     /// Runtime-only (built by `http_request` responses and `conn.request()`); the
     /// checker sees `Unknown`, the opaque-type pattern shared with Dict and Net.
     Headers(Rc<Vec<(String, String)>>),
-    /// An ordered record with identifier keys: `{name: "Ada", age: 41}`. Keys are
-    /// interned [`Symbol`]s, so field lookup and dispatch compare a single `u32`
-    /// (not a heap string), the names cost no per-record allocation, and equal
-    /// field names across the whole program share one entry. The text is recovered
-    /// only on cold paths (display, errors, JSON) via [`Symbol::as_str`].
-    Record(Rc<Vec<(Symbol, Value)>>),
     /// A dense n-dimensional `f64` tensor (ndarray-backed). See ADR 0007.
     Tensor(Rc<ArrayD<f64>>),
     /// A columnar DataFrame, held behind the engine-agnostic backend seam (ADR
@@ -81,12 +227,6 @@ pub enum Value {
     /// (never stored in arrays or hot loops); inlining its two-word payload would
     /// bloat *every* `Value` — and thus every VM stack push/pop/clone — for nothing.
     GroupBy(Rc<GroupByData>),
-    /// A function value — from `fn name(p) = expr` or an anonymous `p => expr`.
-    /// Used by the tree-walker (which evaluates `body` directly). The two `Rc`s are
-    /// collapsed behind one (`Rc<FuncVal>`) so this variant is one word, keeping
-    /// `Value` at 16 bytes; the VM uses the inline `VmFunc` instead, so this never
-    /// touches the bytecode hot path.
-    Function(Rc<FuncVal>),
     /// A function value in the **VM**: a reference to a compiled chunk
     /// (`program.funcs[idx]`) plus its arity. Equivalent to `Function` for the user
     /// (same `<function/N>` rendering and `Function` type name); the VM uses a chunk
@@ -97,12 +237,6 @@ pub enum Value {
         idx: u32,
         arity: u32,
     },
-    /// A VM **closure**: a compiled chunk plus the values it captured from its
-    /// enclosing scope (upvalues). `VmFunc` covers a non-capturing lambda; this
-    /// variant carries the captured environment for one that closes over enclosing
-    /// locals. Boxed behind an `Rc` so `Value` stays 16 bytes; renders identically
-    /// to any other function.
-    Closure(Rc<ClosureData>),
     /// A validated DNA sequence (uppercase A/C/G/T).
     Dna(Rc<String>),
     /// Absent data — distinct from any real value and from float `NaN`.
@@ -122,15 +256,6 @@ pub enum Value {
     /// backpropagate. Created by `variable(x)`; one word (`Rc`), so `Value` stays
     /// 16 bytes. Pure at the surface — the graph's interior mutability is hidden.
     Node(Rc<crate::autodiff::Node>),
-    /// A keyed map with O(log n) lookup (ADR 0020) — the escape from O(n) `.where`/
-    /// `.contains` scans for counting, vocabularies, bigram tables, etc. A `BTreeMap`
-    /// (not a hash map) so iteration order is **deterministic** (sorted by key),
-    /// matching Helix's reproducibility guarantee. Keys are hashable scalars
-    /// ([`DictKey`]: int, string, bool, or DNA); values are any `Value`. Immutable —
-    /// `insert`/`remove` return a new dict. Backed by [`Dict`]: a settled map plus
-    /// a shared append-only log, so an insert costs O(1) whether or not the value
-    /// is uniquely owned.
-    Dict(Rc<Dict>),
     /// An opaque network handle — a bound HTTP listener or a single accepted
     /// connection (see `src/serve.rs`). Held behind an `Rc` so the variant is one
     /// word. Effect-only (created by `listen`, consumed by `accept`/`respond`); never
@@ -624,7 +749,7 @@ impl ArrayData {
             // Lazy `enumerate`: the `(index, element)` tuple, built on demand — identical
             // to the materialized `Value::Tuple([Int(i), inner[i]])`.
             ArrayData::Enumerate { inner } => {
-                Value::Tuple(std::rc::Rc::new(vec![Value::Int(i as i64), inner.get(i)]))
+                Value::tuple(vec![Value::Int(i as i64), inner.get(i)])
             }
             // O(1). `i < len <= buf.len()` and the buffer is append-only, so this slot is
             // settled — no later append can change what an existing value reads.
@@ -639,7 +764,7 @@ impl ArrayData {
             // Lazy `zip`: the `(a[i], b[i])` pair, built on demand — identical to the
             // materialized `Value::Tuple([a[i], b[i]])` the eager path built.
             ArrayData::Zip { a, b, .. } => {
-                Value::Tuple(std::rc::Rc::new(vec![a.get(i), b.get(i)]))
+                Value::tuple(vec![a.get(i), b.get(i)])
             }
         }
     }
@@ -717,8 +842,13 @@ impl ArrayData {
     ///
     /// Seeding costs one copy of the receiver, which is why a fold is linear overall: the
     /// seed happens once (on a short or empty accumulator) and every later step is O(1).
-    /// Returning `None` is always safe — it is the behaviour that shipped.
-    pub fn concat_shared(cur: &std::rc::Rc<ArrayData>, add: &ArrayData) -> Option<Value> {
+    /// Returning `None` is always safe — it is the behaviour that shipped. Every buffer it
+    /// grows grows FALLIBLY: `Err` is an allocation the system refused (ADR 0024), which the
+    /// caller reports rather than letting `Vec` abort the process.
+    pub fn concat_shared(
+        cur: &std::rc::Rc<ArrayData>,
+        add: &ArrayData,
+    ) -> Result<Option<Value>, MaterializeLimit> {
         use std::rc::Rc;
         match &**cur {
             ArrayData::Shared { buf, len, views } => {
@@ -728,7 +858,9 @@ impl ArrayData {
                 // is a `RefCell` double borrow — a panic on a user-reachable path, which
                 // ADR 0024 forbids outright. Collecting first costs O(|add|), which is the
                 // payload's own cost and the same guard `concat_in_place` already pays.
-                let addition: Vec<Value> = add.iter_values().collect();
+                let mut addition: Vec<Value> = Vec::new();
+                reserve_more(&mut addition, add.len())?;
+                addition.extend(add.iter_values());
                 // A CYCLE IS REFUSED BEFORE THE CELL IS TAKEN. Appending a value that holds
                 // a view of THIS buffer (`a.concat([a])`, `a.concat([{inner: a}])`) would
                 // store, inside the buffer, an `Rc` to the buffer: a cycle no drop ever
@@ -751,42 +883,47 @@ impl ArrayData {
                 // two branches would see each other's elements. A cyclic addition goes the
                 // same way, for the reason above.
                 if b.len() != *len || cyclic {
-                    let mut fresh: Vec<Value> = b[..*len].to_vec();
+                    let mut fresh: Vec<Value> = Vec::new();
+                    reserve_more(&mut fresh, *len + addition.len())?;
+                    fresh.extend_from_slice(&b[..*len]);
                     drop(b);
                     fresh.extend(addition);
                     let len = fresh.len();
-                    return Some(Value::Array(Rc::new(ArrayData::Shared {
+                    return Ok(Some(Value::Array(Rc::new(ArrayData::Shared {
                         buf: Rc::new(std::cell::RefCell::new(fresh)),
                         len,
                         views: Rc::new(std::cell::Cell::new(views.get() || adds_view)),
-                    })));
+                    }))));
                 }
+                reserve_more(&mut *b, addition.len())?;
                 b.extend(addition);
                 let len = b.len();
                 drop(b);
                 if adds_view {
                     views.set(true);
                 }
-                Some(Value::Array(Rc::new(ArrayData::Shared {
+                Ok(Some(Value::Array(Rc::new(ArrayData::Shared {
                     buf: Rc::clone(buf),
                     len,
                     views: Rc::clone(views),
-                })))
+                }))))
             }
             // Seed. Every other variant becomes a buffer on its first append; the copy here
             // is the one the eager path would have made anyway. A brand-new buffer cannot be
             // reached by anything yet, so the only question is what it holds.
             _ => {
-                let mut fresh: Vec<Value> = cur.to_values().into_owned();
+                let mut fresh: Vec<Value> = Vec::new();
+                reserve_more(&mut fresh, cur.len() + add.len())?;
+                fresh.extend(cur.iter_values());
                 fresh.extend(add.iter_values());
                 let len = fresh.len();
                 let mut vb = CYCLE_SCAN_BUDGET;
                 let any_view = fresh.iter().any(|x| holds_view(x, &mut vb));
-                Some(Value::Array(Rc::new(ArrayData::Shared {
+                Ok(Some(Value::Array(Rc::new(ArrayData::Shared {
                     buf: Rc::new(std::cell::RefCell::new(fresh)),
                     len,
                     views: Rc::new(std::cell::Cell::new(any_view)),
-                })))
+                }))))
             }
         }
     }
@@ -862,6 +999,13 @@ fn reserve_one<T>(v: &mut Vec<T>) -> Result<(), MaterializeLimit> {
         })?;
     }
     Ok(())
+}
+
+/// Make room for `more` elements, growing as `Vec` would (amortized doubling) but
+/// *fallibly*: the many-element sibling of [`reserve_one`], for appends of a whole array.
+pub(crate) fn reserve_more<T>(v: &mut Vec<T>, more: usize) -> Result<(), MaterializeLimit> {
+    v.try_reserve(more)
+        .map_err(|_| MaterializeLimit::Alloc((v.len() + more).saturating_mul(std::mem::size_of::<T>())))
 }
 
 /// Promote a packed buffer to boxed `Value`s, reserving fallibly up front.
@@ -1084,6 +1228,18 @@ fn type_slot(name: &str) -> Option<usize> {
 }
 
 impl Value {
+    /// A tuple of these elements.
+    #[inline]
+    pub fn tuple(items: Vec<Value>) -> Value {
+        Value::Tuple(Rc::new(Items(items)))
+    }
+
+    /// A record of these fields, in this order.
+    #[inline]
+    pub fn record(fields: Vec<(Symbol, Value)>) -> Value {
+        Value::Record(Rc::new(Fields(fields)))
+    }
+
     /// Wrap a backend DataFrame handle into a `Value`. The extra `Rc` keeps the
     /// `DataFrame` variant one word wide (see the variant's doc); construct through
     /// here so the wrapping lives in one place.
@@ -1150,16 +1306,20 @@ impl Value {
     /// spellings would silently diverge in performance and, through the packed paths,
     /// potentially in more than that. Everything else falls through to the identical
     /// `to_values` + `array_sniff` `concat` performs.
-    pub fn concat_in_place(cur: Rc<ArrayData>, add: &ArrayData) -> Value {
+    ///
+    /// Every buffer grows FALLIBLY; `Err` is an allocation the system refused (ADR 0024).
+    pub fn concat_in_place(cur: Rc<ArrayData>, add: &ArrayData) -> Result<Value, MaterializeLimit> {
         let mut cur = cur;
         match (Rc::get_mut(&mut cur), add) {
             (Some(ArrayData::Ints(v)), ArrayData::Ints(w)) if !v.is_empty() || !w.is_empty() => {
+                reserve_more(v, w.len())?;
                 v.extend_from_slice(w);
-                return Value::Array(cur);
+                return Ok(Value::Array(cur));
             }
             (Some(ArrayData::Floats(v)), ArrayData::Floats(w)) if !v.is_empty() || !w.is_empty() => {
+                reserve_more(v, w.len())?;
                 v.extend_from_slice(w);
-                return Value::Array(cur);
+                return Ok(Value::Array(cur));
             }
             // A `Values` accumulator whose argument carries a NON-NUMERIC witness. The
             // representation argument that keeps this fast path honest: `array_sniff`
@@ -1178,14 +1338,17 @@ impl Value {
                     .iter()
                     .any(|x| !matches!(x, Value::Int(_) | Value::Float(_))) =>
             {
+                reserve_more(v, add.len())?;
                 v.extend(add.to_values().iter().cloned());
-                return Value::Array(cur);
+                return Ok(Value::Array(cur));
             }
             _ => {}
         }
-        let mut out = cur.to_values().into_owned();
-        out.extend(add.to_values().iter().cloned());
-        Value::array_sniff(out)
+        let mut out: Vec<Value> = Vec::new();
+        reserve_more(&mut out, cur.len() + add.len())?;
+        out.extend(cur.iter_values());
+        out.extend(add.iter_values());
+        Ok(Value::array_sniff(out))
     }
 
     /// `cur.insert(k, v)` — O(1) amortized whoever else holds `cur`, by appending to its
@@ -1446,83 +1609,26 @@ impl fmt::Display for Value {
             Value::PyObject(h) => write!(f, "{}", h.repr()),
             // A tracked value prints as its forward value (the graph stays hidden).
             Value::Node(n) => write!(f, "{}", crate::autodiff::node_value(n)),
-            Value::Array(items) => {
-                write!(f, "[")?;
-                for (i, v) in items.to_values().iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    // Strings inside arrays are quoted for clarity.
-                    match v {
-                        Value::Str(s) => write!(f, "\"{}\"", s)?,
-                        other => write!(f, "{}", other)?,
-                    }
-                }
-                write!(f, "]")
-            }
-            Value::Tuple(items) => {
-                write!(f, "(")?;
-                for (i, v) in items.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    match v {
-                        Value::Str(s) => write!(f, "\"{}\"", s)?,
-                        other => write!(f, "{}", other)?,
+            // Containers have ONE renderer, `write_text`: guarded for depth, aware of
+            // sharing, held to the one-string cap. Here it runs lossy (a frame that cannot
+            // be drawn prints its placeholder, as this impl always did) and cannot fail: a
+            // value whose text would pass the cap prints its opening and an ellipsis. Until
+            // this, such a value — one that holds a sub-value many times — printed until
+            // the allocator gave up, and took the process with it (tables and CSV cells
+            // come through here).
+            Value::Array(_) | Value::Tuple(_) | Value::Record(_) | Value::Dict(_) => {
+                let mut text = String::new();
+                match write_text(&mut text, self, "print", true, 0, 0) {
+                    Ok(()) => f.write_str(&text),
+                    Err(_) => {
+                        let mut end = text.len().min(256);
+                        while !text.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        f.write_str(&text[..end])?;
+                        f.write_str("…")
                     }
                 }
-                // a 1-tuple prints as `(x,)` to disambiguate from grouping
-                if items.len() == 1 {
-                    write!(f, ",")?;
-                }
-                write!(f, ")")
-            }
-            Value::Record(fields) => {
-                // CANONICAL field order (sorted by name, decided 2026-08-24):
-                // `==` always ignored order and `to_json` always sorted, so the
-                // printer was the one place a record's CONSTRUCTION ROUTE showed
-                // — a doc example would document one code path and fail on the
-                // other (field review §1.5). Sorting prints the VALUE.
-                //
-                // Perf shape: `as_str` takes the interner lock, so resolve each
-                // name ONCE (n locks, not n·log n·2), and an already-sorted
-                // record — the common case once writers adopt the canon — skips
-                // the index sort entirely.
-                let names: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
-                let mut order: Vec<usize> = (0..fields.len()).collect();
-                if !names.windows(2).all(|w| w[0] <= w[1]) {
-                    order.sort_unstable_by(|&a, &b| names[a].cmp(names[b]));
-                }
-                write!(f, "{{")?;
-                for (i, &fi) in order.iter().enumerate() {
-                    let (k, v) = &fields[fi];
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    let key = field_key_display(k.as_str());
-                    match v {
-                        Value::Str(s) => write!(f, "{}: \"{}\"", key, s)?,
-                        other => write!(f, "{}: {}", key, other)?,
-                    }
-                }
-                write!(f, "}}")
-            }
-            // `{k => v}` arrow notation (sorted by key) — visually distinct from a
-            // record's bare-identifier `{field: v}`; string keys and values are quoted.
-            Value::Dict(map) => {
-                write!(f, "{{")?;
-                let q = |v: &Value| match v {
-                    Value::Str(s) => format!("\"{}\"", s),
-                    other => format!("{}", other),
-                };
-                let map = map.map();
-                for (i, (k, v)) in map.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{} => {}", q(&k.to_value()), q(v))?;
-                }
-                write!(f, "}}")
             }
             // Headers print in WIRE ORDER with names as they arrived — the same
             // arrow notation as a Dict, so the two read alike, but unsorted,
@@ -1548,58 +1654,158 @@ impl fmt::Display for Value {
 /// collections so a frame nested in an Array/Tuple/Record propagates too; every
 /// other (leaf) value can't fail and delegates to `Display`.
 pub fn display_value(v: &Value, line: usize, col: usize) -> Result<String, HelixError> {
+    let mut s = String::new();
+    write_text(&mut s, v, "print", false, line, col)?;
+    Ok(s)
+}
+
+/// One value's text being written: the buffer, and what every level of the walk needs.
+struct Text<'a> {
+    s: &'a mut String,
+    /// The operation named when the text passes the one-string cap.
+    op: &'a str,
+    line: usize,
+    col: usize,
+    /// A frame that cannot be drawn prints its placeholder instead of failing.
+    lossy: bool,
+    /// This walk's number: a remembered span is an offset into THIS buffer.
+    walk: usize,
+}
+
+/// Append `v`'s text to `s` — the one renderer behind `print`, interpolation, `Display` and
+/// every cell.
+///
+/// ONE buffer for the whole value: building each level's text as its own `String` and
+/// copying it into the level above made printing a value nested `d` deep cost O(d²). Every
+/// append is held to the one-string cap, and a container met again is COPIED from where its
+/// text already lies in the buffer rather than walked again — so a value that holds one
+/// sub-value many times (`[x, x]` wrapped forty deep) is refused as soon as its text would
+/// pass the cap, in about the time it takes to write that much text, instead of after a walk
+/// of its 2^40 leaves (ADR 0024).
+fn write_text(s: &mut String, v: &Value, op: &str, lossy: bool, line: usize, col: usize) -> Result<(), HelixError> {
+    let _walk = crate::deep::scope();
+    write_display(&mut Text { s, op, line, col, lossy, walk: crate::deep::walk_id() }, v)
+}
+
+fn write_display(t: &mut Text, v: &Value) -> Result<(), HelixError> {
+    use crate::interp::growth::push;
+    let (op, line, col) = (t.op, t.line, t.col);
     match v {
-        Value::DataFrame(df) => crate::framefmt::frame_text(&***df, line, col),
+        Value::DataFrame(df) => {
+            let frame = if t.lossy {
+                crate::framefmt::frame_text_lossy(&***df)
+            } else {
+                crate::framefmt::frame_text(&***df, line, col)?
+            };
+            push(op, t.s, &frame, line, col)?;
+        }
         Value::Array(items) => {
-            let mut s = String::from("[");
+            push(op, t.s, "[", line, col)?;
             for (i, it) in items.to_values().iter().enumerate() {
                 if i > 0 {
-                    s.push_str(", ");
+                    push(op, t.s, ", ", line, col)?;
                 }
-                s.push_str(&display_elem(it, line, col)?);
+                write_elem(t, it)?;
             }
-            s.push(']');
-            Ok(s)
+            push(op, t.s, "]", line, col)?;
         }
         Value::Tuple(items) => {
-            let mut s = String::from("(");
+            push(op, t.s, "(", line, col)?;
             for (i, it) in items.iter().enumerate() {
                 if i > 0 {
-                    s.push_str(", ");
+                    push(op, t.s, ", ", line, col)?;
                 }
-                s.push_str(&display_elem(it, line, col)?);
+                write_elem(t, it)?;
             }
             // a 1-tuple prints as `(x,)` to disambiguate from grouping
-            if items.len() == 1 {
-                s.push(',');
-            }
-            s.push(')');
-            Ok(s)
+            push(op, t.s, if items.len() == 1 { ",)" } else { ")" }, line, col)?;
         }
         Value::Record(fields) => {
-            // Canonical sorted field order — the same rule (and the same perf
-            // shape: one interner resolve per name) `Display` applies.
+            // CANONICAL field order (sorted by name, decided 2026-08-24): `==` always
+            // ignored order and `to_json` always sorted, so the printer was the one place a
+            // record's CONSTRUCTION ROUTE showed — a doc example would document one code
+            // path and fail on the other (field review §1.5). Sorting prints the VALUE.
+            //
+            // Perf shape: `as_str` takes the interner lock, so resolve each name ONCE (n
+            // locks, not n·log n·2), and an already-sorted record — the common case once
+            // writers adopt the canon — skips the index sort entirely.
             let names: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
             let mut order: Vec<usize> = (0..fields.len()).collect();
             if !names.windows(2).all(|w| w[0] <= w[1]) {
                 order.sort_unstable_by(|&a, &b| names[a].cmp(names[b]));
             }
-            let mut s = String::from("{");
+            push(op, t.s, "{", line, col)?;
             for (i, &fi) in order.iter().enumerate() {
                 let (k, val) = &fields[fi];
                 if i > 0 {
-                    s.push_str(", ");
+                    push(op, t.s, ", ", line, col)?;
                 }
-                s.push_str(&field_key_display(k.as_str()));
-                s.push_str(": ");
-                s.push_str(&display_elem(val, line, col)?);
+                push(op, t.s, &field_key_display(k.as_str()), line, col)?;
+                push(op, t.s, ": ", line, col)?;
+                write_elem(t, val)?;
             }
-            s.push('}');
-            Ok(s)
+            push(op, t.s, "}", line, col)?;
+        }
+        // `{k => v}` arrow notation (sorted by key) — visually distinct from a record's
+        // bare-identifier `{field: v}`; string keys and values are quoted. A frame inside a
+        // dict has always printed its placeholder when it cannot be drawn, so the dict's
+        // contents are written lossy whatever the caller asked.
+        Value::Dict(map) => {
+            let was_lossy = std::mem::replace(&mut t.lossy, true);
+            let map = map.map();
+            let mut out = push(op, t.s, "{", line, col);
+            for (i, (k, val)) in map.iter().enumerate() {
+                if out.is_err() {
+                    break;
+                }
+                out = (|| {
+                    if i > 0 {
+                        push(op, t.s, ", ", line, col)?;
+                    }
+                    write_elem(t, &k.to_value())?;
+                    push(op, t.s, " => ", line, col)?;
+                    write_elem(t, val)
+                })();
+            }
+            t.lossy = was_lossy;
+            out?;
+            push(op, t.s, "}", line, col)?;
         }
         // Scalars and other leaf values can't fail to render.
-        other => Ok(other.to_string()),
+        other => push(op, t.s, &other.to_string(), line, col)?,
     }
+    Ok(())
+}
+
+/// One element of a container: a string quoted, a scalar written, a container rendered in
+/// place — one level deeper, on stack that [`crate::deep::nested`] guarantees — or, when
+/// this walk has already written that very container, copied from where its text lies.
+fn write_elem(t: &mut Text, v: &Value) -> Result<(), HelixError> {
+    use crate::interp::growth::push;
+    let (op, line, col) = (t.op, t.line, t.col);
+    if let Value::Str(x) = v {
+        push(op, t.s, "\"", line, col)?;
+        push(op, t.s, x, line, col)?;
+        return push(op, t.s, "\"", line, col);
+    }
+    let Some(node) = crate::deep::node(v) else { return write_display(t, v) };
+    // A frame's text depends on `lossy`, so it is part of what a remembered span answers.
+    let key = (node.key, t.walk, crate::deep::REL_TEXT | (t.lossy as u32) << 8);
+    let (step, hit) = crate::deep::step(key, node.shared);
+    if let Some(Value::Int(span)) = hit {
+        let (start, len) = ((span >> 32) as usize, (span & 0xffff_ffff) as usize);
+        if t.s.len().saturating_add(len) > crate::interp::MAX_STRING_LEN {
+            return Err(crate::interp::growth::text_too_long(op, line, col));
+        }
+        t.s.try_reserve(len).map_err(|_| crate::interp::growth::no_memory_for(op, t.s.len() + len, line, col))?;
+        t.s.extend_from_within(start..start + len);
+        return Ok(());
+    }
+    let start = t.s.len();
+    crate::deep::nested(|| write_display(t, v))?;
+    let len = t.s.len() - start;
+    step.done(|| Some(Value::Int((start as i64) << 32 | len as i64)), v, v);
+    Ok(())
 }
 
 /// Append `v`'s display form straight into `buf` — the allocation-free counterpart
@@ -1629,8 +1835,10 @@ pub fn with_article(type_name: &str) -> String {
 pub fn write_value(buf: &mut String, v: &Value, line: usize, col: usize) -> Result<(), HelixError> {
     use std::fmt::Write as _;
     match v {
-        Value::Array(_) | Value::Tuple(_) | Value::Record(_) | Value::DataFrame(_) => {
-            buf.push_str(&display_value(v, line, col)?);
+        // A dict is here with the other containers so that one whose text would pass the
+        // one-string cap is refused, as they are; through `Display` it would be cut short.
+        Value::Array(_) | Value::Tuple(_) | Value::Record(_) | Value::Dict(_) | Value::DataFrame(_) => {
+            write_text(buf, v, "interpolation", false, line, col)?;
         }
         // The shapes that dominate interpolation, appended DIRECTLY. `write!(buf, "{}",
         // value)` costs two nested `fmt::Arguments` dispatches — one to reach
@@ -1701,15 +1909,6 @@ fn push_i64(buf: &mut String, i: i64) {
             use std::fmt::Write as _;
             let _ = write!(buf, "{}", i);
         }
-    }
-}
-
-/// Element rendering inside a collection: strings are quoted (matching `Display`),
-/// everything else goes through `display_value` so nested frames stay fallible.
-fn display_elem(v: &Value, line: usize, col: usize) -> Result<String, HelixError> {
-    match v {
-        Value::Str(s) => Ok(format!("\"{}\"", s)),
-        other => display_value(other, line, col),
     }
 }
 
@@ -1832,7 +2031,7 @@ mod tests {
             Value::Str(Rc::new("a".to_string())),
             Value::Bool(true),
             Value::array(vec![Value::Int(1)]),
-            Value::Tuple(Rc::new(vec![Value::Int(1)])),
+            Value::tuple(vec![Value::Int(1)]),
             Value::Missing,
             Value::Unit,
             Value::Bytes(Rc::new(vec![1u8])),

@@ -90,11 +90,11 @@ pub fn read_fasta(path: &str, line: usize, col: usize) -> Result<Value, HelixErr
 
         crate::error::try_push(
             &mut records,
-            Value::Record(Rc::new(vec![
+            Value::record(vec![
                 (k_id, Value::Str(Rc::new(id))),
                 (k_seq, Value::Dna(Rc::new(seq))),
                 (k_length, Value::Int(length)),
-            ])),
+            ]),
             "FASTA records",
             line,
             col,
@@ -137,12 +137,12 @@ pub fn read_fastq(path: &str, line: usize, col: usize) -> Result<Value, HelixErr
 
         crate::error::try_push(
             &mut records,
-            Value::Record(Rc::new(vec![
+            Value::record(vec![
                 (k_id, Value::Str(Rc::new(id))),
                 (k_seq, Value::Dna(Rc::new(seq))),
                 (k_qual, qual),
                 (k_length, Value::Int(length)),
-            ])),
+            ]),
             "FASTQ records",
             line,
             col,

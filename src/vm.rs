@@ -755,9 +755,9 @@ fn rebuild_acc(template: &Value, buf: Vec<i64>) -> Value {
         Value::Record(r) => {
             let fields: Vec<(crate::symbol::Symbol, Value)> =
                 r.iter().zip(buf).map(|((sym, _), i)| (*sym, Value::Int(i))).collect();
-            Value::Record(std::rc::Rc::new(fields))
+            Value::record(fields)
         }
-        _ => Value::Tuple(std::rc::Rc::new(buf.into_iter().map(Value::Int).collect())),
+        _ => Value::tuple(buf.into_iter().map(Value::Int).collect()),
     }
 }
 
@@ -798,9 +798,9 @@ fn rebuild_acc_f64(template: &Value, buf: Vec<i64>) -> Value {
         Value::Record(r) => {
             let fields: Vec<(crate::symbol::Symbol, Value)> =
                 r.iter().zip(buf).map(|((sym, _), i)| (*sym, f(i))).collect();
-            Value::Record(std::rc::Rc::new(fields))
+            Value::record(fields)
         }
-        _ => Value::Tuple(std::rc::Rc::new(buf.into_iter().map(f).collect())),
+        _ => Value::tuple(buf.into_iter().map(f).collect()),
     }
 }
 
@@ -1114,7 +1114,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         col,
                     ));
                 };
-                if !matches!(locals[at], Value::Array(_)) {
+                let Value::Array(held) = &locals[at] else {
                     return Err(HelixError::new(
                         format!(
                             "{} has no method `concat`",
@@ -1123,14 +1123,17 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         line,
                         col,
                     ));
-                }
+                };
+                // The size guard every `concat` passes (the walker's twin calls the same).
+                crate::interp::growth::concat_one_guard(held, add, line, col)?;
                 let add = add.clone();
                 // Now the take: the slot's `Rc` loses its second owner, so an accumulator
                 // nothing else aliases becomes unique and can be extended in place.
                 let Value::Array(cur) = std::mem::replace(&mut locals[at], Value::Unit) else {
                     unreachable!("accumulator type checked immediately above")
                 };
-                locals[at] = Value::concat_in_place(cur, &add);
+                locals[at] = Value::concat_in_place(cur, &add)
+                    .map_err(|lim| materialize_refused(lim, line, col))?;
             }
             Op::InsertIntoLocal(slot) => {
                 // Pushed key-then-value, so the value pops first. Both pops are guaranteed
@@ -1757,7 +1760,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
             Op::MakeTuple(n) => {
                 let start = stack.len() - *n as usize;
                 let items: Vec<Value> = stack.split_off(start);
-                stack.push(Value::Tuple(std::rc::Rc::new(items)));
+                stack.push(Value::tuple(items));
             }
             Op::MakeRecord(names) => {
                 let start = stack.len() - names.len();
@@ -1766,7 +1769,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 // each) — no per-record key allocation.
                 let fields: Vec<(crate::symbol::Symbol, Value)> =
                     names.iter().copied().zip(vals).collect();
-                stack.push(Value::Record(std::rc::Rc::new(fields)));
+                stack.push(Value::record(fields));
             }
             Op::UpdateRecord(names) => {
                 let start = stack.len() - names.len();
@@ -1779,7 +1782,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 for (name, val) in names.iter().copied().zip(vals) {
                     crate::interp::set_field(&mut out, name, val);
                 }
-                stack.push(Value::Record(std::rc::Rc::new(out)));
+                stack.push(Value::record(out));
             }
             Op::SpreadRecord => {
                 let (Some(extra), Some(acc)) = (stack.pop(), stack.pop()) else {
@@ -1788,7 +1791,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let mut out: Vec<(crate::symbol::Symbol, Value)> = Vec::new();
                 crate::interp::spread_into(&mut out, &acc, line, col)?;
                 crate::interp::spread_into(&mut out, &extra, line, col)?;
-                stack.push(Value::Record(std::rc::Rc::new(out)));
+                stack.push(Value::record(out));
             }
             Op::GetField(name) => {
                 let recv = stack.pop().unwrap();

@@ -251,6 +251,12 @@ pub(crate) fn call_method(
             // `Rc` (the caller's binding plus the stack value), so it cannot be extended
             // in place. Making THAT O(1) needs last-use liveness in the compiler so the
             // final read of a binding moves instead of cloning; see docs/ROADMAP.md.
+            // Every `concat` — and every array spread, which the parser lowers to one —
+            // knows its result's length before any path below allocates it, so one O(args)
+            // guard here covers the packed, shared and general paths alike (ADR 0024).
+            if name == "concat" {
+                crate::interp::growth::concat_guard(items, args, line, col)?;
+            }
             if name == "concat" && !args.is_empty() {
                 if let Some(head) = items.to_ints() {
                     let mut tails = Vec::with_capacity(args.len());
@@ -273,7 +279,9 @@ pub(crate) fn call_method(
                     }
                     if tails.len() == args.len() {
                         let total = head.len() + tails.iter().map(|t| t.len()).sum::<usize>();
-                        let mut out: Vec<i64> = Vec::with_capacity(total);
+                        let mut out: Vec<i64> = Vec::new();
+                        crate::value::reserve_more(&mut out, total)
+                            .map_err(|lim| crate::vm::materialize_refused(lim, line, col))?;
                         out.extend_from_slice(&head);
                         for t in &tails {
                             out.extend_from_slice(t);
@@ -302,7 +310,9 @@ pub(crate) fn call_method(
                     }
                     if tails.len() == args.len() {
                         let total = head.len() + tails.iter().map(|t| t.len()).sum::<usize>();
-                        let mut out: Vec<f64> = Vec::with_capacity(total);
+                        let mut out: Vec<f64> = Vec::new();
+                        crate::value::reserve_more(&mut out, total)
+                            .map_err(|lim| crate::vm::materialize_refused(lim, line, col))?;
                         out.extend_from_slice(head);
                         for t in &tails {
                             out.extend_from_slice(t);
@@ -440,7 +450,9 @@ pub(crate) fn call_method(
                 for a in args {
                     match a {
                         Value::Array(add) => {
-                            match crate::value::ArrayData::concat_shared(&acc, add) {
+                            let next = crate::value::ArrayData::concat_shared(&acc, add)
+                                .map_err(|lim| crate::vm::materialize_refused(lim, line, col))?;
+                            match next {
                                 Some(Value::Array(next)) => acc = next,
                                 // Any decline abandons the whole fast path rather than
                                 // leaving a half-appended accumulator behind.
@@ -536,7 +548,7 @@ pub(crate) fn call_method(
 /// is a fixed-size positional product, and `map`/`filter` on the Array `values()` returns
 /// says so at the call site.
 fn tuple_method(
-    items: &std::rc::Rc<Vec<Value>>,
+    items: &std::rc::Rc<crate::value::Items>,
     name: &str,
     args: &[Value],
     line: usize,
@@ -557,7 +569,7 @@ fn tuple_method(
             if !args.is_empty() {
                 return Err(HelixError::new("`values` takes no arguments", line, col));
             }
-            Ok(Value::array((**items).clone()))
+            Ok(Value::array(items.to_vec()))
         }
         _ => Err(no_such_method(&Value::Tuple(items.clone()), name, line, col)),
     }

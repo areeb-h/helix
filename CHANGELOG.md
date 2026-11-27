@@ -4,6 +4,60 @@
 
 ### Fixed
 
+- **A value that holds one part many times hung, or killed the process.** `[x, x]` wrapped
+  sixty times is sixty-one arrays and 2^60 leaves — small in memory, astronomically large as
+  a tree — and nearly every operation treated it as the tree. `==`, `!=`, `unique`,
+  `contains`, `frequencies`, `assert_eq` and tuple `<` never finished. Worse, anything that
+  BUILT a tree from one ran the machine out of memory and died, on all three engines:
+  `v + 1` and the other elementwise operations, `abs`/`sqrt`/`is_nan`, sorting such tuples
+  (the check that keys agree position by position), `tensor(v)` (whose element count
+  overflowed), printing a dict, and a `to_table`/`to_markdown`/`to_html`/`write_csv` cell.
+  Each walk now answers once per distinct container (`deep::once`): a comparison costs the
+  containers it meets, and elementwise arithmetic returns a result that shares wherever its
+  input did. Text that would pass the one-string cap is refused in about a second (it took
+  twenty to thirty to fill the cap one leaf at a time, where it did not crash first); a
+  table or CSV cell that long shows its opening and an ellipsis; `tensor` past a billion
+  elements is refused in `zeros`' own words. Values that do not share pay two counter
+  updates per container compared: +0.1–0.6% on record, dict and string workloads, +0.75% on
+  one made only of comparisons, sorting and printing.
+- **A deeply nested value killed the process.** A program can nest a value as deep as its
+  memory allows — a tail-recursive loop wrapping an accumulator, `build(n - 1, [acc])` or
+  `{next: acc}`, makes a million levels in under a second — but almost everything the runtime
+  then did with it recursed once per level on the native stack and died with `fatal runtime
+  error: stack overflow` on all three engines: printing or interpolating it, `==`/`!=`,
+  `to_json`/`write_json`, `unique`, `frequencies`, `contains`, `index_of`, a `match` guard,
+  sorting or comparing nested tuples, arithmetic and `abs`/`sqrt`/`is_nan` over nested arrays,
+  `to_table`/`to_markdown`/`to_html`/`write_csv` — 87 operations by the first count — and, at a
+  few million levels (a chain of dicts far fewer), merely letting the value go out of scope.
+  Every walk over a value now continues on heap-allocated stack as it deepens (as deep Helix
+  calls already did), and freeing a container counts how deep it has gone and finishes the
+  rest from the top of the stack (`src/deep.rs`), so any value a program can build it can
+  also print, compare, serialize and drop. Three of those walks were also slow in depth, which
+  would have turned the crash into a hang: printing copied every level's text once per level
+  above it (now written into one buffer), tuple `<` compared each pair in full before
+  descending into it (now one pass), and `tensor` measured a nested array's first row twice
+  per level — exponential, so a 60-deep `[[[…[1]…]]]` would never have finished (now once,
+  and a tensor is limited to 64 axes, NumPy's limit). A value that holds one sub-value many
+  times (`[x, x]` wrapped forty deep) prints to more text than any memory holds: that is now
+  the one-string cap's error, not an allocator abort. The cost on ordinary programs is +0.2%
+  of instructions across the examples; printing records, tuples and strings got faster.
+- **Growing a string or array past 1 GB killed the process.** A loop that doubled a value with
+  `replace`, `re_replace`, `concat`, `join`, `html_escape`, `to_json`, `hex_encode`, `flatten`,
+  an array spread `[...xs, ...xs]`, or a large `windows` died with `memory allocation of N
+  bytes failed` (SIGABRT) on all three engines, and `try` could not catch it. Every operation
+  whose result can be larger than its inputs now works out the result's size before building
+  it and refuses past the limits Helix already had — 1 GiB for one string (as `repeat` and
+  interpolation do), 1 GiB of elements for one array (as `map` does): `` `replace` would exceed
+  1073741824 bytes `` or `` `concat` would build an array of more than 1024 MB, which is too
+  large ``, each with a hint, the same on every engine. This covers the string methods
+  `replace`, `replace_first`, `re_replace`, `concat`, `upper`, `normalize`, `chars`, `split`,
+  `re_split`, `re_find_all`; `html_escape`, `url_encode`, `base64_encode`, `hex_encode`,
+  `to_json` and `write_json`; `Bytes` `concat`, `to_hex` and `to_base64`; and the array
+  methods `concat` (with spreads and the `reduce` fast path), `join`, `flatten` (so
+  `flat_map`), `windows`, `chunks`, and `Dna` `windows` and `kmers`. Ordinary inputs pay only
+  an O(1) bound. A result under the limit that the system still has no memory for is a clean
+  error too ("there is not enough memory to hold …"), and `hex_encode` no longer takes
+  minutes on large input.
 - **A sharded server's listening sockets leaked into the programs it ran.** `listen(port, n)`
   with `n > 1` made its sockets without close-on-exec, so any program the app ran with `run`
   inherited them and could accept the app's connections. They are close-on-exec now,
@@ -24,6 +78,20 @@
 
 ### Changed
 
+- **One renderer for a value's text.** `print`, interpolation, `Display` and every table or
+  CSV cell now go through the same writer (`write_text` in `src/value.rs`), so they cannot
+  disagree about how a value is written; the printed form of every value is unchanged.
+- **`to_json` writes JSON directly.** It used to build a `serde_json` tree and serialize that;
+  it now writes straight into one buffer, byte-for-byte what the old route wrote (checked
+  against it on 20,000 random values), without the intermediate tree. One visible difference:
+  when a record holds more than one value JSON cannot represent, the error names the first in
+  key order rather than in declaration order.
+- **`scripts/deepvalues.py` in CI.** 281 programs build a value 100,000 deep of each container
+  kind — and of each kind holding the level below TWICE, which is 2^100000 leaves — and apply
+  every operation that takes one, on all three engines with a 4 MB evaluator stack. Four hard oracles: no abort, engines agree, no run past its time limit (a walk that is
+  quadratic in depth takes hours at this depth), and each operation does what it must — deep
+  values are supported, so a change that refused them with an error fails too. On the
+  previous release it reports 489 aborts on the deep shapes alone.
 - **One pinned Rust version.** `rust-toolchain.toml` pins Rust 1.100.0 for local builds, CI and
   the release builds, so a tag always builds with the same compiler. A weekly job
   (`stable-canary.yml`) tries the newest stable, and the MSRV job still checks 1.96.

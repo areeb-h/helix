@@ -413,36 +413,66 @@ fn group_thousands(digits: &str) -> String {
 
 /// Render `v` as a single colored line — used for list elements and nested cells.
 fn render_compact(v: &Value, opts: &RenderOpts) -> String {
+    let mut out = String::new();
+    write_compact(&mut out, v, opts);
+    out
+}
+
+/// How much text one compact line may build before the rest is elided. A compact line is a
+/// cell or a list element on a terminal, cut to [`CELL_MAX`] or the screen's width anyway; the
+/// bound is what keeps a value holding one sub-value many times (`[x, x]` wrapped forty deep)
+/// from building more text than memory holds before the cut.
+const COMPACT_MAX: usize = 1 << 20;
+
+/// [`render_compact`], appended to `out`: one buffer for the whole value. Formatting each
+/// level into its own `String` copied every level once per level above it (O(d²) for a
+/// value nested `d` deep), and each step into a child is a guarded one ([`crate::deep`]).
+fn write_compact(out: &mut String, v: &Value, opts: &RenderOpts) {
+    if out.len() > COMPACT_MAX {
+        if !out.ends_with('…') {
+            out.push('…');
+        }
+        return;
+    }
+    let items = |out: &mut String, xs: &[Value]| {
+        for (i, e) in xs.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            crate::deep::nested(|| write_compact(out, e, opts));
+        }
+    };
     match v {
         Value::Array(a) => {
-            let inner: Vec<String> =
-                a.to_values().iter().map(|e| render_compact(e, opts)).collect();
-            format!("{}{}{}", opts.paint(Role::Dim, "["), inner.join(", "), opts.paint(Role::Dim, "]"))
+            out.push_str(&opts.paint(Role::Dim, "["));
+            items(out, &a.to_values());
+            out.push_str(&opts.paint(Role::Dim, "]"));
         }
-        Value::Tuple(items) => {
-            let mut inner: Vec<String> = items.iter().map(|e| render_compact(e, opts)).collect();
-            if items.len() == 1 {
-                inner.push(String::new()); // trailing comma → `(x,)`
+        Value::Tuple(xs) => {
+            out.push_str(&opts.paint(Role::Dim, "("));
+            items(out, xs);
+            if xs.len() == 1 {
+                out.push_str(", "); // trailing comma → `(x,)`, as the joined form wrote it
             }
-            format!("{}{}{}", opts.paint(Role::Dim, "("), inner.join(", "), opts.paint(Role::Dim, ")"))
+            out.push_str(&opts.paint(Role::Dim, ")"));
         }
         Value::Record(fields) => {
             // Canonical sorted field order — the same rule `Display` applies;
             // the sweep found the rich (TTY) path still showing insertion
             // order, so `print(r)` and `"{r}"` disagreed in one session.
-            let inner: Vec<String> = sorted_fields(fields)
-                .map(|(k, val)| {
-                    format!(
-                        "{}: {}",
-                        opts.paint(Role::Key, &crate::value::field_key_display(k.as_str())),
-                        render_compact(val, opts)
-                    )
-                })
-                .collect();
-            format!("{}{}{}", opts.paint(Role::Dim, "{"), inner.join(", "), opts.paint(Role::Dim, "}"))
+            out.push_str(&opts.paint(Role::Dim, "{"));
+            for (i, (k, val)) in sorted_fields(fields).enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&opts.paint(Role::Key, &crate::value::field_key_display(k.as_str())));
+                out.push_str(": ");
+                crate::deep::nested(|| write_compact(out, val, opts));
+            }
+            out.push_str(&opts.paint(Role::Dim, "}"));
         }
-        Value::DataFrame(_) => opts.paint(Role::Dim, "<dataframe>"),
-        leaf => color_leaf(leaf, opts, true),
+        Value::DataFrame(_) => out.push_str(&opts.paint(Role::Dim, "<dataframe>")),
+        leaf => out.push_str(&color_leaf(leaf, opts, true)),
     }
 }
 
@@ -464,8 +494,8 @@ fn sorted_fields(fields: &[(Symbol, Value)]) -> impl Iterator<Item = &(Symbol, V
 }
 
 fn render_record(fields: &[(Symbol, Value)], opts: &RenderOpts) -> String {
-    let inline = render_compact(&Value::Record(std::rc::Rc::new(fields.to_vec())), opts);
-    let plain_w = dw(&compact_plain(&Value::Record(std::rc::Rc::new(fields.to_vec())), opts));
+    let inline = render_compact(&Value::record(fields.to_vec()), opts);
+    let plain_w = dw(&compact_plain(&Value::record(fields.to_vec()), opts));
     if plain_w <= opts.width || fields.len() <= 1 {
         return inline;
     }
@@ -869,7 +899,7 @@ mod tests {
     }
 
     fn rec(pairs: &[(&str, Value)]) -> Value {
-        Value::Record(Rc::new(pairs.iter().map(|(k, v)| (Symbol::intern(k), v.clone())).collect()))
+        Value::record(pairs.iter().map(|(k, v)| (Symbol::intern(k), v.clone())).collect())
     }
 
     #[test]

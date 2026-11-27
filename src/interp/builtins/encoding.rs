@@ -83,6 +83,12 @@ pub(crate) fn html_escape(s: &str) -> std::borrow::Cow<'_, str> {
         return std::borrow::Cow::Borrowed(s);
     };
     let mut out = String::with_capacity(s.len() + 16);
+    escape_from(&mut out, s, first);
+    std::borrow::Cow::Owned(out)
+}
+
+/// Append `s` escaped to `out`, given the index of its first byte that needs escaping.
+fn escape_from(out: &mut String, s: &str, first: usize) {
     out.push_str(&s[..first]);
     for c in s[first..].chars() {
         match c {
@@ -94,7 +100,35 @@ pub(crate) fn html_escape(s: &str) -> std::borrow::Cow<'_, str> {
             _ => out.push(c),
         }
     }
-    std::borrow::Cow::Owned(out)
+}
+
+/// The escape of text large enough that its result could pass the string cap, or `None`
+/// for everything else — which [`html_escape`] then handles as it always has.
+///
+/// An escape is at most six bytes (`&quot;` for `"`), so only text past a sixth of the cap
+/// is measured. That text's result is sized exactly, refused past the cap, and built into a
+/// buffer of exactly that size, reserved fallibly.
+fn html_escape_large(s: &str, line: usize, col: usize) -> Result<Option<String>, HelixError> {
+    if s.len().saturating_mul(6) <= crate::interp::MAX_STRING_LEN {
+        return Ok(None);
+    }
+    let grow: usize = s
+        .bytes()
+        .map(|b| match b {
+            b'&' | b'\'' => 4,
+            b'<' | b'>' => 3,
+            b'"' => 5,
+            _ => 0,
+        })
+        .sum();
+    if grow == 0 {
+        return Ok(None);
+    }
+    let len = s.len() + grow;
+    crate::interp::growth::check_text("html_escape", len, line, col)?;
+    let mut out = crate::interp::growth::text_buffer("html_escape", len, line, col)?;
+    escape_from(&mut out, s, 0);
+    Ok(Some(out))
 }
 
 /// `html_escape(s)` — the builtin. Every server-rendering program needs this and every one
@@ -105,12 +139,17 @@ pub(super) fn a_html_escape(name: &str, args: Vec<Value>, line: usize, col: usiz
     match &args[0] {
         // `missing` propagates rather than becoming the text "missing" in a page (ADR 0001).
         Value::Missing => Ok(Value::Missing),
-        Value::Str(s) => match html_escape(s) {
-            // Borrowed means nothing needed escaping, so hand back the SAME `Rc` rather
-            // than a copy of it.
-            std::borrow::Cow::Borrowed(_) => Ok(Value::Str(Rc::clone(s))),
-            std::borrow::Cow::Owned(t) => Ok(Value::Str(Rc::new(t))),
-        },
+        Value::Str(s) => {
+            if let Some(big) = html_escape_large(s, line, col)? {
+                return Ok(Value::Str(Rc::new(big)));
+            }
+            match html_escape(s) {
+                // Borrowed means nothing needed escaping, so hand back the SAME `Rc` rather
+                // than a copy of it.
+                std::borrow::Cow::Borrowed(_) => Ok(Value::Str(Rc::clone(s))),
+                std::borrow::Cow::Owned(t) => Ok(Value::Str(Rc::new(t))),
+            }
+        }
         other => Err(type_err("html_escape", "a string", other, line, col)),
     }
 }
@@ -158,7 +197,19 @@ pub(super) fn a_url_encode(args: Vec<Value>, line: usize, col: usize) -> Result<
         match &args[0] {
             Value::Missing => Ok(Value::Missing),
             Value::Str(s) => {
-                let mut out = String::with_capacity(s.len());
+                // `%XX` is three bytes for one, so only text past a third of the string
+                // cap is measured — exactly, before anything is built.
+                let mut out = if s.len().saturating_mul(3) > crate::interp::MAX_STRING_LEN {
+                    let kept = s
+                        .bytes()
+                        .filter(|b| b.is_ascii_alphanumeric() || b"-._~".contains(b) || extra.contains(b))
+                        .count();
+                    let bytes = kept + 3 * (s.len() - kept);
+                    crate::interp::growth::check_text("url_encode", bytes, line, col)?;
+                    crate::interp::growth::text_buffer("url_encode", bytes, line, col)?
+                } else {
+                    String::with_capacity(s.len())
+                };
                 for byte in s.as_bytes() {
                     match byte {
                         b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_'
@@ -276,9 +327,7 @@ pub(super) fn a_base64_encode(name: &str, args: Vec<Value>, line: usize, col: us
         match &args[0] {
             Value::Missing => Ok(Value::Missing),
             Value::Str(s) => {
-                use base64::Engine;
-                let enc = base64::engine::general_purpose::STANDARD.encode(s.as_bytes());
-                Ok(Value::Str(Rc::new(enc)))
+                Ok(Value::Str(Rc::new(crate::interp::growth::base64(name, s.as_bytes(), line, col)?)))
             }
             other => Err(type_err("base64_encode", "a string", other, line, col)),
         }
@@ -317,7 +366,11 @@ pub(super) fn a_hex_encode(name: &str, args: Vec<Value>, line: usize, col: usize
         match &args[0] {
             Value::Missing => Ok(Value::Missing),
             Value::Str(s) | Value::Dna(s) => {
-                Ok(Value::Str(Rc::new(s.bytes().map(|b| format!("{b:02x}")).collect())))
+                // Exactly two digits a byte, by the one hex encoder `Bytes` prints with:
+                // the old `format!` per byte made a large input crawl for minutes before it
+                // could abort.
+                crate::interp::growth::check_text(name, s.len().saturating_mul(2), line, col)?;
+                Ok(Value::Str(Rc::new(crate::value::bytes_to_hex(s.as_bytes()))))
             }
             other => Err(type_err("hex_encode", "a string", other, line, col)),
         }
@@ -458,10 +511,10 @@ pub(super) fn a_ed25519_keygen(name: &str, args: Vec<Value>, line: usize, col: u
         let pk = sk.verifying_key();
         let priv_hex: String = sk.to_bytes().iter().map(|b| format!("{b:02x}")).collect();
         let pub_hex: String = pk.to_bytes().iter().map(|b| format!("{b:02x}")).collect();
-        Ok(Value::Record(Rc::new(vec![
+        Ok(Value::record(vec![
             (crate::symbol::Symbol::intern("private"), Value::Str(Rc::new(priv_hex))),
             (crate::symbol::Symbol::intern("public"), Value::Str(Rc::new(pub_hex))),
-        ])))
+        ]))
     
 }
 
