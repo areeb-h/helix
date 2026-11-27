@@ -72,6 +72,12 @@
   model tests −24% to −27%, record, closure, `match` and call-heavy programs −25% to −31%,
   string and dict programs −18%. Output and errors are unchanged on all three engines. The
   programs and the numbers are in `bench/general/`.
+- **The VM keeps the running function's position in registers.** Between a call and a return
+  the VM re-read the current frame for every instruction — which function, where in it, where
+  its locals start — and wrote the position back. Those are now locals of the loop, reloaded
+  only when a call, a return or a caught error changes the frame. A further −8.0% of
+  instructions across the 56 examples (5.69 billion, from 8.15 at the start of this work),
+  −7% to −11% on record, closure, `match` and rule code.
 - **An app starts sooner.** Before running anything, the JIT asks which functions can reach
   themselves through calls, and it answered by checking every pair of functions — every body
   walked once per function in the program, seven times over. A program that imports `std.ui`

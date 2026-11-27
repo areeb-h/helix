@@ -169,7 +169,45 @@ bytes on all three engines.
 | orbit | 592,608,289 | 582,982,608 | −1.6% |
 | the other eleven | | | 0.0% |
 
+Suite: 6,188,976,380 → 6,188,703,266, 0.00% (no example renders a view).
+
 **Tried first and not kept:** resolving the prop's name to its symbol (`Symbol::lookup`) and
 comparing symbols. One lookup — lock, hash the name, compare the text — costs more than the
 two or three per-field lock-and-compares it replaces on a typical props record: app +3.2%,
 gallery +5.0%, orbit +1.3%.
+
+### 4. The running frame's instruction pointer, code and locals base are locals (`src/vm.rs`, `exec`)
+
+After change 1 the loop's own cost was about 35 instructions per op, most of it re-deriving
+what does not change between a call and a return: index the top frame, bounds-check its
+function, load the instruction pointer, bounds-check it against the code and again against
+the position table, store the advanced pointer back. The loop is now two loops: `'frame`
+loads `ip`, the code slice and the locals base into locals; `'ops` runs instructions against
+them; an arm that pushes, pops or re-points a frame says `continue 'frame`. A jump is an
+assignment to a local. The one obligation it creates — an arm that PUSHES a frame must
+write `ip` back first, because that is where its `Return` resumes — is at six places
+(the two pushes in `enter_call!`, `CallValue`, the two function-valued-field calls in
+`Method`), and `tests/corpus/vm_frames_resume.helix` runs every way into and out of a
+frame, each followed by more work in the caller, on all three engines against a golden
+taken from the tree-walker of the branch point.
+
+| workload | before | after | |
+|---|--:|--:|--:|
+| records | 674,301,496 | 621,669,816 | −7.8% |
+| nested | 723,463,396 | 673,158,053 | −7.0% |
+| strings | 360,562,711 | 340,386,190 | −5.6% |
+| closures | 582,767,879 | 535,084,964 | −8.2% |
+| match | 849,511,009 | 758,735,263 | −10.7% |
+| dicts | 479,732,598 | 451,172,704 | −6.0% |
+| methods | 835,873,282 | 788,575,844 | −5.7% |
+| calls | 775,615,361 | 714,413,679 | −7.9% |
+| app | 545,347,349 | 542,505,454 | −0.5% |
+| gallery | 1,542,424,901 | 1,506,669,535 | −2.3% |
+| orbit | 582,982,608 | 574,595,513 | −1.4% |
+| freezer_model | 766,825,196 | 695,592,299 | −9.3% |
+| updates_model | 1,026,482,717 | 921,398,363 | −10.2% |
+| lockout_model | 463,408,973 | 428,832,332 | −7.5% |
+
+Suite: 6,188,703,266 → 5,692,717,479, **−8.0%** (`statistics/simulation` −10.3%, the rule
+model tests −7.5% to −10.2%, `language/recursion` −9.7%); the largest plus sign is
+`numerics/tensors` +0.85%, a 3.2 M-instruction program inside the ±1% start-up noise.
