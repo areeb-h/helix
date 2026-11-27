@@ -81,7 +81,16 @@ records its session, and the recording reproduces the bug on any machine and any
   command line. Replaying the same program is a reproduction; replaying a changed one tests
   the change against a real session, and the replay says which it is.
 - **One command.** `helix replay app.helix session.jsonl` reproduces the session, including
-  the error `update` raised and the event that caused it.
+  the error `update` raised and the event that caused it, with the command line it was
+  recorded with. `--view page.html` writes one self-contained page of every screen as
+  replayed, what led to it, what it read and whether it matched: the thing a bug report links
+  to.
+- **A corpus is a CI gate.** `helix replay app.helix sessions/` replays every session in the
+  folder, a few at a time, one line each, and fails if any screen differs; real sessions become
+  regression tests that need no test code. A change made on purpose is taken with `--accept`,
+  which rewrites only the screens (and which program drew them): the events and everything the
+  world answered are kept byte for byte, and a session whose app now reads something else is
+  refused, to be recorded again.
 - **Limits, stated.** A value that cannot be written down (a database connection, a
   DataFrame) is recorded as opaque, and a session that needs one says it cannot replay that
   step. Methods that only READ through a handle (`db.query`) are not on the tape yet.

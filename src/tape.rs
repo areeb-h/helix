@@ -257,6 +257,8 @@ fn program() -> Option<J> {
 /// `session_tape("started")` — on a replay, end the startup: `true` if it made exactly the
 /// recorded calls.
 /// `session_tape("program")` — this run's `{sha256, modules, args, helix}`, or `missing`.
+/// `session_tape("options")` — `{view, accept}`: what `helix replay --view/--accept` asked for.
+/// `session_tape("accept", screens)` — rewrite the session with these screens and this program.
 /// `session_tape("diverged")` — why the replay went another way, or `missing`.
 /// `session_tape("begin")` — start capturing one step.
 /// `session_tape("event", ev)` / `session_tape("view", screen)` — write the step.
@@ -310,6 +312,59 @@ pub fn session_tape(args: &[Value], line: usize, col: usize) -> Result<Value, He
             }
             Ok(Value::Bool(divergence().is_none()))
         }
+        // `--view` and `--accept`, which `helix replay` passes to the replaying run.
+        "options" => {
+            let view = std::env::var("HELIX_REPLAY_VIEW").ok().filter(|v| !v.is_empty());
+            Ok(Value::Record(Rc::new(vec![
+                (Symbol::intern("view"), view.map_or(Value::Missing, |v| Value::Str(Rc::new(v)))),
+                (Symbol::intern("accept"), Value::Bool(std::env::var_os("HELIX_REPLAY_ACCEPT").is_some())),
+            ])))
+        }
+        // `--accept`: this program's screens become the recorded ones. Only the screens and
+        // the program: events and effects are what happened, and are kept byte for byte.
+        "accept" => {
+            let screens: Vec<String> = match &arg {
+                Value::Array(a) => a.to_values().iter().map(|v| match v {
+                    Value::Str(s) => Ok(s.to_string()),
+                    _ => Err(()),
+                }).collect::<Result<_, _>>().map_err(|()| HelixError::new("`session_tape(\"accept\", screens)` takes the screens as strings", line, col))?,
+                _ => return Err(HelixError::new("`session_tape(\"accept\", screens)` takes a list of screens", line, col)),
+            };
+            let path = std::env::var_os("HELIX_REPLAY").ok_or_else(|| HelixError::new("no session to accept (HELIX_REPLAY is not set)", line, col))?;
+            let mut entries = ENTRIES.with(|e| e.borrow().clone()).ok_or_else(|| HelixError::new("the session has not been read", line, col))?;
+            let views = entries.iter().filter(|j| j.get("kind").and_then(J::as_str) == Some("view")).count();
+            if views != screens.len() {
+                return Err(HelixError::new(format!("the session has {views} screens and the replay drew {}", screens.len()), line, col));
+            }
+            let mut next = screens.into_iter();
+            for j in &mut entries {
+                let Some(o) = j.as_object_mut() else { continue };
+                match o.get("kind").and_then(J::as_str) {
+                    Some("view") => {
+                        if let Some(h) = next.next() {
+                            o.insert("screen".into(), J::String(h));
+                        }
+                    }
+                    Some("start") => {
+                        if let Some(p) = program() {
+                            o.insert("program".into(), p);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let mut text = String::new();
+            for j in &entries {
+                text.push_str(&serde_json::to_string(j).map_err(|e| HelixError::new(format!("{e}"), line, col))?);
+                text.push('\n');
+            }
+            // Written beside it, then renamed over it: a crash leaves the old session whole.
+            let path = std::path::PathBuf::from(path);
+            let tmp = path.with_extension("jsonl.accepting");
+            std::fs::write(&tmp, text).map_err(io)?;
+            std::fs::rename(&tmp, &path).map_err(io)?;
+            Ok(Value::Unit)
+        }
         "program" => Ok(match program() {
             Some(p) => decode_plain(&p),
             None => Value::Missing,
@@ -360,7 +415,21 @@ pub fn session_tape(args: &[Value], line: usize, col: usize) -> Result<Value, He
                     if let J::Object(o) = j {
                         for (k, v) in o {
                             if k == "effects" {
-                                out.push((Symbol::intern("calls"), Value::Int(v.as_array().map_or(0, |a| a.len()) as i64)));
+                                let calls = v.as_array().map(Vec::as_slice).unwrap_or(&[]);
+                                out.push((Symbol::intern("calls"), Value::Int(calls.len() as i64)));
+                                // What each call was and whether it answered, for the viewer:
+                                // not the values, which may be large or private.
+                                let reads = calls
+                                    .iter()
+                                    .map(|c| {
+                                        let name = c.get("fn").and_then(J::as_str).unwrap_or("?");
+                                        Value::Record(Rc::new(vec![
+                                            (Symbol::intern("fn"), Value::Str(Rc::new(name.into()))),
+                                            (Symbol::intern("ok"), Value::Bool(c.get("error").is_none())),
+                                        ]))
+                                    })
+                                    .collect();
+                                out.push((Symbol::intern("reads"), Value::array(reads)));
                             } else if k == "program" {
                                 out.push((Symbol::intern(k), decode_plain(v)));
                             } else {

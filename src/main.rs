@@ -2543,41 +2543,140 @@ fn run_emit_rust(args: &[String]) -> ExitCode {
 /// a child process — the same isolation `helix test --engines` relies on — and with `--engines`
 /// all three engines replay it and must print the same thing.
 fn run_replay(args: &[String]) -> ExitCode {
-    if args.iter().skip(2).any(|a| a == "--help" || a == "-h") {
+    const USAGE: &str = "helix replay <app.helix> <session.jsonl | folder>… [--engines] [--view <file | folder>] [--accept] [-- <args>…]";
+    let (ours, theirs) = match args.iter().skip(2).position(|a| a == "--") {
+        Some(i) => (&args[2..2 + i], Some(&args[3 + i..])),
+        None => (&args[2..], None),
+    };
+    if ours.iter().any(|a| a == "--help" || a == "-h") {
         println!(
-            "helix replay <app.helix> <session.jsonl> [--engines]\n\n\
+            "{USAGE}\n\n\
              Reproduce a recorded app session (ADR 0063). Record one with\n\n    \
              HELIX_RECORD=session.jsonl helix run app.helix\n\n\
-             The replay sends the recorded events through the app's `update` and `view`. What they\n\
-             read from the world (the clock, files, responses) comes from the recording, so nothing\n\
-             is read, written or sent, and the result is the same on any machine. It reports how\n\
-             many screens came out identical and fails if any differ.\n\n\
-             --engines  replay on all three engines and fail if they disagree"
+             The replay sends the recorded events through the app's `update` and `view`, with the\n\
+             command line it was recorded with. What the app read from the world (the clock, files,\n\
+             responses), from its first line on, comes from the recording, so nothing is read,\n\
+             written or sent, and the result is the same on any machine. It reports how many screens\n\
+             came out identical and fails if any differ.\n\n\
+             Several sessions, or a folder of them (`*.jsonl`, at any depth), replay as a corpus: each\n\
+             in its own process, a few at a time, with one line each. A CI gate.\n\n\
+             --engines  replay on all three engines and fail if they disagree\n\
+             --view     write the session viewer: one self-contained page with every screen as\n           \
+             replayed, what led to it and whether it matched (for a corpus, a folder: a\n           \
+             page for each session that fails)\n\
+             --accept   the screens changed on purpose: record this program's screens in the session\n           \
+             (refused when the app now reads something it did not read when recorded)\n\
+             -- <args>  run the app with these arguments instead of the recorded ones"
         );
         return ExitCode::SUCCESS;
     }
-    let engines = args.iter().skip(2).any(|a| a == "--engines");
-    let pos: Vec<&String> = args.iter().skip(2).filter(|a| !a.starts_with("--")).collect();
-    let (Some(app), Some(session)) = (pos.first(), pos.get(1)) else {
+    let engines = ours.iter().any(|a| a == "--engines");
+    let accept = ours.iter().any(|a| a == "--accept");
+    let mut view = None;
+    let mut pos: Vec<&String> = Vec::new();
+    let mut it = ours.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--view" => match it.next() {
+                Some(v) => view = Some(v.clone()),
+                None => {
+                    eprintln!("error: `--view` needs a file to write (for several sessions, a folder)\n{USAGE}");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--engines" | "--accept" => {}
+            other if other.starts_with("--") => {
+                eprintln!("error: `helix replay` has no option `{other}`\n{USAGE}");
+                return ExitCode::FAILURE;
+            }
+            _ => pos.push(a),
+        }
+    }
+    let Some((app, sources)) = pos.split_first().filter(|(_, s)| !s.is_empty()) else {
         eprintln!(
             "error: `helix replay` needs an app and a recorded session, e.g. `helix replay app.helix session.jsonl`\n\
              help: record one with `HELIX_RECORD=session.jsonl helix run app.helix`"
         );
         return ExitCode::FAILURE;
     };
-    if !std::path::Path::new(session.as_str()).is_file() {
-        eprintln!("error: no session file `{session}`\nhelp: record one with `HELIX_RECORD={session} helix run {app}`");
+    if accept && engines {
+        eprintln!("error: `--accept` rewrites the session, so it cannot run beside `--engines`: accept, then replay with `--engines`");
         return ExitCode::FAILURE;
     }
     let Ok(exe) = std::env::current_exe() else {
         eprintln!("error: cannot find this helix binary to run the replay");
         return ExitCode::FAILURE;
     };
+    if sources.len() == 1 && !std::path::Path::new(sources[0].as_str()).is_dir() {
+        return replay_one(&exe, app, sources[0], engines, view.as_deref(), accept, theirs);
+    }
+    let mut sessions = Vec::new();
+    for s in sources {
+        let p = std::path::Path::new(s.as_str());
+        if p.is_dir() {
+            if let Err(e) = sessions_under(p, &mut sessions) {
+                eprintln!("error: cannot read the folder `{s}`: {e}");
+                return ExitCode::FAILURE;
+            }
+        } else {
+            sessions.push(p.to_path_buf());
+        }
+    }
+    sessions.sort();
+    sessions.dedup();
+    if sessions.is_empty() {
+        eprintln!("error: no sessions (`*.jsonl`) in {}", sources.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
+        return ExitCode::FAILURE;
+    }
+    replay_corpus(&exe, app, &sessions, engines, view.as_deref(), accept, theirs)
+}
+
+/// Every `*.jsonl` under `dir`, at any depth: a corpus can be organised in folders.
+fn sessions_under(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
+    for e in std::fs::read_dir(dir)? {
+        let p = e?.path();
+        if p.is_dir() {
+            sessions_under(&p, out)?;
+        } else if p.extension().is_some_and(|x| x == "jsonl") {
+            out.push(p);
+        }
+    }
+    Ok(())
+}
+
+/// The command line a session was recorded with (`program.args` on its `start` entry). A
+/// session recorded before it was kept has none: the app's defaults.
+fn recorded_args(session: &str) -> Vec<String> {
+    std::fs::read_to_string(session)
+        .ok()
+        .and_then(|t| t.lines().find(|l| !l.trim().is_empty()).map(str::to_string))
+        .and_then(|l| serde_json::from_str::<serde_json::Value>(&l).ok())
+        .and_then(|j| j.pointer("/program/args").and_then(|a| a.as_array()).cloned())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
+}
+
+fn replay_one(exe: &std::path::Path, app: &str, session: &str, engines: bool, view: Option<&str>, accept: bool, theirs: Option<&[String]>) -> ExitCode {
+    if !std::path::Path::new(session).is_file() {
+        eprintln!("error: no session file `{session}`\nhelp: record one with `HELIX_RECORD={session} helix run {app}`");
+        return ExitCode::FAILURE;
+    }
+    let argv = theirs.map(<[String]>::to_vec).unwrap_or_else(|| recorded_args(session));
     let which: &[(&str, &[(&str, &str)])] = if engines { &TEST_ENGINES } else { &TEST_ENGINES[..1] };
     let mut outs: Vec<(&str, std::process::Output)> = Vec::new();
-    for (name, env) in which {
-        let mut cmd = std::process::Command::new(&exe);
-        cmd.arg("run").arg(app.as_str()).env("HELIX_REPLAY", session.as_str()).env_remove("HELIX_RECORD").stdin(std::process::Stdio::null());
+    for (i, (name, env)) in which.iter().enumerate() {
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("run").arg(app).args(&argv).env("HELIX_REPLAY", session).env_remove("HELIX_RECORD").stdin(std::process::Stdio::null());
+        cmd.env_remove("HELIX_REPLAY_VIEW").env_remove("HELIX_REPLAY_ACCEPT");
+        // The viewer and an accept are the first engine's; the others only have to agree.
+        if i == 0 {
+            if let Some(v) = view {
+                cmd.env("HELIX_REPLAY_VIEW", v);
+            }
+            if accept {
+                cmd.env("HELIX_REPLAY_ACCEPT", "1");
+            }
+        }
         for (k, v) in *env {
             cmd.env(k, v);
         }
@@ -2593,7 +2692,11 @@ fn run_replay(args: &[String]) -> ExitCode {
     print!("{}", String::from_utf8_lossy(&first.stdout));
     eprint!("{}", String::from_utf8_lossy(&first.stderr));
     if engines {
-        let key = |o: &std::process::Output| (o.status.code(), o.stdout.clone(), o.stderr.clone());
+        // The first engine alone wrote a viewer; what the replays found must be the same.
+        let key = |o: &std::process::Output| {
+            let out = String::from_utf8_lossy(&o.stdout).lines().filter(|l| !l.starts_with("wrote the session viewer")).collect::<Vec<_>>().join("\n");
+            (o.status.code(), out, o.stderr.clone())
+        };
         if let Some((name, _)) = outs.iter().find(|(_, o)| key(o) != key(first)) {
             eprintln!("error: the engines disagree: {} and {name} replayed this session differently", outs[0].0);
             return ExitCode::FAILURE;
@@ -2601,6 +2704,96 @@ fn run_replay(args: &[String]) -> ExitCode {
         println!("(3 engines agree)");
     }
     if first.status.success() { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+}
+
+/// The corpus gate: every session replayed in a child `helix replay`, a few at a time, one line
+/// each. A viewer is kept only for the sessions that fail.
+fn replay_corpus(exe: &std::path::Path, app: &str, sessions: &[std::path::PathBuf], engines: bool, view_dir: Option<&str>, accept: bool, theirs: Option<&[String]>) -> ExitCode {
+    if let Some(d) = view_dir
+        && let Err(e) = std::fs::create_dir_all(d)
+    {
+        eprintln!("error: cannot create the viewer folder `{d}`: {e}");
+        return ExitCode::FAILURE;
+    }
+    let viewer = |s: &std::path::Path| view_dir.map(|d| std::path::Path::new(d).join(s.file_stem().unwrap_or_default()).with_extension("html"));
+    let run = |s: &std::path::Path| -> (bool, String) {
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("replay").arg(app).arg(s);
+        if engines {
+            cmd.arg("--engines");
+        }
+        if let Some(v) = viewer(s) {
+            cmd.arg("--view").arg(v);
+        }
+        if accept {
+            cmd.arg("--accept");
+        }
+        if let Some(t) = theirs {
+            cmd.arg("--").args(t);
+        }
+        // A child's session is the one on its command line, never one from this environment.
+        for v in ["HELIX_REPLAY", "HELIX_RECORD", "HELIX_REPLAY_VIEW", "HELIX_REPLAY_ACCEPT"] {
+            cmd.env_remove(v);
+        }
+        match cmd.output() {
+            Ok(o) => (o.status.success(), String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr)),
+            Err(e) => (false, format!("could not run the replay: {e}")),
+        }
+    };
+    let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2).min(sessions.len()).max(1);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let results: std::sync::Mutex<Vec<Option<(bool, String)>>> = std::sync::Mutex::new(vec![None; sessions.len()]);
+    std::thread::scope(|sc| {
+        for _ in 0..workers {
+            sc.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(s) = sessions.get(i) else { break };
+                    let r = run(s);
+                    if let Ok(mut all) = results.lock() {
+                        all[i] = Some(r);
+                    }
+                }
+            });
+        }
+    });
+    let results = results.into_inner().unwrap_or_default();
+    let mut failed = 0usize;
+    // The source pointer under a replay's error is into std.ui, not the app: it says nothing
+    // about this session.
+    let pointer = |l: &str| {
+        let t = l.trim_start();
+        t.starts_with("-->") || t.starts_with('|') || t.split_once('|').is_some_and(|(n, _)| !n.trim().is_empty() && n.trim().chars().all(|c| c.is_ascii_digit()))
+    };
+    for (s, r) in sessions.iter().zip(results) {
+        let (ok, text) = r.unwrap_or((false, "the replay did not run".to_string()));
+        let name = s.display();
+        if ok {
+            // The line that says what happened: an accept's, else the replay's.
+            let line = text.lines().find(|l| l.starts_with("accept")).or_else(|| text.lines().find(|l| l.starts_with("replayed "))).unwrap_or("ok");
+            println!("ok    {name}  ({line})");
+            if let Some(v) = viewer(s) {
+                let _ = std::fs::remove_file(v);
+            }
+        } else {
+            failed += 1;
+            println!("FAIL  {name}");
+            for l in text.lines().filter(|l| !l.trim().is_empty() && !l.starts_with("wrote the session viewer") && !pointer(l)).take(8) {
+                println!("      {l}");
+            }
+            if let Some(v) = viewer(s).filter(|v| v.exists()) {
+                println!("      viewer: {}", v.display());
+            }
+        }
+    }
+    let n = sessions.len();
+    if failed == 0 {
+        println!("\n{n} session{} {}", if n == 1 { "" } else { "s" }, if accept { "checked: each records this program's screens" } else { "replayed: every screen identical" });
+        ExitCode::SUCCESS
+    } else {
+        println!("\n{failed} of {n} sessions differ from their recording");
+        ExitCode::FAILURE
+    }
 }
 
 fn run_file_with_args(path: &str, argv: &[String]) -> ExitCode {
