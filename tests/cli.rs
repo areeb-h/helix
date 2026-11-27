@@ -450,6 +450,90 @@ fn event_loop_server_serves_keepalive() {
 }
 
 #[test]
+fn event_loop_server_closes_when_the_client_asks() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::{Duration, Instant};
+
+    // The event-loop server used to keep EVERY connection open after replying. HTTP/1.0
+    // closes after each reply unless the client sends `Connection: keep-alive`, and any
+    // version may send `Connection: close`; a client reading to end-of-stream (1.0's
+    // framing) then waited for its own timeout. Each case below reads to end-of-stream,
+    // which only returns promptly if the server closed.
+    let dir = std::env::temp_dir();
+    let src = dir.join("helix_evclose.helix");
+    std::fs::write(
+        &src,
+        "fn evloop(l, conns) = do {\n\
+           ready = l.wait(conns, 50)\n\
+           fresh = l.accept_poll()\n\
+           live = if fresh.is_missing() then conns else conns.concat([fresh])\n\
+           active = live.filter(c => do {\n\
+             req = c.poll_request()\n\
+             if req.is_missing() then c.is_open() else do {\n\
+               sent = c.respond({ status: 200, text: req.path })\n\
+               c.is_open()\n\
+             }\n\
+           })\n\
+           evloop(l, active)\n\
+         }\n\
+         evloop(listen(18234), [])\n",
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_helix"))
+        .arg(&src)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn the event-loop server");
+    let connect = || {
+        for _ in 0..100 {
+            if let Ok(s) = TcpStream::connect("127.0.0.1:18234") {
+                s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+                return s;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("event-loop server never started listening on 18234");
+    };
+    // Send one request and read until the server closes; how long that took, and the reply.
+    let until_closed = |req: &[u8]| {
+        let mut s = connect();
+        s.write_all(req).unwrap();
+        let t = Instant::now();
+        let mut out = String::new();
+        let closed = s.read_to_string(&mut out).is_ok();
+        (closed, t.elapsed(), out)
+    };
+
+    let plain_10 = until_closed(b"GET /a HTTP/1.0\r\nHost: x\r\n\r\n");
+    let close_11 = until_closed(b"GET /b HTTP/1.1\r\nHost: x\r\nConnection: Close\r\n\r\n");
+    let listed = until_closed(b"GET /c HTTP/1.1\r\nHost: x\r\nConnection: TE, close\r\n\r\n");
+
+    // HTTP/1.0 that ASKS for keep-alive gets it: two requests on one connection.
+    let mut s = connect();
+    s.write_all(b"GET /d HTTP/1.0\r\nConnection: keep-alive\r\n\r\nGET /e HTTP/1.0\r\n\r\n").unwrap();
+    let mut both = String::new();
+    let ka_closed = s.read_to_string(&mut both).is_ok();
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_file(&src);
+
+    for (name, (closed, took, out), path) in
+        [("HTTP/1.0", plain_10, "/a"), ("Connection: Close", close_11, "/b"), ("TE, close", listed, "/c")]
+    {
+        assert!(closed && took < Duration::from_secs(2), "{name}: not closed promptly ({took:?}):\n{out}");
+        assert!(out.contains("200 OK") && out.ends_with(path), "{name}: reply:\n{out}");
+        assert!(out.contains("Connection: close"), "{name}: should announce the close:\n{out}");
+    }
+    // The first reply is keep-alive, the second (a plain 1.0 request) closes.
+    assert!(ka_closed, "the 1.0 keep-alive connection should close after its plain 1.0 request");
+    assert!(both.contains("Connection: keep-alive") && both.contains("/d"), "{both}");
+    assert!(both.ends_with("/e") && both.matches("200 OK").count() == 2, "{both}");
+}
+
+#[test]
 fn http_server_sends_custom_headers_and_redirects() {
     use std::io::Read;
     use std::net::TcpStream;
@@ -4771,6 +4855,10 @@ fn the_file_manager_asks_the_disk_again_before_it_acts() {
         let body = format!("{{\"msg\":\"{msg}\",\"value\":{value}}}");
         let r = ask(format!("POST /event HTTP/1.0\r\nHost: 127.0.0.1:{PORT}\r\n{cookie}Content-Length: {}\r\n\r\n{body}", body.len()));
         assert!(r.starts_with("HTTP/1.1 204"), "{body}: {r}");
+        // 204 means the event was ACCEPTED; it is applied when the round ends. A request on a
+        // new connection is served in a later round, so this page is drawn after the event
+        // took effect: a sync point, before the test looks at the disk.
+        let _ = ask(format!("GET / HTTP/1.0\r\nHost: 127.0.0.1:{PORT}\r\n{cookie}\r\n"));
     };
     let page = || ask(format!("GET / HTTP/1.0\r\nHost: 127.0.0.1:{PORT}\r\n{cookie}\r\n"));
     let names = |d: &std::path::Path| {
@@ -5216,6 +5304,203 @@ fn a_recorded_session_replays_exactly() {
     assert_eq!(code, Some(1), "out:\n{out}\nerr:\n{err}");
     assert!(err.contains("the replay differs from the recording, first at screen #1"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The black box tapes the WHOLE program: what `main` reads before `ui.app` (a top-level
+/// read), and what a write method returned, so a replay reads and writes nothing. Each call is
+/// fingerprinted with its arguments: an app that reads ANOTHER file is stopped at that read,
+/// named, instead of being handed the answer to a different question. A screen is what the
+/// person saw, so a change of stylesheet is a different screen.
+#[test]
+fn the_black_box_tapes_startup_writes_and_arguments() {
+    const PORT: u16 = 18479;
+    let dir = std::env::temp_dir().join(format!("helix_blackbox_whole_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let app = dir.join("app.helix");
+    let source = format!(
+        "import std.ui\n\
+         NOTE = read_text(source_path(\"note.txt\")).trim()\n\
+         fn update(m, e) = match e.msg {{\n\
+           \"save\" => do {{\n\
+             w = \"{{m.n}}\".write_to(source_path(\"out.txt\"))\n\
+             {{...m, saved: true}}\n\
+           }},\n\
+           \"inc\" => {{...m, n: m.n + 1}},\n\
+           _ => m,\n\
+         }}\n\
+         fn view(m) = <div><p>{{NOTE}}</p><p>{{m.n}}</p><p>{{if m.saved then \"saved\" else \"-\"}}</p></div>\n\
+         ui.app({{title: \"BB2\", init: {{n: 0, saved: false}}, update: update, view: view, port: {PORT}}})\n"
+    );
+    std::fs::write(&app, &source).unwrap();
+    std::fs::write(dir.join("note.txt"), "from the device\n").unwrap();
+    let session = dir.join("session.jsonl");
+
+    record_app_session(&app, PORT, &["inc", "save", "inc"], &session);
+    let tape = std::fs::read_to_string(&session).unwrap();
+    let start: serde_json::Value = serde_json::from_str(tape.lines().next().unwrap()).unwrap();
+    assert_eq!(start["effects"][0]["fn"], "read_text", "main's read is on the start entry:\n{tape}");
+    assert!(start["program"]["sha256"].as_str().is_some_and(|h| h.len() == 64), "{start}");
+    assert!(tape.contains(r#""fn":".write_to""#), "the write is on the tape:\n{tape}");
+    assert_eq!(std::fs::read_to_string(dir.join("out.txt")).unwrap(), "1");
+
+    // The world is gone: the file `main` read, and the file `update` wrote.
+    std::fs::remove_file(dir.join("note.txt")).unwrap();
+    std::fs::remove_file(dir.join("out.txt")).unwrap();
+    let (out, err, code) = run_cmd(&["replay", app.to_str().unwrap(), session.to_str().unwrap(), "--engines"]);
+    assert_eq!(code, Some(0), "out:\n{out}\nerr:\n{err}");
+    assert!(out.contains("note: this is the program that was recorded"), "{out}");
+    assert!(out.contains("replayed 3 events: 3 of 3 screens identical"), "{out}");
+    assert!(out.contains("(3 engines agree)"), "{out}");
+    assert!(!dir.join("out.txt").exists() && !dir.join("note.txt").exists(), "the replay wrote nothing and read nothing");
+
+    // Another file read at startup: the replay stops AT that read and names it.
+    std::fs::write(&app, source.replace("source_path(\"note.txt\")", "source_path(\"other.txt\")")).unwrap();
+    let (out, err, code) = run_cmd(&["replay", app.to_str().unwrap(), session.to_str().unwrap()]);
+    assert_eq!(code, Some(1), "out:\n{out}\nerr:\n{err}");
+    assert!(
+        err.contains("the replay went another way before the app started: the app called `read_text(")
+            && err.contains("other.txt)`, but when recorded `read_text` was called with other arguments"),
+        "{err}"
+    );
+
+    // A new stylesheet: every screen looks different, and the replay says so at the first.
+    std::fs::write(&app, source.replace("port: ", "style: \"p {{ color: red }}\", port: ")).unwrap();
+    let (out, err, code) = run_cmd(&["replay", app.to_str().unwrap(), session.to_str().unwrap()]);
+    assert_eq!(code, Some(1), "out:\n{out}\nerr:\n{err}");
+    assert!(out.contains("note: this is not the program that was recorded, so the session tests the change"), "{out}");
+    assert!(err.contains("the replay differs from the recording, first at screen #1"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Record a session of `app` (which serves on `port`) by posting `msgs` as events over real
+/// HTTP, with `HELIX_RECORD=session`. Returns once the app has stopped.
+fn record_app_session(app: &std::path::Path, port: u16, msgs: &[&str], session: &std::path::Path) {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+    struct Running(std::process::Child);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut run = Running(
+        Command::new(env!("CARGO_BIN_EXE_helix"))
+            .args(["run", app.to_str().unwrap()])
+            .env("HELIX_RECORD", session)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut lines = BufReader::new(run.0.stderr.take().unwrap()).lines();
+    let banner = lines.next().unwrap().unwrap();
+    let token = banner.split("token=").nth(1).unwrap().trim().to_string();
+    let cookie = format!("Cookie: helix_app_{port}={token}\r\n");
+    for m in msgs {
+        let body = format!(r#"{{"msg":"{m}"}}"#);
+        let mut s = TcpStream::connect(("127.0.0.1", port)).expect("the app has stopped");
+        s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        s.write_all(format!("POST /event HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\n{cookie}Content-Length: {}\r\n\r\n{body}", body.len()).as_bytes())
+            .unwrap();
+        let mut out = String::new();
+        let _ = s.read_to_string(&mut out);
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+}
+
+/// A CORPUS of real sessions is a CI gate: `helix replay app folder/` replays every session in
+/// it (at any depth), one line each. A change fails it and, with `--view`, leaves a viewer for
+/// each failing session. A change made on purpose is taken with `--accept`, which rewrites only
+/// the screens: every event and everything the world answered stays byte for byte. A session
+/// whose app now reads something else cannot be accepted.
+#[test]
+fn a_corpus_of_sessions_gates_a_change_and_takes_it_on_purpose() {
+    const PORT: u16 = 18480;
+    let dir = std::env::temp_dir().join(format!("helix_corpus_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("corpus/sub")).unwrap();
+    let app = dir.join("app.helix");
+    let source = format!(
+        "import std.ui\n\
+         fn update(m, e) = match e.msg {{\n\
+           \"inc\" => {{...m, n: m.n + 1}},\n\
+           \"note\" => {{...m, note: read_text(source_path(\"note.txt\")).trim()}},\n\
+           _ => m,\n\
+         }}\n\
+         fn view(m) = <div><h1>Count</h1><p>{{m.n}}</p><p>{{m.note ?? \"-\"}}</p></div>\n\
+         ui.app({{title: \"Corpus\", init: {{n: 0, note: missing}}, update: update, view: view, port: {PORT}}})\n"
+    );
+    std::fs::write(&app, &source).unwrap();
+    std::fs::write(dir.join("note.txt"), "<script>alert(1)</script>\n").unwrap();
+    let (a, b) = (dir.join("corpus/a.jsonl"), dir.join("corpus/sub/b.jsonl"));
+    record_app_session(&app, PORT, &["inc", "inc"], &a);
+    record_app_session(&app, PORT, &["inc", "note", "inc"], &b);
+    std::fs::remove_file(dir.join("note.txt")).unwrap();
+    let corpus = dir.join("corpus");
+    let replay = |extra: &[&str]| {
+        let mut args = vec!["replay", app.to_str().unwrap(), corpus.to_str().unwrap()];
+        args.extend_from_slice(extra);
+        run_cmd(&args)
+    };
+
+    let (out, err, code) = replay(&["--engines"]);
+    assert_eq!(code, Some(0), "out:\n{out}\nerr:\n{err}");
+    assert!(out.contains("ok    ") && out.contains("a.jsonl") && out.contains("sub/b.jsonl"), "{out}");
+    assert!(out.contains("2 sessions replayed: every screen identical"), "{out}");
+
+    // A change to what the app shows: both sessions fail, each with a viewer.
+    std::fs::write(&app, source.replace("<h1>Count</h1>", "<h1>Total</h1>")).unwrap();
+    let views = dir.join("views");
+    let (out, err, code) = replay(&["--view", views.to_str().unwrap()]);
+    assert_eq!(code, Some(1), "out:\n{out}\nerr:\n{err}");
+    assert!(out.contains("FAIL  ") && out.contains("2 of 2 sessions differ from their recording"), "{out}");
+    assert!(out.contains("note: this is not the program that was recorded"), "{out}");
+    let page = std::fs::read_to_string(views.join("b.html")).unwrap();
+    assert!(page.starts_with("<!doctype html>") && page.contains(r#""ok":false"#), "{page}");
+    // What the app read and showed is data in the page, never markup: its text is rendered as
+    // text (`&lt;script&gt;`), and in the page's data even the markup's own `<` is `<`, so
+    // no recorded string can end the script it sits in.
+    let escaped_lt = concat!("\\", "u003c"); // the six characters a JSON `<` is written as
+    assert!(!page.contains("<script>alert(1)") && page.contains(&format!("{escaped_lt}p>&lt;script&gt;alert(1)")), "the recorded text stays inert");
+
+    // Taken on purpose: only the screens change, and then the corpus passes.
+    let before_b = std::fs::read_to_string(&b).unwrap();
+    let (out, err, code) = replay(&["--accept"]);
+    assert_eq!(code, Some(0), "out:\n{out}\nerr:\n{err}");
+    assert!(out.contains("(accepted: 2 of 2 screens now record this program's)") && out.contains("(accepted: 3 of 3 screens now record this program's)"), "{out}");
+    let after_b = std::fs::read_to_string(&b).unwrap();
+    let kinds = |t: &str, kind: &str| t.lines().filter(|l| l.contains(&format!(r#""kind":"{kind}""#))).map(str::to_string).collect::<Vec<_>>();
+    assert_eq!(kinds(&before_b, "event"), kinds(&after_b, "event"), "events and what they read are kept byte for byte");
+    assert_ne!(kinds(&before_b, "view"), kinds(&after_b, "view"));
+    let (out, err, code) = replay(&[]);
+    assert_eq!(code, Some(0), "out:\n{out}\nerr:\n{err}");
+    let (out, _, _) = replay(&["--accept"]);
+    assert!(out.contains("accept: nothing to change"), "{out}");
+
+    // An app that now reads another file cannot be accepted: record it again.
+    std::fs::write(&app, source.replace("<h1>Count</h1>", "<h1>Total</h1>").replace("note.txt", "other.txt")).unwrap();
+    let (out, err, code) = run_cmd(&["replay", app.to_str().unwrap(), b.to_str().unwrap(), "--accept"]);
+    assert_eq!(code, Some(1), "out:\n{out}\nerr:\n{err}");
+    assert!(err.contains("cannot accept this session") && err.contains("read_text("), "{err}");
+    assert_eq!(std::fs::read_to_string(&b).unwrap(), after_b, "a refused accept leaves the session as it was");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Replaying must not cost an app a permission. `helix build --app` infers what an app needs
+/// from everything `ui.app` can reach, std.ui's replay included; the replay hands the viewer
+/// page and the accepted session to the black box, which writes only where the person running
+/// `helix replay` said. So an app that writes nothing is inferred to write nothing.
+#[test]
+fn replaying_costs_an_app_no_permission() {
+    let (out, err, code) = run_cmd(&["effects", "tests/ui/window_app.helix"]);
+    assert_eq!(code, Some(0), "out:\n{out}\nerr:\n{err}");
+    let app = out.lines().skip_while(|l| !l.starts_with("app:")).take(2).collect::<Vec<_>>().join("\n");
+    assert!(app.starts_with("app:"), "no `app` in:\n{out}");
+    assert!(!app.contains("fs-write") && !app.contains("fs-read"), "std.ui's `app` reaches the file system:\n{app}");
 }
 
 /// `helix <args>` with no stdin and no extra environment.
