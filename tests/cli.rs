@@ -7184,7 +7184,9 @@ fn no_new_panicking_calls_on_user_reachable_paths() {
         // before the op, the same stack-shape invariant the other 57 rely on.
         // 65 as of `Op::GetFieldOrMissing` (2026-09-04): one more `stack.pop().unwrap()`
         // under the same invariant, proven at the site.
-        ("src/vm.rs", 66),
+        // 66 -> 65: `Op::UpdateRecord` reads its base where it sits on the stack and
+        // overwrites it, so its `stack.pop().unwrap()` is gone.
+        ("src/vm.rs", 65),
         ("src/bytecode.rs", 1),
         ("src/bytecode/comprehensions.rs", 0),
         ("src/bytecode/ops.rs", 0),

@@ -889,12 +889,14 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
         // comes with it: `frames[fi].ip` is stale while `'ops` runs, so an arm that PUSHES a
         // frame writes `ip` back first — that is the address its `Return` resumes at. (A
         // caught error needs no write-back: the handler sets the catching frame's `ip`
-        // itself and discards every frame above it.)
+        // itself and discards every frame above it.) The locals base is `frame_base`, a name
+        // no arm reuses: several arms have a `base` of their own (a stack depth), and an
+        // arm that wants the frame's binds `base` from it where it always did.
         'frame: loop {
         let fi = frames.len() - 1;
         let chunk = &program.funcs[frames[fi].func];
         let code: &[Op] = &chunk.code;
-        let base = frames[fi].base;
+        let frame_base = frames[fi].base;
         let mut ip = frames[fi].ip;
         'ops: loop {
         // Borrow the instruction rather than cloning it — this loop runs once
@@ -1116,6 +1118,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
         match op {
             Op::Const(k) => stack.push(chunk.consts[*k as usize].clone()),
             Op::LoadLocal(slot) => {
+                let base = frame_base;
                 stack.push(locals[base + *slot as usize].clone());
             }
             Op::ConcatIntoLocal(slot) => {
@@ -1124,6 +1127,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 // the stack for it — the same compiler-maintained stack-shape invariant every
                 // other op in this loop relies on for its own `pop`.
                 let arg = stack.pop().unwrap();
+                let base = frame_base;
                 let at = base + *slot as usize;
                 // VALIDATE BEFORE TAKING. Both error paths must read the accumulator while
                 // it is still in its slot, so a failing `concat` leaves the frame exactly as
@@ -1165,6 +1169,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 // by the compiler, exactly as in `ConcatIntoLocal`.
                 let v = stack.pop().unwrap();
                 let kv = stack.pop().unwrap();
+                let base = frame_base;
                 let at = base + *slot as usize;
                 // Validated before the take, so a bad key or a non-Dict accumulator leaves
                 // the slot untouched and reports what the ordinary lowering reports.
@@ -1217,7 +1222,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         }
                     }
                 }
-                let at = base + *slot as usize;
+                let at = frame_base + *slot as usize;
                 if let Value::Str(peek) = &locals[at] {
                     // 2. The cap, BEFORE the take — `push_str` only grows, so checking
                     //    the crossing once is monotone-equivalent to `Op::Interp`'s
@@ -1278,7 +1283,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
             Op::CheckLocalField(slot, field) => {
                 // `GetField`'s error, nothing pushed — the dropped clone is a refcount bump
                 // and back, so a uniquely held record is still unique for the take after it.
-                let at = base + *slot as usize;
+                let at = frame_base + *slot as usize;
                 drop(crate::interp::eval_field(&locals[at], *field, line, col)?);
             }
             Op::AppendStrFromLocalField(d) => {
@@ -1289,7 +1294,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     .filter(|p| matches!(p, crate::ast::InterpPart::Expr(..)))
                     .count();
                 let base = stack.len() - holes;
-                let at = base + d.slot as usize;
+                let at = frame_base + d.slot as usize;
                 let (hl, hc) = match parts.first() {
                     Some(crate::ast::InterpPart::Expr(e, _)) => e.position(),
                     _ => (line, col),
@@ -1390,6 +1395,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 stack.push(Value::Str(std::rc::Rc::new(built)));
             }
             Op::StoreLocal(slot) => {
+                let base = frame_base;
                 locals[base + *slot as usize] = stack.pop().unwrap();
             }
             Op::LoadGlobal(i) => stack.push(globals[*i as usize].clone()),
@@ -1410,11 +1416,13 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 stack.push(binary(o, a, b, line, col)?);
             }
             Op::LoadLocalBinary(a, c, o) => {
+                let base = frame_base;
                 let av = locals[base + *a as usize].clone();
                 let cv = locals[base + *c as usize].clone();
                 stack.push(binary(o, av, cv, line, col)?);
             }
             Op::LoadLocalConstBinary(a, k, o) => {
+                let base = frame_base;
                 let av = locals[base + *a as usize].clone();
                 let cv = chunk.consts[*k as usize].clone();
                 stack.push(binary(o, av, cv, line, col)?);
@@ -1615,6 +1623,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 // recursion (an accept loop, a state machine) is constant-space and can't hit
                 // VM_MAX_DEPTH. `ip = 0` overrides the loop's default `ip + 1` advance.
                 let start = stack.len() - nargs;
+                let base = frame_base;
                 locals.truncate(base);
                 locals.extend(stack.drain(start..));
                 locals.resize(base + callee.n_locals as usize, Value::Unit);
@@ -1826,7 +1835,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 stack.push(crate::interp::eval_field(&recv, *name, line, col)?);
             }
             Op::LoadLocalField(slot, name) => {
-                let v = crate::interp::eval_field(&locals[base + *slot as usize], *name, line, col)?;
+                let v = crate::interp::eval_field(&locals[frame_base + *slot as usize], *name, line, col)?;
                 stack.push(v);
             }
             Op::GetFieldOrMissing(name) => {
@@ -1873,6 +1882,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 // into the named param locals (same helper the tree-walker uses).
                 let v = stack.pop().unwrap();
                 let parts = crate::interp::pattern_parts(&v, slots.len(), line, col)?;
+                let base = frame_base;
                 for (slot, val) in slots.iter().zip(parts) {
                     locals[base + *slot as usize] = val;
                 }
@@ -2055,6 +2065,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         })
                     }
                 };
+                let base = frame_base;
                 let resolve = |nm: &str| -> Option<Value> {
                     for (lname, slot) in lbind.iter().rev() {
                         if lname == nm {
@@ -2097,6 +2108,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                 return Err(crate::interp::join_operand_err(other, line, col))
                             }
                         };
+                        let base = frame_base;
                         let resolve = |nm: &str| -> Option<Value> {
                             for (lname, slot) in lbind.iter().rev() {
                                 if lname == nm {
@@ -2150,6 +2162,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         ))
                     }
                 };
+                let base = frame_base;
                 let resolve = |nm: &str| -> Option<Value> {
                     for (lname, slot) in lbind.iter().rev() {
                         if lname == nm {
@@ -2238,6 +2251,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let n_caps = program.reduce_loops[*loop_idx as usize].captures.len();
                 let cap_vals =
                     if n_caps > 0 { stack.split_off(stack.len() - n_caps) } else { Vec::new() };
+                let base = frame_base;
                 let len = stack.len();
                 let slot = base + *acc_slot as usize;
                 let bounds = match (jit, &stack[len - 2], &stack[len - 1]) {
@@ -3519,6 +3533,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         if *keep_cur {
                             iters[li].cur_val = el.clone();
                         }
+                        let base = frame_base;
                         locals[base + *binder as usize] = el;
                     }
                     None => ip = *end_target as usize,
@@ -3593,6 +3608,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 // exactly one value on the stack. Identical to `CompBoolTest` below,
                 // which is emitted the same way for the same reason.
                 let v = stack.pop().unwrap();
+                let base = frame_base;
                 // The index BEFORE the bump is the one that matched.
                 let i = match &locals[base + *idx_slot as usize] {
                     Value::Int(n) => *n,
@@ -3616,6 +3632,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         }
                     }
                     Value::Missing => {
+                        let base = frame_base;
                         locals[base + *sm_slot as usize] = Value::Bool(true);
                     }
                     other => {

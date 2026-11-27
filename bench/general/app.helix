@@ -45,7 +45,7 @@ SESSION = range(0, 20).flat_map((r) => [
   {msg: "draft", value: "task {r}c"}, {msg: "add", value: missing},
   {msg: "toggle", value: r * 3 + 1},
   {msg: "filter", value: "open"}, {msg: "filter", value: "done"}, {msg: "filter", value: "all"},
-].concat(if r % 2 == 0 then [{msg: "remove", value: r * 3 + 2}] else []))
+  ].concat(if r % 2 == 0 then [{msg: "remove", value: r * 3 + 2}] else []))
 
 spec = {title: "Todo", init: {items: [], draft: "", next: 1, show: "all"}, update: update, view: view}
 screens = ui.replay(spec, SESSION)
