@@ -2624,7 +2624,9 @@ fn run_replay(args: &[String]) -> ExitCode {
         }
     }
     sessions.sort();
-    sessions.dedup();
+    // One session, once: by the file it is, not the path that named it.
+    let mut real = std::collections::HashSet::new();
+    sessions.retain(|p| real.insert(std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())));
     if sessions.is_empty() {
         eprintln!("error: no sessions (`*.jsonl`) in {}", sources.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
         return ExitCode::FAILURE;
@@ -2633,13 +2635,29 @@ fn run_replay(args: &[String]) -> ExitCode {
 }
 
 /// Every `*.jsonl` under `dir`, at any depth: a corpus can be organised in folders.
+///
+/// A link to a folder is not followed: one pointing back up the tree (`corpus/a/up -> ..`)
+/// made the walk find each session again at every level the kernel would resolve, and count it
+/// once per level. A link to a session file is a session. Each session is counted once, by the
+/// file it is, however many paths lead to it.
 fn sessions_under(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
-    for e in std::fs::read_dir(dir)? {
-        let p = e?.path();
-        if p.is_dir() {
-            sessions_under(&p, out)?;
-        } else if p.extension().is_some_and(|x| x == "jsonl") {
-            out.push(p);
+    let mut seen = std::collections::HashSet::new();
+    sessions_under_inner(dir, out, &mut seen)
+}
+
+fn sessions_under_inner(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>, seen: &mut std::collections::HashSet<std::path::PathBuf>) -> std::io::Result<()> {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)?.collect::<Result<_, _>>()?;
+    entries.sort_by_key(|e| e.path());
+    for e in entries {
+        let p = e.path();
+        // `DirEntry::file_type` does not follow a link, so a link to a folder is not a folder.
+        if e.file_type()?.is_dir() {
+            sessions_under_inner(&p, out, seen)?;
+        } else if p.extension().is_some_and(|x| x == "jsonl") && p.is_file() {
+            let real = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+            if seen.insert(real) {
+                out.push(p);
+            }
         }
     }
     Ok(())
@@ -2956,7 +2974,15 @@ fn run_file_capture_args(
     tape::begin_program(&loaded.spans, argv);
     // Errors render against the spans the loader produced, so a cross-module error
     // points at the dependency's own source and line (not the entry file).
-    run_program(&mut stmts, &loaded.spans, loaded.multi_module).map_err(|e| match tape::divergence() {
+    let ran = run_program(&mut stmts, &loaded.spans, loaded.multi_module);
+    if ran.is_ok() && tape::replay_never_started() {
+        // Nothing was compared, so nothing may be reported as matching (a corpus would count
+        // the session as passing).
+        return Err("error: the session was not replayed: this program finished without starting an app (`ui.app`)\n\
+                    help: `helix replay` replays a session of an app; run the app's own file, the one that was recorded\n"
+            .to_string());
+    }
+    ran.map_err(|e| match tape::divergence() {
         // The replay left the recording before the app was running: the app's own error is a
         // consequence of reading something that was never read when it was recorded.
         Some(why) => format!(

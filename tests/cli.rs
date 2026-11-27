@@ -5503,6 +5503,128 @@ fn replaying_costs_an_app_no_permission() {
     assert!(!app.contains("fs-write") && !app.contains("fs-read"), "std.ui's `app` reaches the file system:\n{app}");
 }
 
+/// Recording must never be what kills a program. Every taped call is fingerprinted by its
+/// arguments, and a write method's receiver is an argument: writing it down to hash it turned
+/// a value that holds one part many times (2^60 leaves as a tree) into an abort for lack of
+/// memory, and a value nested a million deep into a stack overflow — both only with
+/// `HELIX_RECORD` set, for programs that run cleanly without it.
+#[test]
+fn recording_a_value_that_shares_its_parts_or_nests_deep_is_never_a_dead_process() {
+    let dir = std::env::temp_dir().join(format!("helix_tape_big_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let session = dir.join("s.jsonl");
+    let shared = dir.join("shared.helix");
+    std::fs::write(
+        &shared,
+        "fn dup(n, acc) = if n == 0 then acc else dup(n - 1, [acc, acc])\n\
+         v = dup(60, 1)\n\
+         r = try v.write_json(source_path(\"shared.json\"))\n\
+         print(\"refused: {r.error}\")\n",
+    )
+    .unwrap();
+    let deep = dir.join("deep.helix");
+    std::fs::write(
+        &deep,
+        "fn build(n, acc) = if n == 0 then acc else build(n - 1, [acc])\n\
+         v = build(1000000, 1)\n\
+         w = v.write_json(source_path(\"deep.json\"))\n\
+         print(\"wrote\")\n",
+    )
+    .unwrap();
+    for (prog, want) in [(&shared, "refused: `write_json` would exceed"), (&deep, "wrote")] {
+        let started = std::time::Instant::now();
+        let (out, err, code) = run(&["run", prog.to_str().unwrap()], &[("HELIX_RECORD", session.to_str().unwrap())], "");
+        assert_eq!(code, Some(0), "{} under HELIX_RECORD\nout:\n{out}\nerr:\n{err}", prog.display());
+        assert!(out.contains(want), "out:\n{out}\nerr:\n{err}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(60), "took {:?}", started.elapsed());
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A replay that compared nothing must not say everything matched: a corpus is a CI gate, and
+/// an empty or truncated session, a file that is not a session, or an app file that never
+/// starts an app all passed it — "replayed 0 events: 0 of 0 screens identical", exit 0.
+#[test]
+fn a_replay_that_compares_nothing_fails_and_says_why() {
+    let dir = std::env::temp_dir().join(format!("helix_replay_nothing_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let app = dir.join("app.helix");
+    std::fs::write(
+        &app,
+        "import std.ui\nfn update(m, e) = m\nfn view(m) = <p>{m.n}</p>\n\
+         fn main() = ui.app({title: \"t\", init: {n: 1}, update: update, view: view})\n",
+    )
+    .unwrap();
+    let script = dir.join("script.helix");
+    std::fs::write(&script, "print(1)\n").unwrap();
+    let write = |name: &str, text: &str| {
+        let p = dir.join(name);
+        std::fs::write(&p, text).unwrap();
+        p
+    };
+    let empty = write("empty.jsonl", "");
+    let not_json_session = write("other.jsonl", "{\"a\": 1}\n");
+    let unstarted = write("no-start.jsonl", "{\"kind\": \"event\", \"event\": null, \"effects\": []}\n");
+    let no_screens = write("no-screens.jsonl", "{\"kind\": \"start\", \"app\": \"t\", \"effects\": []}\n");
+    for (session, why) in [
+        (&empty, "it is empty"),
+        (&not_json_session, "is not the session's start"),
+        (&unstarted, "is not the session's start"),
+        (&no_screens, "holds no screen to compare"),
+    ] {
+        let (out, err, code) = run_cmd(&["replay", app.to_str().unwrap(), session.to_str().unwrap()]);
+        assert_eq!(code, Some(1), "{}\nout:\n{out}\nerr:\n{err}", session.display());
+        assert!(err.contains("is not a recorded session") && err.contains(why), "{}\nerr:\n{err}", session.display());
+        assert!(!out.contains("identical"), "out:\n{out}");
+    }
+    // A program that never starts an app replays nothing, whatever the session holds.
+    let (out, err, code) = run_cmd(&["replay", script.to_str().unwrap(), no_screens.to_str().unwrap()]);
+    assert_eq!(code, Some(1), "out:\n{out}\nerr:\n{err}");
+    assert!(err.contains("the session was not replayed") && err.contains("`ui.app`"), "err:\n{err}");
+    // And in a corpus each is a failure, not an "ok".
+    let corpus = dir.join("corpus");
+    std::fs::create_dir_all(&corpus).unwrap();
+    std::fs::copy(&empty, corpus.join("empty.jsonl")).unwrap();
+    let (out, err, code) = run_cmd(&["replay", app.to_str().unwrap(), corpus.to_str().unwrap()]);
+    assert_eq!(code, Some(1), "out:\n{out}\nerr:\n{err}");
+    assert!(out.contains("FAIL") && out.contains("1 of 1 sessions differ"), "out:\n{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A corpus folder holding a link back up the tree is walked once: the walk followed links to
+/// folders, found the session again at every level the kernel would resolve (40 of them), and
+/// counted one session as 41. Each session counts once, by the file it is.
+#[cfg(unix)]
+#[test]
+fn a_corpus_counts_each_session_once_however_many_paths_lead_to_it() {
+    const PORT: u16 = 18481;
+    let dir = std::env::temp_dir().join(format!("helix_corpus_links_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("corpus/a")).unwrap();
+    let app = dir.join("app.helix");
+    std::fs::write(
+        &app,
+        format!(
+            "import std.ui\n\
+             fn update(m, e) = match e.msg {{ \"inc\" => {{...m, n: m.n + 1}}, _ => m }}\n\
+             fn view(m) = <p>{{m.n}}</p>\n\
+             ui.app({{title: \"Links\", init: {{n: 0}}, update: update, view: view, port: {PORT}}})\n"
+        ),
+    )
+    .unwrap();
+    let session = dir.join("corpus/a/s.jsonl");
+    record_app_session(&app, PORT, &["inc"], &session);
+    std::os::unix::fs::symlink("..", dir.join("corpus/a/up")).unwrap();
+    std::os::unix::fs::symlink(&session, dir.join("corpus/also.jsonl")).unwrap();
+    let (out, err, code) = run_cmd(&["replay", app.to_str().unwrap(), dir.join("corpus").to_str().unwrap()]);
+    assert_eq!(code, Some(0), "out:\n{out}\nerr:\n{err}");
+    assert!(out.contains("1 session replayed"), "out:\n{out}");
+    assert_eq!(out.lines().filter(|l| l.starts_with("ok")).count(), 1, "out:\n{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `helix <args>` with no stdin and no extra environment.
 fn run_cmd(args: &[&str]) -> (String, String, Option<i32>) {
     run(args, &[], "")
