@@ -19222,3 +19222,29 @@ print(arr(1, 3), tup(1, 2), rec(1, 1))
     // A shallow value that shares still prints as the tree it describes.
     assert_eq!(lines[8], "[[[1, 1], [1, 1]], [[1, 1], [1, 1]]] ((1, 1), (1, 1)) {a: 1, b: 1}");
 }
+
+/// A REPL session is a script fed one line at a time, so a second top-level `{a, b} = r`
+/// binding NEW names must work exactly as it does on the next line of a script. It did
+/// not: the parser numbered its destructure temporaries from `$rec0` afresh on every
+/// line, so the second line rebound the first line's immutable temp and the error named
+/// it — *"`$rec0` is immutable"*, with the advice to declare `mut $rec0`, a name nobody
+/// wrote and nobody can write. Re-destructuring the SAME names is still refused, by the
+/// user's own name, exactly as a script refuses it.
+#[test]
+fn repl_destructures_twice_without_leaking_a_temp_name() {
+    let session = "r = {a: 1, b: 2}\n{a, b} = r\ns = {c: 10, d: 20}\n{c, d} = s\nprint(a + b + c + d)\n\
+                   [p, q] = [1, 2]\n[u, v] = [3, 4]\nprint(p + q + u + v)\n{a} = r\n";
+    let (out, err, code) = run(&["repl"], &[], session);
+    assert_eq!(code, Some(0), "stderr: {err}");
+    assert!(out.contains("33"), "the second record destructure must bind: {out:?} / {err}");
+    assert!(out.contains("10"), "the second array destructure must bind: {out:?} / {err}");
+    assert!(!err.contains('$') && !out.contains('$'), "an internal `$` name leaked: {err}");
+    // The third `{a} = r` rebinds `a`: refused under the user's name, as a script does.
+    assert!(err.contains("`a` is immutable"), "rebinding `a` names `a`: {err}");
+    let script = std::env::temp_dir().join("helix_it_repl_destructure_twice.helix");
+    std::fs::write(&script, "r = {a: 1, b: 2}\n{a, b} = r\n{a} = r\n").unwrap();
+    let (_, serr, scode) = run(&[script.to_str().unwrap()], &[], "");
+    let _ = std::fs::remove_file(&script);
+    assert_eq!(scode, Some(1));
+    assert!(serr.contains("`a` is immutable"), "the script's refusal, for comparison: {serr}");
+}

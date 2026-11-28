@@ -927,6 +927,16 @@ fn mut_inside_a_body(line: usize, col: usize) -> HelixError {
 }
 
 pub fn parse(tokens: Vec<Token>) -> Result<Vec<Stmt>, HelixError> {
+    parse_continuing(tokens, &mut 0)
+}
+
+/// [`parse`] for one piece of a program that is fed in pieces — a REPL line. `temps` is
+/// where the destructure temporaries (`$rec<N>`, `$arr<N>`) left off, and is advanced
+/// past the ones this piece used. Every line starting again from `$rec0` made a second
+/// `{a, b} = r` in one session rebind the first line's immutable temp, and the error
+/// named it: *"`$rec0` is immutable"*, a name the user never wrote. Continuing the count
+/// makes each line's temp its own, exactly as two lines of one script get.
+pub fn parse_continuing(tokens: Vec<Token>, temps: &mut usize) -> Result<Vec<Stmt>, HelixError> {
     let mut p = Parser {
         toks: tokens,
         pos: 0,
@@ -937,7 +947,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Stmt>, HelixError> {
         selected_imports: std::collections::HashSet::new(),
         glob_import: false,
         pending: Vec::new(),
-        temps: 0,
+        temps: *temps,
         pinned_keys_at: None,
         markup: false,
     };
@@ -945,6 +955,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Stmt>, HelixError> {
     // its definition, and its defaults and parameter names must be known there too.
     p.prescan_signatures();
     let mut program = p.program()?;
+    *temps = p.temps;
     // A column expression outside a frame verb's argument is a value — the record that
     // describes it (ADR 0052) — the last pass over the finished tree.
     crate::predicate::desugar_program(&mut program)?;
