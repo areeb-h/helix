@@ -1,0 +1,10 @@
+# ADR 0066: a name first bound in a loop body does not outlive an iteration, and the
+# unknown-name error says so before anything runs.
+fn longest(words) = do {
+  for w in words {
+    best = if w.count() > 3 then w else ""
+  }
+  best
+}
+print("not reached")
+print(longest(["a", "word"]))

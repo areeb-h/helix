@@ -153,12 +153,23 @@ cmp a.out b.out && cmp a.out c.out
   `from … import …`. **Only `export fn` / `export` names can be imported**: mark what a
   test file or another module needs (`export fn total(xs) = …`). **`import std.ui`** is built in (bound as `ui`): the app library —
   `helix describe app` for the whole surface, `examples/apps/gallery.helix` for every component.
+- **A `for` loop is a fold: only names bound before it survive it.** `for x in xs { total += x }`
+  is notation the parser turns into `xs.reduce(…)` (ADR 0066), so nothing is mutated and all
+  three engines agree. A name the body assigns that was bound BEFORE the loop — an earlier
+  line of the `do` block, a parameter — is carried from one iteration to the next and holds
+  the last value afterwards; a name FIRST bound inside the body, and the loop variable, are
+  gone after the loop (the error says so: bind it before the loop). Patterns: `for (k, v) in
+  d.items() { … }`, `for [a, b] in pairs { … }`; the sequence is an array, `range(n)`, `0..n`.
+  It is a statement with no value (`ys = xs.map(…)` builds a collection); there is no `break`
+  or `continue` (cut the sequence first: `xs.take_while(p)`, `xs.filter(p)`), no `while` (a
+  tail-recursive function is that loop), and no assignment inside `if` — write
+  `total = if x > 0 then total + x else total`. `n += 1` (also `-=`, `*=`, `/=`) is
+  `n = n + 1`, on any name already bound.
 - **`mut` is top-level only, and this is a design question, not a spelling one.** A
   function body evolves state by *rebinding* — `do { n = 0` / `n = n + 1` / `n }`, each
-  line shadowing the last — and state that crosses a sequence is *threaded*, with
-  `reduce`. Reach for `mut` only for state that must outlive a call. Deciding this after
-  writing an imperative loop means rewriting the program, which is why it is here rather
-  than left to the (very explicit) error.
+  line shadowing the last — and state that crosses a sequence is *threaded*: by a `for`
+  loop, which carries the names bound before it, or by `reduce`. Reach for `mut` only for
+  state that must outlive a call; a top-level `for` may assign only `mut` names.
 - Most things are methods on a receiver, not free functions: `x.to_json()`,
   `s.parse_json()`, `xs.join(", ")`. `helix doc <name>` answers which in one command,
   and calling a method as a function tells you so by name.

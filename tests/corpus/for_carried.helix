@@ -1,0 +1,96 @@
+# ADR 0066: a `for` loop is a fold. A name bound before the loop that the body
+# assigns is CARRIED; one first bound in the body belongs to one iteration.
+
+# One carried name: the state is the name itself.
+fn total(xs) = do {
+  sum = 0
+  for x in xs {
+    sum = sum + x
+  }
+  sum
+}
+print(total([1, 2, 3, 4]))
+print(total([]))
+
+# Several: a tuple the parser packs and unpacks.
+fn stats(xs) = do {
+  lo = xs[0]
+  hi = xs[0]
+  n = 0
+  for x in xs {
+    lo = if x < lo then x else lo
+    hi = if x > hi then x else hi
+    n += 1
+  }
+  (lo, hi, n)
+}
+print(stats([3, 9, -2, 7]))
+
+# None: the loop is run for its effects, and binds nothing.
+fn show(xs) = do {
+  for x in xs {
+    print("item {x}")
+  }
+  xs.count()
+}
+print(show(["a", "b"]))
+
+# A parameter is bound before the loop, so it is carried too.
+fn drain(n, steps) = do {
+  for s in steps {
+    n -= s
+  }
+  n
+}
+print(drain(10, [1, 2, 3]))
+
+# A name first bound in the body is this iteration's: `sq` starts fresh each time,
+# and reading the carried `acc` sees what the last iteration left.
+fn squares(xs) = do {
+  acc = []
+  for x in xs {
+    sq = x * x
+    acc = acc.concat([sq])
+  }
+  acc
+}
+print(squares([1, 2, 3]))
+
+# A closure made in the body keeps that iteration's values — there is no shared
+# loop variable to capture.
+fn adders(xs) = do {
+  fs = []
+  for x in xs {
+    fs = fs.concat([(y) => x + y])
+  }
+  fs
+}
+print(adders([1, 10, 100]).map(f => f(5)))
+
+# The carried name's value before the loop is the fold's start, and zero
+# iterations leave it alone.
+fn keep(v) = do {
+  for x in [] {
+    v = x
+  }
+  v
+}
+print(keep("unchanged"))
+
+# A loop in a lambda carries the lambda's names; one over an immutable global
+# carries a local of the same name, as a `do` line rebinding it would.
+LIMIT = 3
+fn capped(xs) = do {
+  f = (start) => do {
+    for x in xs {
+      start += x
+    }
+    start
+  }
+  for x in xs {
+    LIMIT += x
+  }
+  (f(100), LIMIT)
+}
+print(capped([1, 2]))
+print(LIMIT)

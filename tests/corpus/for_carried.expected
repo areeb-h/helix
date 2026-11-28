@@ -1,0 +1,15 @@
+exit: 0
+--- stdout ---
+10
+0
+(-2, 9, 4)
+item a
+item b
+2
+4
+[1, 4, 9]
+[6, 15, 105]
+unchanged
+(103, 6)
+3
+--- stderr ---

@@ -259,6 +259,17 @@ fn render_line(src: &str, line: &[&Token]) -> String {
 /// binary one.
 fn needs_space(prev: &Tok, next: &Tok, line: &[&Token], i: usize) -> bool {
     use Tok::*;
+    // AN OPERATOR NEVER TOUCHES A FOLLOWING `=`. `+=`, `-=`, `*=` and `/=` are tokens of their
+    // own (ADR 0066), so two tokens printed with nothing between them would be read back as
+    // one: `(- = x)` lexes, a unary minus hugs its operand, and `(-= x)` is a different
+    // program. No rule below may close this gap, so it is decided first.
+    if matches!(prev, Plus | Minus | Star | Slash) && matches!(next, Eq | EqEq | FatArrow) {
+        return true;
+    }
+    // `for (k, v) in d.items() {` — a loop's pattern (ADR 0066), not a call of `for`.
+    if matches!(next, LParen | LBracket) && loop_pattern_at(line, i) {
+        return true;
+    }
     // A SPREAD AFTER A COMMA TAKES THE COMMA'S SPACE: `{...a, ...b}`, `{x: 1, ...r}`. The rule
     // below is about a `...` hugging its OPERAND and a `.` hugging both sides; applied to the
     // gap BEFORE a spread it rendered the second part of a record update as `{...a,...b}`,
@@ -306,8 +317,10 @@ fn needs_space(prev: &Tok, next: &Tok, line: &[&Token], i: usize) -> bool {
     // (a tuple pattern: `match x {(a, b) => …}`), and the call rule below would
     // otherwise close the gap this one just opened — giving a body its space at one
     // end and not the other.
+    //
+    // A `for` body (ADR 0066) is a block of lines too: `for x in xs { total += x }`.
     if matches!(prev, LBrace) {
-        return opens_match_body(line, i - 1);
+        return opens_match_body(line, i - 1) || opens_loop_body(line, i - 1);
     }
     if matches!(next, RBrace) {
         return closes_match_body(line, i);
@@ -350,6 +363,10 @@ fn needs_space(prev: &Tok, next: &Tok, line: &[&Token], i: usize) -> bool {
                 | Shl
                 | Shr
                 | Pipe
+                | PlusEq
+                | MinusEq
+                | StarEq
+                | SlashEq
                 | Colon
                 | Arrow
                 | FatArrow
@@ -409,11 +426,63 @@ fn closes_match_body(line: &[&Token], at: usize) -> bool {
             RBrace => depth += 1,
             LBrace => {
                 if depth == 0 {
-                    return opens_match_body(line, k);
+                    return opens_match_body(line, k) || opens_loop_body(line, k);
                 }
                 depth -= 1;
             }
             _ => {}
+        }
+    }
+    false
+}
+
+/// Does the `{` at `at` open a `for` BODY (ADR 0066)? Walking back over the sequence —
+/// balanced, however complicated — reaches `in`, then the pattern, then a `for` that starts
+/// the line or the block it is in. A `for` anywhere else is a name (`let for = 1 in {…}`),
+/// and a brace whose `for` is on an earlier line keeps the record spacing, harmlessly: it
+/// is then at the end of its line.
+fn opens_loop_body(line: &[&Token], at: usize) -> bool {
+    use Tok::*;
+    let mut depth = 0i32;
+    let mut seen_in = false;
+    for (k, t) in line[..at].iter().enumerate().rev() {
+        match &t.tok {
+            RParen | RBracket | RBrace => depth += 1,
+            LParen | LBracket | LBrace => {
+                if depth == 0 {
+                    return false;
+                }
+                depth -= 1;
+            }
+            In if depth == 0 => seen_in = true,
+            Ident(n) if depth == 0 && seen_in && n == "for" && starts_statement(line, k) => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Whether the token at `k` is where a statement can start on this line: first, or first
+/// inside a block.
+fn starts_statement(line: &[&Token], k: usize) -> bool {
+    k == 0 || matches!(line[k - 1].tok, Tok::LBrace)
+}
+
+/// Is the bracket at `at` a `for` loop's pattern — `for (k, v) in`, `for [a, ...rest] in` —
+/// rather than a call or an index on something named `for`? Names, commas and a `...` up
+/// to the closer, then `in`: what the parser asks.
+fn loop_pattern_at(line: &[&Token], at: usize) -> bool {
+    use Tok::*;
+    if at == 0 || !matches!(&line[at - 1].tok, Ident(n) if n == "for") || !starts_statement(line, at - 1) {
+        return false;
+    }
+    let close = if matches!(line[at].tok, LParen) { RParen } else { RBracket };
+    let mut k = at + 1;
+    while let Some(t) = line.get(k) {
+        match &t.tok {
+            Ident(_) | Comma | DotDotDot => k += 1,
+            t if *t == close => return matches!(line.get(k + 1).map(|t| &t.tok), Some(In)),
+            _ => return false,
         }
     }
     false
@@ -540,6 +609,10 @@ fn continues_after_this_line(t: &Tok) -> bool {
     matches!(
         t,
         Eq | EqEq
+            | PlusEq
+            | MinusEq
+            | StarEq
+            | SlashEq
             | Ne
             | Lt
             | Gt
@@ -730,6 +803,62 @@ mod tests {
 
     /// Formatting an already-formatted file is a no-op, and the spacing rules do what they
     /// say. Small, readable cases — the file sweep above proves safety, this proves taste.
+    /// `for` loops and compound assignment (ADR 0066): a body is laid out as a `do` block's
+    /// is, and — the property the formatter exists on — the tokens that come out are the
+    /// tokens that went in, including the ones that only a missing space would merge.
+    #[test]
+    fn loops_are_laid_out_as_blocks_and_never_change() {
+        let f = |s: &str| format_source(s).expect("lexes");
+        // A body is one step in; its `}` returns to the `for`.
+        assert_eq!(
+            f("fn mean(xs) = do {\ntotal = 0.0\nn = 0\nfor x in xs {\ntotal += x\nn+=1\n}\ntotal / n\n}\n"),
+            "fn mean(xs) = do {\n  total = 0.0\n  n = 0\n  for x in xs {\n    total += x\n    n += 1\n  }\n  total / n\n}\n"
+        );
+        // A loop in a loop steps twice.
+        assert_eq!(
+            f("for r in rows {\nfor (k, v) in r.items() {\nprint(k)\n}\n}\n"),
+            "for r in rows {\n  for (k, v) in r.items() {\n    print(k)\n  }\n}\n"
+        );
+        // One line: the body's braces are a block's, and a pattern is not a call of `for`.
+        assert_eq!(f("for x in xs {total+=x}"), "for x in xs { total += x }\n");
+        assert_eq!(f("for(k,v) in d.items() {n-=v}"), "for (k, v) in d.items() { n -= v }\n");
+        assert_eq!(f("for[a,...rest] in rows {print(a)}"), "for [a, ...rest] in rows { print(a) }\n");
+        assert_eq!(f("for x in xs { for y in ys { n *= y } }"), "for x in xs { for y in ys { n *= y } }\n");
+        assert_eq!(f("total = do { for x in xs { total /= x }\ntotal }"), "total = do {for x in xs { total /= x }\n  total}\n");
+        // `for` is still a name: a call and an index stay tight, a record stays a record.
+        assert_eq!(f("for (a, b)"), "for(a, b)\n");
+        assert_eq!(f("y = for [0]"), "y = for[0]\n");
+        assert_eq!(f("let for = 1 in { a: for }"), "let for = 1 in {a: for}\n");
+        // The right-hand side is an expression like any other.
+        assert_eq!(f("n -= - 1"), "n -= -1\n");
+        assert_eq!(f("n *= ( a + b )"), "n *= (a + b)\n");
+        assert_eq!(f("n +=\n1"), "n +=\n  1\n");
+
+        // Every source above and below, formatted: the same tokens, and a fixed point.
+        // The last four do not parse — an operator, a space, an `=` — and are here because
+        // printed without the space they would become a compound assignment.
+        for src in [
+            "fn mean(xs) = do {\ntotal = 0.0\nn = 0\nfor x in xs {\ntotal += x\nn+=1\n}\ntotal / n\n}\n",
+            "for r in rows {\nfor (k, v) in r.items() {\nprint(k)\n}\n}\n",
+            "for x in xs {total+=x}",
+            "for(k,v) in d.items() {n-=v}",
+            "for[a,...rest] in rows {print(a)}",
+            "mut t=0\nfor i in 0..10 {t+=i\nt-=1\nt*=2\nt/=3}\n",
+            "for x in xs {\n  y = x * 2   # local\n  seen = seen.concat([y])\n}\n",
+            "x = (- = 3)",
+            "x = [- == 3]",
+            "f(a, - => b)",
+            "a + = b\na - = b\na * = b\na / = b\na +== b\na -=> b\n",
+        ] {
+            let once = f(src);
+            assert_eq!(f(&once), once, "not a fixed point: {src:?}");
+            let before = crate::lexer::lex(src).expect("input lexes");
+            let after = crate::lexer::lex(&once).expect("output lexes");
+            let toks = |ts: &[Token]| ts.iter().map(|t| format!("{:?}", t.tok)).collect::<Vec<_>>();
+            assert_eq!(toks(&before), toks(&after), "tokens changed: {src:?} -> {once:?}");
+        }
+    }
+
     #[test]
     fn spacing_and_indent_rules() {
         let f = |s: &str| format_source(s).expect("lexes");

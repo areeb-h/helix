@@ -1203,7 +1203,7 @@ fn count_cannot_answer_for_a_csv_it_cannot_read() {
 fn foreign_syntax_gets_the_hint_it_actually_needs() {
     // (program, a phrase the help must contain)
     let cases = [
-        ("xs = [1, 2, 3]\nfor x in xs:\n    print(x)", "no `for` loop"),
+        ("xs = [1, 2, 3]\nfor x in xs:\n    print(x)", "goes in braces, not after a colon"),
         ("i = 0\nwhile i < 3:\n    print(i)", "no `while`"),
         ("def f(x):\n    return x + 1", "fn name(a, b) = expression"),
         ("f = lambda x: x + 1", "a lambda is `x => x + 1`"),
@@ -5501,6 +5501,164 @@ fn replaying_costs_an_app_no_permission() {
     let app = out.lines().skip_while(|l| !l.starts_with("app:")).take(2).collect::<Vec<_>>().join("\n");
     assert!(app.starts_with("app:"), "no `app` in:\n{out}");
     assert!(!app.contains("fs-write") && !app.contains("fs-read"), "std.ui's `app` reaches the file system:\n{app}");
+}
+
+/// Recording must never be what kills a program. Every taped call is fingerprinted by its
+/// arguments, and a write method's receiver is an argument: writing it down to hash it turned
+/// a value that holds one part many times (2^60 leaves as a tree) into an abort for lack of
+/// memory, and a value nested a million deep into a stack overflow — both only with
+/// `HELIX_RECORD` set, for programs that run cleanly without it.
+#[test]
+fn recording_a_value_that_shares_its_parts_or_nests_deep_is_never_a_dead_process() {
+    let dir = std::env::temp_dir().join(format!("helix_tape_big_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let session = dir.join("s.jsonl");
+    let shared = dir.join("shared.helix");
+    std::fs::write(
+        &shared,
+        "fn dup(n, acc) = if n == 0 then acc else dup(n - 1, [acc, acc])\n\
+         v = dup(60, 1)\n\
+         r = try v.write_json(source_path(\"shared.json\"))\n\
+         print(\"refused: {r.error}\")\n",
+    )
+    .unwrap();
+    let deep = dir.join("deep.helix");
+    std::fs::write(
+        &deep,
+        "fn build(n, acc) = if n == 0 then acc else build(n - 1, [acc])\n\
+         v = build(1000000, 1)\n\
+         w = v.write_json(source_path(\"deep.json\"))\n\
+         print(\"wrote\")\n",
+    )
+    .unwrap();
+    for (prog, want) in [(&shared, "refused: `write_json` would exceed"), (&deep, "wrote")] {
+        let started = std::time::Instant::now();
+        let (out, err, code) = run(&["run", prog.to_str().unwrap()], &[("HELIX_RECORD", session.to_str().unwrap())], "");
+        assert_eq!(code, Some(0), "{} under HELIX_RECORD\nout:\n{out}\nerr:\n{err}", prog.display());
+        assert!(out.contains(want), "out:\n{out}\nerr:\n{err}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(60), "took {:?}", started.elapsed());
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A replay that compared nothing must not say everything matched: a corpus is a CI gate, and
+/// an empty or truncated session, a file that is not a session, or an app file that never
+/// starts an app all passed it — "replayed 0 events: 0 of 0 screens identical", exit 0.
+#[test]
+fn a_replay_that_compares_nothing_fails_and_says_why() {
+    let dir = std::env::temp_dir().join(format!("helix_replay_nothing_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let app = dir.join("app.helix");
+    std::fs::write(
+        &app,
+        "import std.ui\nfn update(m, e) = m\nfn view(m) = <p>{m.n}</p>\n\
+         fn main() = ui.app({title: \"t\", init: {n: 1}, update: update, view: view})\n",
+    )
+    .unwrap();
+    let script = dir.join("script.helix");
+    std::fs::write(&script, "print(1)\n").unwrap();
+    let write = |name: &str, text: &str| {
+        let p = dir.join(name);
+        std::fs::write(&p, text).unwrap();
+        p
+    };
+    let empty = write("empty.jsonl", "");
+    let not_json_session = write("other.jsonl", "{\"a\": 1}\n");
+    let unstarted = write("no-start.jsonl", "{\"kind\": \"event\", \"event\": null, \"effects\": []}\n");
+    let no_screens = write("no-screens.jsonl", "{\"kind\": \"start\", \"app\": \"t\", \"effects\": []}\n");
+    for (session, why) in [
+        (&empty, "it is empty"),
+        (&not_json_session, "is not the session's start"),
+        (&unstarted, "is not the session's start"),
+        (&no_screens, "holds no screen to compare"),
+    ] {
+        let (out, err, code) = run_cmd(&["replay", app.to_str().unwrap(), session.to_str().unwrap()]);
+        assert_eq!(code, Some(1), "{}\nout:\n{out}\nerr:\n{err}", session.display());
+        assert!(err.contains("is not a recorded session") && err.contains(why), "{}\nerr:\n{err}", session.display());
+        assert!(!out.contains("identical"), "out:\n{out}");
+    }
+    // A program that never starts an app replays nothing, whatever the session holds.
+    let (out, err, code) = run_cmd(&["replay", script.to_str().unwrap(), no_screens.to_str().unwrap()]);
+    assert_eq!(code, Some(1), "out:\n{out}\nerr:\n{err}");
+    assert!(err.contains("the session was not replayed") && err.contains("`ui.app`"), "err:\n{err}");
+    // And in a corpus each is a failure, not an "ok".
+    let corpus = dir.join("corpus");
+    std::fs::create_dir_all(&corpus).unwrap();
+    std::fs::copy(&empty, corpus.join("empty.jsonl")).unwrap();
+    let (out, err, code) = run_cmd(&["replay", app.to_str().unwrap(), corpus.to_str().unwrap()]);
+    assert_eq!(code, Some(1), "out:\n{out}\nerr:\n{err}");
+    assert!(out.contains("FAIL") && out.contains("1 of 1 sessions differ"), "out:\n{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A corpus folder holding a link back up the tree is walked once: the walk followed links to
+/// folders, found the session again at every level the kernel would resolve (40 of them), and
+/// counted one session as 41. Each session counts once, by the file it is.
+#[cfg(unix)]
+#[test]
+fn a_corpus_counts_each_session_once_however_many_paths_lead_to_it() {
+    const PORT: u16 = 18481;
+    let dir = std::env::temp_dir().join(format!("helix_corpus_links_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("corpus/a")).unwrap();
+    let app = dir.join("app.helix");
+    std::fs::write(
+        &app,
+        format!(
+            "import std.ui\n\
+             fn update(m, e) = match e.msg {{ \"inc\" => {{...m, n: m.n + 1}}, _ => m }}\n\
+             fn view(m) = <p>{{m.n}}</p>\n\
+             ui.app({{title: \"Links\", init: {{n: 0}}, update: update, view: view, port: {PORT}}})\n"
+        ),
+    )
+    .unwrap();
+    let session = dir.join("corpus/a/s.jsonl");
+    record_app_session(&app, PORT, &["inc"], &session);
+    std::os::unix::fs::symlink("..", dir.join("corpus/a/up")).unwrap();
+    std::os::unix::fs::symlink(&session, dir.join("corpus/also.jsonl")).unwrap();
+    let (out, err, code) = run_cmd(&["replay", app.to_str().unwrap(), dir.join("corpus").to_str().unwrap()]);
+    assert_eq!(code, Some(0), "out:\n{out}\nerr:\n{err}");
+    assert!(out.contains("1 session replayed"), "out:\n{out}");
+    assert_eq!(out.lines().filter(|l| l.starts_with("ok")).count(), 1, "out:\n{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `--view` on a corpus keeps a viewer for each session that fails, and two sessions with the
+/// same file name in different folders each keep their own: the viewer was named by the file's
+/// name alone, so `a/s.jsonl` and `b/s.jsonl` wrote the same `s.html` and the second replaced
+/// the first.
+#[test]
+fn a_corpus_keeps_one_viewer_per_failing_session_even_when_their_names_match() {
+    const PORT: u16 = 18482;
+    let dir = std::env::temp_dir().join(format!("helix_corpus_views_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("corpus/a")).unwrap();
+    std::fs::create_dir_all(dir.join("corpus/b")).unwrap();
+    let app = dir.join("app.helix");
+    let source = |label: &str| {
+        format!(
+            "import std.ui\n\
+             fn update(m, e) = match e.msg {{ \"inc\" => {{...m, n: m.n + 1}}, _ => m }}\n\
+             fn view(m) = <p>{label} {{m.n}}</p>\n\
+             ui.app({{title: \"Views\", init: {{n: 0}}, update: update, view: view, port: {PORT}}})\n"
+        )
+    };
+    std::fs::write(&app, source("Count")).unwrap();
+    record_app_session(&app, PORT, &["inc"], &dir.join("corpus/a/s.jsonl"));
+    record_app_session(&app, PORT, &["inc", "inc"], &dir.join("corpus/b/s.jsonl"));
+    // A change on purpose: both sessions now fail, and each keeps its viewer.
+    std::fs::write(&app, source("Total")).unwrap();
+    let views = dir.join("views");
+    let (out, err, code) = run_cmd(&["replay", app.to_str().unwrap(), dir.join("corpus").to_str().unwrap(), "--view", views.to_str().unwrap()]);
+    assert_eq!(code, Some(1), "out:\n{out}\nerr:\n{err}");
+    assert!(out.contains("2 of 2 sessions differ"), "out:\n{out}");
+    let (a, b) = (views.join("a/s.html"), views.join("b/s.html"));
+    assert!(a.is_file() && b.is_file(), "viewers: {:?}\nout:\n{out}", std::fs::read_dir(&views).map(|d| d.flatten().map(|e| e.path()).collect::<Vec<_>>()));
+    assert_ne!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap(), "each viewer shows its own session");
+    assert!(out.contains(&a.display().to_string()) && out.contains(&b.display().to_string()), "out:\n{out}");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// `helix <args>` with no stdin and no extra environment.
@@ -19225,4 +19383,413 @@ print(arr(1, 3), tup(1, 2), rec(1, 1))
     assert_eq!(lines[7], "true true");
     // A shallow value that shares still prints as the tree it describes.
     assert_eq!(lines[8], "[[[1, 1], [1, 1]], [[1, 1], [1, 1]]] ((1, 1), (1, 1)) {a: 1, b: 1}");
+}
+
+// --- `for` loops and compound assignment (ADR 0066). -----------------------------------------
+
+/// Run `src` on every engine and answer the one result they agree on.
+fn on_every_engine(src: &str, tag: &str) -> (String, String, Option<i32>) {
+    let mut seen: Option<(String, String, Option<i32>)> = None;
+    for (engine, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("{tag}_{engine}"));
+        // The temp file is named per engine; the text must not differ otherwise.
+        let got = (out, err.replace(&format!("{tag}_{engine}"), tag), code);
+        match &seen {
+            None => seen = Some(got),
+            Some(first) => assert_eq!(first, &got, "engines disagree ({engine}) on:\n{src}"),
+        }
+    }
+    seen.expect("three engines ran")
+}
+
+/// Every refusal ADR 0066 names: its message, its hint, the line and column it points at —
+/// identical on all three engines, and never showing a name the parser made up.
+#[test]
+fn for_loop_refusals_say_what_to_write_instead() {
+    // (program, message, a phrase of the hint, "line:col")
+    let cases: &[(&str, &str, &str, &str)] = &[
+        // No `break`, no `continue`.
+        (
+            "fn f(xs) = do {\n  n = 0\n  for x in xs {\n    n += x\n    if n > 3 then break else n\n  }\n  n\n}\nprint(f([1, 2]))",
+            "a `for` loop has no `break`",
+            "cut the sequence first: `for x in xs.take_while(x => x < limit) { … }`",
+            "5:19",
+        ),
+        (
+            "for x in [1, 2] {\n  continue\n}",
+            "a `for` loop has no `continue`",
+            "choose the elements first: `for x in xs.filter(x => x > 0) { … }`",
+            "2:3",
+        ),
+        // No value.
+        (
+            "xs = [1, 2]\nys = for x in xs { x * 2 }\nprint(ys)",
+            "a `for` loop is a statement; to build a collection use `xs.map(…)`",
+            "`ys = xs.map(x => x * 2)` builds an array",
+            "2:6",
+        ),
+        (
+            "fn f(xs) = for x in xs { print(x) }",
+            "a `for` loop is a statement; to build a collection use `xs.map(…)`",
+            "a loop has no value",
+            "1:12",
+        ),
+        // A name of the body's own, read after the loop.
+        (
+            "fn f(xs) = do {\n  for x in xs {\n    last = x\n  }\n  last\n}\nprint(f([1]))",
+            "`last` is not defined",
+            "it was first bound inside the `for` body, so it does not outlive an iteration; bind it before the loop to carry it out",
+            "5:3",
+        ),
+        (
+            "for x in [1, 2] {\n  double = (y) => y * 2\n}\nprint(double(2))",
+            "`double` is not a known function",
+            "it was first bound inside the `for` body, so it does not outlive an iteration; bind it before the loop to carry it out",
+            "4:7",
+        ),
+        // …and the loop's own variable.
+        (
+            "for i in range(3) {\n  print(i)\n}\nprint(i)",
+            "`i` is not defined",
+            "it is the `for` loop's own variable, so it does not outlive an iteration",
+            "4:7",
+        ),
+        // Compound assignment to a name that is not bound.
+        (
+            "fn f(xs) = do {\n  total += 1\n  total\n}",
+            "`total` is not bound, so `+=` has nothing to update",
+            "`total += value` is `total = total + value`, so `total` needs a value first — bind it with a plain `total = …` above this line.",
+            "2:3",
+        ),
+        (
+            "count *= 2",
+            "`count` is not bound, so `*=` has nothing to update",
+            "bind it with a plain `count = …` above this line",
+            "1:1",
+        ),
+        (
+            "for x in [1] {\n  seen = x\n}\nseen -= 1",
+            "`seen` is not bound, so `-=` has nothing to update",
+            "it was first bound inside the `for` body",
+            "4:1",
+        ),
+        // A top-level loop assigns `mut` names; another gets the error it always got.
+        (
+            "total = 0\nfor x in [1, 2] {\n  total += x\n}",
+            "`total` is immutable and cannot be reassigned",
+            "mut total",
+            "3:3",
+        ),
+        // A `mut` global is not updated from inside a function, by a loop or otherwise.
+        (
+            "mut count = 0\nfn f(xs) = do {\n  for x in xs {\n    count += 1\n  }\n  count\n}",
+            "`count` is a mutable global; this binding would shadow it, not update it",
+            "the global keeps its old value",
+            "4:5",
+        ),
+        // No assignment inside `if`.
+        (
+            "fn f(xs) = do {\n  t = 0\n  for x in xs {\n    if x > 0 then t += x else t\n  }\n  t\n}",
+            "an `if` cannot hold an assignment",
+            "`total = if x > 0 then total + x else total`",
+            "4:21",
+        ),
+        // Only a name is updated.
+        (
+            "r = {n: 1}\nr.n += 1",
+            "expected end of line after statement, found `+=`",
+            "only a NAME can be updated",
+            "2:5",
+        ),
+        // Something that is not a sequence: known to the checker…
+        (
+            "for i in 10 {\n  print(i)\n}",
+            "`for` needs something to iterate — an Array, a `range(…)`, `d.items()` — and this is an Int",
+            "To count, write `for i in range(n) { … }`",
+            "1:10",
+        ),
+        (
+            "fn f() = do {\n  n = 0\n  for ch in \"abc\" {\n    n += 1\n  }\n  n\n}\nprint(f())",
+            "`for` needs something to iterate — an Array, a `range(…)`, `d.items()` — and this is a String",
+            "a string's characters `for ch in s.chars() { … }`",
+            "3:13",
+        ),
+        // …and known only when it runs: the same sentence.
+        (
+            "fn f(v) = do {\n  n = 0\n  for x in v {\n    n += 1\n  }\n  n\n}\nprint(f(10))",
+            "`for` needs something to iterate — an Array, a `range(…)`, `d.items()` — and this is an Int",
+            "To count, write `for i in range(n) { … }`",
+            "3:12",
+        ),
+        (
+            "fn f(v) = do {\n  for (k, n) in v {\n    print(k)\n  }\n  0\n}\nprint(f({\"a\": 1}))",
+            "`for` needs something to iterate — an Array, a `range(…)`, `d.items()` — and this is a Dict",
+            "entries are `for (k, v) in d.items() { … }`",
+            "2:17",
+        ),
+        (
+            "fn f(v) = do {\n  for x in v {\n    print(x)\n  }\n  0\n}\nprint(f(missing))",
+            "`for` needs something to iterate — an Array, a `range(…)`, `d.items()` — and this is `missing`",
+            "a loop walks a sequence",
+            "2:12",
+        ),
+        // The spellings of other languages.
+        (
+            "xs = [1, 2]\nfor x in xs:\n    print(x)",
+            "expected `{` to open the `for` body, found `:`",
+            "the body of a loop goes in braces, not after a colon: `for x in xs { total += x }`",
+            "2:12",
+        ),
+        (
+            "for i in range(10):\n    print(i)",
+            "expected `{` to open the `for` body, found `:`",
+            "Indentation means nothing to Helix",
+            "1:19",
+        ),
+        (
+            "for (i = 0; i < 3; i++) { print(i) }",
+            "unexpected character `;`",
+            "`for i in range(n) { … }` runs `i` from 0 to n - 1",
+            "1:11",
+        ),
+        (
+            "for (i in 1:3) { print(i) }",
+            "a `for` loop takes no parentheses around its header",
+            "a loop is written `for x in xs { … }`",
+            "1:1",
+        ),
+        (
+            "for (const x of [1, 2]) { print(x) }",
+            "a `for` loop takes no parentheses around its header",
+            "`for i in range(n) { … }` counts from 0",
+            "1:1",
+        ),
+        (
+            "foreach x in [1, 2] { print(x) }",
+            "Helix spells `foreach` as `for`",
+            "a loop is written `for x in xs { … }`",
+            "1:1",
+        ),
+        (
+            "for x of [1, 2] { print(x) }",
+            "expected end of line after statement, found `x`",
+            "a loop is written `for x in xs { … }`",
+            "1:5",
+        ),
+        (
+            "for x in [1, 2] do\n  print(x)\nend",
+            "expected `{` to open the `for` body, found `do`",
+            "with no `do`",
+            "1:17",
+        ),
+        // A loop is a statement of a block, which still ends in a value.
+        (
+            "fn f(xs) = do {\n  for x in xs {\n    print(x)\n  }\n}",
+            "a `do` block must end with a result expression",
+            "add a final line",
+            "1:12",
+        ),
+        (
+            "for x in [1] { a = 1 b = 2 }",
+            "expected end of line after a line of the `for` body, found `b`",
+            "a block has one statement per line",
+            "1:22",
+        ),
+    ];
+    for (i, (src, message, hint, at)) in cases.iter().enumerate() {
+        let (out, err, code) = on_every_engine(src, &format!("for_refusal_{i}"));
+        assert_eq!(code, Some(1), "should be refused:\n{src}\nstdout: {out}\nstderr: {err}");
+        assert!(
+            err.starts_with(&format!("error: {message}\n")),
+            "for:\n{src}\n  expected the message {message:?}\n  got: {err}"
+        );
+        assert!(err.contains(hint), "for:\n{src}\n  expected the help to say {hint:?}\n  got: {err}");
+        assert!(err.contains(&format!(".helix:{at}\n")), "for:\n{src}\n  expected it at {at}\n  got: {err}");
+        assert!(!err.contains('$'), "a generated name in an error:\n{src}\n{err}");
+        // `helix check` refuses what `helix run` refuses before running, in the same words.
+        let path = std::env::temp_dir().join(format!("helix_it_for_check_{i}.helix"));
+        std::fs::write(&path, src).unwrap();
+        let (_, check_err, check_code) = run(&["check", path.to_str().unwrap()], &[], "");
+        let _ = std::fs::remove_file(&path);
+        assert!(!check_err.contains('$'), "a generated name in a check error:\n{src}\n{check_err}");
+        if check_code == Some(1) {
+            assert!(check_err.contains(message), "check says something else for:\n{src}\n{check_err}");
+        } else {
+            // Only what is known when it runs gets past the checker.
+            assert!(src.contains("print(f("), "check accepted a program run refuses:\n{src}\n{check_err}");
+        }
+    }
+}
+
+/// The loop and the `reduce` it stands for, written by hand, print the same thing — for
+/// bodies put together from lines that assign one, several or none of the names bound
+/// before the loop, with names of their own in between — on every engine.
+#[test]
+fn for_loop_is_the_fold_it_stands_for() {
+    // (the lines as a loop body has them, the same lines with `+=` written out, the names
+    // bound before the loop that they assign)
+    let lines: &[(&str, &str, &[&str])] = &[
+        ("a += x", "a = a + x", &["a"]),
+        ("b = b * 2 - x", "b = b * 2 - x", &["b"]),
+        ("c = c.concat([x])", "c = c.concat([x])", &["c"]),
+        ("t = x * 3\n    a -= t", "t = x * 3\n    a = a - t", &["a"]),
+        ("b *= a", "b = b * a", &["b"]),
+        ("c = c.concat([a + b])", "c = c.concat([a + b])", &["c"]),
+        ("u = [x, a]\n    [p, q] = u\n    b += p * q", "u = [x, a]\n    [p, q] = u\n    b = b + p * q", &["b"]),
+        ("a = if x % 2 == 0 then a + 1 else a - b", "a = if x % 2 == 0 then a + 1 else a - b", &["a"]),
+        ("d /= 2", "d = d / 2", &["d"]),
+        ("w = \"{x}:{a}\"", "w = \"{x}:{a}\"", &[]),
+        ("c = c.concat([c.count()])\n    d += c.count()", "c = c.concat([c.count()])\n    d = d + c.count()", &["c", "d"]),
+        ("f = (y) => y + x\n    a = f(a)", "f = (y) => y + x\n    a = f(a)", &["a"]),
+    ];
+    let mut src = String::new();
+    let mut calls = String::new();
+    let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next = |n: usize| {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((seed >> 33) as usize) % n
+    };
+    let programs = 36;
+    for k in 0..programs {
+        // Zero to four lines; program 0 has none, so one loop carries nothing at all.
+        let count = if k == 0 { 0 } else { 1 + next(4) };
+        let picked: Vec<usize> = (0..count).map(|_| next(lines.len())).collect();
+        let mut carried: Vec<&str> = Vec::new();
+        for &i in &picked {
+            for name in lines[i].2 {
+                if !carried.contains(name) {
+                    carried.push(name);
+                }
+            }
+        }
+        let body = |which: usize| -> String {
+            picked.iter().map(|&i| format!("    {}\n", if which == 0 { lines[i].0 } else { lines[i].1 })).collect()
+        };
+        let head = "  a = 1\n  b = 2\n  c = []\n  d = 64.0\n";
+        src.push_str(&format!(
+            "fn loop{k}(xs) = do {{\n{head}  for x in xs {{\n{}  }}\n  (a, b, c, d)\n}}\n",
+            body(0)
+        ));
+        // By hand: the state is the carried names — one is itself, several are a tuple,
+        // none is `()` — read out at the top of the block and answered at its end.
+        let (state, unpack, rebind) = match carried.as_slice() {
+            [] => ("()".to_string(), String::new(), "  _ = r\n".to_string()),
+            [one] => (one.to_string(), format!("    {one} = st\n"), format!("  {one} = r\n")),
+            many => (
+                format!("({})", many.join(", ")),
+                many.iter().enumerate().map(|(i, n)| format!("    {n} = st[{i}]\n")).collect(),
+                many.iter().enumerate().map(|(i, n)| format!("  {n} = r[{i}]\n")).collect(),
+            ),
+        };
+        src.push_str(&format!(
+            "fn fold{k}(xs) = do {{\n{head}  r = xs.reduce({state}, (st, x) => do {{\n{unpack}{}    {state}\n  }})\n{rebind}  (a, b, c, d)\n}}\n",
+            body(1)
+        ));
+        for xs in ["[]", "[5]", "[3, 1, 4, 1, 5]", "range(1, 7)"] {
+            calls.push_str(&format!("print(loop{k}({xs}))\nprint(fold{k}({xs}))\n"));
+        }
+    }
+    src.push_str(&calls);
+    let (out, err, code) = on_every_engine(&src, "for_differential");
+    assert_eq!(code, Some(0), "stderr:\n{err}\nsource:\n{src}");
+    let printed: Vec<&str> = out.lines().collect();
+    assert_eq!(printed.len(), programs * 4 * 2, "{out}");
+    for (i, pair) in printed.chunks(2).enumerate() {
+        assert_eq!(pair[0], pair[1], "loop{0} and fold{0} differ (call {1}):\n{src}", i / 4, i % 4);
+    }
+    // The bodies did something: not every answer is the starting state.
+    assert!(printed.iter().filter(|l| **l != "(1, 2, [], 64.0)").count() > programs * 4);
+}
+
+/// `for` was a name before it began a loop, and still is everywhere a loop cannot start:
+/// an HTML attribute in markup, a variable, a function. And an operator that only LOOKS
+/// like a compound assignment keeps the tokens — and so the error — it had.
+#[test]
+fn for_is_still_a_name_where_it_was_one() {
+    let (out, err, code) = on_every_engine(
+        "import std.ui\nfor = 3\nprint(for + 1)\nfn each(for, f) = f(for)\nprint(each(4, (for) => for * 2))\n\
+         r = {for: \"x\", in: 1}\nprint(r.for)\nv = <label for=\"name\">Name</label>\nprint(v.props)\n",
+        "for_name",
+    );
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out, "4\n8\nx\n{attrs: {for: \"name\"}}\n");
+    // A function called `for` is called, pattern-shaped arguments and all.
+    let (out, err, code) = on_every_engine("fn for(a, b) = a + b\nx = 1\ny = 2\nfor (x, y)\nprint(for(x, y))\n", "for_call");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out, "3\n");
+    for (src, message) in [
+        ("a = 1\nb = 2\nprint(a +== b)", "unexpected `==`"),
+        ("a = 1\nb = a +=> 2", "unexpected `=>`"),
+        ("a = 1\nb = (a + = 2)", "unexpected `=`"),
+    ] {
+        let (_, err, code) = on_every_engine(src, "for_not_compound");
+        assert_eq!(code, Some(1), "{src}");
+        assert!(err.contains(message), "for {src:?}: {err}");
+    }
+}
+
+/// A loop in a session carries the names its earlier lines bound, and `+=` finds them.
+#[test]
+fn for_loop_in_a_session_carries_earlier_lines() {
+    let (out, err, _) = run(
+        &["repl"],
+        &[],
+        "mut total = 0\nmut n = 0\nfor x in [1, 2, 3] { total += x }\ntotal += 10\n\
+         for x in [1, 2] { for y in [x] { n += y } }\nfor x in [5] { total += x }\nprint(total, n)\nnope += 1\n",
+    );
+    assert!(out.contains("21 3"), "stdout: {out}\nstderr: {err}");
+    assert!(err.contains("`nope` is not bound, so `+=` has nothing to update"), "{err}");
+    assert!(!err.contains('$') && !out.contains('$'), "{out}\n{err}");
+}
+
+/// `helix describe for` and `helix search loop` answer with the notation and its fold.
+#[test]
+fn for_loop_is_described_and_found() {
+    let (out, err, code) = run(&["describe", "for"], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    assert!(out.contains("for x in xs {") && out.contains("IS A FOLD") && out.contains("reduce"), "{out}");
+    let (out, err, code) = run(&["search", "loop"], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    assert!(out.lines().any(|l| l.contains("for x in xs {")), "{out}");
+    let (out, _, code) = run(&["describe", "+="], &[], "");
+    assert_eq!(code, Some(0));
+    assert!(out.contains("name += value") && out.contains("n = n + 1"), "{out}");
+}
+
+/// A `for` in a rule is refused by `helix emit rust` as a loop — not as the `reduce`, the
+/// tuple read or the `type_of` the parser wrote it with.
+#[test]
+fn emit_rust_refuses_a_for_loop_by_name() {
+    let dir = std::env::temp_dir().join(format!("helix_emit_for_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let rule = dir.join("rule.helix");
+    let out = dir.join("rule.rs");
+    for body in [
+        "do {\n  total = 0\n  for x in xs {\n    total += x.count()\n  }\n  total\n}",
+        "do {\n  total = 0\n  for x in xs {\n    total += x.count()\n    n = 1\n    total += n\n  }\n  total\n}",
+        "do {\n  total = 0\n  for x in [\"a\", \"b\"] {\n    total += x.count()\n  }\n  total + xs.count()\n}",
+    ] {
+        std::fs::write(&rule, format!("## rust: pub fn total(xs: &[String]) -> i64\nfn total(xs) = {body}\n")).unwrap();
+        let (_, err, code) = run(&["emit", "rust", rule.to_str().unwrap(), "-o", out.to_str().unwrap()], &[], "");
+        assert_ne!(code, Some(0), "a loop in a rule was emitted:\n{body}");
+        assert!(err.contains("a `for` loop is not translated by `helix emit rust` yet"), "{err}");
+        assert!(err.contains("xs.reduce(init, (acc, x) => …)"), "{err}");
+        assert!(err.contains("rule.helix:4: "), "the refusal points at the loop's line: {err}");
+        assert!(!err.contains('$') && !err.contains("type_of"), "{err}");
+    }
+    // What `helix effects` says of a function is what it says of the fold: the `raise` the
+    // parser guards a loop with is the loop's, not something the function does.
+    std::fs::write(
+        &rule,
+        "fn looped(xs) = do {\n  t = 0\n  for x in xs {\n    t += x\n  }\n  t\n}\nfn folded(xs) = xs.reduce(0, (t, x) => t + x)\n\
+         fn guarded(x) = if x > 0 then x else raise(\"negative\")\n",
+    )
+    .unwrap();
+    let (out, err, code) = run(&["effects", rule.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    assert!(out.contains("looped: no authority, reproducible"), "{out}");
+    assert!(out.contains("folded: no authority, reproducible"), "{out}");
+    assert!(out.contains("guarded: no authority, not reproducible"), "{out}");
+    assert!(!out.contains('$'), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
 }
