@@ -1,0 +1,24 @@
+exit: 1
+--- stdout ---
+({tag: "p1", x: 1, y: 2}, {tag: "p1", x: 11, y: 2})
+{tag: "p1", w: [1, 2], x: 1, y: 2, z: 0}
+{extra: 2, tag: "p1", x: 2, y: -1}
+{a: 1, b: 3, c: 4, last: 1}
+{last: 1, tag: "p1", w: [1, 2], x: 1, y: 2, z: 0}
+[1, 2, 3, 4, 5]
+{tag: "p1", x: 1, y: 2}
+{a: 1, k: 1}
+{inner: {tag: "p1", x: {tag: "p1", x: 0, y: 2}, y: 2}, tag: "p1", x: 1, y: 2}
+(false, "`...` record update needs a record, got an Int")
+[1, false, 3, 2]
+[true, false, true]
+loud
+{a: 1, k: {tag: "p1", x: 1, y: 1}}
+loud
+--- stderr ---
+error: `...` record update needs a record, got an Int
+  --> <src>:46:7
+   |
+46 | print({...loud(1), k: point(1, 1)})
+   |       ^
+help: the spread base must be a record or a dict, e.g. `{ ...resp, status: 500 }`.

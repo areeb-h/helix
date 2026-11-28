@@ -1,0 +1,44 @@
+# A string grown by a fold (`"{acc}…"`) or carried in a record field (`"{st.s}…"`) is
+# extended in place, in the local slot that holds it. The slot is addressed from the
+# running FRAME's base — not from the depth of the operand stack, which happens to be the
+# same number at top level and in a function called with nothing else in flight. So each
+# of these runs inside a function, with other locals in the frame and with values already
+# on the stack when the call is made.
+
+fn joined(xs, sep) = xs.reduce("", (acc, x) => "{acc}{x}{sep}")
+fn framed(pad, xs) = do {
+  before = "<{pad}"
+  body = xs.reduce("", (acc, x) => "{acc}[{x}]")
+  after = "{pad}>"
+  "{before}{body}{after}"
+}
+fn go(st, i, n) = if i == n then st.s.length() else go({s: "{st.s}x", k: st.k + 1}, i + 1, n)
+fn grow(st, word) = {s: "{st.s}{word}.", n: st.n + 1}
+fn many(words) = words.reduce({s: "", n: 0}, (st, w) => grow(st, w))
+fn seeded(seed, xs) = xs.reduce(seed, (acc, x) => "{acc}{x}")
+
+print(joined([1, 2, 3], ","))
+print(framed("--", ["a", "b"]))
+print(go({s: "", k: 0}, 0, 50))
+print(many(["a", "bb", "ccc"]))
+
+# With operands already on the stack when the call is made: inside an array literal, an
+# interpolation, a tuple, a call's later argument, and a comprehension over records.
+print([0, 1, joined(["x", "y"], "-"), 3])
+print("a{1}b{joined([7, 8], "+")}c{framed("=", [1])}")
+print((1, 2, framed("*", [joined([1], "/"), go({s: "ab", k: 0}, 0, 3)])))
+print([{w: "p"}, {w: "q"}].map((r) => (r.w, joined([r.w, r.w], "."), many([r.w]).s)))
+print(range(0, 4).map((i) => go({s: "{i}", k: 0}, 0, i)))
+
+# The value the fold started from is still what it was, and so is a record whose field
+# was read as the head of an interpolation while something else held it.
+seed = "seed:"
+print((seeded(seed, [1, 2]), seed))
+held = {s: "kept", n: 0}
+print((grow(held, "w"), held))
+
+# A hole that fails inside the function leaves the accumulator's slot alone.
+fn risky(xs) = xs.reduce("", (acc, x) => "{acc}{10 // x}")
+t = try risky([1, 2, 0, 5])
+print((t.ok, t.error))
+print(risky([1, 2, 5]))

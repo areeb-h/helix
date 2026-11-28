@@ -1,0 +1,5 @@
+## A mutant: one dash per character, not per run
+export fn slugify(title) = do {
+  s = title.lower().re_replace("""[^a-z0-9]""", "-").re_replace("""^-+|-+$""", "")
+  s.take(40).re_replace("""-+$""", "")
+}

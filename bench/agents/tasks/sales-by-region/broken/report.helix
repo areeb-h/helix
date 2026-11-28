@@ -1,0 +1,3 @@
+## Plausible wrong draft: sorted by name, not by total.
+totals = read_csv("sales.csv").group(@region).sum(@amount).records()
+printed = totals.sort_by((r) => r.region).map((r) => print("{r.region}: {r.amount:.2f}"))

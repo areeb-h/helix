@@ -1,0 +1,17 @@
+# Calls to small functions whose arguments are records, strings and arrays — nothing the
+# numeric JIT takes — and recursion over a list.
+N = 60000
+
+fn area(s) = s.w * s.h
+fn bigger(a, b) = if area(a) >= area(b) then a else b
+fn describe(s, unit) = "{s.w}x{s.h}{unit}"
+fn clamp_w(s, lo, hi) = if s.w < lo then {...s, w: lo} else if s.w > hi then {...s, w: hi} else s
+fn total(xs, i, acc) = if i == xs.count() then acc else total(xs, i + 1, acc + area(xs[i]))
+fn depth(node) = if node.kids.count() == 0 then 1 else 1 + node.kids.map((k) => depth(k)).max()
+fn tree(d) = if d == 0 then {kids: []} else {kids: [tree(d - 1), tree(d - 1)]}
+
+shapes = range(0, N).map((i) => {w: i % 17 + 1, h: i % 5 + 1})
+print(shapes.reduce(shapes[0], (best, s) => bigger(best, s)))
+print(shapes.map((s) => describe(clamp_w(s, 3, 12), "cm").length()).sum())
+print(total(shapes, 0, 0))
+print(depth(tree(12)))

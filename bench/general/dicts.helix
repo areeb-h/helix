@@ -1,0 +1,16 @@
+# Dict folds: counting, grouping into arrays, and lookups — the keyed-map work behind
+# word counts, indexes and caches.
+N = 40000
+
+words = range(0, N).map((i) => "w{(i * 7919) % 613}")
+counts = words.reduce(dict(), (d, w) => d.insert(w, (d.get(w) ?? 0) + 1))
+index = range(0, N).reduce(dict(), (d, i) => d.insert(i, {id: i, bucket: i % 16}))
+hits = range(0, N).map((i) => index.get((i * 31) % (N + 100))).filter((r) => not r.is_missing()).count()
+by_bucket = range(0, 4000).reduce(dict(), (d, i) => d.insert(i % 16, (d.get(i % 16) ?? []).concat([i])))
+
+print(counts.count())
+print(counts.get("w0"))
+print(hits)
+print(by_bucket.get(3).count())
+print(counts.items().filter((e) => e[1] > 65).count())
+print(words.filter((w) => counts.has(w)).count())

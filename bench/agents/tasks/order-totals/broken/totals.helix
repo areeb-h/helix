@@ -1,0 +1,6 @@
+## Plausible wrong draft: forgets to drop cancelled orders.
+orders = read_text("orders.json").parse_json()
+spend = (o) => o.items.map((i) => i.qty * i.price).sum()
+names = orders.map((o) => o.customer).unique()
+totals = names.map((c) => (c, round(orders.filter((o) => o.customer == c).map(spend).sum(), 2)))
+written = totals.to_dict().to_json().write_to("totals.json")

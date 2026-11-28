@@ -1,0 +1,70 @@
+# Every way the VM enters and leaves a function frame, each followed by more work in the
+# CALLER — so a call that resumed at the wrong instruction, or a caught error that resumed
+# anywhere but its `try`, prints something else. (The dispatch loop keeps the running
+# frame's instruction pointer in a local and writes it back only when a frame is pushed.)
+
+fn add(a, b) = a + b
+fn greet(name, punct = "!") = "hi {name}{punct}"
+fn fib(n) = if n < 2 then n else fib(n - 1) + fib(n - 2)
+fn count_down(n, acc) = if n == 0 then acc else count_down(n - 1, acc.concat([n]))
+fn wrap(x) = do {
+  a = add(x, 1)
+  b = add(a, a)
+  c = "{a}-{b}"
+  [a, b, c, add(b, 1)]
+}
+fn boom(x) = if x > 2 then raise("too big: {x}") else x * 10
+fn guarded(x) = do {
+  r = try boom(x)
+  tail = add(x, 100)
+  if r.ok then "ok {r.value} {tail}" else "caught {r.error} {tail}"
+}
+fn twice(f, x) = do {
+  once = f(x)
+  again = f(once)
+  (once, again)
+}
+fn describe(r) = "{r.name}:{r.n}"
+fn label(self, suffix) = "{self.name}{suffix}"
+
+# A direct call, then more ops in the caller.
+print(wrap(3))
+
+# Defaults filled in at the call (`settle_short`), in the middle of an expression.
+print([greet("a"), greet("b", "?"), greet("c")].join(" "))
+
+# A memoized function: misses push a frame, hits do not.
+print([fib(10), fib(20), fib(10) + fib(11)])
+
+# A tail call reuses its frame; the caller continues after it.
+print(count_down(5, []).concat([0]))
+
+# A function value and a closure, called twice each from one frame.
+k = 7
+print(twice((x) => x + k, 1))
+print(twice(fib, 6))
+
+# A function held in a record field, called in method position; then UFCS.
+obj = {name: "rec", n: 3, show: (s) => "<{s}>"}
+print([obj.show("x"), obj.describe(), obj.label("!"), (obj.show)("y")])
+
+# An error raised two frames down, caught one frame down; the catcher and ITS caller both
+# carry on.
+print([1, 2, 3, 4].map((x) => guarded(x)))
+
+# A caught error inside a comprehension inside a call, with a comprehension running in the
+# caller too: both iterators survive the unwind that belongs to neither.
+fn safe_all(xs) = xs.map((x) => (try boom(x)).ok)
+print([[1, 2], [3, 4], [5]].map((xs) => safe_all(xs)))
+
+# `try` around a call that itself returns normally after catching inside.
+r = try guarded(9)
+print((r.ok, r.value))
+
+# An error that escapes a function called from a `try` at top level, then more top-level work.
+escaped = try wrap(boom(5))
+print(escaped.error)
+print(add(40, 2))
+
+# Calls in every operand position of one expression.
+print(add(add(1, 2), add(3, add(4, 5))) + fib(5) * wrap(0)[0])
