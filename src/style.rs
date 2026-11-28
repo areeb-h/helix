@@ -181,10 +181,23 @@ const RADII: &[(&str, &str)] = &[
     ("none", "0"), ("xs", "0.125rem"), ("sm", "0.25rem"), ("md", "0.375rem"), ("lg", "0.5rem"), ("xl", "0.75rem"), ("2xl", "1rem"),
     ("3xl", "1.5rem"), ("4xl", "2rem"), ("full", "9999px"),
     // Helix's geometry: concentric by construction (ADR 0056).
-    ("card", "var(--r-card)"), ("control", "var(--r-ctl)"), ("field", "var(--r-field)"), ("chip", "var(--r-chip)"),
-    ("list", "var(--r-list)"), ("row", "var(--r-row)"), ("overlay", "var(--r-overlay)"), ("item", "var(--r-item)"),
-    ("sheet", "var(--r-sheet)"), ("window", "var(--r-window)"), ("in-card", "var(--r-in-card)"), ("in-sheet", "var(--r-in-sheet)"),
+    // Like std.ui's own components, these have smooth corners where `corner-shape` is
+    // supported, with the radius scaled to keep its softness (std.ui's SMOOTH).
+    ("card", "calc(var(--r-card) * var(--smooth, 1))"), ("control", "calc(var(--r-ctl) * var(--smooth, 1))"),
+    ("field", "calc(var(--r-field) * var(--smooth, 1))"), ("chip", "calc(var(--r-chip) * var(--smooth, 1))"),
+    ("list", "calc(var(--r-list) * var(--smooth, 1))"), ("row", "calc(var(--r-row) * var(--smooth, 1))"),
+    ("overlay", "calc(var(--r-overlay) * var(--smooth, 1))"), ("item", "calc(var(--r-item) * var(--smooth, 1))"),
+    ("sheet", "calc(var(--r-sheet) * var(--smooth, 1))"), ("window", "calc(var(--r-window) * var(--smooth, 1))"),
+    ("in-card", "calc(var(--r-in-card) * var(--smooth, 1))"), ("in-sheet", "calc(var(--r-in-sheet) * var(--smooth, 1))"),
 ];
+/// The corner shape that goes with a radius: a geometry token's (a control's stays a capsule
+/// where the shape makes controls capsules); nothing for Tailwind's fixed sizes.
+fn corner_of(r: &str) -> Option<&'static str> {
+    if !r.contains("var(--r-") {
+        return None;
+    }
+    Some(if ["--r-ctl)", "--r-field)", "--r-chip)"].iter().any(|t| r.contains(t)) { "var(--corner-ctl, round)" } else { "var(--corner, round)" })
+}
 fn radius(v: &str) -> Option<String> {
     if v.is_empty() {
         return Some("0.25rem".into());
@@ -652,7 +665,10 @@ fn valued(u: &str, negative: bool, neg: &dyn Fn(String) -> String) -> Option<Rul
         }
         "rounded-ss" | "rounded-se" | "rounded-es" | "rounded-ee" => {
             let prop = match head { "rounded-ss" => "border-start-start-radius", "rounded-se" => "border-start-end-radius", "rounded-es" => "border-end-start-radius", _ => "border-end-end-radius" };
-            ranked(one(prop, radius(v)?), 2)
+            let r = radius(v)?;
+            let mut decls = vec![(prop.to_string(), r.clone())];
+            decls.extend(corner_of(&r).map(|c| ("corner-shape".to_string(), c.to_string())));
+            Some(Rule { decls, suffix: "", keyframes: None, rank: 2 })
         }
         "rounded" | "rounded-t" | "rounded-r" | "rounded-b" | "rounded-l" | "rounded-tl" | "rounded-tr" | "rounded-br" | "rounded-bl" | "rounded-s" | "rounded-e" => {
             let r = radius(v)?;
@@ -669,7 +685,9 @@ fn valued(u: &str, negative: bool, neg: &dyn Fn(String) -> String) -> Option<Rul
                 "rounded-br" => (vec!["border-bottom-right-radius"], 2),
                 _ => (vec!["border-bottom-left-radius"], 2),
             };
-            Some(Rule { decls: props.iter().map(|p| (p.to_string(), r.clone())).collect(), suffix: "", keyframes: None, rank })
+            let mut decls: Vec<(String, String)> = props.iter().map(|p| (p.to_string(), r.clone())).collect();
+            decls.extend(corner_of(&r).map(|c| ("corner-shape".to_string(), c.to_string())));
+            Some(Rule { decls, suffix: "", keyframes: None, rank })
         }
         "outline" => {
             if let Some(n) = int(v) {
@@ -1269,7 +1287,10 @@ mod tests {
         has(&["bg-accent"], ".bg-accent { background-color: var(--accent); }");
         has(&["text-muted"], ".text-muted { color: var(--muted); }");
         has(&["bg-accent/10"], "color-mix(in oklab, var(--accent) 10%, transparent)");
-        has(&["rounded-card"], ".rounded-card { border-radius: var(--r-card); }");
+        has(&["rounded-card"], ".rounded-card { border-radius: calc(var(--r-card) * var(--smooth, 1)); corner-shape: var(--corner, round); }");
+        has(&["rounded-control"], ".rounded-control { border-radius: calc(var(--r-ctl) * var(--smooth, 1)); corner-shape: var(--corner-ctl, round); }");
+        // Tailwind's own sizes keep their plain circular corners.
+        has(&["rounded-lg"], ".rounded-lg { border-radius: 0.5rem; }");
         has(&["p-card"], ".p-card { padding: var(--pad-card); }");
         has(&["shadow-2"], "--tw-shadow: var(--e-2)");
         has(&["text-title-2"], ".text-title-2 { font: var(--type-title-2); letter-spacing: var(--track-title-2); }");

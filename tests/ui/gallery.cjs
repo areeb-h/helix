@@ -490,7 +490,10 @@ async function session(browser, url, motion) {
   await plan.scrollIntoViewIfNeeded();
   await settle();
   check(await plan.evaluate((e) => getComputedStyle(e).paddingTop) === '24px', 'a utility is Tailwind’s size (p-6 is 24 px)');
-  check(await plan.evaluate((e) => getComputedStyle(e).borderTopLeftRadius === getComputedStyle(document.documentElement).getPropertyValue('--r-card').trim()), 'a token utility follows the design (rounded-card)');
+  // `rounded-card` is the design's card corner: the same radius and corner shape as std.ui's
+  // own cards (smooth where the browser has `corner-shape`, with the radius scaled to match).
+  check(await plan.evaluate((e) => { const c = getComputedStyle(document.querySelector('.card')), u = getComputedStyle(e);
+    return u.borderTopLeftRadius === c.borderTopLeftRadius && u.cornerTopLeftShape === c.cornerTopLeftShape; }), 'a token utility follows the design (rounded-card)');
   check(await p.evaluate(() => getComputedStyle(document.querySelector('section[aria-label="Utility classes"] .grid')).gridTemplateColumns.split(' ').length) === 3, 'md:grid-cols-3 lays out three columns at this width');
   check(await p.evaluate(() => getComputedStyle(document.querySelector('.btn.outlined') || document.body).outlineStyle !== 'solid'), 'a component class never collides with a utility (the outlined button has no outline)');
   if (motion !== 'reduce') {

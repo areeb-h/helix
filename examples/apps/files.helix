@@ -508,7 +508,7 @@ fn toolbar(m) = ui.toolbar(present([
   [
     ui.segmented("view", "View", m.view, [["list", "List"], ["grid", "Icons"]], "view", size: "sm"),
     if m.write then ui.icon_button("plus", "New folder", "cmd", "cmd:new") else ui.el("span", {class: "badge", attrs: {title: "Started without --write: nothing can be changed"}}, [ui.icon("lock", "xs"), ui.text(" Read-only")]),
-    ui.icon_button("⌘", "Command palette (Ctrl+K)", "palette"),
+    ui.icon_button("command", "Command palette (Ctrl+K)", "palette"),
   ],
   ]), label: "Folder")
 

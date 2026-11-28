@@ -192,8 +192,8 @@ fn buttons(m) = ui.card("Buttons", [
   ui.cluster([ui.button("Default", "toast"), ui.button("Primary", "toast", variant: "primary"), ui.button("Ghost", "toast", variant: "ghost"), ui.button("Delete…", "open-dialog", variant: "danger")], gap: 2),
   ui.cluster([
     ui.button("Disabled", "toast", disabled: true),
-    ui.tooltip("tip-copy", "Copy the link", ui.icon_button("⧉", "Copy link", "toast")),
-    ui.tooltip("tip-more", "More options", ui.icon_button("⋯", "More options", "toast")),
+    ui.tooltip("tip-copy", "Copy the link", ui.icon_button("copy", "Copy link", "toast")),
+    ui.tooltip("tip-more", "More options", ui.icon_button("more_h", "More options", "toast")),
     ], gap: 2),
   ui.cluster([ui.badge("Neutral"), ui.badge("Accent", tone: "accent"), ui.badge("Passed", tone: "success"), ui.badge("Pending", tone: "warning"), ui.badge("Failed", tone: "danger")], gap: 2),
 ])
@@ -388,7 +388,7 @@ fn view(m) = ui.column([
 
 STYLE = """
 .top { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--s-4); flex-wrap: wrap; }
-.actions { display: flex; gap: var(--s-4); align-items: center; }
+.actions { display: flex; flex-wrap: wrap; gap: var(--s-3) var(--s-4); align-items: center; }
 .error-line { margin: 0; min-height: 0; color: var(--danger); font-size: var(--t-sm); font-weight: 500; }
 .error-line:empty { display: none; }
 .between { display: flex; justify-content: space-between; align-items: center; gap: var(--s-3); }
