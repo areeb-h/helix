@@ -51,6 +51,11 @@ enum Target {
     Method(&'static str),
     /// Free-form advice, for the ones with no single-name answer.
     Text(&'static str),
+    /// Free-form advice about a FUNCTION-shaped guess (`push(xs, x)`, `write_file(p, s)`),
+    /// offered only away from a method site. After a dot the answer depends on the
+    /// receiver — `xs.concat([x])` is right for an Array and wrong for a String — so the
+    /// method-site form lives in [`TYPED`], keyed by the receiver's type.
+    Call(&'static str),
 }
 
 /// Spellings from other languages, matched case-insensitively. These are *not*
@@ -149,6 +154,34 @@ const ALIASES: &[(&str, Target)] = &[
     ("dplyr", Target::Text(
         "DataFrame verbs are methods: `df.where(@a > 1).select(@b).group(@c).mean(@d)`.",
     )),
+    // File I/O spellings from Python, Node and Rust. Each reached NO help — `read_file`,
+    // `write_text` and `write_file` are each two or more edits from every real name —
+    // and they are the first guesses a benchmark author made.
+    ("read_file", Target::Text(READ_TEXT)),
+    ("read_lines", Target::Text(READ_TEXT)),
+    ("write_text", Target::Call(WRITE_TO)),
+    ("write_file", Target::Call(WRITE_TO)),
+    // Growing an array in place is how most languages build one; Helix values never
+    // change, so the answer is the method that returns the longer array.
+    ("push", Target::Call(CONCAT)),
+    ("append", Target::Call(CONCAT)),
+];
+
+const READ_TEXT: &str =
+    "a whole text file is `read_text(path)`, one String; `read_text(path).split(\"\\n\")` gives its lines.";
+const WRITE_TO: &str = "a String writes itself: `s.write_to(path)` makes `s` the file's whole contents.";
+const CONCAT: &str =
+    "values never change: `xs.concat([x])` returns a NEW array with `x` on the end, so bind it: `xs2 = xs.concat([x])`.";
+
+/// Guesses answered only for a receiver of one type: (type name, method, advice). The
+/// type is the one `unknown_method` names ("an Array has no method `push`"), so the
+/// advice is never offered where it would not work — `s.push(t)` on a String is not
+/// told about an Array method.
+const TYPED: &[(&str, &str, &str)] = &[
+    ("Array", "push", CONCAT),
+    ("Array", "append", CONCAT),
+    ("String", "write_text", WRITE_TO),
+    ("String", "write_file", WRITE_TO),
 ];
 
 /// A natural receiver name per type, so a cross-namespace hint reads like code a
@@ -187,6 +220,7 @@ fn method_receiver(name: &str) -> Option<&'static str> {
 fn applies_at(target: &Target, site: Site, extra: &[&str]) -> bool {
     match (site, target) {
         (Site::Method, Target::Name(n)) => extra.contains(n),
+        (Site::Method, Target::Call(_)) => false,
         _ => true,
     }
 }
@@ -201,7 +235,7 @@ fn render(target: &Target, name: &str, site: Site) -> String {
                 format!("`{name}` is a method: `{recv}.{m}()`.")
             }
         },
-        Target::Text(t) => t.to_string(),
+        Target::Text(t) | Target::Call(t) => t.to_string(),
     }
 }
 
@@ -296,6 +330,9 @@ pub fn hint(name: &str, site: Site, extra: &[&str]) -> Option<String> {
             best = Some((d, cand, recv));
         }
     }
+    if best.is_none() && site == Site::Method {
+        return completion(name, extra).map(|m| format!("did you mean `{m}`?"));
+    }
     best.map(|(_, cand, recv)| match recv {
         // A NEAR MATCH IS A GUESS, AND MUST BE PHRASED AS ONE. Rule 2's sentence —
         // "`sum` is a method: `xs.sum()`" — is a statement of fact about the user's own
@@ -310,6 +347,42 @@ pub fn hint(name: &str, site: Site, extra: &[&str]) -> Option<String> {
         Some(r) => format!("did you mean the method `{cand}`? e.g. `{r}.{cand}()`."),
         None => format!("did you mean `{cand}`?"),
     })
+}
+
+/// The hint for `name` on a receiver of type `type_name` whose method table is
+/// `methods` — [`hint`] at a method site, after the receiver-specific answers in
+/// [`TYPED`]. Every `has no method` error goes through here, on the checker and on
+/// every engine, so the three cannot disagree about what to suggest.
+pub fn method_hint(type_name: &str, name: &str, methods: &[&str]) -> Option<String> {
+    if let Some((_, _, advice)) = TYPED.iter().find(|(t, m, _)| *t == type_name && *m == name) {
+        return Some(advice.to_string());
+    }
+    hint(name, Site::Method, methods)
+}
+
+/// The method `name` is the beginning of, when that is unambiguous: `df.col(@x)` is
+/// `column`. Edit distance cannot see this — `col` is three edits from `column` — and a
+/// truncated name is as common a guess as a mistyped one.
+///
+/// Held to the same "a wrong suggestion is worse than silence" bar as the typo rule, so
+/// it is narrow: a method site only (the receiver's own table, so the answer works), a
+/// name of three characters or more, and the completions must form ONE chain — `col`
+/// begins `column` and `columns`, and `columns` merely extends `column`, so the shorter
+/// is the answer; `arg` begins `argmax` and `argmin`, which is two answers and so none.
+fn completion<'a>(name: &str, methods: &[&'a str]) -> Option<&'a str> {
+    let lower = name.to_lowercase();
+    if lower.chars().count() < 3 {
+        return None;
+    }
+    let mut hits: Vec<&'a str> = methods
+        .iter()
+        .copied()
+        .filter(|m| m.len() > lower.len() && m.to_lowercase().starts_with(&lower))
+        .collect();
+    hits.sort_unstable_by_key(|m| (m.len(), *m));
+    hits.dedup();
+    let shortest = *hits.first()?;
+    hits.iter().all(|m| m.starts_with(shortest)).then_some(shortest)
 }
 
 #[cfg(test)]

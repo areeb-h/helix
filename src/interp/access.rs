@@ -459,7 +459,7 @@ pub(crate) fn df_value_method(
                     line,
                     col,
                 );
-            Err(match crate::suggest::hint(name, crate::suggest::Site::Method, &methods) {
+            Err(match crate::suggest::method_hint("DataFrame", name, &methods) {
                 Some(h) => err.hint(h),
                 // The same fallback as `unknown_method` — a dump is a haystack, `helix doc
                 // DataFrame` is an answer. This arm listed every method while the general

@@ -226,3 +226,37 @@ fn candidate_order_does_not_change_the_answer() {
     assert_eq!(b, c);
     assert!(a.is_some());
 }
+
+/// A truncated method name is answered with the method it begins — `df.col(@x)` is
+/// `column`, three edits away and so invisible to the typo rule — but only when that is
+/// ONE answer: completions must form a chain (`column` ⊂ `columns`), the name must be
+/// three characters or more, and only the receiver's own table is searched.
+#[test]
+fn an_unambiguous_prefix_names_its_method() {
+    let df = crate::registry::methods_of(crate::registry::DF_METHODS);
+    assert_eq!(method("col", &df).as_deref(), Some("did you mean `column`?"));
+    let array = crate::registry::methods_of(crate::registry::ARRAY_METHODS);
+    // `argmax` and `argmin` are two answers, so neither is offered.
+    assert_eq!(method("arg", &array), None);
+    // Two characters is not a prefix worth guessing from.
+    assert_eq!(method("co", &df), None);
+    // Never away from a method site, and never from another type's table.
+    assert_eq!(func("col"), None);
+    let string = crate::registry::methods_of(crate::registry::STRING_METHODS);
+    assert_eq!(method("col", &string), None);
+}
+
+/// The Array-growing guesses are answered per receiver type: an Array is told about
+/// `concat`, a String is not.
+#[test]
+fn growing_guesses_are_answered_for_the_receiver_they_fit() {
+    let array = crate::registry::methods_of(crate::registry::ARRAY_METHODS);
+    let string = crate::registry::methods_of(crate::registry::STRING_METHODS);
+    for n in ["push", "append"] {
+        assert!(super::method_hint("Array", n, &array).unwrap().contains("`xs.concat([x])`"), "{n}");
+        assert!(!super::method_hint("String", n, &string).unwrap_or_default().contains("concat"), "{n}");
+        assert!(func(n).unwrap().contains("`xs.concat([x])`"), "{n}");
+    }
+    assert!(func("write_file").unwrap().contains("`s.write_to(path)`"));
+    assert!(func("read_file").unwrap().contains("`read_text(path)`"));
+}

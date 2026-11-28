@@ -96,12 +96,7 @@ pub(super) fn a_dict(args: Vec<Value>, line: usize, col: usize) -> Result<Value,
         // An empty keyed map (ADR 0020); build a populated one with
         // `[(k, v), …].to_dict()`. Grows via the immutable `.insert(k, v)`.
         if !args.is_empty() {
-            return Err(HelixError::new(
-                "`dict()` takes no arguments",
-                line,
-                col,
-            )
-            .hint("build a populated dict with `[(k, v), …].to_dict()` or `xs.frequencies().to_dict()`."));
+            return Err(crate::interp::dict_arity_err(args.len(), line, col));
         }
         Ok(Value::dict(std::collections::BTreeMap::new()))
     

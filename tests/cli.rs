@@ -19791,3 +19791,131 @@ fn emit_rust_refuses_a_for_loop_by_name() {
     assert!(!out.contains('$'), "{out}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A REPL session is a script fed one line at a time, so a second top-level `{a, b} = r`
+/// binding NEW names must work exactly as it does on the next line of a script. It did
+/// not: the parser numbered its destructure temporaries from `$rec0` afresh on every
+/// line, so the second line rebound the first line's immutable temp and the error named
+/// it — *"`$rec0` is immutable"*, with the advice to declare `mut $rec0`, a name nobody
+/// wrote and nobody can write. Re-destructuring the SAME names is still refused, by the
+/// user's own name, exactly as a script refuses it.
+#[test]
+fn repl_destructures_twice_without_leaking_a_temp_name() {
+    let session = "r = {a: 1, b: 2}\n{a, b} = r\ns = {c: 10, d: 20}\n{c, d} = s\nprint(a + b + c + d)\n\
+                   [p, q] = [1, 2]\n[u, v] = [3, 4]\nprint(p + q + u + v)\n{a} = r\n";
+    let (out, err, code) = run(&["repl"], &[], session);
+    assert_eq!(code, Some(0), "stderr: {err}");
+    assert!(out.contains("33"), "the second record destructure must bind: {out:?} / {err}");
+    assert!(out.contains("10"), "the second array destructure must bind: {out:?} / {err}");
+    assert!(!err.contains('$') && !out.contains('$'), "an internal `$` name leaked: {err}");
+    // The third `{a} = r` rebinds `a`: refused under the user's name, as a script does.
+    assert!(err.contains("`a` is immutable"), "rebinding `a` names `a`: {err}");
+    let script = std::env::temp_dir().join("helix_it_repl_destructure_twice.helix");
+    std::fs::write(&script, "r = {a: 1, b: 2}\n{a, b} = r\n{a} = r\n").unwrap();
+    let (_, serr, scode) = run(&[script.to_str().unwrap()], &[], "");
+    let _ = std::fs::remove_file(&script);
+    assert_eq!(scode, Some(1));
+    assert!(serr.contains("`a` is immutable"), "the script's refusal, for comparison: {serr}");
+}
+
+/// The first guesses a benchmark author made — Python's, Node's and Rust's names for
+/// file I/O and for growing an array, and a prefix of a DataFrame method — each got an
+/// error that pointed nowhere ("is not a known function", "no similar method"). Each now
+/// names the Helix spelling, identically from `helix check` and from all three engines.
+#[test]
+fn common_guesses_get_a_help_naming_the_helix_spelling() {
+    let cases: [(&str, &str, &str, &str); 9] = [
+        ("read_file", "x = read_file(\"a.txt\")\n", "`read_file` is not a known function", "`read_text(path)`"),
+        ("write_text", "write_text(\"a.txt\", \"hi\")\n", "`write_text` is not a known function", "`s.write_to(path)`"),
+        ("write_file", "write_file(\"a.txt\", \"hi\")\n", "`write_file` is not a known function", "`s.write_to(path)`"),
+        ("push", "xs = [1, 2]\nys = xs.push(3)\n", "an Array has no method `push`", "`xs.concat([x])` returns a NEW array"),
+        ("append", "xs = [1, 2]\nys = xs.append(3)\n", "an Array has no method `append`", "`xs.concat([x])` returns a NEW array"),
+        // A receiver the checker cannot type: the refusal is the ENGINES' own, not the checker's.
+        ("push_rt", "xs = \"[1, 2]\".parse_json()\nys = xs.push(3)\n", "an Array has no method `push`", "`xs.concat([x])`"),
+        ("dict", "d = dict([[\"a\", 1]])\n", "`dict` takes 0 arguments, got 1", "`pairs.to_dict()`"),
+        ("dict_rt", "f = (p) => dict(p)\nprint(f([1]))\n", "`dict` takes 0 arguments, got 1", "`pairs.to_dict()`"),
+        ("col", "df = dataframe({x: [1, 2]})\nc = df.col(@x)\n", "a DataFrame has no method `col`", "help: did you mean `column`?"),
+    ];
+    let dir = std::env::temp_dir().join("helix_it_common_guesses");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for (tag, src, msg, help) in cases {
+        let path = dir.join(format!("{tag}.helix"));
+        std::fs::write(&path, src).unwrap();
+        let p = path.to_str().unwrap();
+        let mut seen: Option<String> = None;
+        for (engine, env) in ENGINES {
+            let (_, err, code) = run(&["run", p], env, "");
+            assert_eq!(code, Some(1), "{tag} on {engine}: {err}");
+            assert!(err.contains(msg), "{tag} on {engine}: wanted {msg:?}, got: {err}");
+            assert!(err.contains("help:") && err.contains(help), "{tag} on {engine}: wanted help {help:?}, got: {err}");
+            assert!(!err.contains("no similar method"), "{tag} on {engine}: {err}");
+            if let Some(prev) = &seen {
+                assert_eq!(prev, &err, "{tag}: the engines disagree");
+            }
+            seen = Some(err);
+        }
+        if !tag.ends_with("_rt") || tag == "dict_rt" {
+            let (out, err, code) = run(&["check", p], &[], "");
+            assert_eq!(code, Some(1), "{tag}: `helix check` must refuse it: {out}{err}");
+            let all = format!("{out}{err}");
+            assert!(all.contains(msg) && all.contains(help), "{tag}: `helix check` gave: {all}");
+            assert!(all.contains(seen.as_deref().unwrap().trim_end()), "{tag}: check and run disagree: {all}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    // The advice is for the receiver it works on: a String's `push` is not told about an
+    // Array method.
+    let (_, err, _) = run_source("s = \"a\"\nt = s.push(\"b\")\n", &[], "common_guesses_string_push");
+    assert!(err.contains("a String has no method `push`") && !err.contains("concat"), "{err}");
+}
+
+/// `fn main(path, top = 10)`: the checker types `top` as Int from its default, and
+/// `main()` binds the Int 10 — but `--top 3` bound the String `"3"`, so `xs.take(top)`
+/// failed inside `main` with "expected an integer, found String", nowhere near the
+/// command line, and `--help` called the option a String. An unannotated parameter with
+/// a literal Int, Float or Bool default now binds as that type (ADR 0037, "As
+/// implemented"), with the annotated parameter's conversion and error.
+#[test]
+fn an_unannotated_main_parameter_binds_as_its_default_s_type() {
+    let dir = std::env::temp_dir().join("helix_it_main_default_type");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let tool = dir.join("top.helix");
+    std::fs::write(
+        &tool,
+        "## Top rows.\nfn main(path, top = 10, scale = 1.5, name = \"x\", low = -2, verbose = false) =\n    \
+         print(\"{[1, 2, 3, 4, 5].take(top)} {type_of(top)} {type_of(scale)} {type_of(name)} {name} {low} {verbose}\")\n",
+    )
+    .unwrap();
+    let t = tool.to_str().unwrap().to_string();
+    for (engine, env) in ENGINES {
+        let (out, err, code) =
+            run(&["run", &t, "in.csv", "--top", "3", "--scale", "2", "--name", "7", "--low", "-1", "--verbose"], env, "");
+        assert_eq!(code, Some(0), "{engine}: {err}");
+        assert_eq!(out.trim(), "[1, 2, 3] Int Float String 7 -1 true", "{engine}");
+        let (out, err, code) = run(&["run", &t, "in.csv"], env, "");
+        assert_eq!(code, Some(0), "{engine}: {err}");
+        assert_eq!(out.trim(), "[1, 2, 3, 4, 5] Int Float String x -2 false", "{engine}");
+        // A value that does not parse is refused at the boundary, naming the flag.
+        let (_, err, code) = run(&["run", &t, "in.csv", "--top", "x"], env, "");
+        assert_eq!(code, Some(1), "{engine}");
+        assert!(err.contains("`--top` expects an Int, but got `x`"), "{engine}: {err}");
+        assert!(!err.contains("found String"), "{engine}: {err}");
+    }
+    let (out, _, code) = run(&["run", &t, "--help"], &[], "");
+    assert_eq!(code, Some(0));
+    assert!(out.contains("Top rows."), "{out}");
+    assert!(out.contains("usage: top <path> [--top <top>] [--scale <scale>] [--name <name>] [--low <low>] [--verbose]"), "{out}");
+    for want in [
+        "--path           String  (required)",
+        "--top            Int  (default: 10)",
+        "--scale          Float  (default: 1.5)",
+        "--name           String  (default: \"x\")",
+        "--low            Int  (default: -2)",
+        "--verbose        Bool  (default: false)",
+    ] {
+        assert!(out.contains(want), "wanted {want:?} in: {out}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
