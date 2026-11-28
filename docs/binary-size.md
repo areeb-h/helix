@@ -16,6 +16,35 @@
 > feature-by-feature, and of the reasoning that led to replacing it instead. It is worth
 > keeping for that, and it should not be read as a description of the current build.
 
+## The phone build
+
+`--no-default-features --features mobile` is `http + mimalloc + native-df + regex`: the
+appliance plus the `regex` that `std.ui` needs (the reasoning for each member, and for what is
+left out, is above the feature in `Cargo.toml`). It is what rust-mobile packages into Android
+apps, at the `release` profile (fat LTO, one codegen unit, `strip = true`).
+
+Measured 2026-11-28 on the host (x86_64-unknown-linux-gnu, Rust 1.100.0, the tree this
+profile landed in):
+
+| Build | Profile | Bytes | |
+|---|---|---|---|
+| `mobile`, x86_64 Linux | `release` (as built; `strip` again removes 8 bytes) | **16,086,224** (16.1 MB) | `gzip -9`: 6,210,768 |
+| `mobile`, x86_64 Linux | `gate`, then `strip` | 17,525,232 (17.5 MB) | |
+
+The gzip figure is about what the APK's deflate gives, and agrees with rust-mobile's own
+measurement of the same profile (`libhelix.so` 6.1 MB compressed in an x86_64 release APK,
+2026-11-27, spike/RESULTS.md).
+
+**The CI budget: 19,000,000 bytes stripped, for `aarch64-linux-android` at API 28.** It is the
+16.09 MB host measurement plus 18%: up to ~10% for aarch64's code density, which could NOT be
+measured here (the container has no NDK), and ~8% of headroom for growth. The `mobile` job in
+`.github/workflows/ci.yml` builds with `$ANDROID_NDK_LATEST_HOME` (the NDK the runner image
+provides; the job logs its `Pkg.Revision`), strips with the NDK's `llvm-strip`, prints the
+stripped and gzipped sizes, and fails over the budget. Once its first run has reported the
+real aarch64 number, the budget should be re-set to that number plus 10% and this paragraph
+updated with it. Raising it later is allowed and is a reviewed change: say here what grew and
+why.
+
 ## Historical: the problem this document was written about
 
 The Helix binary is large (~65 MB release, default features) with ~1000 transitive

@@ -306,6 +306,32 @@ jit = [
 native-df = ["dep:parquet", "dep:bytes", "dep:zstd"]
 # The small-server profile: full language surface, no heavy backends.
 appliance = ["http", "mimalloc", "native-df"]
+# The phone profile: what a std.ui app needs on Android/iOS, and nothing it does not.
+# rust-mobile ships Helix inside an APK this way; CI cross-builds it for aarch64-linux-android
+# and holds it to a size budget (docs/binary-size.md). Each member, from evidence:
+#   regex     -- std.ui cannot run without it: std/ui.helix calls `re_match` (the colour-seed
+#                parser, ids, `pattern`, the session token check). Measured on `appliance`:
+#                serving examples/apps/stopwatch.helix exits 1 at std/ui.helix:1230 before it
+#                prints a link, and the gallery, design-lab and orbit replays fail the same
+#                way. scripts/mobilediff.sh (CI's `mobile` job) holds this build to the
+#                default build's screens on every app's replay, and serves stopwatch.
+#   native-df -- `ui.data_table(df)` renders a DataFrame, so std.ui needs AN engine; this is
+#                the small one (parquet+zstd), not polars.
+#   http      -- `http_get` and friends, the network access an app asks for. It is behind the
+#                capability gate (ADR 0021) like every other build: under HELIX_CAP=enforce a
+#                call is denied unless the host grants `net`. TLS is rustls on ring.
+#   mimalloc  -- the allocator, as everywhere else; mimalloc has an Android path (pthread TLS
+#                on __ANDROID__, so it also suits a future dlopen'd library), and rust-mobile's
+#                spike built it for arm64 and x86_64 and ran the x86_64 build on the emulator
+#                (10-minute soak, flat RSS). Its C, ring's and zstd's are the only C in this
+#                build (no cmake, no bindgen), all compiled by the NDK's clang.
+# Left out: `jit` (iOS forbids writable+executable pages, and Android's W^X policy has not
+# been verified; the VM's bytecode path gives identical output), `dataframes` (polars,
+# ~60 MB), `bio`, `db`, `postgres`, `python`, `managed` and `desktop` -- none is needed by a
+# UI app, and an app that wants one builds `--features mobile,db`. Listed member by member
+# rather than as `appliance` + `regex`, so a change to the server profile cannot change
+# what ships on a phone.
+mobile = ["http", "mimalloc", "native-df", "regex"]
 # Python interop hands whole frames across via Arrow, so it needs the engine.
 python = ["dataframes", "dep:pyo3", "dep:pyo3-polars", "dep:numpy"]
 # Managed runtimes: verified downloads + extraction (managed Python, etc.).
