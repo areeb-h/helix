@@ -1985,6 +1985,49 @@ A multi-statement body; the last expression is the value. Newlines separate, nev
 8
 ```
 
+### `for`
+
+A loop over a sequence. A name bound BEFORE the loop keeps what the body assigns to it.
+
+`for x in xs { line\n line }`
+
+**Note:** A `for` loop IS A FOLD, written by the parser: the loop above is `xs.reduce((total, n), (st, x) => …)` with the tuple packed and unpacked for you, so it means the same on every engine and nothing is mutated — `total += x` rebinds a name. Two rules follow. A name the body assigns that was bound before the loop (an earlier line, a parameter) is CARRIED: each iteration starts with what the last one left, and the name holds the final value afterwards. A name FIRST bound inside the body, and the loop variable itself, belong to one iteration and do not exist after the loop. The pattern is a name or positions: `for (k, v) in d.items() { … }`, `for [a, b] in pairs { … }`; the sequence is anything `reduce` takes — an array, `range(n)`, `0..n`, `d.items()`. It is a STATEMENT — a line of a `do` block or of another loop, or a top-level statement, where the names it carries must be `mut` — and has no value: build a collection with `xs.map(…)`. There is no `break` or `continue` (cut the sequence first: `xs.take_while(p)`, `xs.filter(p)`), no `while` (a tail-recursive function is that loop), and no assignment inside `if` (write `total = if x > 0 then total + x else total`). A closure made in the body keeps that iteration's values. Keywords: loop, iterate, iteration, foreach, each, while, repeat, accumulate, counter, running total, break, continue, range, imperative.
+
+```
+>>> fn mean(xs) = do {
+>>>   total = 0.0
+>>>   n = 0
+>>>   for x in xs {
+>>>     total += x
+>>>     n += 1
+>>>   }
+>>>   total / n
+>>> }
+>>> print(mean([1, 2, 6]))
+3.0
+```
+
+### `+=`
+
+Compound assignment: `n += 1` is `n = n + 1`. Also `-=`, `*=` and `/=`.
+
+`name += value`
+
+**Note:** A REBINDING, not a mutation: nothing that held the old value sees a new one. It is allowed wherever `name = …` on an existing name is — a line of a `do` block or of a `for` body, and the top level for a `mut` name — and refused on a name that is not bound yet. Only a name can be updated: a field or an element is rebuilt (`r = {...r, n: r.n + 1}`). `/=` divides as `/` does, so the result is a Float. Keywords: increment, decrement, add assign, plus equals, augmented assignment, compound, update, accumulate, counter, ++.
+
+```
+>>> fn f(x) = do {
+>>>   n = x
+>>>   n += 1
+>>>   n *= 2
+>>>   n -= 3
+>>>   n /= 2
+>>>   n
+>>> }
+>>> print(f(4))
+3.5
+```
+
 ### `where`
 
 Bindings written AFTER the expression that uses them.
@@ -2090,7 +2133,7 @@ The current element inside a comprehension — no parameter to name.
 
 `xs.map(it * 2)`
 
-**Note:** These chains are the loop: Helix has no `for`. A numeric chain over packed arrays is also what the JIT compiles — `helix jit-explain` says whether yours was. Keywords: loop, for, each, iterate, element, current, implicit, placeholder, underscore.
+**Note:** These chains are the loop to reach for first — a `for` loop (`helix describe for`) is for state that changes across the sequence. A numeric chain over packed arrays is also what the JIT compiles — `helix jit-explain` says whether yours was. Keywords: loop, for, each, iterate, element, current, implicit, placeholder, underscore.
 
 ```
 >>> print([1, 2, 3].map(it * 2).where(it > 2).sum())
@@ -2131,7 +2174,7 @@ A rebindable top-level binding — the only mutable state in the language.
 
 `mut n = 0`
 
-**Note:** TOP-LEVEL ONLY, and that is a design question rather than a spelling one: a function body evolves state by rebinding inside `do { }`, and state crossing a sequence is threaded with `reduce`. Reach for `mut` only for state that must outlive a call. Keywords: mutable, variable, assign, reassign, update, counter, accumulator, global, state.
+**Note:** TOP-LEVEL ONLY, and that is a design question rather than a spelling one: a function body evolves state by rebinding inside `do { }`, and state crossing a sequence is threaded — by a `for` loop, which carries the names bound before it, or by `reduce`. Reach for `mut` only for state that must outlive a call. Keywords: mutable, variable, assign, reassign, update, counter, accumulator, global, state.
 
 ```
 >>> mut n = 0
@@ -2213,7 +2256,7 @@ If a program defines `fn main`, its parameters ARE the command line.
 
 `fn main(seq: String, threads: Int = 1) = ...`
 
-**Note:** Arguments bind by the ordinary call-site rule — positional, `--named value`, `--named=value`, out of order — and a Bool parameter is a bare flag. A doc comment above `main` becomes `--help`. Keywords: command line, argv, cli, arguments, flags, options, parse args, entry point, script, tool.
+**Note:** Arguments bind by the ordinary call-site rule — positional, `--named value`, `--named=value`, out of order — and a Bool parameter is a bare flag. Each argument is converted to the parameter's type, and a value that does not parse is an error naming the flag; an UNANNOTATED parameter takes the type of a literal Int, Float or Bool default (`top = 10` binds `--top 3` as the Int 3) and is otherwise a String. A doc comment above `main` becomes `--help`. Keywords: command line, argv, cli, arguments, flags, options, parse args, entry point, script, tool.
 
 ```
 >>> print(1)

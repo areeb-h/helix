@@ -65,6 +65,22 @@ fn passes_through(name: &str) -> bool {
     )
 }
 
+fn set_mode(mode: Mode) {
+    SEGMENT_BYTES.set(0);
+    SEGMENT_FULL.set(false);
+    MODE.with(|m| *m.borrow_mut() = mode);
+}
+
+thread_local! {
+    /// What the calls taped since the mode was last set (the startup, or one step) take written
+    /// down. A step's calls are held until the step is written, and the startup's until
+    /// `ui.app` writes the session's first line — which a program that never starts an app
+    /// never does — so without a bound a recorded program held every file it read.
+    static SEGMENT_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// The segment passed [`TAPE_BYTES`]: its overflow has been noted, and nothing more is held.
+    static SEGMENT_FULL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn running() -> bool {
     // Constant folding (ADR 0050) tries calls while the program loads and drops any that turn
     // out impure. Those attempts are the compiler's, not the program's: they never reach the
@@ -95,14 +111,55 @@ pub struct Call<'a> {
 }
 
 impl Call<'_> {
-    /// SHA-256 (128 bits, hex) of the arguments, written down exactly. A replay that makes the
+    /// SHA-256 (128 bits, hex) of the arguments, by their structure. A replay that makes the
     /// same call with other arguments (another file, another URL) has gone another way AT that
     /// call, and is stopped there rather than handed the answer to a different question.
+    ///
+    /// It is a hash of the value, not of its text: written down, a value that holds one part
+    /// many times is as large as the tree it stands for (sixty doublings are 2^60 leaves), and
+    /// writing it down to hash it ran the recording out of memory. Here each container's digest
+    /// is made from its children's and remembered by address for this one fingerprint, so a
+    /// shared part is hashed once and the cost is what the value takes in memory. Equal values
+    /// have equal digests however they are shared, so a replay that rebuilt the same arguments
+    /// another way still matches.
     fn fingerprint(&self) -> String {
         use sha2::{Digest, Sha256};
-        let all = json!([self.recv.map(encode), self.args.iter().map(encode).collect::<Vec<_>>()]);
+        let mut memo = rustc_hash::FxHashMap::default();
+        let mut h = Sha256::new();
+        h.update(b"helix tape arguments 2\0");
+        match self.recv {
+            Some(r) => {
+                h.update([1]);
+                h.update(digest(r, &mut memo));
+            }
+            None => h.update([0]),
+        }
+        h.update((self.args.len() as u64).to_le_bytes());
+        for a in self.args {
+            h.update(digest(a, &mut memo));
+        }
+        h.finalize()[..16].iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// The fingerprint Helix b3f898d wrote under `args`: SHA-256 (128 bits, hex) of the
+    /// arguments written out as the tape's JSON. Kept to check the sessions recorded then —
+    /// the replay corpora of apps already in use — and only for arguments that can be written
+    /// out within the tape's own bounds: one that cannot was the recording's crash, and is
+    /// refused here with what to do.
+    fn text_fingerprint(&self) -> Result<String, String> {
+        use sha2::{Digest, Sha256};
+        let mut memo = rustc_hash::FxHashMap::default();
+        for v in self.recv.into_iter().chain(self.args.iter()) {
+            if written_size(v, 0, &mut memo).is_err() {
+                return Err(format!(
+                    "`{}` was recorded by an earlier Helix, which fingerprinted arguments by their text, and these arguments are too large to check that way: record the session again",
+                    self.label
+                ));
+            }
+        }
+        let all = json!([self.recv.map(encode_unchecked), self.args.iter().map(encode_unchecked).collect::<Vec<_>>()]);
         let digest = Sha256::digest(all.to_string().as_bytes());
-        digest[..16].iter().map(|b| format!("{b:02x}")).collect()
+        Ok(digest[..16].iter().map(|b| format!("{b:02x}")).collect())
     }
 
     /// How the call reads in a message: `name(arg, …)`, each argument shortened at its middle
@@ -123,6 +180,92 @@ impl Call<'_> {
     }
 }
 
+/// A value's SHA-256 by its structure (see [`Call::fingerprint`]). `memo` maps a container's
+/// address to its digest for the length of one fingerprint; the value is borrowed throughout,
+/// so no address in it can be freed and reused meanwhile.
+fn digest(v: &Value, memo: &mut rustc_hash::FxHashMap<usize, [u8; 32]>) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let at = crate::deep::node(v).map(|n| n.key);
+    if let Some(d) = at.and_then(|k| memo.get(&k)) {
+        return *d;
+    }
+    fn bytes(h: &mut Sha256, tag: u8, b: &[u8]) {
+        h.update([tag]);
+        h.update((b.len() as u64).to_le_bytes());
+        h.update(b);
+    }
+    // A child that is a container is a step deeper: it gets its own stack segment if it needs
+    // one, so a value nested a million deep is hashed as surely as it was built.
+    fn child(h: &mut Sha256, x: &Value, memo: &mut rustc_hash::FxHashMap<usize, [u8; 32]>) {
+        let d = if crate::deep::is_container(x) { crate::deep::nested(|| digest(x, memo)) } else { digest(x, memo) };
+        h.update(d);
+    }
+    let mut h = Sha256::new();
+    match v {
+        Value::Missing => h.update([0]),
+        Value::Unit => h.update([1]),
+        Value::Bool(b) => h.update([2, u8::from(*b)]),
+        Value::Int(i) => {
+            h.update([3]);
+            h.update(i.to_le_bytes());
+        }
+        Value::Float(f) => {
+            h.update([4]);
+            h.update(f.to_bits().to_le_bytes());
+        }
+        Value::Str(s) => bytes(&mut h, 5, s.as_bytes()),
+        Value::Dna(s) => bytes(&mut h, 6, s.as_bytes()),
+        Value::Bytes(b) => bytes(&mut h, 7, b),
+        Value::Array(a) => {
+            let items = a.to_values();
+            h.update([8]);
+            h.update((items.len() as u64).to_le_bytes());
+            for x in items.iter() {
+                child(&mut h, x, memo);
+            }
+        }
+        Value::Tuple(t) => {
+            h.update([9]);
+            h.update((t.len() as u64).to_le_bytes());
+            for x in t.iter() {
+                child(&mut h, x, memo);
+            }
+        }
+        Value::Record(r) => {
+            h.update([10]);
+            h.update((r.len() as u64).to_le_bytes());
+            for (k, x) in r.iter() {
+                bytes(&mut h, 5, k.as_str().as_bytes());
+                child(&mut h, x, memo);
+            }
+        }
+        Value::Dict(d) => {
+            let m = d.map();
+            h.update([11]);
+            h.update((m.len() as u64).to_le_bytes());
+            for (k, x) in m.iter() {
+                child(&mut h, &k.to_value(), memo);
+                child(&mut h, x, memo);
+            }
+        }
+        Value::Headers(hs) => {
+            h.update([12]);
+            h.update((hs.len() as u64).to_le_bytes());
+            for (k, x) in hs.iter() {
+                bytes(&mut h, 5, k.as_bytes());
+                bytes(&mut h, 5, x.as_bytes());
+            }
+        }
+        // What the tape writes for it, too: a value that cannot be written down is its kind.
+        other => bytes(&mut h, 13, other.type_name().as_bytes()),
+    }
+    let d: [u8; 32] = h.finalize().into();
+    if let Some(k) = at {
+        memo.insert(k, d);
+    }
+    d
+}
+
 /// Run `call` through the tape: while recording, run it and note what it returned (or the
 /// error it raised, which a replay raises again); while replaying, do NOT run it and return
 /// what was recorded.
@@ -130,13 +273,29 @@ pub fn through(c: Call<'_>, line: usize, col: usize, call: impl FnOnce() -> Resu
     let replaying = MODE.with(|m| matches!(*m.borrow(), Mode::Replay(_)));
     if !replaying {
         let out = call();
+        if SEGMENT_FULL.get() {
+            return out;
+        }
         let fp = c.fingerprint();
+        let (entry, size) = match &out {
+            Ok(v) => {
+                let (j, size) = encode_sized(v);
+                (json!({"fn": c.label, "argsum": fp, "value": j}), size)
+            }
+            Err(e) => (json!({"fn": c.label, "argsum": fp, "error": e.message, "hint": e.hint}), (e.message.len() + 256) as u64),
+        };
+        let used = SEGMENT_BYTES.get().saturating_add(size);
         MODE.with(|m| {
             if let Mode::Record(t) = &mut *m.borrow_mut() {
-                t.push(match &out {
-                    Ok(v) => json!({"fn": c.label, "args": fp, "value": encode(v)}),
-                    Err(e) => json!({"fn": c.label, "args": fp, "error": e.message, "hint": e.hint}),
-                });
+                if used > TAPE_BYTES {
+                    // Noted once, at the call that passed the bound; a replay stops there.
+                    SEGMENT_FULL.set(true);
+                    let why = format!("the recording stopped taping at `{}`: what this part of the run read passed {} MiB, more than a session holds", c.label, TAPE_BYTES >> 20);
+                    t.push(json!({"fn": c.label, "argsum": fp, "overflow": why}));
+                } else {
+                    SEGMENT_BYTES.set(used);
+                    t.push(entry);
+                }
             }
         });
         return out;
@@ -166,11 +325,26 @@ pub fn through(c: Call<'_>, line: usize, col: usize, call: impl FnOnce() -> Resu
     if recorded != c.label {
         return Err(went_another_way(format!("the app called `{}` where the recording called `{recorded}`", c.shown())));
     }
-    // Recordings made before calls were fingerprinted have no `args`; their names still match.
-    if let Some(fp) = entry.get("args").and_then(J::as_str)
-        && fp != c.fingerprint()
-    {
-        return Err(went_another_way(format!("the app called `{}`, but when recorded `{}` was called with other arguments", c.shown(), c.label)));
+    // The arguments, as the recording fingerprinted them: `argsum` by their structure (this
+    // Helix), `args` by their text (Helix b3f898d, whose sessions are kept and replayed as
+    // they are); a recording made before calls were fingerprinted has neither, and its names
+    // still match.
+    let other_arguments = || went_another_way(format!("the app called `{}`, but when recorded `{}` was called with other arguments", c.shown(), c.label));
+    if let Some(fp) = entry.get("argsum").and_then(J::as_str) {
+        if fp != c.fingerprint() {
+            return Err(other_arguments());
+        }
+    } else if let Some(fp) = entry.get("args").and_then(J::as_str) {
+        match c.text_fingerprint() {
+            Ok(now) if now == fp => {}
+            Ok(_) => return Err(other_arguments()),
+            Err(why) => return Err(went_another_way(why)),
+        }
+    }
+    if let Some(why) = entry.get("overflow").and_then(J::as_str) {
+        // The recording held no more of this part of the run, so nothing after here can be
+        // answered: every later call says the same.
+        return Err(went_another_way(why.to_string()));
     }
     if let Some(msg) = entry.get("error").and_then(J::as_str) {
         // It failed when recorded, so it fails now, the same way.
@@ -184,6 +358,17 @@ pub fn through(c: Call<'_>, line: usize, col: usize, call: impl FnOnce() -> Resu
         Some(v) => decode(v).map_err(|why| HelixError::new(format!("`{}` returned {why} when this session was recorded, so this step cannot be replayed", c.label), line, col)),
         None => Err(HelixError::new(format!("the recording of `{}` has no value", c.label), line, col)),
     }
+}
+
+/// Whether this process read its session (`session_tape("entries")`), which is what replaying
+/// one is. A program run by `helix replay` that never started an app read none, and must not
+/// be reported as a session replayed with every screen identical.
+static SESSION_READ: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `helix replay` ran a program that finished without replaying the session: it never
+/// started an app (`ui.app`).
+pub fn replay_never_started() -> bool {
+    std::env::var_os("HELIX_REPLAY").is_some() && !SESSION_READ.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Why the replay went another way, if it did.
@@ -241,7 +426,7 @@ pub fn begin_program(spans: &[crate::module::Span], argv: &[String]) {
         ),
         None => Mode::Record(Vec::new()),
     };
-    MODE.with(|m| *m.borrow_mut() = mode);
+    set_mode(mode);
 }
 
 fn program() -> Option<J> {
@@ -386,12 +571,9 @@ pub fn session_tape(args: &[Value], line: usize, col: usize) -> Result<Value, He
             None => Value::Missing,
         }),
         "begin" => {
-            MODE.with(|m| {
-                let mut m = m.borrow_mut();
-                if !matches!(*m, Mode::Replay(_)) {
-                    *m = Mode::Record(Vec::new());
-                }
-            });
+            if !MODE.with(|m| matches!(*m.borrow(), Mode::Replay(_))) {
+                set_mode(Mode::Record(Vec::new()));
+            }
             Ok(Value::Unit)
         }
         "event" | "view" => {
@@ -418,8 +600,30 @@ pub fn session_tape(args: &[Value], line: usize, col: usize) -> Result<Value, He
             let mut parsed = Vec::new();
             for (i, l) in text.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
                 let j: J = serde_json::from_str(l).map_err(|e| HelixError::new(format!("line {} of the session is not JSON: {e}", i + 1), line, col))?;
-                parsed.push(j);
+                parsed.push((i + 1, j));
             }
+            // A replay that compares nothing must not report that everything matched: an empty
+            // or truncated file in a corpus would pass the gate it is in.
+            let name = std::path::Path::new(&path).display().to_string();
+            let not_a_session = |why: String| {
+                HelixError::new(format!("`{name}` is not a recorded session: {why}"), line, col).hint("record one with `HELIX_RECORD=session.jsonl helix run app.helix`")
+            };
+            let kind = |j: &J| j.get("kind").and_then(J::as_str).map(str::to_string);
+            match parsed.first() {
+                None => return Err(not_a_session("it is empty".into())),
+                Some((n, j)) if kind(j).as_deref() != Some("start") => {
+                    return Err(not_a_session(format!("its first entry (line {n}) is not the session's start, `{{\"kind\": \"start\", …}}`")));
+                }
+                _ => {}
+            }
+            if let Some((n, _)) = parsed.iter().find(|(_, j)| !matches!(kind(j).as_deref(), Some("start" | "event" | "view"))) {
+                return Err(not_a_session(format!("line {n} is not an entry the black box writes (it has no `kind` of start, event or view)")));
+            }
+            if !parsed.iter().any(|(_, j)| kind(j).as_deref() == Some("view")) {
+                return Err(not_a_session("it holds no screen to compare: no event reached the app while it was recorded".into()));
+            }
+            let parsed: Vec<J> = parsed.into_iter().map(|(_, j)| j).collect();
+            SESSION_READ.store(true, std::sync::atomic::Ordering::Relaxed);
             let values = parsed
                 .iter()
                 .map(|j| {
@@ -463,7 +667,7 @@ pub fn session_tape(args: &[Value], line: usize, col: usize) -> Result<Value, He
             let effects = ENTRIES.with(|e| {
                 e.borrow().as_ref().and_then(|v| v.get(i)).and_then(|j| j.get("effects")).and_then(J::as_array).cloned().unwrap_or_default()
             });
-            MODE.with(|m| *m.borrow_mut() = Mode::Replay(effects.into()));
+            set_mode(Mode::Replay(effects.into()));
             Ok(Value::Unit)
         }
         "done" => Ok(Value::Bool(MODE.with(|m| match std::mem::replace(&mut *m.borrow_mut(), Mode::Off) {
@@ -494,9 +698,128 @@ fn write_line(j: &J) -> std::io::Result<()> {
 
 // --- Values, written down exactly. -------------------------------------------------------
 
+/// How deep, in JSON levels, a value may be written on the tape. A session is read back a line
+/// at a time with serde_json's limit of 128 levels, and a value sits a few levels inside its
+/// line (`{"effects": [{"value": …}]}`): a deeper value made the WHOLE session unreadable, not
+/// only its step. A record level is three JSON levels (`{"record": [[k, v]]}`), so this is 33
+/// records deep, or 100 arrays.
+const TAPE_DEPTH: usize = 100;
+
+/// How much one value may take written down, counting each JSON node at what it costs in
+/// memory while its line is built. Past this a value is noted, not written: a session is a bug
+/// report, and a step that read a quarter of a gigabyte is reproduced by the file, not the tape.
+const TAPE_BYTES: u64 = 256 << 20;
+
 /// A Helix value as tagged JSON. Plain JSON where it is exact — strings, booleans, integers,
 /// arrays, `missing` as `null` — and a one-key object where it is not.
+///
+/// A value too deep or too large to write down is written as `{"unrecorded": why}`, and is
+/// measured before anything is built: a value that holds one part many times is small in
+/// memory and astronomically large written down, and building it first is what ran the
+/// recording out of memory. The live run is unaffected; a replay that needs the value refuses
+/// at that step and says why.
 pub fn encode(v: &Value) -> J {
+    encode_sized(v).0
+}
+
+/// [`encode`], and what the result takes written down.
+fn encode_sized(v: &Value) -> (J, u64) {
+    let mut memo = rustc_hash::FxHashMap::default();
+    match written_size(v, 0, &mut memo) {
+        Ok((size, _)) => (encode_unchecked(v), size),
+        Err(why) => {
+            let n = why.len() as u64 + 64;
+            (json!({"unrecorded": why}), n)
+        }
+    }
+}
+
+/// What a value takes written down — bytes, roughly, counting each JSON node as a small fixed
+/// cost — or why it cannot be. Remembered per container by address, with the levels it spans,
+/// so a shared part is measured once and the walk is as large as the value is in memory. The
+/// walk stops at [`TAPE_DEPTH`], so its own recursion is bounded too.
+fn written_size(v: &Value, depth: usize, memo: &mut rustc_hash::FxHashMap<usize, (u64, usize)>) -> Result<(u64, usize), String> {
+    const NODE: u64 = 64;
+    let too_deep = || format!("a value nested deeper than a session holds ({TAPE_DEPTH} levels written down)");
+    let at = crate::deep::node(v).map(|n| n.key);
+    if let Some(&(size, levels)) = at.and_then(|k| memo.get(&k)) {
+        return if depth + levels > TAPE_DEPTH { Err(too_deep()) } else { Ok((size, levels)) };
+    }
+    // The JSON levels a container opens before its elements: `[`; `{"tuple": [`; `{"record": [[`.
+    let open = match v {
+        Value::Array(_) => 1,
+        Value::Tuple(_) => 2,
+        Value::Record(_) | Value::Dict(_) | Value::Headers(_) => 3,
+        _ => 0,
+    };
+    if depth + open > TAPE_DEPTH {
+        return Err(too_deep());
+    }
+    let mut size = NODE;
+    let mut levels = open.max(1);
+    let add = |x: &Value, size: &mut u64, levels: &mut usize, memo: &mut rustc_hash::FxHashMap<usize, (u64, usize)>| -> Result<(), String> {
+        let (s, l) = written_size(x, depth + open, memo)?;
+        *size = size.saturating_add(s);
+        *levels = (*levels).max(open + l);
+        Ok(())
+    };
+    match v {
+        Value::Str(s) | Value::Dna(s) => size += s.len() as u64 + 2,
+        Value::Bytes(b) => size += 2 * b.len() as u64,
+        Value::Float(_) => size += 32,
+        Value::Array(a) => {
+            for x in a.to_values().iter() {
+                add(x, &mut size, &mut levels, memo)?;
+                if size > TAPE_BYTES {
+                    break;
+                }
+            }
+        }
+        Value::Tuple(t) => {
+            for x in t.iter() {
+                add(x, &mut size, &mut levels, memo)?;
+                if size > TAPE_BYTES {
+                    break;
+                }
+            }
+        }
+        Value::Record(r) => {
+            for (k, x) in r.iter() {
+                size += k.as_str().len() as u64 + NODE;
+                add(x, &mut size, &mut levels, memo)?;
+                if size > TAPE_BYTES {
+                    break;
+                }
+            }
+        }
+        Value::Dict(d) => {
+            for (k, x) in d.map().iter() {
+                add(&k.to_value(), &mut size, &mut levels, memo)?;
+                add(x, &mut size, &mut levels, memo)?;
+                if size > TAPE_BYTES {
+                    break;
+                }
+            }
+        }
+        Value::Headers(hs) => {
+            for (k, x) in hs.iter() {
+                size += (k.len() + x.len()) as u64 + 2 * NODE;
+            }
+        }
+        _ => {}
+    }
+    if size > TAPE_BYTES {
+        return Err(format!("a value too large for a session (over {} MiB written down)", TAPE_BYTES >> 20));
+    }
+    if let Some(k) = at {
+        memo.insert(k, (size, levels));
+    }
+    Ok((size, levels))
+}
+
+/// [`encode`] without the measuring: only for a value [`written_size`] accepted.
+fn encode_unchecked(v: &Value) -> J {
+    let encode = encode_unchecked;
     match v {
         Value::Missing => J::Null,
         Value::Unit => json!({"unit": true}),
@@ -570,6 +893,8 @@ pub fn decode(j: &J) -> Result<Value, String> {
                     Value::Headers(Rc::new(out))
                 }
                 "opaque" => return Err(format!("{} (a value that cannot be written down)", crate::value::with_article(body.as_str().unwrap_or("value")))),
+                // `encode` refused it while recording, and said why.
+                "unrecorded" => return Err(body.as_str().unwrap_or("a value that could not be recorded").to_string()),
                 other => return Err(format!("an unknown kind of value `{other}`")),
             }
         }
@@ -598,5 +923,138 @@ mod tests {
         assert!(matches!(decode(&encode(&Value::Int(2))).unwrap(), Value::Int(2)));
         let opaque = json!({"opaque": "DataFrame"});
         assert!(decode(&opaque).unwrap_err().contains("cannot be written down"));
+    }
+
+    /// `[acc, acc]` sixty times over: sixty-one arrays in memory, 2^60 leaves as a tree.
+    fn doubled(n: usize) -> Value {
+        (0..n).fold(Value::Int(1), |acc, _| Value::array(vec![acc.clone(), acc]))
+    }
+
+    /// A value that holds one part many times is fingerprinted by what it is in memory, not by
+    /// the tree it stands for — and the same however it is shared, so a replay that rebuilt
+    /// the same arguments another way still matches the recording.
+    #[test]
+    fn a_fingerprint_hashes_each_shared_part_once_and_ignores_how_it_is_shared() {
+        let fp = |args: &[Value]| Call { label: "f", recv: None, args }.fingerprint();
+        let start = std::time::Instant::now();
+        let huge = fp(&[doubled(60)]);
+        assert!(start.elapsed() < std::time::Duration::from_secs(5), "took {:?}", start.elapsed());
+        assert_eq!(huge.len(), 32);
+        // Shared, and written out in full: the same value, the same fingerprint.
+        let pair = |a: Value, b: Value| Value::array(vec![a, b]);
+        let one = || Value::Int(1);
+        let spelled_out = pair(pair(pair(one(), one()), pair(one(), one())), pair(pair(one(), one()), pair(one(), one())));
+        assert_eq!(fp(&[doubled(3)]), fp(&[spelled_out]));
+        // And different values, different fingerprints — down to the kind of a number.
+        assert_ne!(fp(&[doubled(3)]), fp(&[doubled(4)]));
+        assert_ne!(fp(&[Value::Int(1)]), fp(&[Value::Float(1.0)]));
+        assert_ne!(fp(&[Value::Str(Rc::new("ab".into())), Value::Str(Rc::new("c".into()))]), fp(&[Value::Str(Rc::new("a".into())), Value::Str(Rc::new("bc".into()))]));
+        // A value nested far past any stack is hashed too.
+        let deep = (0..1_000_000).fold(Value::Int(1), |acc, _| Value::array(vec![acc]));
+        assert_eq!(fp(&[deep]).len(), 32);
+    }
+
+    /// A session recorded by Helix b3f898d fingerprinted arguments by their text, under
+    /// `args`; rust-mobile's replay corpus holds such sessions. They still replay — matched
+    /// on the same arguments, stopped on other ones — and new recordings use `argsum`.
+    #[test]
+    fn sessions_recorded_with_text_fingerprints_still_replay() {
+        let path = [Value::Str(Rc::new("notes.txt".into()))];
+        let other = [Value::Str(Rc::new("other.txt".into()))];
+        // Exactly what b3f898d wrote for `read_text("notes.txt")`.
+        let old = {
+            use sha2::{Digest, Sha256};
+            let all = json!([J::Null, ["notes.txt"]]);
+            Sha256::digest(all.to_string().as_bytes())[..16].iter().map(|b| format!("{b:02x}")).collect::<String>()
+        };
+        let entry = json!({"fn": "read_text", "args": old, "value": "hello"});
+        let read = |args: &[Value]| {
+            let c = Call { label: "read_text", recv: None, args };
+            through(c, 1, 1, || Ok(Value::Missing))
+        };
+        set_mode(Mode::Replay(vec![entry.clone()].into()));
+        assert!(matches!(read(&path), Ok(Value::Str(s)) if s.as_str() == "hello"));
+        set_mode(Mode::Replay(vec![entry].into()));
+        DIVERGED.with(|d| *d.borrow_mut() = None);
+        let e = read(&other).unwrap_err();
+        assert!(e.message.contains("called with other arguments"), "{}", e.message);
+        DIVERGED.with(|d| *d.borrow_mut() = None);
+        // New recordings write the structural fingerprint under its own key.
+        set_mode(Mode::Record(Vec::new()));
+        let c = Call { label: "read_text", recv: None, args: &path };
+        let _ = through(c, 1, 1, || Ok(Value::Str(Rc::new("hello".into()))));
+        let taped = match MODE.with(|m| std::mem::replace(&mut *m.borrow_mut(), Mode::Off)) {
+            Mode::Record(t) => t,
+            _ => unreachable!(),
+        };
+        assert!(taped[0].get("argsum").is_some() && taped[0].get("args").is_none(), "{:?}", taped[0]);
+    }
+
+    /// A part of the run that reads more than a session holds is held only up to that bound:
+    /// the call that passes it is noted, later ones are not kept, and a replay stops at the
+    /// note and says why. Before, a recorded program that never started an app held every
+    /// result it read, without limit, because nothing ever wrote its startup down.
+    #[test]
+    fn a_recording_holds_a_bounded_amount_and_a_replay_stops_where_it_stopped() {
+        let big = Value::Str(Rc::new("x".repeat(100 << 20)));
+        let read = |v: &Value| {
+            let args = [Value::Str(Rc::new("f.txt".into()))];
+            let c = Call { label: "read_text", recv: None, args: &args };
+            through(c, 1, 1, || Ok(v.clone()))
+        };
+        set_mode(Mode::Record(Vec::new()));
+        for _ in 0..5 {
+            assert!(read(&big).is_ok(), "the live run is never affected");
+        }
+        let taped = match MODE.with(|m| std::mem::replace(&mut *m.borrow_mut(), Mode::Off)) {
+            Mode::Record(t) => t,
+            _ => unreachable!(),
+        };
+        // Two reads fit (200 MiB); the third passed 256 MiB and is the note; the rest are not kept.
+        assert_eq!(taped.len(), 3);
+        assert!(taped[..2].iter().all(|e| e.get("value").is_some()));
+        let why = taped[2]["overflow"].as_str().unwrap();
+        assert!(why.contains("`read_text`") && why.contains("256 MiB"), "{why}");
+
+        set_mode(Mode::Replay(taped.into()));
+        assert!(read(&Value::Missing).is_ok());
+        assert!(read(&Value::Missing).is_ok());
+        for _ in 0..2 {
+            let e = read(&Value::Missing).unwrap_err();
+            assert!(e.message.contains("stopped taping at `read_text`"), "{}", e.message);
+        }
+        set_mode(Mode::Off);
+        DIVERGED.with(|d| *d.borrow_mut() = None);
+    }
+
+    /// What the tape cannot hold it notes instead of building: a shared value is refused in
+    /// time and memory proportional to what it is, a deep one before it reaches the depth a
+    /// session line can be read back at. Every line the tape writes can be read back.
+    #[test]
+    fn the_tape_writes_down_only_what_a_session_can_hold() {
+        let start = std::time::Instant::now();
+        let j = encode(&doubled(60));
+        assert!(start.elapsed() < std::time::Duration::from_secs(5), "took {:?}", start.elapsed());
+        let why = decode(&j).unwrap_err();
+        assert!(why.contains("too large for a session"), "{why}");
+
+        let nest = |n: usize| (0..n).fold(Value::Int(1), |acc, _| Value::array(vec![acc]));
+        let rec = |n: usize| (0..n).fold(Value::Int(1), |acc, _| Value::record(vec![(Symbol::intern("a"), acc)]));
+        for v in [nest(TAPE_DEPTH), nest(TAPE_DEPTH + 1), nest(1_000_000), rec(32), rec(34)] {
+            let line = json!({"kind": "event", "effects": [{"fn": "read_json", "args": "0", "value": encode(&v)}]}).to_string();
+            let back: J = serde_json::from_str(&line).expect("every line the tape writes reads back");
+            let value = &back["effects"][0]["value"];
+            match decode(value) {
+                Ok(got) => assert_eq!(format!("{got:?}"), format!("{v:?}")),
+                Err(why) => assert!(why.contains("nested deeper than a session holds"), "{why}"),
+            }
+        }
+        assert!(decode(&encode(&nest(TAPE_DEPTH))).is_ok());
+        assert!(decode(&encode(&nest(TAPE_DEPTH + 1))).is_err());
+        assert!(decode(&encode(&rec(33))).is_ok());
+        assert!(decode(&encode(&rec(34))).is_err());
+        // Ordinary data is written exactly as before.
+        let row = Value::record(vec![(Symbol::intern("n"), Value::Int(3)), (Symbol::intern("s"), Value::Str(Rc::new("x".into())))]);
+        assert_eq!(encode(&row), json!({"record": [["n", 3], ["s", "x"]]}));
     }
 }

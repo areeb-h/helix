@@ -926,7 +926,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         // `dict()` → an empty Dict (ADR 0020); a runtime type, so `Unknown` to the checker.
         "dict" => {
             if !args.is_empty() {
-                return Err(arity_err("dict", 0, 0, args.len(), line, col));
+                return Err(crate::interp::dict_arity_err(args.len(), line, col));
             }
             Ok(Type::Unknown)
         }

@@ -1,0 +1,14 @@
+exit: 0
+--- stdout ---
+abc
+[(1, "x"), (2, "y")]
+14
+14
+([1, 4, 5], [2, 0, 1])
+3
+10 10 1024
+60
+a=1,b=true
+["H", "E", "Y"]
+cannot destructure a value of type Int into 2 names
+--- stderr ---

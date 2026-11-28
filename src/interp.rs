@@ -182,6 +182,16 @@ pub(crate) fn arity_err(name: &str, min: usize, max: usize, got: usize, line: us
     HelixError::new(format!("`{name}` takes {want}, got {got}"), line, col)
 }
 
+/// `dict(pairs)` — Python's way to build a dict from pairs, and the commonest wrong call
+/// of `dict`. One refusal for the checker and every engine: the bare arity error named no
+/// way forward, and the engines' own wording differed from the checker's.
+pub(crate) fn dict_arity_err(got: usize, line: usize, col: usize) -> HelixError {
+    arity_err("dict", 0, 0, got, line, col).hint(
+        "`dict()` is the empty Dict; build one from pairs with `pairs.to_dict()` \
+         (an array of `(key, value)` tuples or 2-arrays), or counts with `xs.frequencies().to_dict()`.",
+    )
+}
+
 /// The value of a literal default (`= 0`, `= -5`, `= ""`, `= true`, `= missing`) — the
 /// only shapes the parser admits — so a function value can carry its defaults.
 pub(crate) fn const_default_value(e: &Expr) -> Option<Value> {

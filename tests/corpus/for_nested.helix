@@ -1,0 +1,81 @@
+# ADR 0066: a loop in a loop. What the inner loop carries, the outer body assigns.
+
+# An inner loop updating a name bound before the OUTER loop: both carry it.
+fn grid_sum(rows) = do {
+  total = 0
+  for row in rows {
+    for x in row {
+      total += x
+    }
+  }
+  total
+}
+print(grid_sum([[1, 2], [3], [], [4, 5, 6]]))
+
+# A name bound in the outer body is the inner loop's carried name, and the outer
+# body's own: it starts fresh for every row.
+fn row_sums(rows) = do {
+  sums = []
+  for row in rows {
+    s = 0
+    for x in row {
+      s += x
+    }
+    sums = sums.concat([s])
+  }
+  sums
+}
+print(row_sums([[1, 2], [3], [], [4, 5, 6]]))
+
+# Two carried by the inner, one of them only by the inner.
+fn pairs(n) = do {
+  out = []
+  count = 0
+  for i in range(n) {
+    seen = 0
+    for j in range(i) {
+      out = out.concat([(j, i)])
+      seen += 1
+      count += 1
+    }
+    print("i={i} seen={seen}")
+  }
+  (out, count)
+}
+print(pairs(3))
+
+# Three deep, with the pattern at each level.
+fn cube(n) = do {
+  hits = 0
+  for i in range(n) {
+    for j in range(n) {
+      for k in range(n) {
+        hits = if i + j + k == n then hits + 1 else hits
+      }
+    }
+  }
+  hits
+}
+print(cube(3))
+
+# A `where` binding is bound for the body, though it is written after it.
+fn weighted(xs) = do {
+  for x in xs {
+    acc += x * w
+  }
+  acc
+} where w = 2, acc = 100
+print(weighted([1, 2, 3]))
+
+# A loop inside a string's hole carries the names around the string.
+fn label(xs) = do {
+  n = 0
+  s = "{do {
+    for x in xs {
+      n += x
+    }
+    n
+  }}"
+  "{s}/{n}"
+}
+print(label([4, 5]))

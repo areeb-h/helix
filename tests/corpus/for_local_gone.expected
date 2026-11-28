@@ -1,0 +1,10 @@
+exit: 1
+--- stdout ---
+
+--- stderr ---
+error: `best` is not defined
+  --> <src>:7:3
+  |
+7 |   best
+  |   ^
+help: it was first bound inside the `for` body, so it does not outlive an iteration; bind it before the loop to carry it out.

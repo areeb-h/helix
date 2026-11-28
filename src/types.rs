@@ -367,7 +367,7 @@ fn unknown_method(type_name: &str, name: &str, candidates: &[&str], line: usize,
         line,
         col,
     );
-    match crate::suggest::hint(name, crate::suggest::Site::Method, candidates) {
+    match crate::suggest::method_hint(type_name, name, candidates) {
         Some(h) => err.hint(h),
         // No near-miss: point at the doc command instead of dumping 79 names — a dump
         // is a haystack, `helix doc Array` is an answer. Byte-identical to the runtime
@@ -546,6 +546,12 @@ impl Checker {
             literal_temps: FxHashSet::default(),
             fn_globals: FxHashSet::default(),
         }
+    }
+
+    /// Every name bound so far — what a session's next line is parsed after
+    /// (`parser::parse_after`, ADR 0066).
+    pub fn bound_names(&self) -> Vec<String> {
+        self.env.keys().cloned().collect()
     }
 
     pub fn exec_stmt(&mut self, s: &Stmt) -> Result<(), HelixError> {
@@ -944,6 +950,14 @@ impl Checker {
                      be called above its definition, a top-level value binding has to \
                      appear before the code that uses it — move the binding up."
                 ))),
+                // Bound only by a `for` loop that has ended (ADR 0066): the parser saw the
+                // loop and this use, and knows why the name is gone.
+                None if crate::parser::loop_local_hint(name, *line, *col).is_some() => Err(HelixError::new(
+                    format!("`{name}` is not defined"),
+                    *line,
+                    *col,
+                )
+                .hint(crate::parser::loop_local_hint(name, *line, *col).unwrap_or_default())),
                 None => {
                     let names: Vec<&str> = self.env.keys().map(|s| s.as_str()).collect();
                     let err = HelixError::new(format!("`{}` is not defined", name), *line, *col);
@@ -1511,7 +1525,11 @@ use signatures::*;
 /// A later `fn` of the same name still wins, as it did before: the second registration
 /// overwrites the first, in source order, in both passes.
 pub fn check(program: &[Stmt]) -> Result<TypeMap, HelixError> {
-    check_program(program).map(|c| c.types)
+    let checked = check_program(program).map(|c| c.types);
+    // What the parser noted for this program's errors (ADR 0066) has been read, or was not
+    // needed; it must not be there for the next program this thread checks.
+    crate::parser::forget_loop_locals();
+    checked
 }
 
 /// [`check`]'s driver, answering the checker itself: its `specializations` counter is what
