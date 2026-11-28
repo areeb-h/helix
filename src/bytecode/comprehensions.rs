@@ -1484,10 +1484,10 @@ fn is_idempotent(e: &Expr) -> bool {
 }
 
 impl super::Compiler {
-    /// The JIT-eligible user-function names as a borrowed set, for the kernel eligibility
-    /// checks (a kernel body may call these).
-    fn jit_fn_set(&self) -> std::collections::HashSet<&str> {
-        self.jit_fns.iter().map(String::as_str).collect()
+    /// The JIT-eligible user-function names, for the kernel eligibility checks (a kernel
+    /// body may call these). Shared, not collected: see [`crate::jit::FnNames`].
+    fn jit_fn_set(&self) -> std::rc::Rc<std::collections::HashSet<String>> {
+        std::rc::Rc::clone(&self.jit_fns)
     }
 
     /// All user-defined function names — so a kernel's inline float builtins
@@ -1586,8 +1586,11 @@ impl super::Compiler {
         Ok(())
     }
 
-    fn user_fn_set(&self) -> std::collections::HashSet<&str> {
-        self.func_names.iter().map(String::as_str).collect()
+    /// Every name in `func_names` so far, as a set (`user_fns`, kept as names are pushed). A
+    /// site holds what it was handed: a function defined while the site is still compiling
+    /// is added to a copy (`Rc::make_mut`), as it was absent from the set collected before.
+    fn user_fn_set(&self) -> std::rc::Rc<std::collections::HashSet<String>> {
+        std::rc::Rc::clone(&self.user_fns)
     }
 
     /// Build a `FusionStage` from a `map`/`filter`/`where` method, or `None` if it is not

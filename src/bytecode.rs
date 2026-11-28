@@ -380,7 +380,10 @@ pub struct Compiler {
     /// User functions the JIT can compile to pure `i64` natives — so a kernel/fused body
     /// may *call* them. Computed once (identically to `jit::build`) so the compile-time
     /// guard decision matches what the JIT will actually compile.
-    jit_fns: std::collections::HashSet<String>,
+    jit_fns: std::rc::Rc<std::collections::HashSet<String>>,
+    /// The names in `func_names`, as a set — what the kernel analyses ask "is this callee
+    /// the user's own?" of. Pushed to only through [`Compiler::push_func_name`].
+    user_fns: std::rc::Rc<std::collections::HashSet<String>>,
     /// User functions that get a MIXED specialization, with their parameter kinds and return
     /// kind. The names alone are not enough to type a call inside a mixed map body — a
     /// `Float`-parameter callee needs its signature — so this carries them. Same
@@ -538,7 +541,8 @@ pub fn compile_with_types(program: &[Stmt], types: Option<crate::types::TypeMap>
         scan_loops: Vec::new(),
         no_fuse: false,
         body_depth: 0,
-        jit_fns: crate::jit::int_eligible_fns(program),
+        jit_fns: std::rc::Rc::new(crate::jit::int_eligible_fns(program)),
+        user_fns: std::rc::Rc::new(std::iter::once("<main>".to_string()).collect()),
         mixed_sigs: crate::jit::mixed_fn_sigs(program),
         types,
         take_heads: Vec::new(),
@@ -580,7 +584,7 @@ pub fn compile_with_types(program: &[Stmt], types: Option<crate::types::TypeMap>
         if let Stmt::Func { name, params, .. } = stmt
             && !c.func_names.iter().any(|n| n == name)
         {
-            c.func_names.push(name.clone());
+            c.push_func_name(name);
             c.func_arity.push(params.len() as u32);
             c.funcs.push(None);
         }
@@ -608,6 +612,14 @@ pub fn compile_with_types(program: &[Stmt], types: Option<crate::types::TypeMap>
     // `globals` as compilation reaches its binding, so the collision is not knowable before
     // the walk. The slot must still hold a chunk, because indices are baked into every
     // emitted `Call`; it just has to be one that cannot answer.
+    // The set the kernel analyses ask is exactly the names in `func_names`, which only
+    // `push_func_name` appends to; every program a unit test compiles checks that it is.
+    #[cfg(test)]
+    assert_eq!(
+        *c.user_fns,
+        c.func_names.iter().cloned().collect::<std::collections::HashSet<_>>(),
+        "`user_fns` drifted from `func_names`"
+    );
     let funcs: Vec<Chunk> = (0..c.funcs.len())
         .map(|i| match c.funcs[i].take() {
             Some(chunk) => chunk,
@@ -719,6 +731,14 @@ fn tco_peephole(code: &mut [Op]) {
 }
 
 impl Compiler {
+    /// Append `name` to `func_names`, and to the `user_fns` set if it is new there.
+    fn push_func_name(&mut self, name: &str) {
+        self.func_names.push(name.to_string());
+        if !self.user_fns.contains(name) {
+            std::rc::Rc::make_mut(&mut self.user_fns).insert(name.to_string());
+        }
+    }
+
     /// The type checker's inferred type for a method receiver expression, if a
     /// type-check ran. Keyed by the receiver's node address (stable: the AST is
     /// not cloned between `types::check` and here).
@@ -1354,7 +1374,7 @@ impl Compiler {
         {
             Some(i) => i,
             None => {
-                self.func_names.push(name.to_string());
+                self.push_func_name(name);
                 self.func_arity.push(params.len() as u32);
                 self.funcs.push(None);
                 self.funcs.len() - 1
@@ -1404,7 +1424,7 @@ impl Compiler {
         enclosing: Vec<(String, CaptureSrc)>,
     ) -> R<(u32, Vec<CaptureSrc>)> {
         let idx = self.funcs.len() as u32;
-        self.func_names.push("<lambda>".to_string());
+        self.push_func_name("<lambda>");
         self.func_arity.push(params.len() as u32);
         self.funcs.push(None);
 
@@ -2281,3 +2301,24 @@ impl Compiler {
 }
 
 mod comprehensions;
+
+#[cfg(test)]
+mod user_fn_set_tests {
+    /// `user_fns` follows `func_names` through every way a name is added: the pre-pass's
+    /// top-level functions, a function that shadows a builtin (reserved only when its
+    /// definition is reached, so a kernel above it still reads the builtin), and lambdas —
+    /// with kernel sites (`map`, `filter`, `reduce`) on both sides of the shadowing
+    /// definition. `compile_with_types` asserts the two agree when built for tests.
+    #[test]
+    fn the_user_function_set_is_the_function_table() {
+        let src = "fn early(xs) = xs.map(it + round(it)).filter(it > 1)\n\
+                   fn round(x) = 99\n\
+                   fn late(xs) = xs.map(round(it)).reduce(0, (a, b) => a + b)\n\
+                   f = (y) => [y].map((z) => z * 2)\n\
+                   print(early([1, 2]), late([3]), f(4))\n";
+        let stmts = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
+        let program = super::compile_with_types(&stmts, None).unwrap();
+        assert!(program.func_names.iter().any(|n| n == "round"));
+        assert!(program.func_names.iter().any(|n| n == "<lambda>"));
+    }
+}

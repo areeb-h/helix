@@ -11,6 +11,34 @@ use crate::bytecode::{Capture, CaptureKind, IndexBound};
 
 use super::{FnDef, NumKind, MAX_ARITY};
 
+/// The function names an analysis asks about — whether a call's callee is the user's own
+/// (`user_fns`) or one the JIT compiles (`fns`) — and the one question it asks of them.
+/// The JIT builds a `HashSet<&str>` from the program once; the bytecode compiler keeps
+/// a `HashSet<String>` that grows as it defines functions, shared through an `Rc` with
+/// each kernel site, where it used to collect a fresh `HashSet<&str>` of every function
+/// name per comprehension — a twentieth of a `std.ui` program's start-up.
+pub trait FnNames {
+    fn contains(&self, name: &str) -> bool;
+}
+
+impl FnNames for HashSet<&str> {
+    fn contains(&self, name: &str) -> bool {
+        HashSet::contains(self, name)
+    }
+}
+
+impl FnNames for HashSet<String> {
+    fn contains(&self, name: &str) -> bool {
+        HashSet::contains(self, name)
+    }
+}
+
+impl<T: FnNames> FnNames for std::rc::Rc<T> {
+    fn contains(&self, name: &str) -> bool {
+        T::contains(self, name)
+    }
+}
+
 // ---------- eligibility ----------
 
 /// True if `body` is a pure `i64` expression over `{pa, pb}` the JIT can compile
@@ -38,7 +66,7 @@ pub fn int_eligible_fns(program: &[Stmt]) -> std::collections::HashSet<String> {
 /// True if `body` is a pure `i64` value expression over `{pa, pb}` and calls only the
 /// JIT-eligible functions in `fns` — what `define_reduce_loop`/`define_fused_kernel` can
 /// lower. `fns` is empty for a self-contained body.
-pub fn reduce_loop_eligible(body: &Expr, pa: &str, pb: &str, fns: &HashSet<&str>) -> bool {
+pub fn reduce_loop_eligible(body: &Expr, pa: &str, pb: &str, fns: &impl FnNames) -> bool {
     let mut locals: HashSet<&str> = HashSet::new();
     locals.insert(pa);
     locals.insert(pb);
@@ -64,7 +92,7 @@ pub fn reduce_loop_captures(
     body: &Expr,
     pa: &str,
     pb: &str,
-    fns: &HashSet<&str>,
+    fns: &impl FnNames,
 ) -> Option<IndexedCaptures> {
     let mut locals: HashSet<&str> = HashSet::new();
     locals.insert(pa);
@@ -162,7 +190,7 @@ fn relabel_value_scalars(caps: &mut [Capture], bounds: &[IndexBound], synth: &[(
 /// variant lands. i64-closed subset — identical operator rules to `value_eligible_cap`.
 fn value_eligible_cap_indexed(
     e: &Expr,
-    eligible: &HashSet<&str>,
+    eligible: &impl FnNames,
     locals: &HashSet<&str>,
     pb: &str,
     caps: &mut Vec<Capture>,
@@ -328,7 +356,7 @@ fn value_eligible_cap_indexed(
 /// may index a captured array by the loop counter.
 fn cond_eligible_cap_indexed(
     e: &Expr,
-    eligible: &HashSet<&str>,
+    eligible: &impl FnNames,
     locals: &HashSet<&str>,
     pb: &str,
     caps: &mut Vec<Capture>,
@@ -360,7 +388,7 @@ pub(crate) fn float_reduce_body_eligible<'e>(
     pa: &str,
     pb: &str,
     locals: &HashSet<&'e str>,
-    user_fns: &HashSet<&str>,
+    user_fns: &impl FnNames,
 ) -> bool {
     // THE TYPED ANALYSIS, over `{pa, pb}` as Floats — the same pair (`infer_f64_typed` /
     // `gen_f64_typed`) the tuple-accumulator reduce has always used, so the scalar array-source
@@ -382,9 +410,9 @@ pub(crate) fn float_reduce_body_eligible<'e>(
 /// `Float`-literal init (so the accumulator is `f64`) and a pure-`f64` body over `{pa, pb}`.
 /// Returns the body, or `None`. (The source must be a `Float` array; the VM checks that at
 /// dispatch and falls back otherwise.)
-pub fn reduce_jit_f64_body(init: &Expr, body: &Expr, pa: &str, pb: &str, user_fns: &HashSet<&str>) -> Option<Expr> {
+pub fn reduce_jit_f64_body(init: &Expr, body: &Expr, pa: &str, pb: &str, user_fns: &impl FnNames) -> Option<Expr> {
     if init_admits_scalar_f64(init)
-        && float_reduce_body_eligible(body, pa, pb, &HashSet::new(), user_fns)
+        && float_reduce_body_eligible(body, pa, pb, &HashSet::<&str>::new(), user_fns)
     {
         Some(body.clone())
     } else {
@@ -403,8 +431,8 @@ fn infer_reduce_f64_kind<'e>(
     pa: &str,
     pb: &str,
     locals: &HashMap<&'e str, NumKind>,
-    fns: &HashSet<&str>,
-    user_fns: &HashSet<&str>,
+    fns: &impl FnNames,
+    user_fns: &impl FnNames,
     msigs: &MixedSigTable,
 ) -> Option<NumKind> {
     match e {
@@ -549,8 +577,8 @@ pub fn reduce_jit_f64_range_body(
     body: &Expr,
     pa: &str,
     pb: &str,
-    fns: &HashSet<&str>,
-    user_fns: &HashSet<&str>,
+    fns: &impl FnNames,
+    user_fns: &impl FnNames,
     msigs: &MixedSigTable,
 ) -> Option<Expr> {
     if init_admits_scalar_f64(init) && f64_range_body_eligible(body, pa, pb, fns, user_fns, msigs) {
@@ -570,8 +598,8 @@ fn f64_range_body_eligible(
     body: &Expr,
     pa: &str,
     pb: &str,
-    fns: &HashSet<&str>,
-    user_fns: &HashSet<&str>,
+    fns: &impl FnNames,
+    user_fns: &impl FnNames,
     msigs: &MixedSigTable,
 ) -> bool {
     infer_reduce_f64_kind(body, pa, pb, &HashMap::new(), fns, user_fns, msigs)
@@ -660,8 +688,8 @@ fn infer_f64_indexed<'e>(
     pb: &str,
     locals: &HashMap<&'e str, MixT>,
     out: &mut IndexedOut,
-    fns: &HashSet<&str>,
-    user_fns: &HashSet<&str>,
+    fns: &impl FnNames,
+    user_fns: &impl FnNames,
 ) -> Option<MixT> {
     match e {
         Expr::Int(_) => Some(MixT::Int),
@@ -973,8 +1001,8 @@ pub fn reduce_jit_f64_range_captures(
     body: &Expr,
     pa: &str,
     pb: &str,
-    fns: &HashSet<&str>,
-    user_fns: &HashSet<&str>,
+    fns: &impl FnNames,
+    user_fns: &impl FnNames,
 ) -> Option<F64RangeCaptures> {
     if !init_admits_scalar_f64(init) {
         return None;
@@ -1010,7 +1038,7 @@ pub fn reduce_jit_f64_range_captures(
 /// `binders` (the `f64` accumulator slots `$acc0…` plus the element/counter `pb`), or `None`
 /// if it falls outside the eligible shape. The N-binder generalization of
 /// [`infer_reduce_f64_kind`] — same promotion rules; used for f64 tuple/record accumulators.
-pub(crate) fn infer_f64_typed(e: &Expr, binders: &HashMap<&str, NumKind>, user_fns: &HashSet<&str>) -> Option<NumKind> {
+pub(crate) fn infer_f64_typed(e: &Expr, binders: &HashMap<&str, NumKind>, user_fns: &impl FnNames) -> Option<NumKind> {
     match e {
         Expr::Int(_) => Some(NumKind::Int),
         Expr::Float(_) => Some(NumKind::Float),
@@ -1262,7 +1290,7 @@ fn check_slot_bodies(
     pa: &str,
     pb: &str,
     fields: &[String],
-    fns: &HashSet<&str>,
+    fns: &impl FnNames,
 ) -> Option<Vec<Expr>> {
     let n = comps.len();
     let names: Vec<String> = (0..n).map(acc_ident).collect();
@@ -1288,7 +1316,7 @@ fn check_slot_bodies_f64(
     pb: &str,
     pb_kind: NumKind,
     fields: &[String],
-    user_fns: &HashSet<&str>,
+    user_fns: &impl FnNames,
 ) -> Option<Vec<Expr>> {
     let n = comps.len();
     let bodies: Vec<Expr> = comps.iter().map(|c| subst_acc(c, pa, n, fields)).collect();
@@ -1314,7 +1342,7 @@ pub fn reduce_jit_f64_tuple_bodies(
     pa: &str,
     pb: &str,
     pb_is_int: bool,
-    user_fns: &HashSet<&str>,
+    user_fns: &impl FnNames,
 ) -> Option<Vec<Expr>> {
     let pb_kind = if pb_is_int { NumKind::Int } else { NumKind::Float };
     if let (Expr::Tuple(inits), Expr::Tuple(comps)) = (init, body) {
@@ -1358,7 +1386,7 @@ pub fn reduce_jit_bodies(
     body: &Expr,
     pa: &str,
     pb: &str,
-    fns: &HashSet<&str>,
+    fns: &impl FnNames,
 ) -> Option<Vec<Expr>> {
     if reduce_loop_eligible(body, pa, pb, fns) {
         return Some(vec![body.clone()]);
@@ -1394,7 +1422,7 @@ pub fn reduce_jit_bodies(
 /// Re-check (at JIT-compile time) that already-substituted reduce bodies are `i64`-eligible
 /// — a scalar (1 body) over `{pa, pb}`, or a tuple (2..=MAX_ACC_SLOTS bodies) over the slots
 /// `{$acc0.., pb}`. Shared by the range reduce loop and the fused reduce sink.
-pub(crate) fn bodies_eligible(pa: &str, pb: &str, bodies: &[Expr], fns: &HashSet<&str>) -> bool {
+pub(crate) fn bodies_eligible(pa: &str, pb: &str, bodies: &[Expr], fns: &impl FnNames) -> bool {
     if bodies.len() == 1 {
         return reduce_loop_eligible(&bodies[0], pa, pb, fns);
     }
@@ -1413,8 +1441,8 @@ pub(crate) fn bodies_eligible(pa: &str, pb: &str, bodies: &[Expr], fns: &HashSet
 
 pub(crate) fn reduce_bodies_eligible(
     rl: &crate::bytecode::ReduceLoop,
-    fns: &HashSet<&str>,
-    user_fns: &HashSet<&str>,
+    fns: &impl FnNames,
+    user_fns: &impl FnNames,
     msigs: &MixedSigTable,
 ) -> bool {
     // An f64 accumulator over the i64 counter: capture-free, every component's root `Float`,
@@ -1521,7 +1549,7 @@ pub(crate) fn reduce_bodies_eligible(
 
 /// True if a `map` body is a pure `i64` value expression over its single binder (calling
 /// only `fns`) — the same shape as a reduce body, lowered to a per-element kernel.
-pub fn map_kernel_eligible(body: &Expr, binder: &str, fns: &HashSet<&str>) -> bool {
+pub fn map_kernel_eligible(body: &Expr, binder: &str, fns: &impl FnNames) -> bool {
     let mut locals: HashSet<&str> = HashSet::new();
     locals.insert(binder);
     value_eligible(body, fns, &locals, NumKind::Int)
@@ -1535,7 +1563,7 @@ pub const MAX_CAPTURES: usize = 8;
 /// passed to the kernel as a loop-invariant `caps[i]`. Returns the ordered capture names,
 /// or `None` if the body is ineligible (a float literal, `/`, a non-eligible call, …) or
 /// captures more than [`MAX_CAPTURES`]. Same i64-closed rules as `value_eligible(Int)`.
-pub fn map_kernel_captures(body: &Expr, binder: &str, fns: &HashSet<&str>) -> Option<Vec<String>> {
+pub fn map_kernel_captures(body: &Expr, binder: &str, fns: &impl FnNames) -> Option<Vec<String>> {
     let mut locals: HashSet<&str> = HashSet::new();
     locals.insert(binder);
     let mut caps: Vec<String> = Vec::new();
@@ -1565,7 +1593,7 @@ pub fn map_kernel_captures(body: &Expr, binder: &str, fns: &HashSet<&str>) -> Op
 pub fn map_kernel_captures_indexed(
     body: &Expr,
     binder: &str,
-    fns: &HashSet<&str>,
+    fns: &impl FnNames,
 ) -> Option<IndexedCaptures> {
     let mut locals: HashSet<&str> = HashSet::new();
     locals.insert(binder);
@@ -1599,7 +1627,7 @@ pub fn map_kernel_captures_indexed(
 pub fn map_kernel_captures_f64(
     body: &Expr,
     binder: &str,
-    user_fns: &HashSet<&str>,
+    user_fns: &impl FnNames,
 ) -> Option<Vec<String>> {
     let mut caps: Vec<String> = Vec::new();
     let mut uses_binder = false;
@@ -1660,7 +1688,7 @@ fn f64_body_eligible(
     binder: &str,
     caps: &mut Vec<String>,
     uses_binder: &mut bool,
-    user_fns: &HashSet<&str>,
+    user_fns: &impl FnNames,
 ) -> Option<F64Proof> {
     match e {
         Expr::Float(_) => Some(F64Proof::Float),
@@ -1749,8 +1777,8 @@ fn f64_body_eligible(
 pub fn mixed_map_eligible(
     body: &Expr,
     binder: &str,
-    fns: &HashSet<&str>,
-    user_fns: &HashSet<&str>,
+    fns: &impl FnNames,
+    user_fns: &impl FnNames,
     msigs: &MixedSigTable,
 ) -> Option<Vec<Capture>> {
     let mut uses_binder = false;
@@ -1787,7 +1815,7 @@ const RAISING_ROUNDERS: &[&str] = &["floor", "ceil", "round", "trunc"];
 /// is stored on the kernel ([`crate::bytecode::ArrayKernel::raises`],
 /// [`crate::bytecode::ReduceLoop::raises`]) rather than recomputed by the VM, because the
 /// answer decides an ABI and the VM cannot reach the user functions a call would need.
-pub fn body_raises(e: &Expr, user_fns: &HashSet<&str>, msigs: &MixedSigTable) -> bool {
+pub fn body_raises(e: &Expr, user_fns: &impl FnNames, msigs: &MixedSigTable) -> bool {
     match e {
         Expr::Call { name, args, .. } => {
             // A call to a MIXED specialization always counts: its ABI carries a poison
@@ -1839,8 +1867,8 @@ pub fn body_raises(e: &Expr, user_fns: &HashSet<&str>, msigs: &MixedSigTable) ->
 pub fn mixed_map_int_root_eligible(
     body: &Expr,
     binder: &str,
-    fns: &HashSet<&str>,
-    user_fns: &HashSet<&str>,
+    fns: &impl FnNames,
+    user_fns: &impl FnNames,
     msigs: &MixedSigTable,
 ) -> Option<Vec<Capture>> {
     let mut uses_binder = false;
@@ -1860,8 +1888,8 @@ pub fn mixed_map_int_root_eligible(
 pub fn float_source_map_eligible(
     body: &Expr,
     binder: &str,
-    fns: &HashSet<&str>,
-    user_fns: &HashSet<&str>,
+    fns: &impl FnNames,
+    user_fns: &impl FnNames,
     msigs: &MixedSigTable,
 ) -> Option<(Vec<Capture>, NumKind)> {
     let mut uses_binder = false;
@@ -1884,8 +1912,8 @@ pub fn float_caps_map_eligible(
     body: &Expr,
     binder: &str,
     source: NumKind,
-    fns: &HashSet<&str>,
-    user_fns: &HashSet<&str>,
+    fns: &impl FnNames,
+    user_fns: &impl FnNames,
     msigs: &MixedSigTable,
 ) -> Option<(Vec<Capture>, NumKind)> {
     let mut uses_binder = false;
@@ -1901,8 +1929,8 @@ pub fn float_caps_map_eligible(
 pub fn float_source_map_value_scalar_eligible(
     body: &Expr,
     binder: &str,
-    fns: &HashSet<&str>,
-    user_fns: &HashSet<&str>,
+    fns: &impl FnNames,
+    user_fns: &impl FnNames,
     msigs: &MixedSigTable,
 ) -> Option<(Vec<Capture>, NumKind)> {
     let mut acc = IndexedOut::default();
@@ -1950,8 +1978,8 @@ fn infer_mixed_kind(
     ck: NumKind,
     uses_binder: &mut bool,
     caps: &mut Vec<Capture>,
-    fns: &HashSet<&str>,
-    user_fns: &HashSet<&str>,
+    fns: &impl FnNames,
+    user_fns: &impl FnNames,
     msigs: &MixedSigTable,
 ) -> Option<NumKind> {
     match e {
@@ -2186,8 +2214,8 @@ fn typed_cond_ok(
     ck: NumKind,
     uses_binder: &mut bool,
     caps: &mut Vec<Capture>,
-    fns: &HashSet<&str>,
-    user_fns: &HashSet<&str>,
+    fns: &impl FnNames,
+    user_fns: &impl FnNames,
     msigs: &MixedSigTable,
 ) -> Option<()> {
     match e {
@@ -2248,8 +2276,8 @@ pub type MapIndexAnalysis = (Vec<Capture>, Vec<IndexBound>, Vec<(String, Expr)>)
 pub fn mixed_map_captures_indexed(
     body: &Expr,
     binder: &str,
-    fns: &HashSet<&str>,
-    user_fns: &HashSet<&str>,
+    fns: &impl FnNames,
+    user_fns: &impl FnNames,
     msigs: &MixedSigTable,
 ) -> Option<MapIndexAnalysis> {
     let mut acc = IndexedOut::default();
@@ -2284,8 +2312,8 @@ pub fn mixed_map_captures_indexed(
 pub fn mixed_map_value_scalar_eligible(
     body: &Expr,
     binder: &str,
-    fns: &HashSet<&str>,
-    user_fns: &HashSet<&str>,
+    fns: &impl FnNames,
+    user_fns: &impl FnNames,
     msigs: &MixedSigTable,
 ) -> Option<(Vec<Capture>, NumKind)> {
     let mut acc = IndexedOut::default();
@@ -2361,8 +2389,8 @@ fn infer_mixed_kind_indexed(
     // `Int` for a range element, `GFloat` for the Floats-source value-scalar build.
     bk: MixT,
     out: &mut IndexedOut,
-    fns: &HashSet<&str>,
-    user_fns: &HashSet<&str>,
+    fns: &impl FnNames,
+    user_fns: &impl FnNames,
     msigs: &MixedSigTable,
 ) -> Option<MixT> {
     match e {
@@ -2612,8 +2640,8 @@ fn mixt_cond_ok(
     binder: &str,
     bk: MixT,
     out: &mut IndexedOut,
-    fns: &HashSet<&str>,
-    user_fns: &HashSet<&str>,
+    fns: &impl FnNames,
+    user_fns: &impl FnNames,
     msigs: &MixedSigTable,
 ) -> Option<()> {
     match e {
@@ -2640,7 +2668,7 @@ fn mixt_cond_ok(
     }
 }
 
-fn value_eligible_cap(e: &Expr, eligible: &HashSet<&str>, locals: &HashSet<&str>, caps: &mut Vec<String>) -> bool {
+fn value_eligible_cap(e: &Expr, eligible: &impl FnNames, locals: &HashSet<&str>, caps: &mut Vec<String>) -> bool {
     match e {
         Expr::Int(_) => true,
         // Float literals need the (dormant) f64 specialization; not this i64 kernel.
@@ -2709,7 +2737,7 @@ fn value_eligible_cap(e: &Expr, eligible: &HashSet<&str>, locals: &HashSet<&str>
     }
 }
 
-fn cond_eligible_cap(e: &Expr, eligible: &HashSet<&str>, locals: &HashSet<&str>, caps: &mut Vec<String>) -> bool {
+fn cond_eligible_cap(e: &Expr, eligible: &impl FnNames, locals: &HashSet<&str>, caps: &mut Vec<String>) -> bool {
     match e {
         // `and`/`or` in condition position (see `cond_eligible`); recurse through the
         // capture-collecting twin so captured names inside the operands are still found.
@@ -2741,7 +2769,7 @@ fn cond_eligible_cap(e: &Expr, eligible: &HashSet<&str>, locals: &HashSet<&str>,
 pub fn filter_kernel_eligible(
     body: &Expr,
     binder: &str,
-    fns: &HashSet<&str>,
+    fns: &impl FnNames,
 ) -> Option<Vec<Capture>> {
     let mut locals: HashSet<&str> = HashSet::new();
     locals.insert(binder);
@@ -2769,7 +2797,7 @@ pub fn filter_kernel_eligible(
 pub fn filter_kernel_eligible_f64(
     body: &Expr,
     binder: &str,
-    user_fns: &HashSet<&str>,
+    user_fns: &impl FnNames,
 ) -> Option<Vec<Capture>> {
     let mut names: Vec<String> = Vec::new();
     let mut uses_binder = false;
@@ -2792,7 +2820,7 @@ fn cond_eligible_f64(
     binder: &str,
     caps: &mut Vec<String>,
     uses_binder: &mut bool,
-    user_fns: &HashSet<&str>,
+    user_fns: &impl FnNames,
 ) -> bool {
     match e {
         Expr::Binary { op: BinOp::And | BinOp::Or, left, right, .. } => {
@@ -3351,7 +3379,7 @@ fn infer_typed_env(
     e: &Expr,
     env: &HashMap<&str, NumKind>,
     sigs: &HashMap<&str, MixedSig>,
-    user_fns: &HashSet<&str>,
+    user_fns: &impl FnNames,
 ) -> Option<NumKind> {
     match e {
         Expr::Int(_) => Some(NumKind::Int),
@@ -3469,7 +3497,7 @@ fn cond_typed_ok(
     e: &Expr,
     env: &HashMap<&str, NumKind>,
     sigs: &HashMap<&str, MixedSig>,
-    user_fns: &HashSet<&str>,
+    user_fns: &impl FnNames,
 ) -> bool {
     match e {
         Expr::Binary { op: BinOp::And | BinOp::Or, left, right, .. } => {
@@ -3501,7 +3529,7 @@ fn mixed_tail_ret_kind<'a>(
     self_name: &str,
     param_kinds: &[NumKind],
     sigs: &HashMap<&str, MixedSig>,
-    user_fns: &HashSet<&str>,
+    user_fns: &impl FnNames,
 ) -> Option<Option<NumKind>> {
     match e {
         Expr::If { cond, then_branch, else_branch, .. } => {
@@ -3813,7 +3841,7 @@ pub(crate) fn mixed_fn_sig(
     recursive: &HashSet<&str>,
     int_eligible: &HashSet<&str>,
     sigs: &HashMap<&str, MixedSig>,
-    user_fns: &HashSet<&str>,
+    user_fns: &impl FnNames,
 ) -> Option<(u16, Vec<NumKind>, Option<NumKind>)> {
     // Recursive functions qualify only in the tail-loopable shape; NON-recursive ones
     // compile straight-line with the same walker (no self-call arm ever fires) — the
@@ -3940,7 +3968,7 @@ fn jit_float_builtin_arity(name: &str) -> Option<usize> {
 }
 
 
-fn value_eligible(e: &Expr, eligible: &HashSet<&str>, locals: &HashSet<&str>, kind: NumKind) -> bool {
+fn value_eligible(e: &Expr, eligible: &impl FnNames, locals: &HashSet<&str>, kind: NumKind) -> bool {
     match e {
         Expr::Int(_) => true,
         // A float literal is only representable in the `f64` specialization.
@@ -4023,7 +4051,7 @@ fn value_eligible(e: &Expr, eligible: &HashSet<&str>, locals: &HashSet<&str>, ki
 fn match_eligible(
     scrutinee: &Expr,
     arms: &[crate::ast::MatchArm],
-    eligible: &HashSet<&str>,
+    eligible: &impl FnNames,
     locals: &HashSet<&str>,
     kind: NumKind,
 ) -> bool {
@@ -4060,7 +4088,7 @@ fn match_eligible(
     })
 }
 
-fn cond_eligible(e: &Expr, eligible: &HashSet<&str>, locals: &HashSet<&str>, kind: NumKind) -> bool {
+fn cond_eligible(e: &Expr, eligible: &impl FnNames, locals: &HashSet<&str>, kind: NumKind) -> bool {
     match e {
         // `and`/`or` are widenable ONLY in condition position (an `if`/filter/guard
         // condition is forced to `Bool`). Each side must itself be a condition, so every
