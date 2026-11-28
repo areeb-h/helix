@@ -75,6 +75,34 @@ pub fn unbindable_param<'a>(sig: &'a MainSig<'a>) -> Option<&'a str> {
     sig.params.iter().find(|(_, ty)| !buildable(ty)).map(|(n, _)| n.as_str())
 }
 
+/// The type an argv string is converted to: the annotation, or — for an UNANNOTATED
+/// parameter — the type of a literal Int, Float or Bool default.
+///
+/// `fn main(path, top = 10)` used to bind `--top 3` as the String `"3"`, and the program
+/// then failed deep inside `main` (`xs.take(top)`: *"expected an integer, found String"*)
+/// with nothing pointing at the command line. The default already says what the
+/// parameter is: the checker types `top` from it, every in-source call passes an Int, and
+/// `main()` with no arguments binds the Int 10. A command line that bound a String there
+/// gave the same parameter two types depending on whether the flag was typed. A String
+/// default (or `missing`, or no default) still binds the text as given.
+fn arg_type(ty: &Option<TypeAnn>, default: Option<&Expr>) -> Option<TypeAnn> {
+    if ty.is_some() {
+        return ty.clone();
+    }
+    match default? {
+        Expr::Int(_) => Some(TypeAnn::Int),
+        Expr::Float(_) => Some(TypeAnn::Float),
+        Expr::Bool(_) => Some(TypeAnn::Bool),
+        // `= -5`: the parser keeps a negative literal default as a negation.
+        Expr::Unary { op: crate::ast::UnOp::Neg, expr, .. } => match **expr {
+            Expr::Int(_) => Some(TypeAnn::Int),
+            Expr::Float(_) => Some(TypeAnn::Float),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Convert one argv string to the literal the parameter's type asks for.
 ///
 /// The error names the option AND the value it could not take, because "invalid integer"
@@ -99,11 +127,17 @@ fn convert(name: &str, ty: &Option<TypeAnn>, raw: &str, line: usize, col: usize)
             "false" => Expr::Bool(false),
             _ => return Err(bad("`true` or `false`", "true|false")),
         },
-        // A String parameter, and an UNANNOTATED one: argv is strings, so that is the
-        // honest default. A wrong assumption surfaces inside `main` as an ordinary type
-        // error rather than being guessed at here.
+        // A String parameter, and an unannotated one with no Int/Float/Bool default
+        // (`arg_type`): argv is strings, so that is the honest default. A wrong
+        // assumption surfaces inside `main` as an ordinary type error rather than being
+        // guessed at here.
         _ => Expr::Str(raw.to_string()),
     })
+}
+
+/// [`arg_type`] for parameter `idx` of `sig`.
+fn param_type(sig: &MainSig<'_>, idx: usize) -> Option<TypeAnn> {
+    arg_type(&sig.params[idx].1, sig.defaults.get(idx).and_then(|d| d.as_ref()))
 }
 
 /// Bind `argv` to `main`'s parameters, producing the call's arguments.
@@ -137,7 +171,8 @@ pub fn bind(sig: &MainSig<'_>, argv: &[String]) -> Result<Vec<Expr>, HelixError>
                     sig.params.iter().map(|(p, _)| format!("--{p}")).collect::<Vec<_>>().join(", ")
                 )));
             };
-            let (pname, ty) = &sig.params[idx];
+            let pname = &sig.params[idx].0;
+            let ty = &param_type(sig, idx);
             // A Bool defaulting to `false` may be given bare: `--verbose` means
             // `--verbose true`. It is a shorthand for a value, not a separate concept,
             // which is why nothing else in this function knows about flags.
@@ -170,8 +205,8 @@ pub fn bind(sig: &MainSig<'_>, argv: &[String]) -> Result<Vec<Expr>, HelixError>
                 )
                 .hint("run with `--help` to see the parameters.".to_string()));
             }
-            let (pname, ty) = &sig.params[positional];
-            given[positional] = Some(convert(pname, ty, a, line, col)?);
+            let pname = &sig.params[positional].0;
+            given[positional] = Some(convert(pname, &param_type(sig, positional), a, line, col)?);
             positional += 1;
         }
         i += 1;
@@ -235,7 +270,8 @@ pub fn help(sig: &MainSig<'_>, src: &str, tool: &str) -> String {
     // Required parameters are always a prefix — the parser refuses a non-default after a
     // default — so usage can be written left to right without sorting anything.
     let mut usage = format!("usage: {tool}");
-    for (idx, (name, ty)) in sig.params.iter().enumerate() {
+    for (idx, (name, _)) in sig.params.iter().enumerate() {
+        let ty = &param_type(sig, idx);
         let optional = sig.defaults.get(idx).is_some_and(|d| d.is_some());
         // A Bool with a default is written bare on a real command line, so write it bare
         // here: `[--verbose <verbose>]` describes a form nobody types.
@@ -254,8 +290,9 @@ pub fn help(sig: &MainSig<'_>, src: &str, tool: &str) -> String {
         out.push_str("takes no arguments\n");
         return out;
     }
-    for (idx, (name, ty)) in sig.params.iter().enumerate() {
-        let tyname = match ty {
+    for (idx, (name, _)) in sig.params.iter().enumerate() {
+        // The type the argument is BOUND as, so `--help` says `Int` for `top = 10`.
+        let tyname = match param_type(sig, idx) {
             Some(t) => format!("{t:?}"),
             None => "String".to_string(),
         };
@@ -281,6 +318,7 @@ fn literal_text(e: &Expr) -> String {
         Expr::Str(s) => format!("\"{s}\""),
         Expr::Bool(b) => b.to_string(),
         Expr::Missing => "missing".to_string(),
+        Expr::Unary { op: crate::ast::UnOp::Neg, expr, .. } => format!("-{}", literal_text(expr)),
         _ => "…".to_string(),
     }
 }

@@ -182,6 +182,20 @@ calls it currently runs its top level and nothing else (measured). After this, `
 runs too. That is a real behaviour change for such a program, it is detectable
 mechanically (declares `main`, never calls it), and it is the only one D1 causes.
 
+**As implemented — an unannotated parameter (2026-11-28).** D1 says the types are the
+checker's types, and did not separately decide what an UNANNOTATED parameter is. The
+first implementation bound it as a String, which contradicted that rule for
+`fn main(path, top = 10)`: the checker types `top` as Int from its default, `main()`
+binds the Int 10, and `--top 3` bound the String `"3"` — so `xs.take(top)` failed inside
+`main` with *"expected an integer, found String"*, nowhere near the command line, and
+`--help` called the option a String. Now an unannotated parameter whose default is a
+literal Int, Float or Bool (a negative literal included) is converted exactly as if it
+were annotated with that type: the same conversion, the same error naming the flag for a
+value that does not parse (*"`--top` expects an Int, but got `x`"*), the bare `--flag`
+form for a Bool, and that type in `--help`. Every other unannotated parameter — no
+default, a String default, `missing` — still binds the text as given. Nothing a program
+may do changed; only the type its argument arrives as.
+
 ### D2 — The environment is declared, not read.
 
 ```helix

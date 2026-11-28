@@ -411,8 +411,11 @@ pub static SYNTAX: &[SyntaxDoc] = &[
         example: "print(1)",
         example_out: "1",
         notes: "Arguments bind by the ordinary call-site rule — positional, `--named value`, `--named=value`, \
-                out of order — and a Bool parameter is a bare flag. A doc comment above `main` becomes \
-                `--help`. \
+                out of order — and a Bool parameter is a bare flag. Each argument is converted to the \
+                parameter's type, and a value that does not parse is an error naming the flag; an \
+                UNANNOTATED parameter takes the type of a literal Int, Float or Bool default \
+                (`top = 10` binds `--top 3` as the Int 3) and is otherwise a String. A doc comment \
+                above `main` becomes `--help`. \
                 Keywords: command line, argv, cli, arguments, flags, options, parse args, entry point, script, tool.",
     },
 ];
