@@ -66,7 +66,19 @@ fn passes_through(name: &str) -> bool {
 }
 
 fn set_mode(mode: Mode) {
+    SEGMENT_BYTES.set(0);
+    SEGMENT_FULL.set(false);
     MODE.with(|m| *m.borrow_mut() = mode);
+}
+
+thread_local! {
+    /// What the calls taped since the mode was last set (the startup, or one step) take written
+    /// down. A step's calls are held until the step is written, and the startup's until
+    /// `ui.app` writes the session's first line — which a program that never starts an app
+    /// never does — so without a bound a recorded program held every file it read.
+    static SEGMENT_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// The segment passed [`TAPE_BYTES`]: its overflow has been noted, and nothing more is held.
+    static SEGMENT_FULL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn running() -> bool {
@@ -240,13 +252,29 @@ pub fn through(c: Call<'_>, line: usize, col: usize, call: impl FnOnce() -> Resu
     let replaying = MODE.with(|m| matches!(*m.borrow(), Mode::Replay(_)));
     if !replaying {
         let out = call();
+        if SEGMENT_FULL.get() {
+            return out;
+        }
         let fp = c.fingerprint();
+        let (entry, size) = match &out {
+            Ok(v) => {
+                let (j, size) = encode_sized(v);
+                (json!({"fn": c.label, "args": fp, "value": j}), size)
+            }
+            Err(e) => (json!({"fn": c.label, "args": fp, "error": e.message, "hint": e.hint}), (e.message.len() + 256) as u64),
+        };
+        let used = SEGMENT_BYTES.get().saturating_add(size);
         MODE.with(|m| {
             if let Mode::Record(t) = &mut *m.borrow_mut() {
-                t.push(match &out {
-                    Ok(v) => json!({"fn": c.label, "args": fp, "value": encode(v)}),
-                    Err(e) => json!({"fn": c.label, "args": fp, "error": e.message, "hint": e.hint}),
-                });
+                if used > TAPE_BYTES {
+                    // Noted once, at the call that passed the bound; a replay stops there.
+                    SEGMENT_FULL.set(true);
+                    let why = format!("the recording stopped taping at `{}`: what this part of the run read passed {} MiB, more than a session holds", c.label, TAPE_BYTES >> 20);
+                    t.push(json!({"fn": c.label, "args": fp, "overflow": why}));
+                } else {
+                    SEGMENT_BYTES.set(used);
+                    t.push(entry);
+                }
             }
         });
         return out;
@@ -281,6 +309,11 @@ pub fn through(c: Call<'_>, line: usize, col: usize, call: impl FnOnce() -> Resu
         && fp != c.fingerprint()
     {
         return Err(went_another_way(format!("the app called `{}`, but when recorded `{}` was called with other arguments", c.shown(), c.label)));
+    }
+    if let Some(why) = entry.get("overflow").and_then(J::as_str) {
+        // The recording held no more of this part of the run, so nothing after here can be
+        // answered: every later call says the same.
+        return Err(went_another_way(why.to_string()));
     }
     if let Some(msg) = entry.get("error").and_then(J::as_str) {
         // It failed when recorded, so it fails now, the same way.
@@ -655,10 +688,18 @@ const TAPE_BYTES: u64 = 256 << 20;
 /// recording out of memory. The live run is unaffected; a replay that needs the value refuses
 /// at that step and says why.
 pub fn encode(v: &Value) -> J {
+    encode_sized(v).0
+}
+
+/// [`encode`], and what the result takes written down.
+fn encode_sized(v: &Value) -> (J, u64) {
     let mut memo = rustc_hash::FxHashMap::default();
     match written_size(v, 0, &mut memo) {
-        Ok(_) => encode_unchecked(v),
-        Err(why) => json!({"unrecorded": why}),
+        Ok((size, _)) => (encode_unchecked(v), size),
+        Err(why) => {
+            let n = why.len() as u64 + 64;
+            (json!({"unrecorded": why}), n)
+        }
     }
 }
 
@@ -880,6 +921,43 @@ mod tests {
         // A value nested far past any stack is hashed too.
         let deep = (0..1_000_000).fold(Value::Int(1), |acc, _| Value::array(vec![acc]));
         assert_eq!(fp(&[deep]).len(), 32);
+    }
+
+    /// A part of the run that reads more than a session holds is held only up to that bound:
+    /// the call that passes it is noted, later ones are not kept, and a replay stops at the
+    /// note and says why. Before, a recorded program that never started an app held every
+    /// result it read, without limit, because nothing ever wrote its startup down.
+    #[test]
+    fn a_recording_holds_a_bounded_amount_and_a_replay_stops_where_it_stopped() {
+        let big = Value::Str(Rc::new("x".repeat(100 << 20)));
+        let read = |v: &Value| {
+            let args = [Value::Str(Rc::new("f.txt".into()))];
+            let c = Call { label: "read_text", recv: None, args: &args };
+            through(c, 1, 1, || Ok(v.clone()))
+        };
+        set_mode(Mode::Record(Vec::new()));
+        for _ in 0..5 {
+            assert!(read(&big).is_ok(), "the live run is never affected");
+        }
+        let taped = match MODE.with(|m| std::mem::replace(&mut *m.borrow_mut(), Mode::Off)) {
+            Mode::Record(t) => t,
+            _ => unreachable!(),
+        };
+        // Two reads fit (200 MiB); the third passed 256 MiB and is the note; the rest are not kept.
+        assert_eq!(taped.len(), 3);
+        assert!(taped[..2].iter().all(|e| e.get("value").is_some()));
+        let why = taped[2]["overflow"].as_str().unwrap();
+        assert!(why.contains("`read_text`") && why.contains("256 MiB"), "{why}");
+
+        set_mode(Mode::Replay(taped.into()));
+        assert!(read(&Value::Missing).is_ok());
+        assert!(read(&Value::Missing).is_ok());
+        for _ in 0..2 {
+            let e = read(&Value::Missing).unwrap_err();
+            assert!(e.message.contains("stopped taping at `read_text`"), "{}", e.message);
+        }
+        set_mode(Mode::Off);
+        DIVERGED.with(|d| *d.borrow_mut() = None);
     }
 
     /// What the tape cannot hold it notes instead of building: a shared value is refused in

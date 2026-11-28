@@ -5625,6 +5625,42 @@ fn a_corpus_counts_each_session_once_however_many_paths_lead_to_it() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `--view` on a corpus keeps a viewer for each session that fails, and two sessions with the
+/// same file name in different folders each keep their own: the viewer was named by the file's
+/// name alone, so `a/s.jsonl` and `b/s.jsonl` wrote the same `s.html` and the second replaced
+/// the first.
+#[test]
+fn a_corpus_keeps_one_viewer_per_failing_session_even_when_their_names_match() {
+    const PORT: u16 = 18482;
+    let dir = std::env::temp_dir().join(format!("helix_corpus_views_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("corpus/a")).unwrap();
+    std::fs::create_dir_all(dir.join("corpus/b")).unwrap();
+    let app = dir.join("app.helix");
+    let source = |label: &str| {
+        format!(
+            "import std.ui\n\
+             fn update(m, e) = match e.msg {{ \"inc\" => {{...m, n: m.n + 1}}, _ => m }}\n\
+             fn view(m) = <p>{label} {{m.n}}</p>\n\
+             ui.app({{title: \"Views\", init: {{n: 0}}, update: update, view: view, port: {PORT}}})\n"
+        )
+    };
+    std::fs::write(&app, source("Count")).unwrap();
+    record_app_session(&app, PORT, &["inc"], &dir.join("corpus/a/s.jsonl"));
+    record_app_session(&app, PORT, &["inc", "inc"], &dir.join("corpus/b/s.jsonl"));
+    // A change on purpose: both sessions now fail, and each keeps its viewer.
+    std::fs::write(&app, source("Total")).unwrap();
+    let views = dir.join("views");
+    let (out, err, code) = run_cmd(&["replay", app.to_str().unwrap(), dir.join("corpus").to_str().unwrap(), "--view", views.to_str().unwrap()]);
+    assert_eq!(code, Some(1), "out:\n{out}\nerr:\n{err}");
+    assert!(out.contains("2 of 2 sessions differ"), "out:\n{out}");
+    let (a, b) = (views.join("a/s.html"), views.join("b/s.html"));
+    assert!(a.is_file() && b.is_file(), "viewers: {:?}\nout:\n{out}", std::fs::read_dir(&views).map(|d| d.flatten().map(|e| e.path()).collect::<Vec<_>>()));
+    assert_ne!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap(), "each viewer shows its own session");
+    assert!(out.contains(&a.display().to_string()) && out.contains(&b.display().to_string()), "out:\n{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `helix <args>` with no stdin and no extra environment.
 fn run_cmd(args: &[&str]) -> (String, String, Option<i32>) {
     run(args, &[], "")
