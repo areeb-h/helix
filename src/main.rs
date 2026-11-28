@@ -4453,7 +4453,9 @@ fn eval_repl_line(interp: &mut Interp, checker: &mut types::Checker, src: &str) 
             return;
         }
     };
-    let program = match parser::parse(tokens) {
+    // Parsed AFTER the session so far: a `for` loop and `n += 1` ask which names are bound
+    // (ADR 0066), and here the earlier lines bound them.
+    let program = match parser::parse_after(tokens, &checker.bound_names()) {
         Ok(p) => p,
         Err(e) => {
             eprint!("{}", e.render(src, "<repl>"));
@@ -4481,4 +4483,6 @@ fn eval_repl_line(interp: &mut Interp, checker: &mut types::Checker, src: &str) 
             }
         }
     }
+    // What the parser noted for this line's errors is this line's (ADR 0066).
+    parser::forget_loop_locals();
 }
