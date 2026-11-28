@@ -4,6 +4,12 @@
 
 ### Added
 
+- **The mobile shell's replay corpus is tested here** (ADR 0069 D6). Sessions recorded on
+  Android by areeb-h/rust-mobile, with the apps they came from, are in `tests/ui/rust-mobile/`
+  and replay on all three engines in `a_mobile_shells_replay_corpus_still_replays`. That
+  repository gates its changes on them, so a Helix change that would break them fails here
+  first. They also pin that sessions recorded by Helix b3f898d keep replaying: with that
+  compatibility path removed, the test fails at the first `file_exists` call.
 - **`for` loops, and `+=` (ADR 0066, phase 1).** `for x in xs { total += x }` now runs, and
   means what it looks like — without anything in the language becoming mutable. A loop is
   notation the parser turns into the `reduce` it stands for, so the checker, the three
