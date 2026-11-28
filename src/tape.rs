@@ -141,6 +141,27 @@ impl Call<'_> {
         h.finalize()[..16].iter().map(|b| format!("{b:02x}")).collect()
     }
 
+    /// The fingerprint Helix b3f898d wrote under `args`: SHA-256 (128 bits, hex) of the
+    /// arguments written out as the tape's JSON. Kept to check the sessions recorded then —
+    /// the replay corpora of apps already in use — and only for arguments that can be written
+    /// out within the tape's own bounds: one that cannot was the recording's crash, and is
+    /// refused here with what to do.
+    fn text_fingerprint(&self) -> Result<String, String> {
+        use sha2::{Digest, Sha256};
+        let mut memo = rustc_hash::FxHashMap::default();
+        for v in self.recv.into_iter().chain(self.args.iter()) {
+            if written_size(v, 0, &mut memo).is_err() {
+                return Err(format!(
+                    "`{}` was recorded by an earlier Helix, which fingerprinted arguments by their text, and these arguments are too large to check that way: record the session again",
+                    self.label
+                ));
+            }
+        }
+        let all = json!([self.recv.map(encode_unchecked), self.args.iter().map(encode_unchecked).collect::<Vec<_>>()]);
+        let digest = Sha256::digest(all.to_string().as_bytes());
+        Ok(digest[..16].iter().map(|b| format!("{b:02x}")).collect())
+    }
+
     /// How the call reads in a message: `name(arg, …)`, each argument shortened at its middle
     /// (a path differs in its last part, a URL in its tail).
     fn shown(&self) -> String {
@@ -259,9 +280,9 @@ pub fn through(c: Call<'_>, line: usize, col: usize, call: impl FnOnce() -> Resu
         let (entry, size) = match &out {
             Ok(v) => {
                 let (j, size) = encode_sized(v);
-                (json!({"fn": c.label, "args": fp, "value": j}), size)
+                (json!({"fn": c.label, "argsum": fp, "value": j}), size)
             }
-            Err(e) => (json!({"fn": c.label, "args": fp, "error": e.message, "hint": e.hint}), (e.message.len() + 256) as u64),
+            Err(e) => (json!({"fn": c.label, "argsum": fp, "error": e.message, "hint": e.hint}), (e.message.len() + 256) as u64),
         };
         let used = SEGMENT_BYTES.get().saturating_add(size);
         MODE.with(|m| {
@@ -270,7 +291,7 @@ pub fn through(c: Call<'_>, line: usize, col: usize, call: impl FnOnce() -> Resu
                     // Noted once, at the call that passed the bound; a replay stops there.
                     SEGMENT_FULL.set(true);
                     let why = format!("the recording stopped taping at `{}`: what this part of the run read passed {} MiB, more than a session holds", c.label, TAPE_BYTES >> 20);
-                    t.push(json!({"fn": c.label, "args": fp, "overflow": why}));
+                    t.push(json!({"fn": c.label, "argsum": fp, "overflow": why}));
                 } else {
                     SEGMENT_BYTES.set(used);
                     t.push(entry);
@@ -304,11 +325,21 @@ pub fn through(c: Call<'_>, line: usize, col: usize, call: impl FnOnce() -> Resu
     if recorded != c.label {
         return Err(went_another_way(format!("the app called `{}` where the recording called `{recorded}`", c.shown())));
     }
-    // Recordings made before calls were fingerprinted have no `args`; their names still match.
-    if let Some(fp) = entry.get("args").and_then(J::as_str)
-        && fp != c.fingerprint()
-    {
-        return Err(went_another_way(format!("the app called `{}`, but when recorded `{}` was called with other arguments", c.shown(), c.label)));
+    // The arguments, as the recording fingerprinted them: `argsum` by their structure (this
+    // Helix), `args` by their text (Helix b3f898d, whose sessions are kept and replayed as
+    // they are); a recording made before calls were fingerprinted has neither, and its names
+    // still match.
+    let other_arguments = || went_another_way(format!("the app called `{}`, but when recorded `{}` was called with other arguments", c.shown(), c.label));
+    if let Some(fp) = entry.get("argsum").and_then(J::as_str) {
+        if fp != c.fingerprint() {
+            return Err(other_arguments());
+        }
+    } else if let Some(fp) = entry.get("args").and_then(J::as_str) {
+        match c.text_fingerprint() {
+            Ok(now) if now == fp => {}
+            Ok(_) => return Err(other_arguments()),
+            Err(why) => return Err(went_another_way(why)),
+        }
     }
     if let Some(why) = entry.get("overflow").and_then(J::as_str) {
         // The recording held no more of this part of the run, so nothing after here can be
@@ -921,6 +952,42 @@ mod tests {
         // A value nested far past any stack is hashed too.
         let deep = (0..1_000_000).fold(Value::Int(1), |acc, _| Value::array(vec![acc]));
         assert_eq!(fp(&[deep]).len(), 32);
+    }
+
+    /// A session recorded by Helix b3f898d fingerprinted arguments by their text, under
+    /// `args`; rust-mobile's replay corpus holds such sessions. They still replay — matched
+    /// on the same arguments, stopped on other ones — and new recordings use `argsum`.
+    #[test]
+    fn sessions_recorded_with_text_fingerprints_still_replay() {
+        let path = [Value::Str(Rc::new("notes.txt".into()))];
+        let other = [Value::Str(Rc::new("other.txt".into()))];
+        // Exactly what b3f898d wrote for `read_text("notes.txt")`.
+        let old = {
+            use sha2::{Digest, Sha256};
+            let all = json!([J::Null, ["notes.txt"]]);
+            Sha256::digest(all.to_string().as_bytes())[..16].iter().map(|b| format!("{b:02x}")).collect::<String>()
+        };
+        let entry = json!({"fn": "read_text", "args": old, "value": "hello"});
+        let read = |args: &[Value]| {
+            let c = Call { label: "read_text", recv: None, args };
+            through(c, 1, 1, || Ok(Value::Missing))
+        };
+        set_mode(Mode::Replay(vec![entry.clone()].into()));
+        assert!(matches!(read(&path), Ok(Value::Str(s)) if s.as_str() == "hello"));
+        set_mode(Mode::Replay(vec![entry].into()));
+        DIVERGED.with(|d| *d.borrow_mut() = None);
+        let e = read(&other).unwrap_err();
+        assert!(e.message.contains("called with other arguments"), "{}", e.message);
+        DIVERGED.with(|d| *d.borrow_mut() = None);
+        // New recordings write the structural fingerprint under its own key.
+        set_mode(Mode::Record(Vec::new()));
+        let c = Call { label: "read_text", recv: None, args: &path };
+        let _ = through(c, 1, 1, || Ok(Value::Str(Rc::new("hello".into()))));
+        let taped = match MODE.with(|m| std::mem::replace(&mut *m.borrow_mut(), Mode::Off)) {
+            Mode::Record(t) => t,
+            _ => unreachable!(),
+        };
+        assert!(taped[0].get("argsum").is_some() && taped[0].get("args").is_none(), "{:?}", taped[0]);
     }
 
     /// A part of the run that reads more than a session holds is held only up to that bound:
