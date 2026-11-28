@@ -2624,7 +2624,9 @@ fn run_replay(args: &[String]) -> ExitCode {
         }
     }
     sessions.sort();
-    sessions.dedup();
+    // One session, once: by the file it is, not the path that named it.
+    let mut real = std::collections::HashSet::new();
+    sessions.retain(|p| real.insert(std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())));
     if sessions.is_empty() {
         eprintln!("error: no sessions (`*.jsonl`) in {}", sources.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
         return ExitCode::FAILURE;
@@ -2633,16 +2635,76 @@ fn run_replay(args: &[String]) -> ExitCode {
 }
 
 /// Every `*.jsonl` under `dir`, at any depth: a corpus can be organised in folders.
+///
+/// A link to a folder is not followed: one pointing back up the tree (`corpus/a/up -> ..`)
+/// made the walk find each session again at every level the kernel would resolve, and count it
+/// once per level. A link to a session file is a session. Each session is counted once, by the
+/// file it is, however many paths lead to it.
 fn sessions_under(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
-    for e in std::fs::read_dir(dir)? {
-        let p = e?.path();
-        if p.is_dir() {
-            sessions_under(&p, out)?;
-        } else if p.extension().is_some_and(|x| x == "jsonl") {
-            out.push(p);
+    let mut seen = std::collections::HashSet::new();
+    sessions_under_inner(dir, out, &mut seen)
+}
+
+fn sessions_under_inner(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>, seen: &mut std::collections::HashSet<std::path::PathBuf>) -> std::io::Result<()> {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)?.collect::<Result<_, _>>()?;
+    entries.sort_by_key(|e| e.path());
+    for e in entries {
+        let p = e.path();
+        // `DirEntry::file_type` does not follow a link, so a link to a folder is not a folder.
+        if e.file_type()?.is_dir() {
+            sessions_under_inner(&p, out, seen)?;
+        } else if p.extension().is_some_and(|x| x == "jsonl") && p.is_file() {
+            let real = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+            if seen.insert(real) {
+                out.push(p);
+            }
         }
     }
     Ok(())
+}
+
+/// Where each session's viewer goes under `dir`: `<name>.html`, as it always was — except where
+/// two sessions share a name (`corpus/a/s.jsonl`, `corpus/b/s.jsonl`), which wrote the same
+/// `s.html`, the second replacing the first. Those get their path below the folder all the
+/// sessions share: `a/s.html`, `b/s.html`. Only a path's plain names are used — never a root,
+/// `.` or `..` — so a viewer is always inside `dir`; two that would still meet get `-2`, `-3`.
+/// The folders are made here.
+fn viewer_paths(dir: &std::path::Path, sessions: &[std::path::PathBuf]) -> std::io::Result<Vec<std::path::PathBuf>> {
+    use std::path::{Component, PathBuf};
+    let mut shared: Option<PathBuf> = sessions.first().and_then(|s| s.parent()).map(PathBuf::from);
+    for s in sessions.iter().skip(1) {
+        while let Some(c) = shared.as_ref().filter(|c| !s.starts_with(c)) {
+            shared = c.parent().map(PathBuf::from);
+        }
+    }
+    let shared = shared.unwrap_or_default();
+    let mut names: std::collections::HashMap<std::ffi::OsString, usize> = std::collections::HashMap::new();
+    for s in sessions {
+        *names.entry(s.file_stem().unwrap_or_default().to_os_string()).or_default() += 1;
+    }
+    let mut taken = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for s in sessions {
+        let stem = s.file_stem().unwrap_or_default();
+        let below = if names.get(stem).copied().unwrap_or(0) > 1 { s.strip_prefix(&shared).unwrap_or(s) } else { std::path::Path::new(stem) };
+        let mut rel: PathBuf = below.components().filter_map(|c| if let Component::Normal(n) = c { Some(n) } else { None }).collect();
+        if rel.as_os_str().is_empty() {
+            rel = PathBuf::from("session");
+        }
+        rel.set_extension("html");
+        let mut path = dir.join(&rel);
+        let stem = rel.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+        let mut n = 1;
+        while !taken.insert(path.clone()) {
+            n += 1;
+            path = dir.join(rel.with_file_name(format!("{stem}-{n}.html")));
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        out.push(path);
+    }
+    Ok(out)
 }
 
 /// The command line a session was recorded with (`program.args` on its `start` entry). A
@@ -2716,14 +2778,24 @@ fn replay_corpus(exe: &std::path::Path, app: &str, sessions: &[std::path::PathBu
         eprintln!("error: cannot create the viewer folder `{d}`: {e}");
         return ExitCode::FAILURE;
     }
-    let viewer = |s: &std::path::Path| view_dir.map(|d| std::path::Path::new(d).join(s.file_stem().unwrap_or_default()).with_extension("html"));
-    let run = |s: &std::path::Path| -> (bool, String) {
+    let viewers: Vec<Option<std::path::PathBuf>> = match view_dir {
+        Some(d) => match viewer_paths(std::path::Path::new(d), sessions) {
+            Ok(v) => v.into_iter().map(Some).collect(),
+            Err(e) => {
+                eprintln!("error: cannot create the viewer folder `{d}`: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => vec![None; sessions.len()],
+    };
+    let viewer = |i: usize| viewers[i].as_deref();
+    let run = |i: usize, s: &std::path::Path| -> (bool, String) {
         let mut cmd = std::process::Command::new(exe);
         cmd.arg("replay").arg(app).arg(s);
         if engines {
             cmd.arg("--engines");
         }
-        if let Some(v) = viewer(s) {
+        if let Some(v) = viewer(i) {
             cmd.arg("--view").arg(v);
         }
         if accept {
@@ -2750,7 +2822,7 @@ fn replay_corpus(exe: &std::path::Path, app: &str, sessions: &[std::path::PathBu
                 loop {
                     let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let Some(s) = sessions.get(i) else { break };
-                    let r = run(s);
+                    let r = run(i, s);
                     if let Ok(mut all) = results.lock() {
                         all[i] = Some(r);
                     }
@@ -2766,14 +2838,14 @@ fn replay_corpus(exe: &std::path::Path, app: &str, sessions: &[std::path::PathBu
         let t = l.trim_start();
         t.starts_with("-->") || t.starts_with('|') || t.split_once('|').is_some_and(|(n, _)| !n.trim().is_empty() && n.trim().chars().all(|c| c.is_ascii_digit()))
     };
-    for (s, r) in sessions.iter().zip(results) {
+    for (i, (s, r)) in sessions.iter().zip(results).enumerate() {
         let (ok, text) = r.unwrap_or((false, "the replay did not run".to_string()));
         let name = s.display();
         if ok {
             // The line that says what happened: an accept's, else the replay's.
             let line = text.lines().find(|l| l.starts_with("accept")).or_else(|| text.lines().find(|l| l.starts_with("replayed "))).unwrap_or("ok");
             println!("ok    {name}  ({line})");
-            if let Some(v) = viewer(s) {
+            if let Some(v) = viewer(i) {
                 let _ = std::fs::remove_file(v);
             }
         } else {
@@ -2782,7 +2854,7 @@ fn replay_corpus(exe: &std::path::Path, app: &str, sessions: &[std::path::PathBu
             for l in text.lines().filter(|l| !l.trim().is_empty() && !l.starts_with("wrote the session viewer") && !pointer(l)).take(8) {
                 println!("      {l}");
             }
-            if let Some(v) = viewer(s).filter(|v| v.exists()) {
+            if let Some(v) = viewer(i).filter(|v| v.exists()) {
                 println!("      viewer: {}", v.display());
             }
         }
@@ -2956,7 +3028,15 @@ fn run_file_capture_args(
     tape::begin_program(&loaded.spans, argv);
     // Errors render against the spans the loader produced, so a cross-module error
     // points at the dependency's own source and line (not the entry file).
-    run_program(&mut stmts, &loaded.spans, loaded.multi_module).map_err(|e| match tape::divergence() {
+    let ran = run_program(&mut stmts, &loaded.spans, loaded.multi_module);
+    if ran.is_ok() && tape::replay_never_started() {
+        // Nothing was compared, so nothing may be reported as matching (a corpus would count
+        // the session as passing).
+        return Err("error: the session was not replayed: this program finished without starting an app (`ui.app`)\n\
+                    help: `helix replay` replays a session of an app; run the app's own file, the one that was recorded\n"
+            .to_string());
+    }
+    ran.map_err(|e| match tape::divergence() {
         // The replay left the recording before the app was running: the app's own error is a
         // consequence of reading something that was never read when it was recorded.
         Some(why) => format!(

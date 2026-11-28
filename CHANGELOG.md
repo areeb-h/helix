@@ -41,6 +41,35 @@
 
 ### Fixed
 
+- **Recording killed programs that ran cleanly without it.** With `HELIX_RECORD` set, every
+  taped call is fingerprinted by its arguments — a write method's receiver among them — and
+  the fingerprint was a hash of the arguments written out as JSON. A value that holds one part
+  many times was written out as the whole tree it stands for and aborted the process for lack
+  of memory; a value nested a million deep overflowed the stack. The fingerprint is now a hash
+  of the value's structure, each shared part hashed once and every level on its own stack
+  segment, and equal values match however they are shared. What the tape writes down is
+  measured first, the same way: a value too large (over 256 MiB) or too deep (over 100 JSON
+  levels, the depth at which a session line could no longer be read back, which made the
+  whole session unreadable) is noted as unrecorded, the live run is unaffected, and a replay
+  that needs it refuses at that step and says why.
+- **`helix replay` passed when it had compared nothing.** An empty session, a file that is not
+  a session, a session with no screen in it, and an app file that never starts an app
+  (`ui.app`) each reported success ("replayed 0 events: 0 of 0 screens identical"), so a
+  corpus gate counted them as passing. Each is now a failure that says why.
+- **A recorded program held everything it read.** The calls of a program's startup are kept
+  until `ui.app` writes the session's first line, and a step's until the step is written; a
+  program that never starts an app never wrote them, so with `HELIX_RECORD` set it held every
+  file and response it read, without limit. What one part of a run holds is now bounded
+  (256 MiB written down): the call that passes it is noted, nothing later is kept, and a replay
+  stops at the note and says why.
+- **Two failing sessions with the same name shared one viewer.** `helix replay … --view` on a
+  corpus named each viewer by the session's file name, so `a/s.jsonl` and `b/s.jsonl` both
+  wrote `s.html`. Names that collide now get their folder (`a/s.html`, `b/s.html`); every
+  viewer stays inside the `--view` folder.
+- **A corpus folder with a link back up the tree counted one session as 41.** The walk
+  followed links to folders as far as the kernel would resolve them. It no longer follows
+  them, and each session is counted once, by the file it is.
+
 - **A value that holds one part many times hung, or killed the process.** `[x, x]` wrapped
   sixty times is sixty-one arrays and 2^60 leaves — small in memory, astronomically large as
   a tree — and nearly every operation treated it as the tree. `==`, `!=`, `unique`,
