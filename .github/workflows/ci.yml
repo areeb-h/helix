@@ -10,7 +10,8 @@ name: ci
 # the two ever disagree, the local gate is the one people actually run, so this file
 # follows it.
 #
-# ALL EIGHT JOBS BLOCK (`ui` drives the app gallery in Chromium; `desktop`, a native window). Three
+# ALL NINE JOBS BLOCK (`ui` drives the app gallery in Chromium; `desktop`, a native window;
+# `mobile` holds the phone build to std.ui parity and an Android size budget). Three
 # shipped advisory — clippy on 9 warnings, MSRV unverified, `cargo audit` on 6 advisories
 # — each with a written condition for promotion, because asserting an unchecked claim as
 # a gate is how a badge starts lying. Those conditions have been met: the clippy warnings
@@ -321,6 +322,10 @@ jobs:
       # outside backend/polars.rs re-links 27 crates, and this cell is what notices.
       - name: appliance profile (clippy, deny warnings)
         run: cargo clippy --no-default-features --features appliance -- -D warnings
+      # The phone profile (Cargo.toml `mobile`) differs from the appliance by `regex`, and is
+      # shipped too, so it gets the same lint; the `mobile` job below builds and runs it.
+      - name: mobile profile (clippy, deny warnings)
+        run: cargo clippy --no-default-features --features mobile -- -D warnings
       # The dual-engine dev build (polars + native) is what the differential
       # campaign runs on — it must always compile, AND it must actually run.
       # `--all-targets` matters: without it the test targets are not compiled, which
@@ -348,6 +353,88 @@ jobs:
         run: |
           CARGO_TARGET_DIR=target/dual cargo build --profile gate --features dataframes
           BIN=./target/dual/gate/helix bash scripts/dfdiff.sh
+
+  # THE PHONE BUILD (`--features mobile`, Cargo.toml). rust-mobile ships Helix inside Android
+  # apps, and had to know that `appliance` alone cannot run a UI app (std.ui calls `re_match`)
+  # and build `appliance,regex` by hand. The profile now has a name, and this job is
+  # what keeps the name honest, in two halves:
+  #
+  # 1. ON THE HOST, it RUNS: each example app's scripted session (bar the file manager's)
+  #    replays on every engine of the phone build byte-identically to the default build,
+  #    stopwatch serves its page (the appliance exits before printing a link), and
+  #    HELIX_CAP=enforce refuses network and process authority in exactly the same words
+  #    (scripts/mobilediff.sh). The test suite cannot do this, because it only ever sees the
+  #    one feature set it was built with.
+  # 2. FOR ANDROID, it BUILDS: aarch64-linux-android at API 28 with the runner's NDK, at the
+  #    `release` profile rust-mobile ships, stripped, and FAILS over a size budget. A phone
+  #    build that quietly gains a dependency is how an APK doubles; the budget makes that a
+  #    reviewed decision. The number and how it was measured are in docs/binary-size.md.
+  #    Nothing runs it here (no emulator); rust-mobile runs its x86_64 twin on one.
+  mobile:
+    name: mobile profile (std.ui on host, aarch64-linux-android size budget)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      ANDROID_TARGET: aarch64-linux-android
+      ANDROID_API: 28
+      # Stripped bytes. Measured, with the margin, in docs/binary-size.md ("The phone build").
+      MOBILE_SIZE_BUDGET: 12700000
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust (the version in rust-toolchain.toml) and the Android target
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup target add "$ANDROID_TARGET"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: helix-mobile
+      # Two builds of one crate, so the phone build gets its own target dir: sharing one would
+      # make each evict the other's artifacts (and target/gate/helix would be whichever ran last).
+      - name: Build the default and the phone binaries (host)
+        run: |
+          cargo build --profile gate --bin helix
+          CARGO_TARGET_DIR=target/mobile cargo build --profile gate --no-default-features --features mobile --bin helix
+      - name: std.ui replays and the capability gate, phone build vs default
+        run: bash scripts/mobilediff.sh target/gate/helix target/mobile/gate/helix
+      # The same environment rust-mobile's spike/build-helix-android.sh sets: the NDK's clang for
+      # the C in the tree (mimalloc, zstd, ring), its llvm-ar, and clang as the linker.
+      - name: Build for Android (${{ env.ANDROID_TARGET }}, API ${{ env.ANDROID_API }}, release)
+        shell: bash
+        run: |
+          set -euo pipefail
+          NDK="${ANDROID_NDK_LATEST_HOME:?the runner image provides no ANDROID_NDK_LATEST_HOME}"
+          echo "NDK: $NDK"
+          grep '^Pkg.Revision' "$NDK/source.properties"
+          TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          T="${ANDROID_TARGET//-/_}"
+          U=$(echo "$ANDROID_TARGET" | tr 'a-z-' 'A-Z_')
+          export "CC_$T=$TC/${ANDROID_TARGET}${ANDROID_API}-clang"
+          export "CXX_$T=$TC/${ANDROID_TARGET}${ANDROID_API}-clang++"
+          export "AR_$T=$TC/llvm-ar"
+          export "CARGO_TARGET_${U}_LINKER=$TC/${ANDROID_TARGET}${ANDROID_API}-clang"
+          "$TC/${ANDROID_TARGET}${ANDROID_API}-clang" --version | sed -n 1p
+          CARGO_TARGET_DIR=target/mobile cargo build --release --target "$ANDROID_TARGET" \
+            --no-default-features --features mobile --bin helix
+          echo "TC=$TC" >> "$GITHUB_ENV"
+      - name: Strip, and hold the size budget
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="target/mobile/$ANDROID_TARGET/release/helix"
+          file "$BIN"
+          file "$BIN" | grep -q 'ARM aarch64' || { echo "FAIL: not an aarch64 binary"; exit 1; }
+          "$TC/llvm-strip" -o target/mobile/helix-android-stripped "$BIN"
+          built=$(stat -c %s "$BIN")
+          size=$(stat -c %s target/mobile/helix-android-stripped)
+          echo "as built (release has strip = true): $built bytes"
+          echo "stripped: $size bytes ($(( size / 1000 )) kB), budget $MOBILE_SIZE_BUDGET bytes"
+          echo "gzip -9 (about what an APK's deflate gives): $(gzip -9c target/mobile/helix-android-stripped | wc -c) bytes"
+          if [ "$size" -gt "$MOBILE_SIZE_BUDGET" ]; then
+            echo "FAIL: the phone build is over its size budget. If the growth is wanted, raise"
+            echo "MOBILE_SIZE_BUDGET here and record the new measurement in docs/binary-size.md."
+            exit 1
+          fi
 
   installer:
     name: install.sh logic

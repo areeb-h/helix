@@ -16,6 +16,45 @@
 > feature-by-feature, and of the reasoning that led to replacing it instead. It is worth
 > keeping for that, and it should not be read as a description of the current build.
 
+## The phone build
+
+`--no-default-features --features mobile` is `http + mimalloc + native-df + regex`: the
+appliance plus the `regex` that `std.ui` needs (the reasoning for each member, and for what is
+left out, is above the feature in `Cargo.toml`). It is what rust-mobile packages into Android
+apps, at the `release` profile (fat LTO, one codegen unit, `strip = true`).
+
+Measured 2026-11-28 on the host (x86_64-unknown-linux-gnu, Rust 1.100.0, the tree this
+profile landed in):
+
+| Build | Profile | Bytes | |
+|---|---|---|---|
+| `mobile`, x86_64 Linux | `release` (as built; `strip` again removes 8 bytes) | **16,086,224** (16.1 MB) | `gzip -9`: 6,210,768 |
+| `mobile`, x86_64 Linux | `gate`, then `strip` | 17,525,232 (17.5 MB) | |
+
+The gzip figure is about what the APK's deflate gives, and agrees with rust-mobile's own
+measurement of the same profile (`libhelix.so` 6.1 MB compressed in an x86_64 release APK,
+2026-11-27, spike/RESULTS.md).
+
+And the phone itself, measured by the `mobile` CI job's first run (2026-11-28, GitHub's
+ubuntu runner, NDK r30 `30.0.16248370`, API 28, Rust 1.100.0, `release`; run 46101494595):
+
+| Build | Bytes | |
+|---|---|---|
+| `mobile`, `aarch64-linux-android` (API 28), `release`, `llvm-strip` | **11,544,408** (11.5 MB) | `gzip -9`: 5,338,008 |
+
+The aarch64 build is about 28% smaller than the x86_64 one: denser code, not a missing piece
+(the same job replays std.ui's apps on the host build of the same profile). The x86_64 figure
+above stays the reference for what rust-mobile's emulator APKs carry.
+
+**The CI budget: 12,700,000 bytes stripped, for `aarch64-linux-android` at API 28** — the
+measured 11,544,408 plus 10%, rounded up. The `mobile` job in `.github/workflows/ci.yml`
+builds with `$ANDROID_NDK_LATEST_HOME` (the NDK the runner image provides; the job logs its
+`Pkg.Revision`), strips with the NDK's `llvm-strip`, prints the stripped and gzipped sizes, and
+fails over the budget. Raising it is allowed and is a reviewed change: record here what grew,
+by how much, and why it is worth it on a phone. (The first draft of this job carried an
+estimate, 19,000,000, set before any aarch64 build existed; it would not have caught a 60%
+increase, which is why it was replaced by the measurement before this landed.)
+
 ## Historical: the problem this document was written about
 
 The Helix binary is large (~65 MB release, default features) with ~1000 transitive
