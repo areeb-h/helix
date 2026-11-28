@@ -378,7 +378,7 @@ jobs:
       ANDROID_TARGET: aarch64-linux-android
       ANDROID_API: 28
       # Stripped bytes. Measured, with the margin, in docs/binary-size.md ("The phone build").
-      MOBILE_SIZE_BUDGET: 19000000
+      MOBILE_SIZE_BUDGET: 12700000
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust (the version in rust-toolchain.toml) and the Android target

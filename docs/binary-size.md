@@ -35,15 +35,25 @@ The gzip figure is about what the APK's deflate gives, and agrees with rust-mobi
 measurement of the same profile (`libhelix.so` 6.1 MB compressed in an x86_64 release APK,
 2026-11-27, spike/RESULTS.md).
 
-**The CI budget: 19,000,000 bytes stripped, for `aarch64-linux-android` at API 28.** It is the
-16.09 MB host measurement plus 18%: up to ~10% for aarch64's code density, which could NOT be
-measured here (the container has no NDK), and ~8% of headroom for growth. The `mobile` job in
-`.github/workflows/ci.yml` builds with `$ANDROID_NDK_LATEST_HOME` (the NDK the runner image
-provides; the job logs its `Pkg.Revision`), strips with the NDK's `llvm-strip`, prints the
-stripped and gzipped sizes, and fails over the budget. Once its first run has reported the
-real aarch64 number, the budget should be re-set to that number plus 10% and this paragraph
-updated with it. Raising it later is allowed and is a reviewed change: say here what grew and
-why.
+And the phone itself, measured by the `mobile` CI job's first run (2026-11-28, GitHub's
+ubuntu runner, NDK r30 `30.0.16248370`, API 28, Rust 1.100.0, `release`; run 46101494595):
+
+| Build | Bytes | |
+|---|---|---|
+| `mobile`, `aarch64-linux-android` (API 28), `release`, `llvm-strip` | **11,544,408** (11.5 MB) | `gzip -9`: 5,338,008 |
+
+The aarch64 build is about 28% smaller than the x86_64 one: denser code, not a missing piece
+(the same job replays std.ui's apps on the host build of the same profile). The x86_64 figure
+above stays the reference for what rust-mobile's emulator APKs carry.
+
+**The CI budget: 12,700,000 bytes stripped, for `aarch64-linux-android` at API 28** — the
+measured 11,544,408 plus 10%, rounded up. The `mobile` job in `.github/workflows/ci.yml`
+builds with `$ANDROID_NDK_LATEST_HOME` (the NDK the runner image provides; the job logs its
+`Pkg.Revision`), strips with the NDK's `llvm-strip`, prints the stripped and gzipped sizes, and
+fails over the budget. Raising it is allowed and is a reviewed change: record here what grew,
+by how much, and why it is worth it on a phone. (The first draft of this job carried an
+estimate, 19,000,000, set before any aarch64 build existed; it would not have caught a 60%
+increase, which is why it was replaced by the measurement before this landed.)
 
 ## Historical: the problem this document was written about
 
