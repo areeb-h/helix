@@ -19300,3 +19300,53 @@ fn common_guesses_get_a_help_naming_the_helix_spelling() {
     let (_, err, _) = run_source("s = \"a\"\nt = s.push(\"b\")\n", &[], "common_guesses_string_push");
     assert!(err.contains("a String has no method `push`") && !err.contains("concat"), "{err}");
 }
+
+/// `fn main(path, top = 10)`: the checker types `top` as Int from its default, and
+/// `main()` binds the Int 10 — but `--top 3` bound the String `"3"`, so `xs.take(top)`
+/// failed inside `main` with "expected an integer, found String", nowhere near the
+/// command line, and `--help` called the option a String. An unannotated parameter with
+/// a literal Int, Float or Bool default now binds as that type (ADR 0037, "As
+/// implemented"), with the annotated parameter's conversion and error.
+#[test]
+fn an_unannotated_main_parameter_binds_as_its_default_s_type() {
+    let dir = std::env::temp_dir().join("helix_it_main_default_type");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let tool = dir.join("top.helix");
+    std::fs::write(
+        &tool,
+        "## Top rows.\nfn main(path, top = 10, scale = 1.5, name = \"x\", low = -2, verbose = false) =\n    \
+         print(\"{[1, 2, 3, 4, 5].take(top)} {type_of(top)} {type_of(scale)} {type_of(name)} {name} {low} {verbose}\")\n",
+    )
+    .unwrap();
+    let t = tool.to_str().unwrap().to_string();
+    for (engine, env) in ENGINES {
+        let (out, err, code) =
+            run(&["run", &t, "in.csv", "--top", "3", "--scale", "2", "--name", "7", "--low", "-1", "--verbose"], env, "");
+        assert_eq!(code, Some(0), "{engine}: {err}");
+        assert_eq!(out.trim(), "[1, 2, 3] Int Float String 7 -1 true", "{engine}");
+        let (out, err, code) = run(&["run", &t, "in.csv"], env, "");
+        assert_eq!(code, Some(0), "{engine}: {err}");
+        assert_eq!(out.trim(), "[1, 2, 3, 4, 5] Int Float String x -2 false", "{engine}");
+        // A value that does not parse is refused at the boundary, naming the flag.
+        let (_, err, code) = run(&["run", &t, "in.csv", "--top", "x"], env, "");
+        assert_eq!(code, Some(1), "{engine}");
+        assert!(err.contains("`--top` expects an Int, but got `x`"), "{engine}: {err}");
+        assert!(!err.contains("found String"), "{engine}: {err}");
+    }
+    let (out, _, code) = run(&["run", &t, "--help"], &[], "");
+    assert_eq!(code, Some(0));
+    assert!(out.contains("Top rows."), "{out}");
+    assert!(out.contains("usage: top <path> [--top <top>] [--scale <scale>] [--name <name>] [--low <low>] [--verbose]"), "{out}");
+    for want in [
+        "--path           String  (required)",
+        "--top            Int  (default: 10)",
+        "--scale          Float  (default: 1.5)",
+        "--name           String  (default: \"x\")",
+        "--low            Int  (default: -2)",
+        "--verbose        Bool  (default: false)",
+    ] {
+        assert!(out.contains(want), "wanted {want:?} in: {out}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
