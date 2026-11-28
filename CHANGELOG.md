@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- **The agent benchmark** (ADR 0068 Part 0): `scripts/agentbench.py` and eight tasks in
+  `bench/agents/tasks/` — a CSV report, a command-line tool, JSON, a regression, two stateful
+  modules, a reported bug to fix, and tests that must catch broken implementations. An agent
+  gets only `helix` and `AGENTS.md`; a recording wrapper logs every call it makes, and a hidden
+  check runs its program on inputs it never saw, on all three engines. CI runs `--selftest`
+  (every check passes its reference solution and fails a broken one and the untouched files);
+  `.github/workflows/agentbench.yml` runs a real agent weekly when the repository has a key.
+  The agent's `helix` runs with the network and processes denied and none of its credentials.
+
 ### Fixed
 
 - **A value that holds one part many times hung, or killed the process.** `[x, x]` wrapped

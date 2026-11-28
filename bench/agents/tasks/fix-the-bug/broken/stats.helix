@@ -1,0 +1,20 @@
+## Small summary statistics over arrays of numbers.
+
+## The arithmetic mean; missing for an empty array.
+export fn mean(xs) = if xs.count() == 0 then missing else xs.sum() / xs.count()
+
+## The middle value once sorted; missing for an empty array.
+export fn median(xs) = do {
+  s = xs.sort()
+  n = s.count()
+  if n == 0 then missing else if n % 2 == 1 then s[n // 2] else (s[n // 2] + s[n // 2 + 1]) / 2
+}
+
+## The largest value minus the smallest; missing for an empty array.
+export fn spread(xs) = if xs.count() == 0 then missing else xs.max() - xs.min()
+
+## How many values are strictly above the mean.
+export fn above_mean(xs) = do {
+  m = mean(xs)
+  xs.filter((x) => x > m).count()
+}

@@ -1,0 +1,5 @@
+## A mutant: keeps capitals
+export fn slugify(title) = do {
+  s = title.re_replace("""[^A-Za-z0-9]+""", "-").re_replace("""^-+|-+$""", "")
+  s.take(40).re_replace("""-+$""", "")
+}

@@ -1,0 +1,2 @@
+The quick brown fox jumps over the lazy dog. The dog sleeps; the fox doesn't.
+Helix 0.14 counts words, and Helix counts them fast. Don't you think so?

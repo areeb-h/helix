@@ -1,0 +1,103 @@
+# The agent benchmark (ADR 0068 Part 0): how often an agent given only `helix` and AGENTS.md
+# solves each task in bench/agents/tasks, and how it gets there. Weekly and on demand, never on
+# a pull request: it needs an API key and costs money, and a workflow a fork's PR could trigger
+# must never see a secret.
+#
+# It needs the repository secret ANTHROPIC_API_KEY; without it the job says so and stops. The
+# results are uploaded as an artifact, not committed: a person reads them and records a run in
+# bench/agents/RESULTS.md (`agentbench.py --record`) by PR, so the trend in the repository is
+# one somebody looked at.
+# Actions are pinned to the commit of a release (Node 24 runtime), not a movable tag, so a
+# retagged or compromised release cannot change what runs here. The version is in the comment.
+
+name: agentbench
+
+on:
+  schedule:
+    - cron: "41 3 * * 3"   # Wednesdays, 03:41 UTC
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: "runs per task"
+        default: "3"
+      tasks:
+        description: "comma-separated task names (empty: all)"
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # The agent CLI is pinned like everything else: a new agent version is a new measurement,
+  # changed on purpose and noted in RESULTS.md.
+  CLAUDE_CODE_VERSION: "2.1.332"
+
+jobs:
+  bench:
+    name: agent benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: Is there a key?
+        id: key
+        env:
+          KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::notice::ANTHROPIC_API_KEY is not set; the agent benchmark did not run."
+            echo "have=no" >> "$GITHUB_OUTPUT"
+          else
+            echo "have=yes" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.key.outputs.have == 'yes'
+      - name: Install Rust (the version in rust-toolchain.toml)
+        if: steps.key.outputs.have == 'yes'
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: steps.key.outputs.have == 'yes'
+      - name: Build helix
+        if: steps.key.outputs.have == 'yes'
+        run: cargo build --profile gate --bin helix
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: steps.key.outputs.have == 'yes'
+        with:
+          node-version: 24
+      - name: Install the agent CLI
+        if: steps.key.outputs.have == 'yes'
+        run: npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" && claude --version
+      - name: The checks can say yes and no
+        if: steps.key.outputs.have == 'yes'
+        run: python3 scripts/agentbench.py --bin ./target/gate/helix --selftest
+      - name: Run the agent on every task
+        if: steps.key.outputs.have == 'yes'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          RUNS: ${{ inputs.runs || '3' }}
+          TASKS: ${{ inputs.tasks || '' }}
+        # Workspaces go outside the checkout, so the acceptance checks are not one `..` away.
+        run: |
+          mkdir -p "$RUNNER_TEMP/agentbench"
+          python3 scripts/agentbench.py --bin ./target/gate/helix --agent claude \
+            --runs "$RUNS" ${TASKS:+--tasks "$TASKS"} --base "$RUNNER_TEMP/agentbench" --keep \
+            | tee "$RUNNER_TEMP/agentbench/summary.md"
+      # Nothing leaves this job holding the key, whatever the agent did to put it there: the
+      # shim already keeps it from `helix`, and this scan is the second line.
+      - name: Refuse to upload anything that contains the key
+        if: always() && steps.key.outputs.have == 'yes'
+        env:
+          KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -d "$RUNNER_TEMP/agentbench" ] && grep -rlF -- "$KEY" "$RUNNER_TEMP/agentbench"; then
+            echo "::error::the results contain the API key; not uploading them"
+            rm -rf "$RUNNER_TEMP/agentbench"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always() && steps.key.outputs.have == 'yes'
+        with:
+          name: agentbench
+          path: ${{ runner.temp }}/agentbench
+          if-no-files-found: ignore
+          retention-days: 30

@@ -1,0 +1,5 @@
+## A mutant: cuts to 39
+export fn slugify(title) = do {
+  s = title.lower().re_replace("""[^a-z0-9]+""", "-").re_replace("""^-+|-+$""", "")
+  s.take(39).re_replace("""-+$""", "")
+}
