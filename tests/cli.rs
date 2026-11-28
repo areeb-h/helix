@@ -5661,6 +5661,29 @@ fn a_corpus_keeps_one_viewer_per_failing_session_even_when_their_names_match() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The replay corpus of the mobile shell (areeb-h/rust-mobile, ADR 0069 D6): real sessions
+/// recorded on Android, with the apps they came from, copied into `tests/ui/rust-mobile/`. That
+/// repository gates its own changes on replaying them; a Helix change that would fail them must
+/// fail here first. They were recorded by Helix b3f898d, whose calls carry text fingerprints
+/// (`args`), so they also pin that older sessions keep replaying after the fingerprint changed.
+#[test]
+fn a_mobile_shells_replay_corpus_still_replays() {
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/ui/rust-mobile");
+    let mut old_fingerprints = 0;
+    for (app, want) in [("stopwatch", "1 session replayed: every screen identical"), ("inputs", "2 sessions replayed: every screen identical")] {
+        let dir = format!("{root}/corpus/{app}");
+        for e in std::fs::read_dir(&dir).unwrap().flatten() {
+            old_fingerprints += std::fs::read_to_string(e.path()).unwrap().matches(r#""args":""#).count();
+        }
+        let (out, err, code) = run_cmd(&["replay", &format!("{root}/{app}.helix"), &dir, "--engines"]);
+        assert_eq!(code, Some(0), "{app}\nout:\n{out}\nerr:\n{err}");
+        assert!(out.contains(want), "{app}\nout:\n{out}");
+    }
+    // The compatibility path is exercised, not just present: these sessions hold b3f898d's
+    // fingerprints. If the corpus is ever re-recorded, keep a session that does.
+    assert!(old_fingerprints >= 30, "the corpus holds {old_fingerprints} text fingerprints");
+}
+
 /// `helix <args>` with no stdin and no extra environment.
 fn run_cmd(args: &[&str]) -> (String, String, Option<i32>) {
     run(args, &[], "")
@@ -17058,10 +17081,12 @@ fn has_feature_answers_for_the_build_it_is_in() {
         ("database", cfg!(feature = "db")),
         ("dataframes", cfg!(feature = "dataframes")),
         ("default", cfg!(feature = "default")),
+        ("desktop", cfg!(feature = "desktop")),
         ("http", cfg!(feature = "http")),
         ("jit", cfg!(feature = "jit")),
         ("managed", cfg!(feature = "managed")),
         ("mimalloc", cfg!(feature = "mimalloc")),
+        ("mobile", cfg!(feature = "mobile")),
         ("native-df", cfg!(feature = "native-df")),
         ("postgres", cfg!(feature = "postgres")),
         ("python", cfg!(feature = "python")),

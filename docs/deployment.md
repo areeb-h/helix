@@ -46,6 +46,27 @@ head/tail/slice, CSV and parquet in both directions); a verb needing an absent b
 says what to rebuild with instead of failing obscurely — and since 0.9.1 a program can ask
 FIRST, with `has_feature("regex")`, instead of provoking that error and catching it.
 
+## The phone build
+
+The appliance cannot run a UI app: `std.ui` calls `re_match`, and the appliance has no regex.
+The `mobile` profile is what a std.ui app needs on a phone, and nothing it does not:
+
+```sh
+cargo build --release --no-default-features --features mobile
+```
+
+It is the appliance plus `regex` (`http`, `mimalloc`, `native-df`, `regex`), each kept for a
+reason written above it in `Cargo.toml`. It leaves out the JIT (iOS forbids writable and
+executable memory, and Android's W^X policy is unverified; the VM gives the same output), polars,
+the genomics readers, SQLite, PostgreSQL, Python and the managed runtimes. Network access is
+compiled in and stays behind the capability gate (ADR 0021), as in every build: under
+`HELIX_CAP=enforce` an app gets the network only when its host grants `net`.
+
+CI's `mobile` job replays the example apps' scripted sessions on this build and on the default
+build and requires identical screens (`scripts/mobilediff.sh`), and cross-builds it for
+`aarch64-linux-android` (API 28) against a size budget; the numbers are in
+[binary-size.md](binary-size.md#the-phone-build). rust-mobile packages it into Android apps.
+
 ## Docker
 
 A multi-stage [`Dockerfile`](../Dockerfile) compiles the static musl binary and drops
