@@ -638,8 +638,18 @@ impl Interp {
                     // it could not evaluate, a parameter — abandons the fold (ADR 0050),
                     // remembering the name: a top-level binding the program made earlier
                     // is evaluated on demand and the fold retried.
+                    let err = HelixError::new(
+                        format!("`{}` is not defined", name),
+                        *line,
+                        *col,
+                    );
+                    // The refusal abandons the attempt, and an abandoned attempt's error is
+                    // discarded unseen (`Sandbox::guarded`), so it is not given the hint:
+                    // the did-you-mean search over every name in scope was the costliest
+                    // part of folding a program that imports `std.ui`.
                     if self.fold_mode {
                         crate::fold::refuse_name(name);
+                        return Err(err);
                     }
                     let names: Vec<&str> = self
                         .env
@@ -647,11 +657,6 @@ impl Interp {
                         .chain(self.globals.keys())
                         .map(|s| s.as_str())
                         .collect();
-                    let err = HelixError::new(
-                        format!("`{}` is not defined", name),
-                        *line,
-                        *col,
-                    );
                     // No fallback (see `types.rs`): `assign it first, e.g. `None = ...``
                     // is never good advice.
                     Err(match crate::suggest::hint(name, crate::suggest::Site::Value, &names) {
@@ -811,8 +816,12 @@ impl Interp {
                 // binding it could not evaluate, or one made earlier and not yet asked for,
                 // which is evaluated on demand and the fold retried — and the fold is
                 // abandoned, never reported.
+                let err =
+                    HelixError::new(format!("`{}` is not a known function", name), *line, *col);
+                // Abandoned, so unseen: no hint (see `Expr::Ident` above).
                 if self.fold_mode {
                     crate::fold::refuse_name(name);
+                    return Err(err);
                 }
                 // The builtins are always in the suggester's universe, so only the user's
                 // own functions need collecting here.
@@ -823,8 +832,6 @@ impl Interp {
                     .filter(|(_, b)| matches!(b.value, Value::Function(_)))
                     .map(|(k, _)| k.as_str())
                     .collect();
-                let err =
-                    HelixError::new(format!("`{}` is not a known function", name), *line, *col);
                 Err(match crate::suggest::hint(name, crate::suggest::Site::Function, &cands) {
                     Some(h) => err.hint(h),
                     None => err,

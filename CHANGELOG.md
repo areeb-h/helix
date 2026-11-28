@@ -92,11 +92,13 @@
 - **Apps start faster.** Most of what an app costs before its first screen is reading and
   preparing its program and `std.ui`, and much of that was waste. The parser copied its table
   of function signatures (some 300 with `std.ui`) for every string-interpolation hole; holes
-  now share it. Measured in instructions executed (callgrind): a program that only imports
-  `std.ui` and prints a line 334.5 → 246.0 million (−26.5%), `bench/general/app.helix` 549.9 →
-  460.9 million (−16.2%), the stopwatch replay 355.7 → 267.1 million (−24.9%), the gallery
-  replay 1,516.9 → 1,424.4 million (−6.1%). Output and errors are unchanged on all three
-  engines.
+  now share it. The constant folder, trying top-level calls before the program runs, built a
+  "did you mean" hint over every name in scope for each name it did not hold — errors it then
+  threw away unseen; it no longer does. Measured in instructions executed (callgrind): a
+  program that only imports `std.ui` and prints a line 334.5 → 199.6 million (−40.3%),
+  `bench/general/app.helix` 549.9 → 407.5 million (−25.9%), the stopwatch replay 355.7 →
+  211.3 million (−40.6%), the gallery replay 1,516.9 → 1,365.5 million (−10.0%). Output and
+  errors are unchanged on all three engines.
 - **Code the JIT does not compile runs about a quarter faster.** Records, strings, closures,
   `match`, dicts, method calls — everything that is not a numeric kernel — runs on the
   bytecode VM, and a third of what the VM executed was its own dispatch loop: each

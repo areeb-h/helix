@@ -1,0 +1,22 @@
+# The constant folder (ADR 0050) tries each top-level call in a sandbox and abandons the
+# ones that meet a name it does not hold: a mutable global read as a value (`count`), a
+# function held in one and called (`op`), a function value passed in and called (`f`), a
+# function defined further down. Each abandoned attempt is an error the sandbox makes and
+# throws away unseen — it is not given a did-you-mean hint, which no one would read — and
+# the call is left for the engines, whose answers these are.
+mut count = 2
+fn bump(n) = count + n
+total = bump(1)
+mut op = (x) => x + 1
+fn apply(x) = op(x)
+applied = apply(4)
+early = later_user(3)
+fn later_user(x) = helper(x) * 2
+fn helper(x) = x + 10
+fn twice(f, x) = f(f(x))
+tw = twice((v) => v * count, 1)
+label = "{bump(10)} {apply(1)}"
+print(total, applied, early, tw, label)
+raw = "[1, 2]"
+xs = raw.parse_json()
+print((try xs.lenght()).error)

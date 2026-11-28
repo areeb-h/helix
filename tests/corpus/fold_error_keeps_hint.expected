@@ -1,0 +1,10 @@
+exit: 1
+--- stdout ---
+
+--- stderr ---
+error: an Array has no method `lenght`
+  --> <src>:9:7
+  |
+9 | n = xs.lenght()
+  |       ^
+help: did you mean `length`?
