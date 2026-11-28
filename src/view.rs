@@ -66,6 +66,38 @@ fn get(v: &Value, name: &str) -> Option<Value> {
     found.filter(|v| !matches!(v, Value::Missing))
 }
 
+/// A node's props, read many times: `parse` asks for each of the forty props it knows.
+///
+/// [`get`] on a record asks the symbol table for every field's name on every call — a lock
+/// taken and released per field per prop, which was a tenth of a rendered app's whole run.
+/// This asks once per field and keeps the names, so each prop is a scan of a few string
+/// slices. Anything that is not a record is read through [`get`], exactly as before.
+enum Props<'a> {
+    Record(Vec<(&'static str, &'a Value)>),
+    Other(&'a Value),
+}
+
+impl<'a> Props<'a> {
+    fn of(v: &'a Value) -> Self {
+        match v {
+            Value::Record(r) => Props::Record(r.iter().map(|(k, v)| (k.as_str(), v)).collect()),
+            other => Props::Other(other),
+        }
+    }
+
+    /// What `get(props, name)` answers.
+    fn get(&self, name: &str) -> Option<Value> {
+        match self {
+            Props::Record(fields) => fields
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| (*v).clone())
+                .filter(|v| !matches!(v, Value::Missing)),
+            Props::Other(v) => get(v, name),
+        }
+    }
+}
+
 /// A value as text: a string as it is, anything else as interpolation writes it.
 fn text_of(v: &Value, line: usize, col: usize) -> Result<String, HelixError> {
     match v {
@@ -181,7 +213,8 @@ fn parse(v: &Value, line: usize, col: usize) -> Result<Node, HelixError> {
         return Ok(Node::Text(text));
     }
     let props = get(v, "props").unwrap_or(Value::Missing);
-    let key = get(&props, "key").map(|k| text_of(&k, line, col)).transpose()?;
+    let props = Props::of(&props);
+    let key = props.get("key").map(|k| text_of(&k, line, col)).transpose()?;
     let mut attrs: Vec<(String, String)> = Vec::new();
     // The props the runtime knows, in a fixed order so a tree renders to one string. The
     // event props (`click`, `input`, `change`, `submit`, `dismiss`, `scroll`) name the message
@@ -237,7 +270,7 @@ fn parse(v: &Value, line: usize, col: usize) -> Result<Node, HelixError> {
         ("reorder_group", "data-reorder-group"),
         ("drop", "data-drop"),
     ] {
-        if let Some(v) = get(&props, prop) {
+        if let Some(v) = props.get(prop) {
             let t = if prop == "class" { class_of(&v, line, col)? } else { text_of(&v, line, col)? };
             if prop == "class" && t.is_empty() {
                 continue;
@@ -257,7 +290,7 @@ fn parse(v: &Value, line: usize, col: usize) -> Result<Node, HelixError> {
     // `aria` is a record of ARIA states and properties: `{label: "Close", expanded: false}` is
     // `aria-label="Close" aria-expanded="false"` — `_` becomes `-`, and a Bool is written as
     // the words ARIA expects rather than dropped, since `aria-expanded="false"` means something.
-    if let Some(aria) = get(&props, "aria").as_ref().and_then(pairs) {
+    if let Some(aria) = props.get("aria").as_ref().and_then(pairs) {
         for (k, v) in aria {
             if !matches!(v, Value::Missing) {
                 attrs.push((format!("aria-{}", k.replace('_', "-")), text_of(&v, line, col)?));
@@ -266,7 +299,7 @@ fn parse(v: &Value, line: usize, col: usize) -> Result<Node, HelixError> {
     }
     // `style` is a record of CSS properties (`border_radius` is `border-radius`), and
     // `transition` is appended to it — the same text the Helix renderer built.
-    let style = get(&props, "style");
+    let style = props.get("style");
     let base = match style.as_ref().and_then(pairs) {
         Some(st) => st
             .iter()
@@ -279,7 +312,7 @@ fn parse(v: &Value, line: usize, col: usize) -> Result<Node, HelixError> {
             _ => String::new(),
         },
     };
-    let styled = match get(&props, "transition") {
+    let styled = match props.get("transition") {
         Some(t) => format!("{base}; transition: {}", text_of(&t, line, col)?),
         None => base,
     };
@@ -288,7 +321,7 @@ fn parse(v: &Value, line: usize, col: usize) -> Result<Node, HelixError> {
     }
     // Raw attributes. A Bool is an HTML boolean attribute: `disabled: true` is present (as
     // `disabled=""`), `disabled: false` is absent — `disabled="false"` would still disable.
-    if let Some(raw) = get(&props, "attrs").as_ref().and_then(pairs) {
+    if let Some(raw) = props.get("attrs").as_ref().and_then(pairs) {
         for (k, v) in raw {
             match v {
                 Value::Bool(false) | Value::Missing => {}
@@ -691,6 +724,43 @@ mod tests {
         let t = el("g", vec![("attrs", dict)], vec![]);
         let Value::Str(h) = view_html(&t, 0, 0).expect("render") else { panic!() };
         assert_eq!(h.as_str(), "<g clip-path=\"url(#p)\"></g>");
+    }
+
+    /// `Props` is a faster way to ask [`get`] the same question, so it must give the same
+    /// answer for whatever a node's `props` holds: a record (a `missing` field reads as
+    /// absent, and the first of a repeated name wins), a dict, or neither.
+    #[test]
+    fn props_read_through_the_cache_are_what_get_reads() {
+        let mut m = std::collections::BTreeMap::new();
+        m.insert(crate::value::DictKey::Str(Rc::new("class".to_string())), s("from-dict"));
+        m.insert(crate::value::DictKey::Str(Rc::new("id".to_string())), Value::Missing);
+        let twice = Value::record(vec![
+            (Symbol::intern("class"), s("first")),
+            (Symbol::intern("class"), s("second")),
+        ]);
+        let holders = [
+            rec(vec![("class", s("btn")), ("id", Value::Missing), ("value", Value::Int(7))]),
+            rec(vec![]),
+            twice,
+            Value::Dict(Rc::new(crate::value::Dict::from_map(m))),
+            Value::Missing,
+            s("not props"),
+        ];
+        for holder in &holders {
+            let props = Props::of(holder);
+            for name in ["class", "id", "value", "key", "never-interned-prop-name"] {
+                let (a, b) = (props.get(name), get(holder, name));
+                assert_eq!(a.map(|v| format!("{v}")), b.map(|v| format!("{v}")), "`{name}` of {holder}");
+            }
+        }
+        assert_eq!(Props::of(&holders[0]).get("class").map(|v| format!("{v}")), Some("btn".into()));
+        assert_eq!(Props::of(&holders[2]).get("class").map(|v| format!("{v}")), Some("first".into()));
+        assert!(Props::of(&holders[0]).get("id").is_none());
+        // The dict's own field reads through, and so does a whole node with dict props.
+        assert_eq!(Props::of(&holders[3]).get("class").map(|v| format!("{v}")), Some("from-dict".into()));
+        let node = rec(vec![("tag", s("p")), ("props", holders[3].clone()), ("children", Value::array(vec![]))]);
+        let Value::Str(h) = view_html(&node, 0, 0).expect("render") else { panic!() };
+        assert_eq!(h.as_str(), "<p class=\"from-dict\"></p>");
     }
 
     #[test]

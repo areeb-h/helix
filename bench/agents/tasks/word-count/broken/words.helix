@@ -1,0 +1,5 @@
+## Plausible wrong draft: splits on spaces only, so punctuation sticks to words.
+fn main(path: String, top: Int = 10) = do {
+  words = read_text(path).lower().split(" ").filter((w) => w != "")
+  words.frequencies().take(top).map((p) => print("{p[0]} {p[1]}"))
+}

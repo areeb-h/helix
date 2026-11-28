@@ -1,0 +1,14 @@
+# Method-call chains on arrays and strings: each call is a dispatch on the receiver's type
+# with a small argument list.
+N = 30000
+
+xs = range(0, N).map((i) => [i, i + 1, i + 2, (i * 7) % 5])
+print(xs.map((a) => a.reverse().take(2).sum() + a.count() + a.max()).sum())
+print(xs.map((a) => a.contains(3) or a.first() == a.last()).filter((b) => b).count())
+print(xs.map((a) => a[1:3].concat([0]).sort().join("-")).filter((s) => s.starts_with("0")).count())
+names = range(0, N).map((i) => " Item {i % 50} ")
+print(names.map((s) => s.trim().lower().replace(" ", "_").length()).sum())
+print(names.map((s) => s.trim().split(" ")[1].to_int()).sum())
+pairs = range(0, N).map((i) => (i % 9, "k{i % 4}"))
+print(pairs.map((p) => p[1].length() + p[0]).sum())
+print(xs.map((a) => a.is_missing()).filter((b) => not b).count())

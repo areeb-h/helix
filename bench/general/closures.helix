@@ -1,0 +1,21 @@
+# Closures and higher-order calls: lambdas that capture locals, function values passed to
+# and returned from functions, and user-written `map`/`fold` that call them.
+N = 60000
+
+fn adder(n) = (x) => x + n
+fn compose(f, g) = (x) => f(g(x))
+fn apply_n(f, x, n) = if n == 0 then x else apply_n(f, f(x), n - 1)
+fn scale_all(xs, k, off) = xs.map((x) => {v: x.v * k + off})
+fn keep(xs, pred) = xs.filter((x) => pred(x))
+fn fold_with(xs, init, f) = xs.reduce(init, (acc, x) => f(acc, x))
+
+items = range(0, N).map((i) => {v: i})
+inc3 = compose(adder(1), adder(2))
+scaled = scale_all(items, 3, 1)
+big = keep(scaled, (r) => r.v % 4 == 0)
+handlers = [adder(1), adder(10), compose(adder(5), adder(5)), inc3]
+
+print(fold_with(big, 0, (a, r) => a + r.v))
+print(items.map((r) => (handlers[r.v % 4])(r.v)).sum())
+print(apply_n(inc3, 0, 20000))
+print(range(0, N).map((i) => adder(i)).map((f) => f(1)).sum())

@@ -1,0 +1,4 @@
+## Total sales per region, largest first, ties by name.
+totals = read_csv("sales.csv").group(@region).sum(@amount).records()
+ranked = totals.sort_by((r) => r.region).sort_by((r) => -r.amount)
+for_each = ranked.map((r) => print("{r.region}: {r.amount:.2f}"))

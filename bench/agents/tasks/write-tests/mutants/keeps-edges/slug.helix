@@ -1,0 +1,5 @@
+## A mutant: keeps a dash at either end
+export fn slugify(title) = do {
+  s = title.lower().re_replace("""[^a-z0-9]+""", "-")
+  s.take(40).re_replace("""-+$""", "")
+}

@@ -1,0 +1,5 @@
+import stats.{mean, median, spread}
+
+fn test_odd_median() = assert_eq(median([3, 1, 2]), 2)
+fn test_spread() = assert_eq(spread([4, 9, 1]), 8)
+fn test_empty_is_missing() = assert(median([]).is_missing())

@@ -1,0 +1,9 @@
+date,region,product,amount
+2026-10-01,North,widget,120.00
+2026-10-01,South,gadget,75.50
+2026-10-02,North,gadget,30.25
+2026-10-03,West,widget,99.99
+2026-10-03,South,widget,-20.00
+2026-10-04,East,gizmo,45.00
+2026-10-05,West,gizmo,0.01
+2026-10-06,East,widget,10.00

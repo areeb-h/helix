@@ -1,0 +1,11 @@
+import slug.{slugify}
+
+fn test_lowercases() = assert_eq(slugify("Hello World"), "hello-world")
+fn test_collapses_runs() = assert_eq(slugify("a  --  b!!c"), "a-b-c")
+fn test_no_dash_at_the_start() = assert_eq(slugify("  ¡hola"), "hola")
+fn test_no_dash_at_the_end() = assert_eq(slugify("done!  "), "done")
+fn test_keeps_digits() = assert_eq(slugify("Top 10 of 2026"), "top-10-of-2026")
+fn test_exactly_forty_is_kept() = assert_eq(slugify("a".repeat(40)), "a".repeat(40))
+fn test_longer_is_cut_to_forty() = assert_eq(slugify("b".repeat(45)), "b".repeat(40))
+fn test_no_dash_left_after_cutting() = assert_eq(slugify("{"c".repeat(39)} dd"), "c".repeat(39))
+fn test_empty() = assert_eq(slugify("!!!"), "")

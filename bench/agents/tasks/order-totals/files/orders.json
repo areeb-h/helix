@@ -1,0 +1,6 @@
+[
+  {"id": 1, "customer": "ada", "status": "paid", "items": [{"sku": "A1", "qty": 2, "price": 9.99}]},
+  {"id": 2, "customer": "bob", "status": "cancelled", "items": [{"sku": "B2", "qty": 1, "price": 100.0}]},
+  {"id": 3, "customer": "ada", "status": "shipped", "items": [{"sku": "C3", "qty": 1, "price": 0.5}, {"sku": "A1", "qty": 3, "price": 9.99}]},
+  {"id": 4, "customer": "cy", "status": "paid", "items": []}
+]

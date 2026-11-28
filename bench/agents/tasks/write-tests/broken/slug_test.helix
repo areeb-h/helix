@@ -1,0 +1,5 @@
+import slug.{slugify}
+
+## Plausible weak draft: only the happy path, so most mutants survive.
+fn test_basic() = assert_eq(slugify("Hello World"), "hello-world")
+fn test_punctuation() = assert_eq(slugify("Hello, World!"), "hello-world")

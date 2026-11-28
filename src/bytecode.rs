@@ -1917,8 +1917,24 @@ impl Compiler {
                 }
             }
             Expr::Field { recv, name, line, col } => {
+                let before = b.code.len();
                 self.compile_expr(b, recv)?;
-                b.emit(Op::GetField(crate::symbol::Symbol::intern(name)), *line, *col);
+                let sym = crate::symbol::Symbol::intern(name);
+                // `p.f` with `p` a local: one instruction that reads the field in the slot.
+                // Decided on what was EMITTED, like the arithmetic superinstructions above:
+                // a bare identifier that resolved to a local is exactly one `LoadLocal`, so
+                // nothing can jump between the two halves, and an identifier that resolved
+                // to anything else (an upvalue, a global) keeps the two-instruction form.
+                if matches!(&**recv, Expr::Ident { .. })
+                    && b.code.len() == before + 1
+                    && let Some(Op::LoadLocal(slot)) = b.code.last().cloned()
+                {
+                    b.code.truncate(before);
+                    b.pos.truncate(before);
+                    b.emit(Op::LoadLocalField(slot, sym), *line, *col);
+                } else {
+                    b.emit(Op::GetField(sym), *line, *col);
+                }
             }
             Expr::FieldOrMissing { recv, name, line, col } => {
                 self.compile_expr(b, recv)?;

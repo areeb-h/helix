@@ -1,0 +1,7 @@
+## The URL slug for a title: lowercase; each run of characters other than a-z and 0-9
+## becomes one `-`; no `-` at either end; at most 40 characters, with no `-` left at the
+## end after cutting.
+export fn slugify(title) = do {
+  s = title.lower().re_replace("""[^a-z0-9]+""", "-").re_replace("""^-+|-+$""", "")
+  s.take(40).re_replace("""-+$""", "")
+}
