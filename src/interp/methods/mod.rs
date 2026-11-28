@@ -923,7 +923,7 @@ fn unknown_method(
         line,
         col,
     );
-    match crate::suggest::hint(name, crate::suggest::Site::Method, candidates) {
+    match crate::suggest::method_hint(type_name, name, candidates) {
         Some(h) => err.hint(h),
         // No near-miss: point at the doc command instead of dumping 79 names — a dump
         // is a haystack, `helix doc Array` is an answer. Byte-identical to the checker

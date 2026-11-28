@@ -940,13 +940,21 @@ fn mut_inside_a_body(line: usize, col: usize) -> HelixError {
 }
 
 pub fn parse(tokens: Vec<Token>) -> Result<Vec<Stmt>, HelixError> {
-    parse_after(tokens, &[])
+    parse_after(tokens, &[], &mut 0)
 }
 
-/// [`parse`] for a line of a session that already has bindings — the REPL — whose names are
-/// `bound`. A `for` loop and a compound assignment ask whether a name is bound where they
-/// stand (ADR 0066), and in a session the earlier lines are where.
-pub fn parse_after(tokens: Vec<Token>, bound: &[String]) -> Result<Vec<Stmt>, HelixError> {
+/// [`parse`] for one piece of a program that is fed in pieces — a REPL line — after the
+/// pieces before it.
+///
+/// - `bound` are the names the earlier pieces bound. A `for` loop and a compound assignment
+///   ask whether a name is bound where they stand (ADR 0066), and in a session the earlier
+///   lines are where.
+/// - `temps` is where the destructure temporaries (`$rec<N>`, `$arr<N>`) left off, and is
+///   advanced past the ones this piece used. Every line starting again from `$rec0` made a
+///   second `{a, b} = r` in one session rebind the first line's immutable temp, and the error
+///   named it: *"`$rec0` is immutable"*, a name the user never wrote. Continuing the count
+///   makes each line's temp its own, exactly as two lines of one script get.
+pub fn parse_after(tokens: Vec<Token>, bound: &[String], temps: &mut usize) -> Result<Vec<Stmt>, HelixError> {
     let rebound = rebound_names(&tokens);
     let mut p = Parser {
         toks: tokens,
@@ -958,7 +966,7 @@ pub fn parse_after(tokens: Vec<Token>, bound: &[String]) -> Result<Vec<Stmt>, He
         selected_imports: std::collections::HashSet::new(),
         glob_import: false,
         pending: Vec::new(),
-        temps: 0,
+        temps: *temps,
         pinned_keys_at: None,
         markup: false,
         scopes: vec![Scope { names: bound.iter().cloned().collect(), gone: HashMap::new() }],
@@ -971,6 +979,7 @@ pub fn parse_after(tokens: Vec<Token>, bound: &[String]) -> Result<Vec<Stmt>, He
     // its definition, and its defaults and parameter names must be known there too.
     p.prescan_signatures();
     let mut program = p.program()?;
+    *temps = p.temps;
     // A column expression outside a frame verb's argument is a value — the record that
     // describes it (ADR 0052) — the last pass over the finished tree.
     crate::predicate::desugar_program(&mut program)?;

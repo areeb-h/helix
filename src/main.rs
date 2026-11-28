@@ -4420,6 +4420,9 @@ fn repl() -> ExitCode {
     // A persistent checker keeps the type env in lock-step with the value env
     // across REPL lines (so `pi`, prior `x = …`, and `fn` defs stay typed).
     let mut checker = types::Checker::new();
+    // The session's destructure-temp count (`parser::parse_after`): each line's
+    // `{a, b} = r` binds a temp no earlier line used.
+    let mut temps = 0usize;
     let stdin = io::stdin();
     let mut line = String::new();
     loop {
@@ -4441,11 +4444,11 @@ fn repl() -> ExitCode {
         if trimmed.is_empty() {
             continue;
         }
-        eval_repl_line(&mut interp, &mut checker, trimmed);
+        eval_repl_line(&mut interp, &mut checker, &mut temps, trimmed);
     }
 }
 
-fn eval_repl_line(interp: &mut Interp, checker: &mut types::Checker, src: &str) {
+fn eval_repl_line(interp: &mut Interp, checker: &mut types::Checker, temps: &mut usize, src: &str) {
     let tokens = match lexer::lex(src) {
         Ok(t) => t,
         Err(e) => {
@@ -4454,8 +4457,9 @@ fn eval_repl_line(interp: &mut Interp, checker: &mut types::Checker, src: &str) 
         }
     };
     // Parsed AFTER the session so far: a `for` loop and `n += 1` ask which names are bound
-    // (ADR 0066), and here the earlier lines bound them.
-    let program = match parser::parse_after(tokens, &checker.bound_names()) {
+    // (ADR 0066), and here the earlier lines bound them; the destructure temporaries carry on
+    // from where the earlier lines left them.
+    let program = match parser::parse_after(tokens, &checker.bound_names(), temps) {
         Ok(p) => p,
         Err(e) => {
             eprint!("{}", e.render(src, "<repl>"));
