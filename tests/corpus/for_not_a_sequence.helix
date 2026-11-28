@@ -1,0 +1,13 @@
+# ADR 0066: a loop over something that is not a sequence is refused as a loop — never
+# as the `reduce` it is written with — when only the run knows what it was given.
+fn count(v) = do {
+  n = 0
+  for x in v {
+    n += 1
+  }
+  n
+}
+mut things = [1, 2]
+print(count(things))
+things = {"a": 1}
+print(count(things))

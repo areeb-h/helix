@@ -4,6 +4,32 @@
 
 ### Added
 
+- **`for` loops, and `+=` (ADR 0066, phase 1).** `for x in xs { total += x }` now runs, and
+  means what it looks like — without anything in the language becoming mutable. A loop is
+  notation the parser turns into the `reduce` it stands for, so the checker, the three
+  engines and the JIT see a fold and agree about it as they already did.
+  - **What survives the loop.** A name the body assigns that was bound BEFORE the loop (an
+    earlier line of the `do` block, a parameter, a name an enclosing loop carries) is carried
+    from one iteration to the next and holds the last value afterwards. A name first bound
+    inside the body, and the loop's own variable, belong to one iteration; reading one after
+    the loop is the unknown-name error, with a hint that says why and what to do.
+  - **Forms.** `for x in xs`, `for (k, v) in d.items()`, `for [a, b, ...rest] in rows`, over
+    anything `reduce` takes: an array, `range(n)`, `0..n`. Loops nest. A loop is a statement —
+    a line of a `do` block or of another loop, or a top-level statement, where the names it
+    carries must be `mut` — and has no value.
+  - **`name += value`**, and `-=`, `*=`, `/=`, is `name = name + value` wherever a binding to
+    an existing name is allowed; on a name that is not bound it is refused.
+  - **What it does not do, each refused by name with the alternative:** `break` and `continue`
+    (cut the sequence first: `xs.take_while(p)`, `xs.filter(p)`), a loop used as a value
+    (`xs.map(…)`), an assignment inside `if` (`total = if c then total + x else total`). `while`
+    keeps its hint. A loop over something that is not a sequence says so as a loop — "`for`
+    needs something to iterate — an Array, a `range(…)`, `d.items()` — and this is an Int" —
+    from `helix check` and at run time alike, and `for x in xs:`, `for (i = 0; …)`,
+    `for (i in 1:3)` and `foreach` each get the loop's own spelling in their hint.
+  - **`for` is still a name** everywhere a loop cannot start (it is an HTML attribute in markup),
+    so no program that ran changes meaning. `helix fmt` lays a loop body out as a block's;
+    `helix describe for` and `helix search loop` answer; `helix emit rust` refuses a loop in a
+    rule by name. See `examples/language/loops.helix`.
 - **The agent benchmark** (ADR 0068 Part 0): `scripts/agentbench.py` and eight tasks in
   `bench/agents/tasks/` — a CSV report, a command-line tool, JSON, a regression, two stateful
   modules, a reported bug to fix, and tests that must catch broken implementations. An agent

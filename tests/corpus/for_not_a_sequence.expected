@@ -1,0 +1,10 @@
+exit: 1
+--- stdout ---
+2
+--- stderr ---
+error: `for` needs something to iterate — an Array, a `range(…)`, `d.items()` — and this is a Dict
+  --> <src>:5:12
+  |
+5 |   for x in v {
+  |            ^
+help: a loop walks a sequence. To count, write `for i in range(n) { … }`; a dict's or a record's entries are `for (k, v) in d.items() { … }`, and a string's characters `for ch in s.chars() { … }`.

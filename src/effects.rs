@@ -230,11 +230,23 @@ fn collect(body: &Expr, fns: &BTreeMap<&str, FnInfo>, params: &[&str]) -> Raw {
         }
         _ => {}
     });
+    // A `for` loop's fold refuses a sequence that is not one with a `raise` the parser
+    // wrote (ADR 0066). It is the loop's, not a call the function makes: a function is as
+    // reproducible with a loop in it as with the `reduce` the loop stands for.
+    let mut loops_own: HashSet<*const Expr> = HashSet::new();
+    crate::visit::walk_expr(body, &mut |x| {
+        if let Some(refusal) = crate::parser::loop_refusal(x) {
+            crate::visit::walk_expr(refusal, &mut |y| {
+                loops_own.insert(y as *const Expr);
+            });
+        }
+    });
     let mut sites: Vec<RawSite> = Vec::new();
     let mut lambdas: Vec<RawLambda> = Vec::new();
     crate::visit::walk_expr(body, &mut |x| {
         let ptr = x as *const Expr;
         match x {
+            _ if loops_own.contains(&ptr) => {}
             Expr::Call { name, args, .. } => sites.push(RawSite {
                 ptr,
                 kind: Kind::Free {
