@@ -89,6 +89,44 @@
 
 ### Changed
 
+- **Code the JIT does not compile runs about a quarter faster.** Records, strings, closures,
+  `match`, dicts, method calls — everything that is not a numeric kernel — runs on the
+  bytecode VM, and a third of what the VM executed was its own dispatch loop: each
+  instruction was run through a closure that the compiler was assumed to inline and did not,
+  so every instruction paid for a call that wrote eighteen references to the stack first. The
+  loop now runs inside that closure, entered once. Measured in instructions executed
+  (callgrind): the 56 runnable examples together 8.15 → 6.20 billion (−23.9%), the three rule
+  model tests −24% to −27%, record, closure, `match` and call-heavy programs −25% to −31%,
+  string and dict programs −18%. Output and errors are unchanged on all three engines. The
+  programs and the numbers are in `bench/general/`. With the four VM and two start-up
+  changes that follow, measured against `main`: the examples 8.23 → 5.69 billion (−30.8%),
+  record, closure, `match` and call-heavy programs −36% to −40%, the rule model tests −33%
+  to −37%, string and dict programs −21% to −23%, app replays −31% to −37%.
+- **The VM keeps the running function's position in registers.** Between a call and a return
+  the VM re-read the current frame for every instruction — which function, where in it, where
+  its locals start — and wrote the position back. Those are now locals of the loop, reloaded
+  only when a call, a return or a caught error changes the frame. A further −8.0% of
+  instructions across the 56 examples (5.69 billion, from 8.15 at the start of this work),
+  −7% to −11% on record, closure, `match` and rule code.
+- **Reading a field of a local record does not copy the record's handle.** `p.f` was two VM
+  instructions: push `p` (a reference-count increment), then find the field and drop `p`
+  again. It is now one that reads the field where the record sits. −5% to −7% of instructions
+  on record-heavy programs, −2.5% to −4.9% on the rule model tests; values and error
+  messages are the same.
+- **Building a record allocates once less.** `{a: x, b: y}` and `{...m, k: v}` copied their
+  values into a temporary list before moving them into the record. They now move straight
+  from the VM's stack: −4% to −6% of instructions on programs that build many records.
+- **An app starts sooner.** Before running anything, the JIT asks which functions can reach
+  themselves through calls, and it answered by checking every pair of functions — every body
+  walked once per function in the program, seven times over. A program that imports `std.ui`
+  has some 300 functions, and this was a fifth of an app's whole run. Each body is now walked
+  once. Instructions executed for a scripted session: `examples/apps/orbit.helix --replay`
+  −30%, `gallery.helix --replay` −16%, a 210-event todo app −24%. The JIT's decisions are the
+  same (`helix jit-explain` prints the same for every example).
+- **Rendering a view reads each node's props once.** Turning a view into HTML looked up every
+  prop the runtime knows on every node, and each lookup asked the symbol table for the name
+  of every field. The names are now fetched once per node: a 210-event todo app −6.7% of
+  instructions, `gallery.helix --replay` −5.5%. The HTML is byte-identical.
 - **One renderer for a value's text.** `print`, interpolation, `Display` and every table or
   CSV cell now go through the same writer (`write_text` in `src/value.rs`), so they cannot
   disagree about how a value is written; the printed form of every value is unchanged.

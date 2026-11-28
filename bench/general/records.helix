@@ -1,0 +1,20 @@
+# Records: build one per element, read its fields, and thread one through a fold with
+# `{...m, k: v}` — the shape of every `update(m, e)`.
+N = 60000
+
+fn make(i) = {id: i, name: "n{i % 97}", score: i % 13, tags: [i % 3, i % 5], active: i % 2 == 0}
+fn bump(r) = {...r, score: r.score + 1}
+fn label(r) = if r.active then "{r.name}:{r.score}" else r.name
+
+rows = range(0, N).map((i) => make(i))
+total = rows.map((r) => r.id + r.score).sum()
+bumped = rows.map((r) => bump(r)).filter((r) => r.score > 6)
+labels = rows.map((r) => label(r))
+
+# A state record carried through a fold: three fields rewritten per step.
+final = range(0, N).reduce({count: 0, sum: 0, last: missing, log: "start"}, (m, i) => {...m, count: m.count + 1, sum: m.sum + i, last: i})
+
+print(total)
+print(bumped.count())
+print(labels[N - 1])
+print(final)

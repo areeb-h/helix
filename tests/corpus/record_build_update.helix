@@ -1,0 +1,46 @@
+# Building a record and `{...base, k: v}` take their values straight off the VM's stack,
+# with the base read where it sits. What comes out — field order, which part wins, the
+# base left as it was, and a refused spread caught by `try` with the stack back in order —
+# must be the tree-walker's.
+
+fn point(x, y) = {x: x, y: y, tag: "p{x}"}
+fn moved(p, dx) = {...p, x: p.x + dx}
+fn widened(p) = {...p, z: 0, w: [p.x, p.y]}
+fn both(p) = {...p, y: -1, extra: p.y, x: p.x * 2}
+fn respread(a, b) = {...a, ...b, last: 1}
+fn spread_of(v) = {...v, k: 1}
+
+p = point(1, 2)
+q = moved(p, 10)
+print((p, q))
+print(widened(p))
+print(both(p))
+print(respread({a: 1, b: 2}, {b: 3, c: 4}))
+print(respread(p, widened(p)))
+
+# The base is still the base after any number of updates of it.
+many = range(0, 5).map((i) => moved(p, i))
+print(many.map((m) => m.x))
+print(p)
+
+# A dict spreads its string keys; a field named again wins over it.
+print(spread_of([("a", 1), ("k", 0)].to_dict()))
+
+# Nested: the inner update's result is a value of the outer one.
+print({...p, inner: {...p, x: {...p, x: 0}}})
+
+# A refused spread, with values already evaluated above the base: caught, and the
+# expression around it carries on with its own operands intact.
+r = try spread_of(5)
+print((r.ok, r.error))
+print([1, (try spread_of("s")).ok, 3, moved(p, 1).x])
+print(range(0, 3).map((i) => (try spread_of(if i == 1 then 7 else {i: i})).ok))
+
+# Uncaught: the sentence, the hint and the position. The value comes from a function that
+# prints, so nothing can work the error out beforehand.
+fn loud(n) = do {
+  print("loud")
+  if n > 0 then 3 else {a: 1}
+}
+print({...loud(0), k: point(1, 1)})
+print({...loud(1), k: point(1, 1)})

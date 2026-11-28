@@ -862,30 +862,56 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
     frames.push(Frame { func: 0, ip: 0, base: 0, memo_key: None, upvalues: no_upvalues.clone() });
 
     loop {
+        // Run ops inside a closure so an error can be CAUGHT (routed to the nearest `try`
+        // handler) instead of propagating straight out of `exec`: a `return Err(..)` or a
+        // `?` in any arm ends the closure with the error, and the handler code below it
+        // decides whether a `try` takes it.
+        //
+        // THE CLOSURE HOLDS THE DISPATCH LOOP, NOT ONE OP. It used to be entered once per
+        // instruction, on the assumption that LLVM inlines a closure with a single call
+        // site. It does not inline this one — the body is every opcode — so each
+        // instruction paid for a real call: the eighteen captured references written to the
+        // stack to build the closure's environment, then the callee's register saves and
+        // restores. Measured with callgrind on a record-building loop, that was 65 of the
+        // ~200 instructions an average op cost, a third of everything a general program
+        // executed (`bench/general/RESULTS.md`). Entering once and looping inside costs that
+        // once per program — or once more per caught error, since a `try` re-enters here
+        // after its unwind. An arm that is done with its op says `continue 'ops`; the end
+        // of the program is the closure's `Ok`.
+        let step: Result<(), HelixError> = (|| {
+        // THE RUNNING FRAME'S STATE LIVES IN LOCALS, reloaded only when the frame changes.
+        // `ip`, the code and position tables and the locals base used to be read back out
+        // of `frames` for every instruction — index the frame, bounds-check the function,
+        // bounds-check the instruction pointer twice, store the advanced pointer — when
+        // between a call and a return none of them but `ip` changes, and `ip` changes by
+        // one. So: `'frame` loads them, `'ops` runs instructions against them, and an arm
+        // that pushes, pops or re-points a frame says `continue 'frame`. The one duty that
+        // comes with it: `frames[fi].ip` is stale while `'ops` runs, so an arm that PUSHES a
+        // frame writes `ip` back first — that is the address its `Return` resumes at. (A
+        // caught error needs no write-back: the handler sets the catching frame's `ip`
+        // itself and discards every frame above it.) The locals base is `frame_base`, a name
+        // no arm reuses: several arms have a `base` of their own (a stack depth), and an
+        // arm that wants the frame's binds `base` from it where it always did.
+        'frame: loop {
         let fi = frames.len() - 1;
-        let func = frames[fi].func;
-        let chunk = &program.funcs[func];
-        let ip = frames[fi].ip;
-        if ip >= chunk.code.len() {
-            // Only `main` runs off the end (functions terminate with `Return`).
-            break;
-        }
+        let chunk = &program.funcs[frames[fi].func];
+        let code: &[Op] = &chunk.code;
+        let frame_base = frames[fi].base;
+        let mut ip = frames[fi].ip;
+        'ops: loop {
         // Borrow the instruction rather than cloning it — this loop runs once
         // per executed op (tens of millions of times in a hot recursion), so a
         // per-dispatch clone is pure waste.
-        let op = &chunk.code[ip];
+        let Some(op) = code.get(ip) else {
+            // Only `main` runs off the end (functions terminate with `Return`).
+            return Ok(());
+        };
         let (line, col) = {
             let (l, c) = chunk.pos[ip];
             (l as usize, c as usize)
         };
-        frames[fi].ip = ip + 1; // default advance; control-flow ops overwrite it
+        ip += 1; // default advance; control-flow ops overwrite it
 
-        // Run the op inside a closure so an error can be CAUGHT (routed to the
-        // nearest `try` handler) instead of propagating straight out of `exec`. An
-        // in-arm `continue` becomes `return Ok(())` (nothing runs after the match, so
-        // they're equivalent); a `return Err(..)` becomes the closure's error. LLVM
-        // inlines this single-call closure, so the dispatch loop stays zero-overhead.
-        let step: Result<(), HelixError> = (|| {
         // ONE ENTRY FOR A CALL TO A DECLARED FUNCTION, shared by `Op::CallFn` and the
         // receiver-decided UFCS route in `Op::Method`. A macro rather than a function
         // because the entry IS the loop's state — stack, locals, frames, memo, the JIT
@@ -897,8 +923,8 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
         //
         // `$name` is what an arity error calls the function: its declared name for a
         // direct call, the SOURCE spelling for a method-position call (`where`, never
-        // `m0$where`). Branches that finish the call `return Ok(())`; the plain frame push
-        // falls through, exactly as the arm this body came from did.
+        // `m0$where`). Every branch ends the op: the ones that finish the call `continue 'ops`,
+        // the ones that push a frame `continue 'frame`.
         macro_rules! enter_call {
             ($idx:expr, $nargs:expr, $name:expr) => {{
                 let idx: usize = $idx;
@@ -926,7 +952,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         let cached = cached.clone();
                         stack.truncate(start);
                         stack.push(cached);
-                        return Ok(());
+                        continue 'ops;
                     }
                     let callee = &program.funcs[idx];
                     if frames.len() > VM_MAX_DEPTH {
@@ -935,6 +961,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     let base = locals.len();
                     locals.extend(stack.drain(start..));
                     locals.resize(base + callee.n_locals as usize, Value::Unit);
+                    frames[fi].ip = ip;
                     frames.push(Frame {
                         func: idx,
                         ip: 0,
@@ -942,7 +969,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         memo_key: Some(Box::new(key)),
                         upvalues: no_upvalues.clone(),
                     });
-                    return Ok(());
+                    continue 'frame;
                 }
 
                 // Native fast path: dispatch to the specialization matching the
@@ -976,7 +1003,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         // `nargs == nf.arity` values, checked above.
                         let r = unsafe { crate::jit::call_i64(ptr, &iargs) };
                         stack.push(Value::Int(r));
-                        return Ok(());
+                        continue 'ops;
                     }
                     if all_float && let Some(ptr) = nf.f64_ptr {
                         let fargs: Vec<f64> = tail.iter().map(|v| v.as_f64().unwrap()).collect();
@@ -985,7 +1012,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         // specialization, and `fargs` holds exactly `nargs == nf.arity` values.
                         let r = unsafe { crate::jit::call_f64(ptr, &fargs) };
                         stack.push(Value::Float(r));
-                        return Ok(());
+                        continue 'ops;
                     }
                     // MIXED per-parameter specialization (annotation-typed tail-loop
                     // fns): taken only when every argument's RUNTIME type matches the
@@ -1030,7 +1057,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             } else {
                                 Value::Int(r)
                             });
-                            return Ok(());
+                            continue 'ops;
                         }
                     }
                 }
@@ -1070,7 +1097,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             // global set `all_int_caps` false and skipped the call).
                             let r = unsafe { crate::jit::call_i64(*ptr, &iargs) };
                             stack.push(Value::Int(r));
-                            return Ok(());
+                            continue 'ops;
                         }
                     }
                 }
@@ -1083,13 +1110,15 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 // no intermediate allocation (vs `split_off`'s fresh `Vec`).
                 locals.extend(stack.drain(start..));
                 locals.resize(base + callee.n_locals as usize, Value::Unit);
+                frames[fi].ip = ip;
                 frames.push(Frame { func: idx, ip: 0, base, memo_key: None, upvalues: no_upvalues.clone() });
+                continue 'frame;
             }};
         }
         match op {
             Op::Const(k) => stack.push(chunk.consts[*k as usize].clone()),
             Op::LoadLocal(slot) => {
-                let base = frames[fi].base;
+                let base = frame_base;
                 stack.push(locals[base + *slot as usize].clone());
             }
             Op::ConcatIntoLocal(slot) => {
@@ -1098,7 +1127,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 // the stack for it — the same compiler-maintained stack-shape invariant every
                 // other op in this loop relies on for its own `pop`.
                 let arg = stack.pop().unwrap();
-                let base = frames[fi].base;
+                let base = frame_base;
                 let at = base + *slot as usize;
                 // VALIDATE BEFORE TAKING. Both error paths must read the accumulator while
                 // it is still in its slot, so a failing `concat` leaves the frame exactly as
@@ -1140,7 +1169,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 // by the compiler, exactly as in `ConcatIntoLocal`.
                 let v = stack.pop().unwrap();
                 let kv = stack.pop().unwrap();
-                let base = frames[fi].base;
+                let base = frame_base;
                 let at = base + *slot as usize;
                 // Validated before the take, so a bad key or a non-Dict accumulator leaves
                 // the slot untouched and reports what the ordinary lowering reports.
@@ -1193,7 +1222,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         }
                     }
                 }
-                let at = frames[fi].base + *slot as usize;
+                let at = frame_base + *slot as usize;
                 if let Value::Str(peek) = &locals[at] {
                     // 2. The cap, BEFORE the take — `push_str` only grows, so checking
                     //    the crossing once is monotone-equivalent to `Op::Interp`'s
@@ -1254,7 +1283,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
             Op::CheckLocalField(slot, field) => {
                 // `GetField`'s error, nothing pushed — the dropped clone is a refcount bump
                 // and back, so a uniquely held record is still unique for the take after it.
-                let at = frames[fi].base + *slot as usize;
+                let at = frame_base + *slot as usize;
                 drop(crate::interp::eval_field(&locals[at], *field, line, col)?);
             }
             Op::AppendStrFromLocalField(d) => {
@@ -1265,7 +1294,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     .filter(|p| matches!(p, crate::ast::InterpPart::Expr(..)))
                     .count();
                 let base = stack.len() - holes;
-                let at = frames[fi].base + d.slot as usize;
+                let at = frame_base + d.slot as usize;
                 let (hl, hc) = match parts.first() {
                     Some(crate::ast::InterpPart::Expr(e, _)) => e.position(),
                     _ => (line, col),
@@ -1366,7 +1395,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 stack.push(Value::Str(std::rc::Rc::new(built)));
             }
             Op::StoreLocal(slot) => {
-                let base = frames[fi].base;
+                let base = frame_base;
                 locals[base + *slot as usize] = stack.pop().unwrap();
             }
             Op::LoadGlobal(i) => stack.push(globals[*i as usize].clone()),
@@ -1387,13 +1416,13 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 stack.push(binary(o, a, b, line, col)?);
             }
             Op::LoadLocalBinary(a, c, o) => {
-                let base = frames[fi].base;
+                let base = frame_base;
                 let av = locals[base + *a as usize].clone();
                 let cv = locals[base + *c as usize].clone();
                 stack.push(binary(o, av, cv, line, col)?);
             }
             Op::LoadLocalConstBinary(a, k, o) => {
-                let base = frames[fi].base;
+                let base = frame_base;
                 let av = locals[base + *a as usize].clone();
                 let cv = chunk.consts[*k as usize].clone();
                 stack.push(binary(o, av, cv, line, col)?);
@@ -1403,7 +1432,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let cv = chunk.consts[*k as usize].clone();
                 stack.push(binary(o, v, cv, line, col)?);
             }
-            Op::Jump(t) => frames[fi].ip = *t as usize,
+            Op::Jump(t) => ip = *t as usize,
             Op::MatchArm(pat) => {
                 // Reuse the tree-walker's matcher so the engines agree exactly. On a
                 // match, push the bound values then `true`; else push `false`.
@@ -1432,7 +1461,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     e.hint("an `if` condition must be a boolean, e.g. `if x > 0 then ... else ...`.")
                 })?;
                 if !taken {
-                    frames[fi].ip = *t as usize;
+                    ip = *t as usize;
                 }
             }
             // `JumpIfFalse` for a `match` guard: same control flow, but the
@@ -1440,7 +1469,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
             Op::GuardCheck(t) => {
                 let c = stack.pop().unwrap();
                 if !crate::interp::guard_bool(&c, line, col)? {
-                    frames[fi].ip = *t as usize;
+                    ip = *t as usize;
                 }
             }
             // Three-valued `and`: short-circuit on a determined `false`.
@@ -1450,7 +1479,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     // CANNOT PANIC: `stack.last().unwrap()` on the line above already
                     // succeeded, and `tri` does not pop.
                     *stack.last_mut().unwrap() = Value::Bool(false);
-                    frames[fi].ip = *end as usize;
+                    ip = *end as usize;
                 }
             }
             Op::AndCombine => {
@@ -1469,7 +1498,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let ta = tri(stack.last().unwrap(), line, col)?;
                 if ta == Some(true) {
                     *stack.last_mut().unwrap() = Value::Bool(true);
-                    frames[fi].ip = *end as usize;
+                    ip = *end as usize;
                 }
             }
             Op::OrCombine => {
@@ -1488,7 +1517,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 if matches!(stack.last().unwrap(), Value::Missing) {
                     stack.pop(); // drop the missing; fall through to `b`
                 } else {
-                    frames[fi].ip = *end as usize; // keep `a`, skip `b`
+                    ip = *end as usize; // keep `a`, skip `b`
                 }
             }
             Op::CallBuiltin { idx, nargs } => {
@@ -1584,7 +1613,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         let frame = frames.pop().unwrap();
                         locals.truncate(frame.base);
                         stack.push(ret);
-                        return Ok(());
+                        continue 'frame;
                     }
                 }
                 // Reuse the CURRENT frame (`fi`) rather than pushing a new one — the call is
@@ -1594,7 +1623,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 // recursion (an accept loop, a state machine) is constant-space and can't hit
                 // VM_MAX_DEPTH. `ip = 0` overrides the loop's default `ip + 1` advance.
                 let start = stack.len() - nargs;
-                let base = frames[fi].base;
+                let base = frame_base;
                 locals.truncate(base);
                 locals.extend(stack.drain(start..));
                 locals.resize(base + callee.n_locals as usize, Value::Unit);
@@ -1603,6 +1632,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 frame.ip = 0;
                 frame.memo_key = None;
                 frame.upvalues = no_upvalues.clone();
+                continue 'frame;
             }
             Op::MakeFunc { idx, arity } => {
                 stack.push(Value::VmFunc { idx: *idx, arity: *arity });
@@ -1666,7 +1696,9 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 locals.extend(stack.drain(start..)); // args → callee locals
                 stack.pop(); // discard the function value (now on top)
                 locals.resize(base + callee.n_locals as usize, Value::Unit);
+                frames[fi].ip = ip;
                 frames.push(Frame { func: idx, ip: 0, base, memo_key: None, upvalues: frame_upvalues });
+                continue 'frame;
             }
             Op::Return => {
                 let ret = stack.pop().unwrap();
@@ -1684,6 +1716,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     memo.insert(key, ret.clone());
                 }
                 stack.push(ret);
+                continue 'frame;
             }
             Op::MakeArray(n) => {
                 let start = stack.len() - *n as usize;
@@ -1764,25 +1797,29 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
             }
             Op::MakeRecord(names) => {
                 let start = stack.len() - names.len();
-                let vals: Vec<Value> = stack.split_off(start);
-                // `names.iter().copied()` copies the interned `Symbol`s (a `u32`
-                // each) — no per-record key allocation.
+                // The values move STRAIGHT from the stack into the record's fields.
+                // `split_off` first minted a `Vec<Value>` that lived only until the next
+                // line zipped it away — an allocation and a free per record built.
+                // `names.iter().copied()` copies the interned `Symbol`s (a `u32` each) — no
+                // per-record key allocation.
                 let fields: Vec<(crate::symbol::Symbol, Value)> =
-                    names.iter().copied().zip(vals).collect();
+                    names.iter().copied().zip(stack.drain(start..)).collect();
                 stack.push(Value::record(fields));
             }
             Op::UpdateRecord(names) => {
-                let start = stack.len() - names.len();
-                let vals: Vec<Value> = stack.split_off(start);
-                let base = stack.pop().unwrap();
+                // Stack: the base, then one value per name. The base is READ where it sits
+                // and the values are moved out from above it, so nothing is copied into a
+                // temporary first; a refused spread leaves them all on the stack, which the
+                // unwind truncates (the same argument as `Op::Interp`'s operands).
+                let base_at = stack.len() - names.len() - 1;
                 // The walker's own fold: the base's fields (a record's, or a dict's), then
                 // each named field set (override) or appended, in order.
                 let mut out: Vec<(crate::symbol::Symbol, Value)> = Vec::new();
-                crate::interp::spread_into(&mut out, &base, line, col)?;
-                for (name, val) in names.iter().copied().zip(vals) {
+                crate::interp::spread_into(&mut out, &stack[base_at], line, col)?;
+                for (name, val) in names.iter().copied().zip(stack.drain(base_at + 1..)) {
                     crate::interp::set_field(&mut out, name, val);
                 }
-                stack.push(Value::record(out));
+                stack[base_at] = Value::record(out);
             }
             Op::SpreadRecord => {
                 let (Some(extra), Some(acc)) = (stack.pop(), stack.pop()) else {
@@ -1796,6 +1833,10 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
             Op::GetField(name) => {
                 let recv = stack.pop().unwrap();
                 stack.push(crate::interp::eval_field(&recv, *name, line, col)?);
+            }
+            Op::LoadLocalField(slot, name) => {
+                let v = crate::interp::eval_field(&locals[frame_base + *slot as usize], *name, line, col)?;
+                stack.push(v);
             }
             Op::GetFieldOrMissing(name) => {
                 // Cannot panic: the compiler emits the receiver immediately before this
@@ -1841,7 +1882,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 // into the named param locals (same helper the tree-walker uses).
                 let v = stack.pop().unwrap();
                 let parts = crate::interp::pattern_parts(&v, slots.len(), line, col)?;
-                let base = frames[fi].base;
+                let base = frame_base;
                 for (slot, val) in slots.iter().zip(parts) {
                     locals[base + *slot as usize] = val;
                 }
@@ -1900,11 +1941,11 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         let base = locals.len();
                         locals.extend(args);
                         locals.resize(base + callee.n_locals as usize, Value::Unit);
+                        frames[fi].ip = ip;
                         frames.push(Frame { func: idx, ip: 0, base, memo_key: None, upvalues: ups });
-                        return Ok(());
+                        continue 'frame;
                     }
                     enter_call!(fidx as usize, *nargs as usize + 1, name);
-                    return Ok(());
                 }
                 let args: Vec<Value> = stack.split_off(split);
                 let recv = stack.pop().unwrap();
@@ -1966,6 +2007,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                     let base = locals.len();
                                     locals.extend(args);
                                     locals.resize(base + callee.n_locals as usize, Value::Unit);
+                                    frames[fi].ip = ip;
                                     frames.push(Frame {
                                         func: idx,
                                         ip: 0,
@@ -1975,7 +2017,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                     });
                                     // The callee's `Return` pushes where this method's
                                     // result would have gone.
-                                    return Ok(());
+                                    continue 'frame;
                                 }
                                 if *d
                                     .ufcs_name
@@ -2023,7 +2065,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         })
                     }
                 };
-                let base = frames[fi].base;
+                let base = frame_base;
                 let resolve = |nm: &str| -> Option<Value> {
                     for (lname, slot) in lbind.iter().rev() {
                         if lname == nm {
@@ -2066,7 +2108,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                 return Err(crate::interp::join_operand_err(other, line, col))
                             }
                         };
-                        let base = frames[fi].base;
+                        let base = frame_base;
                         let resolve = |nm: &str| -> Option<Value> {
                             for (lname, slot) in lbind.iter().rev() {
                                 if lname == nm {
@@ -2120,7 +2162,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         ))
                     }
                 };
-                let base = frames[fi].base;
+                let base = frame_base;
                 let resolve = |nm: &str| -> Option<Value> {
                     for (lname, slot) in lbind.iter().rev() {
                         if lname == nm {
@@ -2174,7 +2216,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         });
                     }
                     // `missing.map(...)` etc. propagate (ADR-0001).
-                    Value::Missing => frames[fi].ip = *missing_target as usize,
+                    Value::Missing => ip = *missing_target as usize,
                     // A FRAME OR A GROUP gets the tree-walker's own sentence. It
                     // dispatches on the value and reaches its DataFrame arm, which reports
                     // "a DataFrame has no method `map`"; this used to report "type
@@ -2209,7 +2251,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let n_caps = program.reduce_loops[*loop_idx as usize].captures.len();
                 let cap_vals =
                     if n_caps > 0 { stack.split_off(stack.len() - n_caps) } else { Vec::new() };
-                let base = frames[fi].base;
+                let base = frame_base;
                 let len = stack.len();
                 let slot = base + *acc_slot as usize;
                 let bounds = match (jit, &stack[len - 2], &stack[len - 1]) {
@@ -2507,7 +2549,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 if took_native {
                     stack.pop(); // end
                     stack.pop(); // start
-                    frames[fi].ip = *after as usize;
+                    ip = *after as usize;
                 }
                 // else: fall through (ip already advanced) to CompInitRange.
             }
@@ -2544,7 +2586,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 if let Some(v) = range_out {
                     stack.pop(); // the lazy range receiver
                     stack.push(v);
-                    frames[fi].ip = *after as usize;
+                    ip = *after as usize;
                 } else {
                     // A lazy `range` source has no buffer for the native map kernel; materialize it so
                     // the JIT engages (as before ranges were lazy). The receiver is now the stack top.
@@ -2748,7 +2790,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             };
                             stack.push(arr);
                             if ran {
-                                frames[fi].ip = *after as usize;
+                                ip = *after as usize;
                             }
                         }
                         Pick::F64(ptr, caps) => {
@@ -2779,7 +2821,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             };
                             stack.push(arr);
                             if ran {
-                                frames[fi].ip = *after as usize;
+                                ip = *after as usize;
                             }
                         }
                         Pick::Mixed(ptr, caps) => {
@@ -2804,7 +2846,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                     } {
                                         Some(out) => {
                                             stack.push(Value::float_array(out));
-                                            frames[fi].ip = *after as usize;
+                                            ip = *after as usize;
                                         }
                                         None => stack.push(arr),
                                     }
@@ -2814,7 +2856,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                     let out =
                                         unsafe { crate::jit::run_map_kernel_mixed(ptr, v, &caps) };
                                     stack.push(Value::float_array(out));
-                                    frames[fi].ip = *after as usize;
+                                    ip = *after as usize;
                                 }
                             } else {
                                 stack.push(arr);
@@ -2901,7 +2943,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             };
                             stack.push(arr);
                             if ran {
-                                frames[fi].ip = *after as usize;
+                                ip = *after as usize;
                             }
                         }
                         Pick::No => {} // fall through to the bytecode loop
@@ -2967,7 +3009,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 if let Some(Some(hit)) = found {
                     stack.pop(); // the receiver
                     stack.push(Value::Bool(if *want { hit } else { !hit }));
-                    frames[fi].ip = *after as usize;
+                    ip = *after as usize;
                 }
             }
             Op::TryJitFilter { kernel_idx, after } => {
@@ -3005,7 +3047,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         unsafe { crate::jit::run_filter_kernel_range(p, rs, rstep, rlen, c) };
                     stack.pop(); // the lazy range receiver
                     stack.push(Value::int_array(out));
-                    frames[fi].ip = *after as usize;
+                    ip = *after as usize;
                     true
                 } else {
                     false
@@ -3031,7 +3073,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             // the `&[]` default.
                             let out = unsafe { crate::jit::run_filter_kernel(ptr, v, c) };
                             stack.push(Value::int_array(out));
-                            frames[fi].ip = *after as usize;
+                            ip = *after as usize;
                         } else {
                             stack.push(arr);
                         }
@@ -3062,7 +3104,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             match unsafe { crate::jit::run_filter_kernel_f64(fptr, v, &fc) } {
                                 Some(out) => {
                                     stack.push(Value::float_array(out));
-                                    frames[fi].ip = *after as usize;
+                                    ip = *after as usize;
                                 }
                                 None => stack.push(arr),
                             }
@@ -3112,7 +3154,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 })();
                 if let Some(out) = native {
                     stack.push(Value::int_array(out));
-                    frames[fi].ip = *after as usize;
+                    ip = *after as usize;
                 }
             }
             Op::TryJitFused { kernel_idx, after } => {
@@ -3272,7 +3314,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 stack.truncate(len - n);
                 if let Some(v) = result {
                     stack.push(v);
-                    frames[fi].ip = *after as usize;
+                    ip = *after as usize;
                 }
             }
             Op::TryJitNestedReduce { inner_loop_idx, after } => {
@@ -3437,7 +3479,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 stack.truncate(len - 5 - n_arrays);
                 if let Some(v) = result {
                     stack.push(v);
-                    frames[fi].ip = *after as usize;
+                    ip = *after as usize;
                 }
             }
             Op::CompInitRange => {
@@ -3491,10 +3533,10 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         if *keep_cur {
                             iters[li].cur_val = el.clone();
                         }
-                        let base = frames[fi].base;
+                        let base = frame_base;
                         locals[base + *binder as usize] = el;
                     }
-                    None => frames[fi].ip = *end_target as usize,
+                    None => ip = *end_target as usize,
                 }
             }
             Op::CompMapPush => {
@@ -3566,7 +3608,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 // exactly one value on the stack. Identical to `CompBoolTest` below,
                 // which is emitted the same way for the same reason.
                 let v = stack.pop().unwrap();
-                let base = frames[fi].base;
+                let base = frame_base;
                 // The index BEFORE the bump is the one that matched.
                 let i = match &locals[base + *idx_slot as usize] {
                     Value::Int(n) => *n,
@@ -3575,7 +3617,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     _ => 0,
                 };
                 if matches!(v, Value::Bool(b) if b == *want) {
-                    frames[fi].ip = *short_target as usize;
+                    ip = *short_target as usize;
                 } else {
                     locals[base + *idx_slot as usize] = Value::Int(i + 1);
                 }
@@ -3586,11 +3628,11 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     Value::Bool(bv) => {
                         // `all` short-circuits on false; `any` on true.
                         if (*is_all && !bv) || (!*is_all && bv) {
-                            frames[fi].ip = *short_target as usize;
+                            ip = *short_target as usize;
                         }
                     }
                     Value::Missing => {
-                        let base = frames[fi].base;
+                        let base = frame_base;
                         locals[base + *sm_slot as usize] = Value::Bool(true);
                     }
                     other => {
@@ -3625,7 +3667,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 handlers.pop();
                 let v = stack.pop().unwrap();
                 stack.push(crate::interp::try_ok(v));
-                frames[fi].ip = *end_ip as usize;
+                ip = *end_ip as usize;
             }
             Op::TryErr => {
                 // Reached via an unwind, which pushed the error message: wrap it in
@@ -3645,10 +3687,13 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 stack.pop();
             }
         }
-        Ok(())
+        }
+        }
         })();
-        if let Err(e) = step {
-            match handlers.pop() {
+        match step {
+            // The program ran off the end of `main`.
+            Ok(()) => break,
+            Err(e) => match handlers.pop() {
                 // Caught by the nearest active `try`: unwind every VM stack to the
                 // depths recorded at `TryBegin`, resume at its catch handler with the
                 // error message on the operand stack (consumed by `Op::TryErr`).
@@ -3667,7 +3712,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 }
                 // No active `try`: propagate out of the VM as a real error.
                 None => return Err(e),
-            }
+            },
         }
     }
 

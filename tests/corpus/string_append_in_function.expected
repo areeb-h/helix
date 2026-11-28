@@ -1,0 +1,17 @@
+exit: 0
+--- stdout ---
+1,2,3,
+<--[a][b]-->
+50
+{n: 3, s: "a.bb.ccc."}
+[0, 1, "x-y-", 3]
+a1b7+8+c<=[1]=>
+(1, 2, "<*[1/][5]*>")
+[("p", "p.p.", "p."), ("q", "q.q.", "q.")]
+[1, 2, 3, 4]
+("seed:12", "seed:")
+({n: 1, s: "keptw."}, {n: 0, s: "kept"})
+(false, "integer division by zero")
+1052
+--- stderr ---
+
