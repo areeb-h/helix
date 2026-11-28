@@ -38,6 +38,17 @@
   (every check passes its reference solution and fails a broken one and the untouched files);
   `.github/workflows/agentbench.yml` runs a real agent weekly when the repository has a key.
   The agent's `helix` runs with the network and processes denied and none of its credentials.
+- **A `mobile` build profile**: `cargo build --release --no-default-features --features mobile`
+  is what a std.ui app needs on a phone — `http`, `mimalloc`, `native-df` and `regex` — and
+  leaves out the JIT (iOS forbids it; Android's W^X policy is unverified), polars, the genomics
+  readers and the database drivers. `appliance` is unchanged and still cannot run a UI app
+  (`std.ui` calls `re_match`); builds that used `appliance,regex` for this can name `mobile`.
+  A new CI job replays five example apps' sessions (all but the file manager's) on every
+  engine of the phone build and the default build and requires identical screens, serves the
+  stopwatch, checks that `HELIX_CAP=enforce` refuses network and process authority the same
+  way in both (`scripts/mobilediff.sh`), and cross-builds for `aarch64-linux-android` (API 28)
+  at the `release` profile, failing over a stripped size budget of 12.7 MB — the first
+  measured aarch64 build, 11.5 MB stripped and 5.3 MB gzipped, plus 10% (docs/binary-size.md). `has_feature("mobile")` answers for it.
 
 ### Fixed
 

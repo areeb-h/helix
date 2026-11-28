@@ -513,6 +513,7 @@ pub(super) fn a_has_feature(
         "jit" => cfg!(feature = "jit"),
         "managed" => cfg!(feature = "managed"),
         "mimalloc" => cfg!(feature = "mimalloc"),
+        "mobile" => cfg!(feature = "mobile"),
         "native-df" => cfg!(feature = "native-df"),
         "postgres" => cfg!(feature = "postgres"),
         "python" => cfg!(feature = "python"),
@@ -525,7 +526,7 @@ pub(super) fn a_has_feature(
             )
             .hint(
                 "one of: appliance, bio, database, dataframes, default, desktop, http, jit, \
-                 managed, mimalloc, native-df, postgres, python, regex.",
+                 managed, mimalloc, mobile, native-df, postgres, python, regex.",
             ))
         }
     };

@@ -100,6 +100,9 @@ Helix ships as a **single self-contained binary** — no runtime to install (no 
 BLAS; the core links nothing external beyond the C runtime). Measured on the gate profile,
 stripped (2026-11-02): the default build is **21.1 MB** and the **appliance profile**
 (`cargo build --release --no-default-features --features appliance`, ADR 0032) is **14.0 MB**.
+For phones, `--features mobile` is the appliance plus the `regex` that `std.ui` needs, without
+the JIT: **16.1 MB** at the release profile on x86_64 (2026-11-28), and CI holds its
+`aarch64-linux-android` build to a size budget ([docs/binary-size.md](docs/binary-size.md#the-phone-build)).
 
 The default build carries Helix's **own** DataFrame engine (ADR 0033). Polars is no longer in
 it: it stays behind `--features dataframes` as the **oracle** every native result is compared
