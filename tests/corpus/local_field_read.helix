@@ -1,0 +1,63 @@
+# `p.f` where `p` is a local is one VM instruction that reads the field in the slot, with
+# no copy of the record on the stack. Everything a field read can do must come out the
+# same as on the tree-walker: the value, `missing` passing through, both errors with their
+# hints, and the record itself left as it was.
+
+fn area(s) = s.w * s.h
+fn pick(c, a, b) = if c then a.name else b.name
+fn chain(p) = p.pos.x + p.pos.y + p.meta.owner.id
+fn both(r) = (r.a, r, r.a)
+fn missing_through(m) = m.anything
+fn typo(r) = r.nmae
+fn far(r) = r.zzz
+fn not_a_record(n) = n.w
+fn keep(r) = do {
+  first = r.items
+  second = r.items.concat([4])
+  (first, second, r.items, r)
+}
+
+print(area({w: 3, h: 4}))
+print((pick(true, {name: "a"}, {name: "b"}), pick(false, {name: "a"}, {name: "b"})))
+print(chain({pos: {x: 1, y: 2}, meta: {owner: {id: 3}}}))
+print(both({a: [1, 2]}))
+print(missing_through(missing))
+print(keep({items: [1, 2, 3]}))
+
+# The parameter of a lambda, a comprehension binder, a fold accumulator, a `match` binder,
+# a destructured name and a `do` binding are all locals.
+rows = [{id: 1, tags: ["x"]}, {id: 2, tags: []}]
+print(rows.map((r) => r.id * 10))
+print(rows.filter((r) => r.tags.count() > 0).map((r) => r.tags))
+print(rows.reduce({n: 0, ids: []}, (acc, r) => {n: acc.n + 1, ids: acc.ids.concat([r.id])}))
+print(match rows[0] { r if r.id == 1 => r.tags, _ => [] })
+fn via_let(x) = do {
+  r = {inner: {v: x}}
+  i = r.inner
+  i.v + r.inner.v
+}
+print(via_let(21))
+
+# A captured record is an upvalue, and a top-level one a global: the two-instruction form.
+G = {g: 7}
+fn from_global() = G.g
+fn capture(r) = (k) => r.base + k
+print(from_global() + (capture({base: 1}))(2))
+
+# Errors: the sentence, as a value.
+t1 = try typo({name: "n", age: 1})
+print((t1.ok, t1.error))
+t2 = try far({a: 1, b: 2})
+print((t2.ok, t2.error))
+t3 = try not_a_record(5)
+print((t3.ok, t3.error))
+t4 = try [{w: 1}, 2].map((s) => s.w)
+print((t4.ok, t4.error))
+
+# And uncaught, with its position and its hint: the field's column, not the record's. The
+# record is made by a function that prints, so nothing can work the error out beforehand.
+fn made() = do {
+  print("made")
+  {name: "n", age: 1}
+}
+print(typo(made()))

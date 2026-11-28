@@ -1,0 +1,13 @@
+# Nested values: records of records, tuples and arrays; deep field chains; a nested update
+# that rebuilds two levels.
+N = 40000
+
+fn point(i) = {pos: {x: i, y: i * 2}, vel: (1, -1), trail: [i, i + 1, i + 2], meta: {kind: "p", owner: {id: i % 7}}}
+fn advance(p) = {...p, pos: {...p.pos, x: p.pos.x + p.vel[0], y: p.pos.y + p.vel[1]}}
+fn weight(p) = p.pos.x + p.pos.y + p.trail[1] + p.meta.owner.id
+
+ps = range(0, N).map((i) => point(i))
+moved = ps.map((p) => advance(advance(p)))
+print(moved.map((p) => weight(p)).sum())
+print(moved.filter((p) => p.meta.owner.id == 3 and p.pos.x % 2 == 0).count())
+print(moved[N - 1])

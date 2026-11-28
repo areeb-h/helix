@@ -1,0 +1,39 @@
+# `match` on records, tuples and literals, with guards — an interpreter for a small event
+# stream, the shape of a reducer.
+N = 60000
+
+fn event(i) = match i % 5 {
+  0 => {kind: "add", amount: i % 11},
+  1 => {kind: "remove", amount: i % 7},
+  2 => {kind: "reset", amount: 0},
+  3 => {kind: "scale", amount: 2},
+  _ => {kind: "noop", amount: 0},
+}
+
+fn apply(state, e) = match e {
+  {kind: "add", amount: a} => (state[0] + a, state[1] + 1),
+  {kind: "remove", amount: a} if a > state[0] => (0, state[1] + 1),
+  {kind: "remove", amount: a} => (state[0] - a, state[1] + 1),
+  {kind: "reset"} => (0, state[1]),
+  {kind: "scale", amount: k} if state[0] < 1000 => (state[0] * k, state[1]),
+  _ => state,
+}
+
+fn bucket(pair) = match pair {
+  (0, _) => "empty",
+  (n, c) if n > c => "heavy",
+  (n, _) if n % 2 == 0 => "even",
+  _ => "odd",
+}
+
+fn grade(n) = match n {
+  0 => "zero",
+  1 | 2 | 3 => "few",
+  4..10 => "some",
+  _ => "many",
+}
+
+events = range(0, N).map((i) => event(i))
+print(events.reduce((0, 0), (s, e) => apply(s, e)))
+print(range(0, N).map((i) => bucket((i % 6, i % 4))).filter((b) => b == "heavy").count())
+print(range(0, N).map((i) => grade(i % 14)).filter((g) => g == "some").count())

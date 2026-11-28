@@ -1,0 +1,71 @@
+# ADR 0066: `name += value` is `name = name + value` — and `-=`, `*=`, `/=` — wherever
+# a binding to an existing name is allowed.
+
+# Each operator, in a `do` block.
+fn each(n) = do {
+  a = n
+  a += 3
+  b = n
+  b -= 3
+  c = n
+  c *= 3
+  d = n
+  d /= 4
+  (a, b, c, d)
+}
+print(each(10))
+
+# The right-hand side is a whole expression: `x *= 2 + 3` multiplies by 5.
+fn whole(x) = do {
+  x *= 2 + 3
+  x -= if x > 20 then 20 else 0
+  x += [1, 2, 3].sum()
+  x
+}
+print(whole(5))
+
+# Each operator, in a loop body, on carried names and on one of the body's own.
+fn run(xs) = do {
+  add = 0
+  sub = 0
+  mul = 1
+  div = 1024.0
+  for x in xs {
+    add += x
+    sub -= x
+    mul *= x
+    div /= x
+    twice = x
+    twice *= 2
+    add += twice
+  }
+  (add, sub, mul, div)
+}
+print(run([1, 2, 4]))
+
+# Not only numbers: whatever `+` and `*` mean for the values.
+fn widen(v) = do {
+  v += [10, 20]
+  v *= 2
+  v
+}
+print(widen([1, 2]))
+
+# Nothing is mutated: a name that held the old value still holds it.
+fn frozen() = do {
+  n = 1
+  f = () => n
+  n += 41
+  (n, f())
+}
+print(frozen())
+
+# A parameter of a lambda, and a `let`-bound name inside a block.
+bump = (k) => do {
+  k += 1
+  k
+}
+print(bump(1), let z = 5 in do {
+  z -= 1
+  z
+})

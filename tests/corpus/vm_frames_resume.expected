@@ -1,0 +1,16 @@
+exit: 0
+--- stdout ---
+[4, 8, "4-8", 9]
+hi a! hi b? hi c!
+[55, 6765, 144]
+[5, 4, 3, 2, 1, 0]
+(8, 15)
+(8, 21)
+["<x>", "rec:3", "rec!", "<y>"]
+["ok 10 101", "ok 20 102", "caught too big: 3 103", "caught too big: 4 104"]
+[[true, true], [false, false], [false]]
+(true, "caught too big: 9 109")
+too big: 5
+42
+20
+--- stderr ---

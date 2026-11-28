@@ -281,6 +281,10 @@ impl super::Checker {
             .map(|(k, _)| k.as_str())
             .collect();
         let err = HelixError::new(format!("`{}` is not a known function", name), line, col);
+        // A function a `for` body bound, called after the loop (ADR 0066).
+        if let Some(why) = crate::parser::loop_local_hint(name, line, col) {
+            return Err(err.hint(why));
+        }
         Err(match crate::suggest::hint(name, crate::suggest::Site::Function, &cands) {
             Some(h) => err.hint(h),
             None => err,
@@ -380,6 +384,16 @@ impl super::Checker {
         // the definition's typing only, never from a call-site specialization.
         if self.recording {
             self.types.insert(recv as *const Expr, rt.clone());
+        }
+        // A `for` loop is a `reduce` the parser wrote (ADR 0066), and a loop over something
+        // that is not a sequence is refused as a loop — in the sentence the fold itself
+        // raises at run time, when the type is only known there.
+        if name == "reduce"
+            && crate::parser::is_loop_source(recv)
+            && let Some(kind) = runtime_kind(&rt)
+            && kind != "Array"
+        {
+            return Err(crate::parser::for_needs_iterable(kind, line, col));
         }
         // `.is_missing()` is universal — and takes no arguments (matching the
         // runtime), so the checker agrees rather than waving the arity through.
@@ -874,4 +888,27 @@ fn mangled_quantifier(
          quantifier. Use a RAW string, which interpolates nothing: `\"\"\"[0-9]{4}\"\"\"`."
             .to_string(),
     ))
+}
+
+/// The name `type_of` gives a value of this type, when the type settles it: what a refusal
+/// written for run time says of a value the checker already knows (ADR 0066). `None` for a
+/// type that is still open — `Unknown`, a number that may be either kind, `missing`.
+fn runtime_kind(t: &Type) -> Option<&'static str> {
+    Some(match t {
+        Type::Int => "Int",
+        Type::Float => "Float",
+        Type::String => "String",
+        Type::Bool => "Bool",
+        Type::Array(_) => "Array",
+        Type::Tuple(_) | Type::AnyTuple => "Tuple",
+        Type::Record(_) | Type::AnyRecord => "Record",
+        Type::Dict => "Dict",
+        Type::Tensor => "Tensor",
+        Type::DataFrame => "DataFrame",
+        Type::GroupBy => "GroupBy",
+        Type::Dna => "Dna",
+        Type::Function { .. } | Type::AnyFunction => "Function",
+        Type::Unit => "Unit",
+        _ => return None,
+    })
 }

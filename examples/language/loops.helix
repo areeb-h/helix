@@ -1,0 +1,109 @@
+# Loops — `for PATTERN in SEQUENCE { BODY }`, and `+=`.
+#
+# A `for` loop is notation for a fold (ADR 0066): the parser rewrites it into a
+# `reduce` whose state is the names the body assigns. Nothing is mutated, and the
+# program means the same on all three engines.
+#
+# The one rule to keep: a name bound BEFORE the loop keeps what the body assigns
+# to it; a name first bound INSIDE the body belongs to one iteration.
+
+# --- Carrying names ----------------------------------------------------------------
+
+fn mean(xs) = do {
+  total = 0.0
+  n = 0
+  for x in xs {
+    total += x
+    n += 1
+  }
+  total / n
+}
+print(mean([1, 2, 6]))
+
+# The same function as the fold the loop stands for.
+fn mean_fold(xs) = do {
+  [total, n] = xs.reduce((0.0, 0), (st, x) => (st[0] + x, st[1] + 1))
+  total / n
+}
+print(mean_fold([1, 2, 6]))
+
+# --- Patterns and sequences ----------------------------------------------------------
+
+fn describe(d) = do {
+  lines = []
+  for (key, value) in d.items() {
+    lines = lines.concat(["{key} -> {value}"])
+  }
+  lines.join(", ")
+}
+print(describe({"one": 1, "two": 2}))
+
+fn triangle(n) = do {
+  t = 0
+  for i in range(1, n + 1) {
+    t += i
+  }
+  t
+}
+print(triangle(10))
+
+# Cut or choose the sequence first — a loop has no `break` and no `continue`.
+fn first_run(xs) = do {
+  kept = []
+  for x in xs.take_while(x => x > 0).filter(x => x % 2 == 1) {
+    kept = kept.concat([x])
+  }
+  kept
+}
+print(first_run([3, 4, 5, -1, 7]))
+
+# --- A name of the body's own ---------------------------------------------------------
+
+# `sq` is first bound inside the body, so each iteration has its own; a conditional
+# update is an `if` EXPRESSION bound to the name.
+fn big_squares(xs, floor) = do {
+  out = []
+  for x in xs {
+    sq = x * x
+    out = if sq > floor then out.concat([sq]) else out
+  }
+  out
+}
+print(big_squares([1, 5, 2, 9], 10))
+
+# --- Loops in loops ------------------------------------------------------------------
+
+fn table(n) = do {
+  rows = []
+  for i in range(1, n + 1) {
+    row = []
+    for j in range(1, n + 1) {
+      row = row.concat([i * j])
+    }
+    rows = rows.concat([row])
+  }
+  rows
+}
+print(table(3))
+
+# --- Closures keep their iteration ----------------------------------------------------
+
+fn scalers(factors) = do {
+  fs = []
+  for k in factors {
+    fs = fs.concat([(x) => x * k])
+  }
+  fs
+}
+print(scalers([1, 2, 3]).map(f => f(10)))
+
+# --- At the top level ----------------------------------------------------------------
+
+# A top-level loop assigns `mut` names.
+mut longest = ""
+mut count = 0
+for word in ["fold", "notation", "loop"] {
+  count += 1
+  longest = if word.count() > longest.count() then word else longest
+}
+print(count, longest)

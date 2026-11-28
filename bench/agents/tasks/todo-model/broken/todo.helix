@@ -1,0 +1,31 @@
+## Plausible wrong draft: ids from the current count, so they are reused after a removal.
+
+## No todos yet.
+export fn init() = {todos: [], next: 1}
+
+fn replace_todos(state, todos) = {todos: todos, next: state.next}
+
+## The state after one message.
+export fn update(state, msg) = match msg.kind {
+  "add" => do {
+    text = msg.text.trim()
+    if text == "" then state else {todos: state.todos.concat([{id: state.todos.count() + 1, text: text, done: false}]), next: state.next + 1}
+  },
+  "toggle" => replace_todos(state, state.todos.map((t) => if t.id == msg.id then {id: t.id, text: t.text, done: not t.done} else t)),
+  "remove" => replace_todos(state, state.todos.filter((t) => t.id != msg.id)),
+  "clear_done" => replace_todos(state, state.todos.filter((t) => not t.done)),
+  _ => state
+}
+
+## The todos a filter shows, in the order they were added.
+export fn visible(state, filter) = match filter {
+  "active" => state.todos.filter((t) => not t.done),
+  "done" => state.todos.filter((t) => t.done),
+  _ => state.todos
+}
+
+## The footer: how many are left to do.
+export fn summary(state) = do {
+  n = visible(state, "active").count()
+  if n == 1 then "1 item left" else "{n} items left"
+}

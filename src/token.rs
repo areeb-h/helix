@@ -86,6 +86,13 @@ pub enum Tok {
     Arrow,    // ->
     FatArrow, // =>
     Pipe,     // | (match-pattern alternatives)
+    /// `+=`, `-=`, `*=`, `/=` — compound assignment (ADR 0066): `n += 1` is `n = n + 1`.
+    /// A token of its own, so that nothing but the statement form can hold one; no program
+    /// that parsed before contains an operator directly followed by `=`.
+    PlusEq,
+    MinusEq,
+    StarEq,
+    SlashEq,
 
     /// A `#` comment, INCLUDING the `#` and everything to end of line, verbatim.
     ///
@@ -160,6 +167,10 @@ impl Tok {
             Tok::Arrow => "`->`".into(),
             Tok::FatArrow => "`=>`".into(),
             Tok::Pipe => "`|`".into(),
+            Tok::PlusEq => "`+=`".into(),
+            Tok::MinusEq => "`-=`".into(),
+            Tok::StarEq => "`*=`".into(),
+            Tok::SlashEq => "`/=`".into(),
             Tok::Comment(_) => "a comment".into(),
             Tok::Newline => "end of line".into(),
             Tok::Eof => "end of file".into(),

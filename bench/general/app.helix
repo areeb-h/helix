@@ -1,0 +1,54 @@
+# An app, start to finish: `update(m, e)` and `view(m)` over a scripted session, replayed by
+# `ui.replay` — one rendered screen per event. A todo list with a filter and an edit field;
+# the session adds, toggles, filters and removes items.
+import std.ui
+
+fn update(m, e) = match e.msg {
+  "draft" => {...m, draft: e.value ?? ""},
+  "add" => if m.draft == "" then m else {...m, items: m.items.concat([{id: m.next, text: m.draft, done: false}]), next: m.next + 1, draft: ""},
+  "toggle" => {...m, items: m.items.map((it) => if it.id == e.value then {...it, done: not it.done} else it)},
+  "remove" => {...m, items: m.items.filter((it) => it.id != e.value)},
+  "filter" => {...m, show: e.value},
+  _ => m,
+}
+
+fn visible(m) = match m.show {
+  "open" => m.items.filter((it) => not it.done),
+  "done" => m.items.filter((it) => it.done),
+  _ => m.items,
+}
+
+fn row(it) = <li key={it.id} class="flex items-center justify-between gap-2 py-1">
+  <button click="toggle" value={it.id} class:line-through={it.done} class="flex-1 text-left">{it.text}</button>
+  <button click="remove" value={it.id} aria-label="Remove {it.text}">×</button>
+</li>
+
+fn view(m) = <div class="mx-auto max-w-md space-y-4 p-6">
+  <form submit="add" class="flex gap-2">
+    <input input="draft" value={m.draft} aria-label="New item" class="flex-1 rounded-control bg-surface-2 px-3 py-2" />
+    <ui.Button caption="Add" msg="add" variant="primary" />
+  </form>
+  <p class="text-muted">{m.items.filter((it) => not it.done).count()} of {m.items.count()} left</p>
+  {if visible(m).count() == 0 then <p class="text-muted">Nothing here.</p>}
+  <ul>{visible(m).map((it) => row(it))}</ul>
+  <div class="flex gap-2">
+    <ui.Button caption="All" msg="filter" value="all" />
+    <ui.Button caption="Open" msg="filter" value="open" />
+    <ui.Button caption="Done" msg="filter" value="done" />
+  </div>
+</div>
+
+# 20 rounds: three adds, a toggle, each filter, and a removal every other round.
+SESSION = range(0, 20).flat_map((r) => [
+  {msg: "draft", value: "task {r}a"}, {msg: "add", value: missing},
+  {msg: "draft", value: "task {r}b"}, {msg: "add", value: missing},
+  {msg: "draft", value: "task {r}c"}, {msg: "add", value: missing},
+  {msg: "toggle", value: r * 3 + 1},
+  {msg: "filter", value: "open"}, {msg: "filter", value: "done"}, {msg: "filter", value: "all"},
+  ].concat(if r % 2 == 0 then [{msg: "remove", value: r * 3 + 2}] else []))
+
+spec = {title: "Todo", init: {items: [], draft: "", next: 1, show: "all"}, update: update, view: view}
+screens = ui.replay(spec, SESSION)
+print(screens.count())
+print(screens.map((h) => h.length()).sum())
+print(screens[screens.count() - 1].length())

@@ -94,6 +94,45 @@ pub static SYNTAX: &[SyntaxDoc] = &[
                 Keywords: block, braces, statements, sequence, multiline, body, begin.",
     },
     SyntaxDoc {
+        name: "for",
+        form: "for x in xs { line\\n line }",
+        doc: "A loop over a sequence. A name bound BEFORE the loop keeps what the body assigns to it.",
+        example: "fn mean(xs) = do {\n  total = 0.0\n  n = 0\n  for x in xs {\n    total += x\n    n += 1\n  }\n  total / n\n}\nprint(mean([1, 2, 6]))",
+        example_out: "3.0",
+        notes: "A `for` loop IS A FOLD, written by the parser: the loop above is \
+                `xs.reduce((total, n), (st, x) => …)` with the tuple packed and unpacked for you, so it \
+                means the same on every engine and nothing is mutated — `total += x` rebinds a name. \
+                Two rules follow. A name the body assigns that was bound before the loop (an earlier \
+                line, a parameter) is CARRIED: each iteration starts with what the last one left, and \
+                the name holds the final value afterwards. A name FIRST bound inside the body, and the \
+                loop variable itself, belong to one iteration and do not exist after the loop. \
+                The pattern is a name or positions: `for (k, v) in d.items() { … }`, \
+                `for [a, b] in pairs { … }`; the sequence is anything `reduce` takes — an array, \
+                `range(n)`, `0..n`, `d.items()`. It is a STATEMENT — a line of a `do` block or of \
+                another loop, or a top-level statement, where the names it carries must be `mut` — \
+                and has no value: build a collection with `xs.map(…)`. There is no `break` or \
+                `continue` (cut the sequence first: `xs.take_while(p)`, `xs.filter(p)`), no `while` (a \
+                tail-recursive function is that loop), and no assignment inside `if` (write \
+                `total = if x > 0 then total + x else total`). A closure made in the body keeps that \
+                iteration's values. \
+                Keywords: loop, iterate, iteration, foreach, each, while, repeat, accumulate, counter, \
+                running total, break, continue, range, imperative.",
+    },
+    SyntaxDoc {
+        name: "+=",
+        form: "name += value",
+        doc: "Compound assignment: `n += 1` is `n = n + 1`. Also `-=`, `*=` and `/=`.",
+        example: "fn f(x) = do {\n  n = x\n  n += 1\n  n *= 2\n  n -= 3\n  n /= 2\n  n\n}\nprint(f(4))",
+        example_out: "3.5",
+        notes: "A REBINDING, not a mutation: nothing that held the old value sees a new one. It is \
+                allowed wherever `name = …` on an existing name is — a line of a `do` block or of a \
+                `for` body, and the top level for a `mut` name — and refused on a name that is not \
+                bound yet. Only a name can be updated: a field or an element is rebuilt \
+                (`r = {...r, n: r.n + 1}`). `/=` divides as `/` does, so the result is a Float. \
+                Keywords: increment, decrement, add assign, plus equals, augmented assignment, \
+                compound, update, accumulate, counter, ++.",
+    },
+    SyntaxDoc {
         name: "where",
         form: "fn f(x) = expr where a = ..., b = ...",
         doc: "Bindings written AFTER the expression that uses them.",
@@ -202,7 +241,8 @@ pub static SYNTAX: &[SyntaxDoc] = &[
         doc: "The current element inside a comprehension — no parameter to name.",
         example: "print([1, 2, 3].map(it * 2).where(it > 2).sum())",
         example_out: "10",
-        notes: "These chains are the loop: Helix has no `for`. A numeric chain over packed arrays is \
+        notes: "These chains are the loop to reach for first — a `for` loop (`helix describe for`) is \
+                for state that changes across the sequence. A numeric chain over packed arrays is \
                 also what the JIT compiles — `helix jit-explain` says whether yours was. \
                 Keywords: loop, for, each, iterate, element, current, implicit, placeholder, underscore.",
     },
@@ -235,7 +275,8 @@ pub static SYNTAX: &[SyntaxDoc] = &[
         example_out: "1",
         notes: "TOP-LEVEL ONLY, and that is a design question rather than a spelling one: a function \
                 body evolves state by rebinding inside `do { }`, and state crossing a sequence is \
-                threaded with `reduce`. Reach for `mut` only for state that must outlive a call. \
+                threaded — by a `for` loop, which carries the names bound before it, or by `reduce`. \
+                Reach for `mut` only for state that must outlive a call. \
                 Keywords: mutable, variable, assign, reassign, update, counter, accumulator, global, state.",
     },
     SyntaxDoc {

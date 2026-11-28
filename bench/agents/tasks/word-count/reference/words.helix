@@ -1,0 +1,8 @@
+## Print the most frequent words in a file.
+## path: the file to read
+## top: how many words to print
+fn main(path: String, top: Int = 10) = do {
+  words = read_text(path).lower().re_split("""[^a-z]+""").filter((w) => w != "")
+  counts = words.frequencies()
+  counts.take(top).map((p) => print("{p[0]} {p[1]}"))
+}

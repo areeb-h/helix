@@ -1,0 +1,13 @@
+## Plausible wrong draft: r2 as the correlation, not its square.
+df = read_csv("points.csv")
+xs = df.column(@x)
+ys = df.column(@y)
+mx = xs.mean()
+my = ys.mean()
+sxy = xs.zip(ys).map((p) => (p[0] - mx) * (p[1] - my)).sum()
+sxx = xs.map((x) => (x - mx) * (x - mx)).sum()
+syy = ys.map((y) => (y - my) * (y - my)).sum()
+slope = sxy / sxx
+print("slope: {slope:.4f}")
+print("intercept: {my - slope * mx:.4f}")
+print("r2: {sxy / sqrt(sxx * syy):.4f}")
