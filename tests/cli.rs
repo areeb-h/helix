@@ -19248,3 +19248,55 @@ fn repl_destructures_twice_without_leaking_a_temp_name() {
     assert_eq!(scode, Some(1));
     assert!(serr.contains("`a` is immutable"), "the script's refusal, for comparison: {serr}");
 }
+
+/// The first guesses a benchmark author made — Python's, Node's and Rust's names for
+/// file I/O and for growing an array, and a prefix of a DataFrame method — each got an
+/// error that pointed nowhere ("is not a known function", "no similar method"). Each now
+/// names the Helix spelling, identically from `helix check` and from all three engines.
+#[test]
+fn common_guesses_get_a_help_naming_the_helix_spelling() {
+    let cases: [(&str, &str, &str, &str); 9] = [
+        ("read_file", "x = read_file(\"a.txt\")\n", "`read_file` is not a known function", "`read_text(path)`"),
+        ("write_text", "write_text(\"a.txt\", \"hi\")\n", "`write_text` is not a known function", "`s.write_to(path)`"),
+        ("write_file", "write_file(\"a.txt\", \"hi\")\n", "`write_file` is not a known function", "`s.write_to(path)`"),
+        ("push", "xs = [1, 2]\nys = xs.push(3)\n", "an Array has no method `push`", "`xs.concat([x])` returns a NEW array"),
+        ("append", "xs = [1, 2]\nys = xs.append(3)\n", "an Array has no method `append`", "`xs.concat([x])` returns a NEW array"),
+        // A receiver the checker cannot type: the refusal is the ENGINES' own, not the checker's.
+        ("push_rt", "xs = \"[1, 2]\".parse_json()\nys = xs.push(3)\n", "an Array has no method `push`", "`xs.concat([x])`"),
+        ("dict", "d = dict([[\"a\", 1]])\n", "`dict` takes 0 arguments, got 1", "`pairs.to_dict()`"),
+        ("dict_rt", "f = (p) => dict(p)\nprint(f([1]))\n", "`dict` takes 0 arguments, got 1", "`pairs.to_dict()`"),
+        ("col", "df = dataframe({x: [1, 2]})\nc = df.col(@x)\n", "a DataFrame has no method `col`", "help: did you mean `column`?"),
+    ];
+    let dir = std::env::temp_dir().join("helix_it_common_guesses");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for (tag, src, msg, help) in cases {
+        let path = dir.join(format!("{tag}.helix"));
+        std::fs::write(&path, src).unwrap();
+        let p = path.to_str().unwrap();
+        let mut seen: Option<String> = None;
+        for (engine, env) in ENGINES {
+            let (_, err, code) = run(&["run", p], env, "");
+            assert_eq!(code, Some(1), "{tag} on {engine}: {err}");
+            assert!(err.contains(msg), "{tag} on {engine}: wanted {msg:?}, got: {err}");
+            assert!(err.contains("help:") && err.contains(help), "{tag} on {engine}: wanted help {help:?}, got: {err}");
+            assert!(!err.contains("no similar method"), "{tag} on {engine}: {err}");
+            if let Some(prev) = &seen {
+                assert_eq!(prev, &err, "{tag}: the engines disagree");
+            }
+            seen = Some(err);
+        }
+        if !tag.ends_with("_rt") || tag == "dict_rt" {
+            let (out, err, code) = run(&["check", p], &[], "");
+            assert_eq!(code, Some(1), "{tag}: `helix check` must refuse it: {out}{err}");
+            let all = format!("{out}{err}");
+            assert!(all.contains(msg) && all.contains(help), "{tag}: `helix check` gave: {all}");
+            assert!(all.contains(seen.as_deref().unwrap().trim_end()), "{tag}: check and run disagree: {all}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    // The advice is for the receiver it works on: a String's `push` is not told about an
+    // Array method.
+    let (_, err, _) = run_source("s = \"a\"\nt = s.push(\"b\")\n", &[], "common_guesses_string_push");
+    assert!(err.contains("a String has no method `push`") && !err.contains("concat"), "{err}");
+}
