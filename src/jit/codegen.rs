@@ -710,7 +710,7 @@ pub fn build(
 }
 
 /// All stages and the reduce sink of a fused pipeline must be JIT-eligible.
-fn fusion_eligible(k: &crate::bytecode::FusedKernel, fns: &HashSet<&str>, user_fns: &HashSet<&str>) -> bool {
+fn fusion_eligible(k: &crate::bytecode::FusedKernel, fns: &impl FnNames, user_fns: &impl FnNames) -> bool {
     use crate::bytecode::{FusionSink, FusionStage};
     k.stages.iter().all(|s| match s {
         FusionStage::Map { binder, body } => map_kernel_eligible(body, binder, fns),
@@ -726,7 +726,7 @@ fn fusion_eligible(k: &crate::bytecode::FusedKernel, fns: &HashSet<&str>, user_f
         // `bodies_eligible`. Scalar (1 body) over `{pa, pb}`; tuple (N>1) over the f64 slots
         // `{$acc0…, pb}` (the array element `pb` is `f64`).
         FusionSink::Reduce { pa, pb, bodies, float: true } if bodies.len() == 1 => {
-            float_reduce_body_eligible(&bodies[0], pa, pb, &HashSet::new(), user_fns)
+            float_reduce_body_eligible(&bodies[0], pa, pb, &HashSet::<&str>::new(), user_fns)
         }
         FusionSink::Reduce { pb, bodies, float: true, .. } => {
             let n = bodies.len();
@@ -751,8 +751,8 @@ fn define_fused_kernels(
     module: &mut JITModule,
     kernels: &[crate::bytecode::FusedKernel],
     fn_ids: &HashMap<&str, FuncId>,
-    eligible: &HashSet<&str>,
-    user_fns: &HashSet<&str>,
+    eligible: &impl FnNames,
+    user_fns: &impl FnNames,
     host: &HostFns,
     int_src: bool,
 ) -> Vec<Option<FuncId>> {
@@ -835,8 +835,8 @@ fn define_array_kernels(
     tag: &str,
     shape: KernelShape,
     fn_ids: &HashMap<&str, FuncId>,
-    eligible: &HashSet<&str>,
-    user_fns: &HashSet<&str>,
+    eligible: &impl FnNames,
+    user_fns: &impl FnNames,
     elem_kind: NumKind,
     mixed_root: Option<NumKind>,
     // The VALUE-SCALAR variant of the plain mixed map ("mapmv"): captures load as `f64`

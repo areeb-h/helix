@@ -17,6 +17,7 @@
 //!               | "(" expr ")" | "[" [ expr { "," expr } ] "]"
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::ast::{ImportNames, BinOp, Expr, InterpPart, Stmt, TypeAnn, UnOp};
 use crate::error::{suggest, HelixError};
@@ -60,6 +61,12 @@ fn is_const_default(e: &Expr) -> bool {
 /// `sigs` carries the enclosing program's function signatures (defined-so-far), so a call
 /// inside the hole resolves named arguments and defaults exactly as it would outside — an
 /// interpolated `"{greet(name, loud: true)}"` is the same call as a bare one.
+/// The hole SHARES the enclosing table (and `imports`) through an `Rc` rather than copying
+/// it: a program that imports `std.ui` knows some 300 signatures and has hundreds of holes,
+/// and the copy per hole was a fifth of such a program's start-up. Nothing a hole parses
+/// writes to either table (a hole is an expression; `fn` and `import` are statements), and
+/// if one ever did, `Rc::make_mut` would copy first, so the hole still could not change
+/// what the enclosing parser sees.
 /// Returns the hole's expression plus any `do {}` binding names it contained, so the
 /// enclosing parser can fold them into its own list — otherwise an interpolated
 /// `"{do { n = 1 … }}"` would be the one place the mut-global shadow check does not reach.
@@ -94,9 +101,9 @@ fn parse_expression_at(src: &str, at: (usize, usize, bool), outer: &Parser) -> R
         toks: tokens,
         pos: 0,
         depth: outer.depth,
-        fn_sigs: outer.fn_sigs.clone(),
+        fn_sigs: Rc::clone(&outer.fn_sigs),
         do_bindings: Vec::new(),
-        imports: outer.imports.clone(),
+        imports: Rc::clone(&outer.imports),
         selected_imports: outer.selected_imports.clone(),
         glob_import: outer.glob_import,
         pending: Vec::new(),
@@ -960,9 +967,9 @@ pub fn parse_after(tokens: Vec<Token>, bound: &[String], temps: &mut usize) -> R
         toks: tokens,
         pos: 0,
         depth: 0,
-        fn_sigs: HashMap::new(),
+        fn_sigs: Rc::default(),
         do_bindings: Vec::new(),
-        imports: std::collections::HashSet::new(),
+        imports: Rc::default(),
         selected_imports: std::collections::HashSet::new(),
         glob_import: false,
         pending: Vec::new(),
@@ -1171,7 +1178,9 @@ struct Parser {
     /// Signatures of user functions seen so far, keyed by name — for resolving
     /// named arguments and defaults at call sites (a function is defined before it
     /// is called, so its signature is known by the time its calls are parsed).
-    fn_sigs: HashMap<String, FnSig>,
+    /// Shared with the parsers of interpolation and markup holes; written only through
+    /// `Rc::make_mut` (see [`parse_expression`]).
+    fn_sigs: Rc<HashMap<String, FnSig>>,
     /// Every user-written `do {}` binding, collected as the file is parsed and checked
     /// against the top-level `mut` globals once the whole program is known. See
     /// [`reject_do_binding_over_mut_global`]. Generated `$do<N>` bindings are not
@@ -1180,7 +1189,7 @@ struct Parser {
     /// Namespaces bound by `import` so far — an alias, or the path's last segment.
     /// The comprehension-sugar desugars consult this: a method on an imported
     /// namespace is a QUALIFIED MODULE CALL, never array sugar, however it is named.
-    imports: std::collections::HashSet<String>,
+    imports: Rc<std::collections::HashSet<String>>,
     /// Names bound by SELECTIVE imports (`import m.{f}`) — for diagnostics only:
     /// a named-argument call on one is unresolvable in this file (the signature
     /// lives in the imported module), and the error should say so, not call `f`
@@ -1516,7 +1525,7 @@ impl Parser {
                 ImportNames::Selected(list) => self.selected_imports.extend(list.iter().cloned()),
                 ImportNames::Glob { .. } => self.glob_import = true,
                 ImportNames::Module => {
-                    self.imports.insert(alias.clone());
+                    Rc::make_mut(&mut self.imports).insert(alias.clone());
                 }
             }
             return Ok(Stmt::Import { segments, alias, names, line: l, col: c });
@@ -1545,7 +1554,7 @@ impl Parser {
             let (params, defaults) = self.parse_params()?;
             // `prescan_signatures` already recorded this signature; recording it again
             // keeps the definition authoritative, and costs one small insert.
-            self.fn_sigs.insert(
+            Rc::make_mut(&mut self.fn_sigs).insert(
                 name.clone(),
                 FnSig {
                     params: params.iter().map(|(n, _)| n.clone()).collect(),
@@ -1870,7 +1879,7 @@ impl Parser {
             self.pos = i + 2;
             self.depth = 0;
             if let Ok((params, defaults)) = self.parse_params() {
-                self.fn_sigs.insert(
+                Rc::make_mut(&mut self.fn_sigs).insert(
                     name,
                     FnSig { params: params.into_iter().map(|(n, _)| n).collect(), defaults },
                 );
@@ -5467,4 +5476,74 @@ fn exact_bound(v: f64, l: usize, c: usize) -> Result<(), HelixError> {
         .hint("range-pattern bounds are held as f64; use a guard (`n if n > …`) for magnitudes beyond 2^53."));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod hole_signature_tests {
+    use super::*;
+
+    /// The value of the top-level `name = …`.
+    fn value_of<'a>(stmts: &'a [Stmt], name: &str) -> &'a Expr {
+        stmts
+            .iter()
+            .find_map(|s| match s {
+                Stmt::Assign { name: n, value, .. } if n == name => Some(value),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no `{name} = …`"))
+    }
+
+    /// The expression of a string that is exactly one hole: `"{…}"`.
+    fn hole(e: &Expr) -> &Expr {
+        match e {
+            Expr::Interp(parts) => match parts.as_slice() {
+                [InterpPart::Expr(e, None)] => e,
+                other => panic!("not a single hole: {other:?}"),
+            },
+            other => panic!("not an interpolated string: {other:?}"),
+        }
+    }
+
+    fn pos(e: &Expr) -> (usize, usize) {
+        match e {
+            Expr::Call { line, col, .. } => (*line, *col),
+            other => panic!("not a call: {other:?}"),
+        }
+    }
+
+    /// A call inside an interpolation hole is parsed against the enclosing program's
+    /// signature table: its named arguments are placed and its defaults filled exactly as
+    /// for the same call written bare — for a function defined above the call and one
+    /// defined below it (the prescan), with named arguments and without, and in a hole
+    /// nested inside a hole. A hole parsed against any other table (an empty one, or one
+    /// missing the functions below) leaves `f(1)` with one argument where the bare call
+    /// has three, and the comparison fails. Positions aside: a hole's nodes are moved to
+    /// the string's position, so the bare call is moved there too before comparing.
+    #[test]
+    fn a_hole_resolves_calls_against_the_enclosing_signatures() {
+        let src = r#"fn above(a, b = 7, c = 8) = a + b + c
+a1 = above(1)
+h1 = "{above(1)}"
+a2 = above(2, c: 9)
+h2 = "{above(2, c: 9)}"
+a3 = below(c: 5, a: 3)
+h3 = "{below(c: 5, a: 3)}"
+a4 = below(4)
+h4 = "{"{below(4)}"}"
+fn below(a, b = "x", c = [1, 2]) = a
+"#;
+        let stmts = parse(crate::lexer::lex(src).unwrap()).unwrap();
+        for (bare, held, nested) in [("a1", "h1", false), ("a2", "h2", false), ("a3", "h3", false), ("a4", "h4", true)] {
+            let mut want = value_of(&stmts, bare).clone();
+            let mut got = hole(value_of(&stmts, held));
+            if nested {
+                got = hole(got);
+            }
+            let (l, c) = pos(got);
+            Parser::relocate(&mut want, l, c);
+            assert_eq!(format!("{got:?}"), format!("{want:?}"), "`{held}` against `{bare}`");
+            let Expr::Call { args, .. } = got else { unreachable!() };
+            assert_eq!(args.len(), 3, "`{held}`: defaults filled");
+        }
+    }
 }

@@ -1,0 +1,10 @@
+# An error the constant folder (ADR 0050) RAISES is the program's error, reported before
+# anything runs — and it keeps its did-you-mean hint. The folder first abandons `bump(1)`
+# (it does not hold the mutable `count`); that abandoned attempt's error is thrown away
+# without a hint, and must not be what is reported, nor change what is.
+mut count = 2
+fn bump(n) = count + n
+total = bump(1)
+xs = "[1, 2]".parse_json()
+n = xs.lenght()
+print(total, n)

@@ -423,3 +423,80 @@ of what the numbers support:
    mean" hints computed for errors the constant folder discards (`suggest::hint` under
    `fold`, 10%), `fold_program` as a whole 21%, and `view_html` 26%. The first two are
    each a small change in files this work was asked to leave alone (parser, checker).
+
+## Start-up: three changes, and where the rest goes
+
+An app's cold start is everything before its first event, and for any program that imports
+`std.ui` (3,600 lines) that is most of the cost. The fourth workload below is the pure case: a
+file that only does `import std.ui` and prints one line. Each change is one commit; the
+per-change numbers are in the commit messages (measured before `main`'s #45–#49 were merged
+in). Against `main` after that merge, same `gate` profile:
+
+| workload | `main` | this branch | |
+|---|--:|--:|--:|
+| `import std.ui` + `print` | 338,893,053 | 192,869,638 | −43.1% |
+| stopwatch `--replay` | 360,123,571 | 204,092,626 | −43.3% |
+| app | 554,946,360 | 400,813,220 | −27.8% |
+| gallery `--replay` | 1,528,491,410 | 1,358,943,798 | −11.1% |
+
+1. **Interpolation holes share the parser's signature table** (`src/parser.rs`). Each `{…}`
+   hole is parsed by a fresh `Parser`, which cloned the enclosing one's table of function
+   signatures — parameter names and default expressions for some 300 functions — and dropped
+   it again: 27% of the pure start-up (334.5 → 246.0 M). The table and the import set are
+   `Rc`s now, written through `Rc::make_mut`. A test compares calls in holes with the same
+   calls written bare and fails when a hole gets an empty table.
+2. **No did-you-mean hint for a name the folding sandbox refuses** (`src/interp.rs`). When the
+   sandbox (ADR 0050) meets a name it does not hold — a parameter, a mutable global — it
+   abandons the attempt, and `Sandbox::guarded` discards that error unread. The walker built
+   the hint first anyway: `suggest::hint` over every name in scope, 3 M instructions a time,
+   14 times — names that are never errors, since the checker runs before the folder. Now the
+   error goes back without its hint (246.0 → 199.6 M). Errors the sandbox raises and reports
+   keep theirs; two corpus programs pin both.
+3. **Kernel sites share the compiler's function-name sets** (`src/bytecode/comprehensions.rs`,
+   `src/jit/analysis.rs`). Every comprehension collected a `HashSet<&str>` of all function
+   names (and one of the JIT-eligible ones) to hand to the JIT's eligibility analyses. The
+   analyses now take `&impl FnNames`; the compiler keeps the set beside `func_names` behind an
+   `Rc` (199.6 → 188.3 M). `helix jit-explain` prints the same for all 151 programs under
+   `examples/`, `bench/` and `std/`.
+
+Where the 192.9 M of the pure start-up goes now:
+
+| | share |
+|---|--:|
+| lexing `std.ui` (262 KB; spread over the scanner, no single hot spot) | 14.0% |
+| parsing | 14.8% |
+| `module::assemble` (renaming the module's names into the program, cloning its statements) | 4.8% |
+| constant folding, of which: | 32.4% |
+| — call-site specialization (`specialize_site`; `binding_at` 5.6%) | 13.9% |
+| — the sandbox evaluating `std.ui`'s top-level bindings on demand (a table built by a comprehension is 7.2%) | 10.0% |
+| — copying each function into the sandbox (`hoist_fn`) | 3.7% |
+| type checking | 10.8% |
+| compiling to bytecode (`compile_func` 7.5%, `memoizable_fns` 2.4%, `mixed_fn_sigs` 1.3%) | 12.2% |
+| the JIT compiling `std.ui`'s three kernels with Cranelift, before anything calls them | 7.7% |
+
+`jit::analysis::recursive_funcs`, 21% before, is 0.1%. On `app.helix` the run is now 48%
+start-up and 36% `view::view_html` (`view::parse` 31%, `Props::get` 8.6%, `view::get` 2.7%).
+
+What is left, and why it was not done here:
+
+- **Lazy JIT compilation** (7.7%): Cranelift compiles every eligible kernel at start-up,
+  including `std.ui`'s, whether or not the program reaches them. Compiling on first use is a
+  change to when the JIT runs and what a failure to compile looks like — a design decision.
+- **Lexing and parsing** (29%): linear and spread out; no single change is worth more than
+  ~2% (the `Vec<char>` and byte-offset tables the scanner builds are 2%, the raw-string
+  copies 1%).
+- **The fold's own work** (32%): specialization and on-demand evaluation are the folder doing
+  what ADR 0050 asks. Smaller pieces each under 3%: `Env::shadow` in `binding_at` runs a
+  retire pass over a fresh environment where it can retire nothing (~2.5%); `hoist_fn` and
+  `Specializer::new` each copy every function body (3.7%, 2.1%).
+- **Small duplications**, each ~1–2%: `mixed_fn_sigs` is derived twice (compiler and JIT,
+  "single source of truth" by re-deriving); the checker keys its specialization memo by a
+  `format!("{bind:?}")` of the argument types (2%).
+- **Precompiling `std.ui`** would remove most of the rest, but not as a cache file: anything
+  code is loaded from is code anyone who can write it runs in every app. Done at build time
+  into the binary (the bytecode `include_bytes!`-ed from the build's own output, so it is as
+  trusted as the binary) it is safe, but the bytecode then has to be a stable serialization
+  of `Program` including the JIT kernels' descriptions, and the fold and checker results it
+  bakes in must not depend on the importing program — today the fold specializes `std.ui`'s
+  functions for the call sites of the program that imports it, so the module is not compiled
+  independently of its importer. That is the design question to answer first.
